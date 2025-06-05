@@ -1,0 +1,75 @@
+# sprite-env Specification
+
+## Overview
+sprite-env is a server application that manages state for a supervised process. It handles two types of state: SpriteDB and SpriteFS, and provides HTTP endpoints for management operations.
+
+## Command Line Interface
+
+### Required Arguments
+- `--listen <ip>:<port>`: IP and port for the HTTP server to listen on
+- `--state-dir <path>`: Filesystem path for state storage
+- `--scripts-dir <path>`: Directory containing management scripts
+- `-- <command>`: Command to run as the supervised process (everything after --)
+
+## Script Directory Structure
+```
+<scripts-dir>/
+├── db/
+│   ├── setup.sh
+│   ├── ready.sh
+│   ├── checkpoint.sh
+│   ├── restore.sh
+│   └── start.sh
+└── fs/
+    ├── setup.sh
+    ├── ready.sh
+    ├── checkpoint.sh
+    ├── restore.sh
+    └── start.sh
+```
+
+## HTTP API Server
+
+### General Rules
+- All endpoints return JSON responses
+- Error responses must include:
+  - Appropriate HTTP status code
+  - Inner application error details
+  - Stack trace for debugging
+- Success responses should use 200 status code
+- Error responses should use appropriate 4xx/5xx status codes
+
+### Endpoints
+
+#### GET /status
+Returns the current status of the system, including:
+- Overall system state
+- SpriteDB state
+- SpriteFS state
+- Supervised process state
+
+#### POST /checkpoint
+Triggers a checkpoint operation:
+1. Runs checkpoint.sh for both SpriteDB and SpriteFS
+2. Returns error if either checkpoint fails
+3. Returns success only if both checkpoints succeed
+
+#### POST /restore
+Triggers a restore operation:
+1. Stops the supervised process
+2. Verifies process is stopped
+3. Runs restore.sh for both SpriteDB and SpriteFS
+4. If restore succeeds:
+   - Starts the supervised process again
+5. If restore fails:
+   - Returns error
+   - Leaves supervised process stopped
+
+## Requirements
+1. All scripts must be executable
+2. Scripts must return 0 on success, non-zero on failure
+3. The start.sh scripts must be long-running processes
+4. The ready.sh scripts must block until the component is ready
+5. The supervised process must be properly managed (start/stop)
+6. State management must be concurrent where possible
+7. All operations must be idempotent where possible
