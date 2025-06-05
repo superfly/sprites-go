@@ -1,0 +1,5 @@
+{"clock": 1, "overallState": [{"op": "Update", "path": [], "args": ["Initializing"]}], "dbState": [{"op": "Update", "path": [], "args": ["Initializing"]}], "fsState": [{"op": "Update", "path": [], "args": ["Initializing"]}], "processState": [{"op": "Update", "path": [], "args": ["Stopped"]}], "event": "SystemInit"}
+{"clock": 2, "dbState": [{"op": "Update", "path": [], "args": ["Running"]}], "event": "DBReady"}
+{"clock": 3, "fsState": [{"op": "Update", "path": [], "args": ["Running"]}], "event": "FSReady"}
+{"clock": 4, "processState": [{"op": "Update", "path": [], "args": ["Starting"]}], "event": "ProcessStart"}
+{"clock": 5, "processState": [{"op": "Update", "path": [], "args": ["Running"]}], "overallState": [{"op": "Update", "path": [], "args": ["Running"]}], "event": "SystemRunning"} 

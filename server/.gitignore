@@ -1,0 +1,8 @@
+# Binary files
+sprite-env
+
+# Log files
+*.log
+
+# Go module cache
+go.sum 
