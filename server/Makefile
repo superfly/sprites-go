@@ -8,15 +8,7 @@ build:
 test: build
 	@for dir in test-scripts/*/; do \
 		echo "Running test for $$dir"; \
-		if [ -f "$$dir/supervised-process.sh" ]; then \
-			SUPERVISED_PROCESS="$$dir/supervised-process.sh"; \
-		elif [ -f "$$dir/supervised_process.sh" ]; then \
-			SUPERVISED_PROCESS="$$dir/supervised_process.sh"; \
-		else \
-			echo "No supervised process script found in $$dir"; \
-			exit 1; \
-		fi; \
-		./sprite-env -debug -test-dir "$$dir" -- "$$SUPERVISED_PROCESS" & \
+		./sprite-env -debug -test-dir "$$dir" -- "$$dir/supervised-process.sh" & \
 		PID=$$!; \
 		echo "Started process with PID $$PID"; \
 		sleep 2; \
