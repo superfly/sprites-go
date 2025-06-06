@@ -1,0 +1,13 @@
+# TLA+ generated files and directories
+states/
+*.out
+*.st
+*.fp
+*.tmp
+MC.tla
+MC.cfg
+tla2tools.jar
+
+# Temporary files
+/tmp/sany.out
+/tmp/tlc.out 
