@@ -1,3 +1,3 @@
-module sprite-env
+module sprite-env/server
 
-go 1.24.0
+go 1.21

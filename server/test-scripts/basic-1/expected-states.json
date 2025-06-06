@@ -3,22 +3,35 @@
     {
       "overallState": "Initializing",
       "componentSet": {
-        "state": "Starting",
-        "components": {
-          "DB": ["Initializing"],
-          "FS": ["Initializing"]
-        }
-      }
-    },
-    {
-      "overallState": "Initializing",
-      "componentSet": {
-        "state": "Starting",
+        "state": "Initializing",
         "components": {
           "DB": ["Initializing", "Running"],
           "FS": ["Initializing", "Running"]
         }
-      }
+      },
+      "processState": "Stopped"
+    },
+    {
+      "overallState": "Initializing",
+      "componentSet": {
+        "state": "Running",
+        "components": {
+          "DB": ["Running"],
+          "FS": ["Running"]
+        }
+      },
+      "processState": "Stopped"
+    },
+    {
+      "overallState": "Initializing",
+      "componentSet": {
+        "state": "Running",
+        "components": {
+          "DB": ["Running"],
+          "FS": ["Running"]
+        }
+      },
+      "processState": "Starting"
     },
     {
       "overallState": "Running",
@@ -32,6 +45,17 @@
       "processState": "Running"
     },
     {
+      "overallState": "Initializing",
+      "componentSet": {
+        "state": "Running",
+        "components": {
+          "DB": ["Running"],
+          "FS": ["Running"]
+        }
+      },
+      "processState": ["Stopping", "Exited"]
+    },
+    {
       "overallState": "Shutdown",
       "componentSet": {
         "state": "Shutdown",
@@ -39,7 +63,19 @@
           "DB": ["Shutdown"],
           "FS": ["Shutdown"]
         }
-      }
+      },
+      "processState": "Exited"
+    },
+    {
+      "overallState": "Error",
+      "componentSet": {
+        "state": "Error",
+        "components": {
+          "DB": ["Error", "Shutdown"],
+          "FS": ["Error", "Shutdown"]
+        }
+      },
+      "processState": "Exited"
     }
   ]
 } 
