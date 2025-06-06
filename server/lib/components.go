@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"sprite-env/server/lib/states"
+	"sprites-env/lib/states"
 )
 
 // Environment interface defines what ComponentManager and ProcessManager need from the environment

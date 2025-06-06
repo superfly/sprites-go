@@ -2,7 +2,7 @@
 
 # Build the server
 build:
-	go build -o tmp/sprite-env
+	go build -o tmp/sprite-env .
 
 # Run integration tests
 test: build

@@ -1,0 +1,48 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test-models:
+    name: Test Models
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '11'
+    
+    - name: Run model tests
+      run: make validate
+
+  test-server:
+    name: Test Server
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: 'stable'
+    
+    - name: Download Go dependencies
+      working-directory: ./server
+      run: pwd && go mod tidy
+    
+    - name: Build sprite-env
+      working-directory: ./server
+      run: go version && pwd && go build -o tmp/sprite-env .
+
+    - name: Test sprite-env
+      working-directory: ./server
+      run: make test

@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"sprite-env/server/lib"
-	"sprite-env/server/lib/states"
+	"sprites-env/lib"
+	"sprites-env/lib/states"
 )
 
 // Signal types as defined in the TLA+ spec

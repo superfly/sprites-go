@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"sprite-env/server/lib/states"
+	"sprites-env/lib/states"
 )
 
 // ProcessManager manages the lifecycle of a supervised process

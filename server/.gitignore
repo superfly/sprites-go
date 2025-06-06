@@ -5,7 +5,7 @@ sprite-env
 *.log
 
 # Go module cache
-go.sum
+# Note: go.sum should be committed to ensure reproducible builds
 
 # Build artifacts
 /tmp/ 
