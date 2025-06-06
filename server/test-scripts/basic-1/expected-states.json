@@ -1,0 +1,45 @@
+{
+  "states": [
+    {
+      "overallState": "Initializing",
+      "componentSet": {
+        "state": "Starting",
+        "components": {
+          "DB": ["Initializing"],
+          "FS": ["Initializing"]
+        }
+      }
+    },
+    {
+      "overallState": "Initializing",
+      "componentSet": {
+        "state": "Starting",
+        "components": {
+          "DB": ["Initializing", "Running"],
+          "FS": ["Initializing", "Running"]
+        }
+      }
+    },
+    {
+      "overallState": "Running",
+      "componentSet": {
+        "state": "Running",
+        "components": {
+          "DB": ["Running"],
+          "FS": ["Running"]
+        }
+      },
+      "processState": "Running"
+    },
+    {
+      "overallState": "Shutdown",
+      "componentSet": {
+        "state": "Shutdown",
+        "components": {
+          "DB": ["Shutdown"],
+          "FS": ["Shutdown"]
+        }
+      }
+    }
+  ]
+} 

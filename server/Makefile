@@ -2,28 +2,12 @@
 
 # Build the server
 build:
-	go build -o sprite-env
+	go build -o tmp/sprite-env
 
-# Run tests for each directory in test-scripts
+# Run integration tests
 test: build
-	@for dir in test-scripts/*/; do \
-		echo "Running test for $$dir"; \
-		./sprite-env -debug -test-dir "$$dir" -- "$$dir/supervised-process.sh" & \
-		PID=$$!; \
-		echo "Started process with PID $$PID"; \
-		sleep 2; \
-		echo "Sending SIGTERM to $$PID"; \
-		kill -TERM $$PID || echo "Failed to send SIGTERM"; \
-		echo "Waiting for process $$PID to exit"; \
-		wait $$PID; \
-		EXIT_CODE=$$?; \
-		echo "Process exited with code $$EXIT_CODE"; \
-		if [ $$EXIT_CODE -ne 0 ] && [ $$EXIT_CODE -ne 143 ]; then \
-			echo "Test failed with exit code $$EXIT_CODE"; \
-			exit $$EXIT_CODE; \
-		fi; \
-	done
+	TSCRIPTS_DIR=$$(cd test-scripts && pwd) go test -v ./tests
 
 # Clean build artifacts
 clean:
-	rm -f sprite-env 
+	rm -rf tmp/ 

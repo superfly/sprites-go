@@ -95,6 +95,7 @@ type SpriteEnv struct {
 	componentSet      *ComponentSet
 	supervisedProcess *ProcessManager
 	debug             bool
+	tlaTrace          bool
 }
 
 // NewSpriteEnv creates a new SpriteEnv instance
@@ -213,7 +214,7 @@ func (s *SpriteEnv) handleSignal(sig os.Signal) {
 	// Don't use mutex in signal handler - keep it fast and non-blocking
 
 	if s.debug {
-		log.Printf("DEBUG: Signal handler received: %v", sig)
+		fmt.Printf("DEBUG: Signal handler received: %v\n", sig)
 	}
 
 	// Stop ComponentSet and SupervisedProcess
@@ -261,32 +262,35 @@ func (s *SpriteEnv) recordStateChange(from, to State, reason string) {
 	}
 	s.stateChanges = append(s.stateChanges, change)
 
-	// Output TLA+ compatible trace
-	vars := map[string]interface{}{
-		"overallState":         to.OverallState,
-		"dbState":              to.DBState,
-		"fsState":              to.FSState,
-		"processState":         to.ProcessState,
-		"processExitCode":      to.ProcessExitCode,
-		"checkpointInProgress": to.CheckpointInProgress,
-		"restoreInProgress":    to.RestoreInProgress,
-		"errorType":            to.ErrorType,
-		"restartAttempt":       to.RestartAttempt,
-		"restartDelay":         to.RestartDelay,
-		"shutdownInProgress":   to.ShutdownInProgress,
-		"exitRequested":        to.ExitRequested,
-		"signalReceived":       to.SignalReceived,
-		"dbShutdownTimeout":    to.DBShutdownTimeout,
-		"fsShutdownTimeout":    to.FSShutdownTimeout,
-		"dbForceKilled":        to.DBForceKilled,
-		"fsForceKilled":        to.FSForceKilled,
-	}
+	// Only output TLA+ trace if enabled
+	if s.tlaTrace {
+		// Output TLA+ compatible trace
+		vars := map[string]interface{}{
+			"overallState":         to.OverallState,
+			"dbState":              to.DBState,
+			"fsState":              to.FSState,
+			"processState":         to.ProcessState,
+			"processExitCode":      to.ProcessExitCode,
+			"checkpointInProgress": to.CheckpointInProgress,
+			"restoreInProgress":    to.RestoreInProgress,
+			"errorType":            to.ErrorType,
+			"restartAttempt":       to.RestartAttempt,
+			"restartDelay":         to.RestartDelay,
+			"shutdownInProgress":   to.ShutdownInProgress,
+			"exitRequested":        to.ExitRequested,
+			"signalReceived":       to.SignalReceived,
+			"dbShutdownTimeout":    to.DBShutdownTimeout,
+			"fsShutdownTimeout":    to.FSShutdownTimeout,
+			"dbForceKilled":        to.DBForceKilled,
+			"fsForceKilled":        to.FSForceKilled,
+		}
 
-	trace := map[string]interface{}{
-		"vars": vars,
-	}
+		trace := map[string]interface{}{
+			"vars": vars,
+		}
 
-	log.Printf("STATE_CHANGE: %s", toJSON(trace))
+		fmt.Fprintln(os.Stderr, toJSON(trace))
+	}
 }
 
 // toJSON converts a value to JSON string
@@ -315,9 +319,16 @@ func main() {
 	// Parse command line arguments
 	var testDir string
 	var debug bool
+	var tlaTrace bool
 	flag.StringVar(&testDir, "test-dir", "", "Directory containing test scripts")
 	flag.BoolVar(&debug, "debug", false, "Enable debug logging")
+	flag.BoolVar(&tlaTrace, "tla-trace", false, "Enable TLA+ state change tracing")
 	flag.Parse()
+
+	// Set up logging
+	if debug {
+		log.SetOutput(os.Stdout)
+	}
 
 	// Get supervised process path from remaining arguments after --
 	var supervisedProcessPath string
@@ -334,6 +345,7 @@ func main() {
 
 	env := NewSpriteEnv()
 	env.debug = debug
+	env.tlaTrace = tlaTrace
 
 	// Set up signal handling
 	sigChan := make(chan os.Signal, 1)
@@ -355,8 +367,8 @@ func main() {
 	// Initialize components if test directory is provided
 	if testDir != "" {
 		if debug {
-			log.Printf("DEBUG: Using test scripts from %s", testDir)
-			log.Printf("DEBUG: Using supervised process: %s", supervisedProcessPath)
+			fmt.Printf("DEBUG: Using test scripts from %s\n", testDir)
+			fmt.Printf("DEBUG: Using supervised process: %s\n", supervisedProcessPath)
 		}
 
 		// Create ComponentSet for storage components
@@ -384,7 +396,7 @@ func main() {
 		}
 
 		if debug {
-			log.Printf("DEBUG: ComponentSet started, waiting for components to be ready")
+			fmt.Printf("DEBUG: ComponentSet started, waiting for components to be ready\n")
 		}
 
 		// Wait for all components to be ready before starting supervised process (per TLA+ spec)
@@ -392,7 +404,7 @@ func main() {
 			for {
 				if componentSet.GetOverallState() == StateRunning {
 					if debug {
-						log.Printf("DEBUG: All components ready, starting supervised process")
+						fmt.Printf("DEBUG: All components ready, starting supervised process\n")
 					}
 					if err := supervisedProcess.Start(); err != nil {
 						log.Printf("Failed to start supervised process: %v", err)
@@ -405,7 +417,7 @@ func main() {
 		}()
 
 		if debug {
-			log.Printf("DEBUG: ComponentSet started, supervised process will start when components are ready")
+			fmt.Printf("DEBUG: ComponentSet started, supervised process will start when components are ready\n")
 		}
 	}
 
@@ -420,7 +432,7 @@ func main() {
 		select {
 		case sig := <-sigChan:
 			if debug {
-				log.Printf("DEBUG: Received signal: %v", sig)
+				fmt.Printf("DEBUG: Received signal: %v\n", sig)
 			}
 
 			// Set shutdown flag for graceful signals
@@ -435,20 +447,20 @@ func main() {
 			// Start shutdown timer for graceful signals
 			if sig == syscall.SIGTERM || sig == syscall.SIGINT {
 				if debug {
-					log.Printf("DEBUG: Starting graceful shutdown, will force exit in 30 seconds")
+					fmt.Printf("DEBUG: Starting graceful shutdown, will force exit in 30 seconds\n")
 				}
 				shutdownTimer.Reset(30 * time.Second)
 			}
 
 		case <-shutdownTimer.C:
 			if debug {
-				log.Printf("DEBUG: Shutdown timeout exceeded, forcing exit")
+				fmt.Printf("DEBUG: Shutdown timeout exceeded, forcing exit\n")
 			}
 			os.Exit(1)
 
 		case <-env.ctx.Done():
 			if debug {
-				log.Printf("DEBUG: Context cancelled, exiting")
+				fmt.Printf("DEBUG: Context cancelled, exiting\n")
 			}
 			return
 
@@ -483,7 +495,7 @@ func main() {
 					(env.state.FSState == StateError || env.state.FSState == StateShutdown) &&
 					(env.state.ProcessState == ProcessStopped || env.state.ProcessState == ProcessExited || env.state.ProcessState == ProcessKilled) {
 					if debug {
-						log.Printf("DEBUG: All components shut down, exiting gracefully")
+						fmt.Printf("DEBUG: All components shut down, exiting gracefully\n")
 					}
 					os.Exit(0)
 				}
