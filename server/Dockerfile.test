@@ -2,19 +2,18 @@
 
 FROM golang:1.24 as builder
 
+# Install make (Debian-based)
+RUN apt-get update && apt-get install -y make && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Copy go.mod and go.sum (if present)
-COPY go.mod .
-# COPY go.sum .
+COPY go.mod go.sum ./
 
 RUN go mod tidy
 
 # Copy the rest of the source code
 COPY . .
 RUN chmod +x ./test-scripts/**/*.sh
-
-# Install make (Debian-based)
-RUN apt-get update && apt-get install -y make && rm -rf /var/lib/apt/lists/*
 
 CMD ["make", "test"] 

@@ -8,4 +8,5 @@ sprite-env
 # Note: go.sum should be committed to ensure reproducible builds
 
 # Build artifacts
-/tmp/ 
+tmp
+tests/tmp

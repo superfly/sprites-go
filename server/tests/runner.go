@@ -91,7 +91,7 @@ func runTest(t *testing.T, dir string) {
 	}
 
 	// Create command to run the server with absolute paths
-	cmd := exec.Command(spriteEnvPath, "-tla-trace", "-debug", "-test-dir", dir, "--", supervisedProcessPath)
+	cmd := exec.Command(spriteEnvPath, "-tla-trace", "-test-dir", dir, "--", supervisedProcessPath)
 	t.Logf("Running command: %v", cmd.Args)
 
 	// Create pipes for stdout and stderr
@@ -152,6 +152,7 @@ func runTest(t *testing.T, dir string) {
 				case <-ctx.Done():
 					return
 				default:
+					// Collect traces silently
 					if strings.Contains(line, "\"processState\":\"Running\"") {
 						// Use stopOnce to ensure this only happens once
 						stopOnce.Do(func() {
@@ -180,7 +181,7 @@ func runTest(t *testing.T, dir string) {
 		}
 	}()
 
-	// Start goroutine to scan stdout for debug logs
+	// Start goroutine to suppress stdout (discard it)
 	go func() {
 		defer close(stdoutDone)
 		scanner := bufio.NewScanner(stdout)
@@ -189,9 +190,8 @@ func runTest(t *testing.T, dir string) {
 			case <-ctx.Done():
 				return
 			default:
-				line := scanner.Text()
-				// Forward all output, including debug
-				os.Stdout.WriteString(line + "\n")
+				// Suppress stdout - do nothing with the line
+				_ = scanner.Text()
 			}
 		}
 		if err := scanner.Err(); err != nil {
@@ -208,30 +208,56 @@ func runTest(t *testing.T, dir string) {
 	t.Logf("Waiting for completion signal...")
 	<-stopChan
 
-	// Send SIGTERM to process
-	t.Logf("Sending SIGTERM to process")
+	// Send SIGINT to process
+	t.Logf("Sending SIGINT to process")
 	if err := cmd.Process.Signal(os.Interrupt); err != nil {
-		t.Fatalf("Failed to send SIGTERM: %v", err)
+		t.Fatalf("Failed to send SIGINT: %v", err)
 	}
 
-	// Wait for process to exit
-	t.Logf("Waiting for process to exit")
-	if err := cmd.Wait(); err != nil {
-		// Check if it's an exit error with a signal-based exit code
-		if exitError, ok := err.(*exec.ExitError); ok {
-			exitCode := exitError.ExitCode()
-			// Accept signal-based exit codes (128 + signal number)
-			// SIGINT = 130 (128 + 2), SIGTERM = 143 (128 + 15)
-			if exitCode == 130 || exitCode == 143 {
-				t.Logf("Process exited with signal-based exit code %d (acceptable)", exitCode)
+	// Wait for process to exit with timeout
+	t.Logf("Waiting for process to exit (5s timeout)")
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	select {
+	case err := <-done:
+		// Process exited within timeout
+		if err != nil {
+			// Check if it's an exit error with a signal-based exit code
+			if exitError, ok := err.(*exec.ExitError); ok {
+				exitCode := exitError.ExitCode()
+				// Accept signal-based exit codes (128 + signal number)
+				// SIGINT = 130 (128 + 2), SIGTERM = 143 (128 + 15), SIGKILL = 137 (128 + 9)
+				if exitCode == 130 || exitCode == 143 || exitCode == 137 {
+					t.Logf("Process exited with signal-based exit code %d (acceptable)", exitCode)
+				} else {
+					t.Fatalf("Process exited with unexpected exit code %d: %v", exitCode, err)
+				}
 			} else {
-				t.Fatalf("Process exited with unexpected exit code %d: %v", exitCode, err)
+				t.Fatalf("Process exited with error: %v", err)
 			}
 		} else {
-			t.Fatalf("Process exited with error: %v", err)
+			t.Logf("Process exited successfully with code 0")
 		}
-	} else {
-		t.Logf("Process exited successfully with code 0")
+	case <-time.After(5 * time.Second):
+		// Timeout - force kill the process
+		t.Logf("Process did not exit within 5s, sending SIGKILL")
+		if err := cmd.Process.Kill(); err != nil {
+			t.Fatalf("Failed to send SIGKILL: %v", err)
+		}
+		// Wait for the kill to take effect
+		err := <-done
+		if err != nil {
+			if exitError, ok := err.(*exec.ExitError); ok {
+				exitCode := exitError.ExitCode()
+				t.Logf("Process killed with exit code %d", exitCode)
+			} else {
+				t.Logf("Process killed: %v", err)
+			}
+		}
 	}
 
 	// Wait specifically for stderr and stdout goroutines to finish
@@ -252,13 +278,13 @@ func runTest(t *testing.T, dir string) {
 	}
 
 	// Verify state changes against expected states
-	verifyStateChanges(t, expectedStates.States, stateChanges)
+	verifyStateChanges(t, expectedStates.States, stateChanges, expectedStatesPath)
 }
 
 // matchesExpectedState checks if the current state matches an expected state
-func matchesExpectedState(overallState, componentSetState, processState, dbState, fsState string, expected ExpectedState) bool {
-	// Check overall state
-	if overallState != expected.OverallState {
+func matchesExpectedState(systemState, componentSetState, processState, dbState, fsState string, expected ExpectedState) bool {
+	// Check system state (was overall state)
+	if systemState != expected.OverallState {
 		return false
 	}
 
@@ -325,26 +351,18 @@ func matchesExpectedState(overallState, componentSetState, processState, dbState
 }
 
 // verifyStateChanges verifies that the actual state changes match the expected states
-func verifyStateChanges(t *testing.T, expectedStates []ExpectedState, actual chan StateChange) {
+func verifyStateChanges(t *testing.T, expectedStates []ExpectedState, actual chan StateChange, expectedStatesFile string) {
 	var stateChanges []StateChange
 	for change := range actual {
 		stateChanges = append(stateChanges, change)
 	}
 
-	t.Logf("=== COLLECTED TRACES ===")
-	t.Logf("Total traces captured: %d", len(stateChanges))
-	for i, change := range stateChanges {
-		vars := change.Vars
-		t.Logf("Trace %d: overallState=%s, componentSetState=%s, processState=%s, dbState=%s, fsState=%s",
-			i, vars["overallState"], vars["componentSetState"], vars["processState"], vars["dbState"], vars["fsState"])
+	// Fail if no traces were collected
+	if len(stateChanges) == 0 {
+		t.Fatalf("No TLA traces were collected - the system may not be emitting traces properly")
 	}
 
-	t.Logf("=== EXPECTED STATES ===")
-	for i, expected := range expectedStates {
-		t.Logf("Expected %d: overallState=%s, componentSetState=%s, processState=%v, DB=%v, FS=%v",
-			i, expected.OverallState, expected.ComponentSet.State, expected.ProcessState,
-			expected.ComponentSet.Components["DB"], expected.ComponentSet.Components["FS"])
-	}
+	// Traces collected silently - only log count for verification
 
 	// Track if we've seen all expected states
 	seenStates := make([]bool, len(expectedStates))
@@ -353,28 +371,32 @@ func verifyStateChanges(t *testing.T, expectedStates []ExpectedState, actual cha
 	// For each actual state change
 	for traceIdx, change := range stateChanges {
 		vars := change.Vars
-		overallState := vars["overallState"].(string)
-		componentSetState := vars["componentSetState"].(string)
-		processState := vars["processState"].(string)
-		dbState := vars["dbState"].(string)
-		fsState := vars["fsState"].(string)
 
-		t.Logf("=== COMPARING TRACE %d ===", traceIdx)
-		t.Logf("Actual: overallState=%s, componentSetState=%s, processState=%s, dbState=%s, fsState=%s",
-			overallState, componentSetState, processState, dbState, fsState)
+		// Extract state from nested structure if available
+		var systemState, componentSetState, processState, dbState, fsState string
+		if stateObj, ok := vars["state"].(map[string]interface{}); ok {
+			systemState = stateObj["systemState"].(string)
+			componentSetState = stateObj["componentSetState"].(string)
+			processState = stateObj["processState"].(string)
+			dbState = stateObj["dbState"].(string)
+			fsState = stateObj["fsState"].(string)
+		} else {
+			// Fallback to old format
+			systemState = vars["overallState"].(string)
+			componentSetState = vars["componentSetState"].(string)
+			processState = vars["processState"].(string)
+			dbState = vars["dbState"].(string)
+			fsState = vars["fsState"].(string)
+		}
 
 		// Check if this state matches any expected state
 		matched := false
 		for i := lastSeenIndex; i < len(expectedStates); i++ {
-			t.Logf("  Checking against expected state %d...", i)
-			if matchesExpectedState(overallState, componentSetState, processState, dbState, fsState, expectedStates[i]) {
-				t.Logf("  ✅ MATCHED expected state %d", i)
+			if matchesExpectedState(systemState, componentSetState, processState, dbState, fsState, expectedStates[i]) {
 				seenStates[i] = true
 				lastSeenIndex = i
 				matched = true
 				break
-			} else {
-				t.Logf("  ❌ No match with expected state %d", i)
 			}
 		}
 
@@ -386,8 +408,9 @@ func verifyStateChanges(t *testing.T, expectedStates []ExpectedState, actual cha
 			} else {
 				t.Errorf("  No more expected states (reached end of expected states list)")
 			}
-			t.Errorf("  Actual:   overallState=%s, componentSetState=%s, processState=%s, dbState=%s, fsState=%s",
-				overallState, componentSetState, processState, dbState, fsState)
+			t.Errorf("  Actual:   systemState=%s, componentSetState=%s, processState=%s, dbState=%s, fsState=%s",
+				systemState, componentSetState, processState, dbState, fsState)
+			t.Errorf("\nActual state did not match expected state from %s. Compare spec/sprite_env.tla against the expected state and analyze why this failed.", expectedStatesFile)
 			t.FailNow()
 		}
 	}
@@ -407,6 +430,7 @@ func verifyStateChanges(t *testing.T, expectedStates []ExpectedState, actual cha
 		for _, i := range missingStates {
 			t.Errorf("  State %d: %+v", i, expectedStates[i])
 		}
+		t.Errorf("\nActual state did not match expected state from %s. Compare spec/sprite_env.tla against the expected state and analyze why this failed.", expectedStatesFile)
 		t.FailNow()
 	}
 

@@ -1,5 +1,4 @@
 # TLA+ generated files and directories
-states/
 *.out
 *.st
 *.fp
