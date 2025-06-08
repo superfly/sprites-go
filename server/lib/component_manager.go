@@ -1,11 +1,12 @@
 package lib
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"sync"
-	"time"
 )
 
 // ComponentType represents the type of component
@@ -30,9 +31,12 @@ type ComponentManager struct {
 	config ComponentConfig
 	ctx    *AppContext
 
-	mu      sync.RWMutex
-	process *exec.Cmd
-	ready   bool
+	mu         sync.RWMutex
+	process    *exec.Cmd
+	ready      bool
+	readyCmd   *exec.Cmd
+	readyStdin io.WriteCloser
+	readyDone  chan error
 }
 
 // NewComponentManager creates a new component manager
@@ -60,8 +64,19 @@ func (cm *ComponentManager) Start(ctx context.Context) error {
 
 	cm.ctx.Info("Starting component", "type", cm.config.Type, "command", cm.config.StartCommand)
 
-	// Start the component process
+	// Start the component process with captured output
 	cmd := exec.CommandContext(ctx, cm.config.StartCommand[0], cm.config.StartCommand[1:]...)
+
+	// Capture stdout and stderr for streaming
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stdout pipe for %s component: %w", cm.config.Type, err)
+	}
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stderr pipe for %s component: %w", cm.config.Type, err)
+	}
 
 	if err := cmd.Start(); err != nil {
 		cm.ctx.Error("Failed to start component", err, "type", cm.config.Type)
@@ -71,7 +86,17 @@ func (cm *ComponentManager) Start(ctx context.Context) error {
 	cm.process = cmd
 	cm.ctx.Info("Component process started", "type", cm.config.Type, "pid", cmd.Process.Pid)
 
-	// Don't wait for readiness here - that's handled by the state machine
+	// Start ready script if configured
+	if len(cm.config.ReadyCommand) > 0 {
+		if err := cm.startReadyScript(ctx); err != nil {
+			cm.ctx.Error("Failed to start ready script", err, "type", cm.config.Type)
+			// Continue anyway - ready script is optional
+		}
+	}
+
+	// Start streaming output in background
+	go cm.streamOutput(ctx, stdout, stderr)
+
 	return nil
 }
 
@@ -86,22 +111,30 @@ func (cm *ComponentManager) WaitForReady(ctx context.Context) error {
 		return nil
 	}
 
-	// Poll for readiness using the ready script
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
+	// Wait for ready script to complete (no more polling)
+	cm.mu.RLock()
+	readyDone := cm.readyDone
+	cm.mu.RUnlock()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			cmd := exec.CommandContext(ctx, cm.config.ReadyCommand[0], cm.config.ReadyCommand[1:]...)
-			if err := cmd.Run(); err == nil {
-				cm.ctx.Info("Component is ready", "type", cm.config.Type)
-				cm.setReady(true)
-				return nil
-			}
-			// Continue polling on error
+	if readyDone == nil {
+		// No ready script was started
+		cm.ctx.Debug("No ready script started, assuming ready", "type", cm.config.Type)
+		cm.setReady(true)
+		return nil
+	}
+
+	// Wait for ready script to complete
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-readyDone:
+		if err == nil {
+			cm.ctx.Info("Component is ready", "type", cm.config.Type)
+			cm.setReady(true)
+			return nil
+		} else {
+			cm.ctx.Error("Ready script failed", err, "type", cm.config.Type)
+			return fmt.Errorf("ready script failed for %s component: %w", cm.config.Type, err)
 		}
 	}
 }
@@ -118,7 +151,18 @@ func (cm *ComponentManager) Stop(ctx context.Context) error {
 
 	cm.ctx.Info("Stopping component", "type", cm.config.Type)
 
-	// Terminate the process that was started
+	// Stop ready script first
+	if cm.readyCmd != nil {
+		if cm.readyStdin != nil {
+			cm.readyStdin.Close()
+			cm.readyStdin = nil
+		}
+		_ = cm.readyCmd.Process.Kill()
+		_ = cm.readyCmd.Wait()
+		cm.readyCmd = nil
+	}
+
+	// Terminate the component process
 	if cm.process.ProcessState == nil {
 		if err := cm.process.Process.Kill(); err != nil {
 			cm.ctx.Error("Failed to kill component process", err, "type", cm.config.Type)
@@ -191,6 +235,130 @@ func (cm *ComponentManager) Restore(ctx context.Context) error {
 
 	cm.ctx.Info("Component restore completed", "type", cm.config.Type)
 	return nil
+}
+
+// startReadyScript starts the ready check script
+func (cm *ComponentManager) startReadyScript(ctx context.Context) error {
+	cm.readyDone = make(chan error, 1)
+
+	cm.ctx.Debug("Starting ready script", "type", cm.config.Type, "command", cm.config.ReadyCommand)
+
+	readyCmd := exec.CommandContext(ctx, cm.config.ReadyCommand[0], cm.config.ReadyCommand[1:]...)
+
+	readyStdin, err := readyCmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stdin pipe for ready script: %w", err)
+	}
+
+	// Capture ready script's stdout and stderr to forward to parent
+	readyStdout, err := readyCmd.StdoutPipe()
+	if err != nil {
+		readyStdin.Close()
+		return fmt.Errorf("failed to create stdout pipe for ready script: %w", err)
+	}
+
+	readyStderr, err := readyCmd.StderrPipe()
+	if err != nil {
+		readyStdin.Close()
+		readyStdout.Close()
+		return fmt.Errorf("failed to create stderr pipe for ready script: %w", err)
+	}
+
+	if err := readyCmd.Start(); err != nil {
+		readyStdin.Close()
+		readyStdout.Close()
+		readyStderr.Close()
+		return fmt.Errorf("failed to start ready script: %w", err)
+	}
+
+	cm.readyCmd = readyCmd
+	cm.readyStdin = readyStdin
+
+	// Forward ready script output to parent
+	go cm.forwardReadyOutput(ctx, readyStdout, readyStderr)
+
+	// Monitor ready script completion
+	go func() {
+		err := readyCmd.Wait()
+		cm.readyDone <- err
+		close(cm.readyDone)
+
+		cm.mu.Lock()
+		if cm.readyStdin != nil {
+			cm.readyStdin.Close()
+			cm.readyStdin = nil
+		}
+		cm.readyCmd = nil
+		cm.mu.Unlock()
+	}()
+
+	return nil
+}
+
+// streamOutput handles streaming component output to both parent and ready script
+func (cm *ComponentManager) streamOutput(ctx context.Context, stdout, stderr io.Reader) {
+	// Merge stdout and stderr
+	combined := io.MultiReader(stdout, stderr)
+	scanner := bufio.NewScanner(combined)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// Always forward to parent (existing behavior)
+		cm.ctx.Info(line, "type", cm.config.Type)
+
+		// Send to ready script if it's still running
+		cm.mu.RLock()
+		readyStdin := cm.readyStdin
+		cm.mu.RUnlock()
+
+		if readyStdin != nil {
+			// Non-blocking write attempt
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				if _, err := readyStdin.Write([]byte(line + "\n")); err != nil {
+					// Ready script stdin closed or errored, stop sending
+					cm.mu.Lock()
+					if cm.readyStdin != nil {
+						cm.readyStdin.Close()
+						cm.readyStdin = nil
+					}
+					cm.mu.Unlock()
+				}
+			}
+		}
+	}
+
+	// Component output ended, close ready script stdin if still open
+	cm.mu.Lock()
+	if cm.readyStdin != nil {
+		cm.readyStdin.Close()
+		cm.readyStdin = nil
+	}
+	cm.mu.Unlock()
+}
+
+// forwardReadyOutput forwards ready script output to parent
+func (cm *ComponentManager) forwardReadyOutput(ctx context.Context, stdout, stderr io.Reader) {
+	// Forward stdout from ready script
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			cm.ctx.Info(line, "type", cm.config.Type, "source", "ready-script")
+		}
+	}()
+
+	// Forward stderr from ready script
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			line := scanner.Text()
+			cm.ctx.Info(line, "type", cm.config.Type, "source", "ready-script")
+		}
+	}()
 }
 
 // setReady updates the ready state (called with lock held)

@@ -1,15 +1,18 @@
 #!/bin/bash
-echo "DB: Running ready.sh"
-echo "DB: Waiting for Litestream replication to start..."
+echo "DB: Running ready.sh" >&2
+echo "DB: Waiting for Litestream replication to start..." >&2
 
-# Simulate waiting for the start script's output.
-# In a real scenario, this script might monitor a log file or pipe.
-# For this simulation, we'll just add a small delay.
-sleep 0.5 # Corresponds to db/start.sh sleep 0.3 + a little extra
+# Read from stdin line by line, looking for the ready message
+while read line; do
+    echo "DB: ready.sh saw: $line" >&2
+    
+    if echo "$line" | grep -q "DB: Litestream replication started successfully. Monitoring for changes."; then
+        echo "DB: Found ready message - DB component is ready." >&2
+        echo "DB: Ready"
+        exit 0
+    fi
+done
 
-# This is the message we are "waiting" for from db/start.sh
-READY_MESSAGE="DB: Litestream replication started successfully. Monitoring for changes."
-
-echo "DB: Found message '${READY_MESSAGE}' - DB component is ready."
-echo "DB: Ready" # Original ready message
-exit 0
+# If we reach here, stdin closed without finding the ready message
+echo "DB: ready.sh: stdin closed without finding ready message" >&2
+exit 1

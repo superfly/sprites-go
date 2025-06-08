@@ -1,16 +1,18 @@
 #!/bin/bash
-echo "FS: Running ready.sh"
-echo "FS: Waiting for JuiceFS to mount and be ready..."
+echo "FS: Running ready.sh" >&2
+echo "FS: Waiting for JuiceFS to mount and be ready..." >&2
 
-# Simulate waiting for the start script's output.
-# In a real scenario, this script might monitor a log file or pipe.
-# For this simulation, we'll just add a small delay.
-# fs/start.sh has a sleep 0.5 before its "JuiceFS mounted and running..." message.
-sleep 0.7 # Simulate slightly longer wait
+# Read from stdin line by line, looking for the ready message
+while read line; do
+    echo "FS: ready.sh saw: $line" >&2
+    
+    if echo "$line" | grep -q "FS: JuiceFS mounted and running. Monitoring file system operations."; then
+        echo "FS: Found ready message - FS component is ready." >&2
+        echo "FS: Ready"
+        exit 0
+    fi
+done
 
-# This is the message we are "waiting" for from fs/start.sh
-READY_MESSAGE="FS: JuiceFS mounted and running. Monitoring file system operations."
-
-echo "FS: Found message '${READY_MESSAGE}' - FS component is ready."
-echo "FS: Ready" # Original ready message
-exit 0
+# If we reach here, stdin closed without finding the ready message
+echo "FS: ready.sh: stdin closed without finding ready message" >&2
+exit 1
