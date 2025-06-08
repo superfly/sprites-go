@@ -17,7 +17,7 @@ SupervisedProcessExitScenario ==
     /\ (dbState = "Initializing") 
     /\ (fsState = "Initializing")
     /\ (processState = "Initializing")
-    /\ (systemState = "Initializing")
+    /\ (overallState = "Initializing")
     /\ (restartAttempt = 0)
     /\ (errorType = "None")
     /\ (signalReceived = "None")
@@ -37,7 +37,7 @@ SupervisedProcessExitScenario ==
            => <>(processState = "Running"))
 
     \* 4. System reaches stable running state  
-    /\ <> (systemState = "Running"
+    /\ <> (overallState = "Running"
            /\ componentSetState = "Running"
            /\ processState = "Running"
            /\ errorType = "None")

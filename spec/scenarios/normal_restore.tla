@@ -1,6 +1,6 @@
 ---------------------------- MODULE normal_restore ----------------------------
 
-EXTENDS _sprite_env
+EXTENDS sprite_env
 
 \* Normal restore scenario:
 \* 1. Start with process and components running
@@ -15,25 +15,37 @@ NormalRestoreScenario ==
         \* Eventually restore begins
         <>(restoreInProgress = TRUE))
     
-    \* When restore begins, process should stop
+    \* When restore begins, components should start stopping
+    /\ []((restoreInProgress = TRUE /\ componentSetState = "Running") =>
+        <>(AnyComponentStopping))
+    
+    \* When restore begins, process should also stop
     /\ []((restoreInProgress = TRUE /\ processState = "Running") =>
         <>(processState = "Stopping"))
     
-    \* Process transitions from Stopping to Stopped during restore
+    \* Process should transition from Stopping to Stopped
     /\ []((restoreInProgress = TRUE /\ processState = "Stopping") =>
         <>(processState = "Stopped"))
     
-    \* Components should be in restoring state during restore
-    /\ []((restoreInProgress = TRUE) =>
+    \* After process stops, components should move to actual restore
+    /\ []((restoreInProgress = TRUE /\ processState = "Stopped" /\ AnyComponentStopping) =>
         <>(componentSetState = "Restoring"))
     
-    \* After restore completes, process should restart
-    /\ []((~restoreInProgress /\ processState = "Stopped" /\ componentSetState = "Running") =>
+    \* After restore completes, components should start processes back up
+    /\ []((~restoreInProgress /\ componentSetState = "Restoring") =>
+        <>(AnyComponentStarting))
+    
+    \* When components are starting, process should start too
+    /\ []((~restoreInProgress /\ AnyComponentStarting /\ processState = "Stopped") =>
         <>(processState = "Starting"))
     
-    \* Process should eventually return to running after restore
+    \* Process should eventually return to running
     /\ []((~restoreInProgress /\ processState = "Starting") =>
         <>(processState = "Running"))
+    
+    \* Components should return to running after process is running
+    /\ []((~restoreInProgress /\ processState = "Running" /\ AnyComponentStarting) =>
+        <>(componentSetState = "Running"))
     
     \* Overall system should return to running state
     /\ []((~restoreInProgress /\ processState = "Running" /\ componentSetState = "Running") =>

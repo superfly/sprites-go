@@ -1,6 +1,6 @@
 ---------------------------- MODULE normal_run_shutdown ----------------------------
 
-EXTENDS _sprite_env
+EXTENDS sprite_env
 
 \* Hierarchical normal run and shutdown scenario:
 \* 1. Start with everything initializing, process has not started, zero restarts

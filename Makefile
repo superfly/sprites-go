@@ -161,6 +161,7 @@ clean-all: clean
 test-scenarios: $(TLA_TOOLS)
 	@echo "$(BLUE)🧪 Running TLA+ scenarios...$(NC)"
 	@for scenario in spec/scenarios/[^_]*.tla; do \
+		if [ "$$(basename $$scenario)" = "sprite_env.tla" ]; then continue; fi; \
 		scenario_name=$$(basename $$scenario .tla); \
 		config="spec/scenarios/$$scenario_name.cfg"; \
 		echo "$(YELLOW)Testing $$scenario_name...$(NC)"; \
@@ -168,12 +169,12 @@ test-scenarios: $(TLA_TOOLS)
 			if $(TLC) -workers auto "$$scenario" > /tmp/tlc.out 2>&1; then \
 				echo "$(GREEN)✅ $$scenario_name passed$(NC)"; \
 			else \
-				if grep -q "fingerprint" /tmp/tlc.out; then \
+				if grep -q "fingerprint" tmp/tlc.out; then \
 					echo "$(GREEN)✅ $$scenario_name passed$(NC)"; \
 				else \
 					echo "$(RED)❌ $$scenario_name failed$(NC)"; \
 					echo "$(RED)Errors:$(NC)"; \
-					cat /tmp/tlc.out; \
+					cat tmp/tlc.out; \
 					exit 1; \
 				fi \
 			fi \
