@@ -1,178 +1,171 @@
 package lib
 
 import (
-	"context"
 	"fmt"
 	"log"
-	"os"
 	"os/exec"
-	"sync"
 	"syscall"
 	"time"
-
-	"sprites-env/lib/states"
 )
 
-// ProcessManager manages the lifecycle of a supervised process
+// ProcessState represents the possible states of a managed process
+type ProcessState string
+
+const (
+	ProcessInitializing ProcessState = "Initializing"
+	ProcessStarting     ProcessState = "Starting"
+	ProcessRunning      ProcessState = "Running"
+	ProcessStopping     ProcessState = "Stopping"
+	ProcessStopped      ProcessState = "Stopped"
+	ProcessCrashed      ProcessState = "Crashed"
+	ProcessKilled       ProcessState = "Killed"
+	ProcessError        ProcessState = "Error"
+)
+
+// String implements the State interface
+func (s ProcessState) String() string {
+	return string(s)
+}
+
+// ProcessManager manages a supervised process
 type ProcessManager struct {
-	env       Environment
-	command   string
-	args      string
-	state     string
-	process   *exec.Cmd
-	debug     bool
-	mutex     sync.RWMutex
-	stopChan  chan bool
-	exitCode  int
-	exitError error
-	ctx       context.Context
-	cancel    context.CancelFunc
+	env          Environment
+	debug        bool
+	command      string
+	args         []string
+	cmd          *exec.Cmd
+	stateManager *StateManager
+	done         chan struct{}
+	stopChan     chan struct{}
+	started      bool
 }
 
 // NewProcessManager creates a new process manager
-func NewProcessManager(env Environment, debug bool, command, args string) *ProcessManager {
-	ctx, cancel := context.WithCancel(context.Background())
-
-	return &ProcessManager{
+func NewProcessManager(env Environment, debug bool, command string, args ...string) *ProcessManager {
+	pm := &ProcessManager{
 		env:      env,
+		debug:    debug,
 		command:  command,
 		args:     args,
-		state:    states.ProcessStateStopped,
-		debug:    debug,
-		stopChan: make(chan bool, 1),
-		exitCode: 0,
-		ctx:      ctx,
-		cancel:   cancel,
+		done:     make(chan struct{}),
+		stopChan: make(chan struct{}),
+		started:  true, // Mark as started since we start StateManager immediately
 	}
+
+	// Create and start StateManager immediately
+	pm.stateManager = NewStateManager(ProcessInitializing, debug)
+	pm.stateManager.Start()
+
+	// Register callback to notify environment of state changes
+	pm.stateManager.OnTransition(func(oldState, newState State) {
+		if pm.env != nil {
+			pm.env.UpdateProcessState(newState.String(), oldState.String())
+		}
+	})
+
+	return pm
 }
 
 // GetState returns the current state of the process
-func (p *ProcessManager) GetState() string {
-	p.mutex.RLock()
-	defer p.mutex.RUnlock()
-	return p.state
+func (p *ProcessManager) GetState() ProcessState {
+	return p.stateManager.GetState().(ProcessState)
 }
 
-// setState updates the process state and notifies the environment
-func (p *ProcessManager) setState(newState string) {
-	p.mutex.Lock()
-	oldState := p.state
-	p.state = newState
-	p.mutex.Unlock()
+// setState sets the state of the process
+func (pm *ProcessManager) setState(newState ProcessState) {
+	pm.stateManager.SetState(newState)
+}
 
-	// Notify environment of state change
-	if p.env != nil {
-		p.env.UpdateProcessState(newState, oldState)
+// logDebug logs a debug message with process information
+func (p *ProcessManager) logDebug(format string, args ...interface{}) {
+	if !p.debug {
+		return
 	}
-
-	if p.debug {
-		log.Printf("DEBUG: Process state changed from %s to %s", oldState, newState)
+	cmdStr := ""
+	if p.cmd != nil {
+		cmdStr = fmt.Sprintf(" [%s %v]", p.cmd.Path, p.cmd.Args)
+	} else if p.command != "" {
+		cmdStr = fmt.Sprintf(" [%s %v]", p.command, p.args)
 	}
+	log.Printf("DEBUG: Process%s: "+format, append([]interface{}{cmdStr}, args...)...)
 }
 
 // Start starts the supervised process
-func (p *ProcessManager) Start() error {
-	if p.debug {
-		fmt.Printf("DEBUG: Starting supervised process: %s\n", p.command)
+func (pm *ProcessManager) Start() error {
+	if pm.debug {
+		fmt.Printf("DEBUG: Starting supervised process: %s %v\n", pm.command, pm.args)
 	}
 
-	p.setState(states.ProcessStateStarting)
-
-	// Start the process
-	if p.args != "" {
-		p.process = exec.Command("sh", "-c", p.command+" "+p.args)
-	} else {
-		p.process = exec.Command("sh", "-c", p.command)
-	}
+	// Set up command
+	cmd := exec.Command(pm.command, pm.args...)
+	pm.cmd = cmd
 
 	// Set up output forwarding
-	p.process.Stdout = os.Stdout
-	p.process.Stderr = os.Stderr
-
-	if err := p.process.Start(); err != nil {
-		p.setState(states.ProcessStateError)
-		return fmt.Errorf("failed to start process: %v", err)
+	if pm.debug {
+		fmt.Printf("DEBUG: Setting up output forwarding for process\n")
 	}
 
-	p.setState(states.ProcessStateRunning)
+	// Update state to Starting
+	pm.setState(ProcessStarting)
 
-	// Monitor the process
-	go p.monitorProcess()
+	// Start process
+	if err := cmd.Start(); err != nil {
+		if pm.debug {
+			fmt.Printf("DEBUG: Failed to start process: %v\n", err)
+		}
+		// Set error state and wait for it to be processed before returning
+		pm.stateManager.SetStateSync(ProcessError)
+		return err
+	}
+
+	if pm.debug {
+		fmt.Printf("DEBUG: Process started successfully, PID: %d\n", cmd.Process.Pid)
+	}
+
+	// Update state to Running
+	pm.setState(ProcessRunning)
+
+	// Start monitoring the process in the background
+	go pm.monitorProcess()
 
 	return nil
 }
 
-// Stop stops the supervised process and waits for it to actually stop
-func (p *ProcessManager) Stop() error {
-	if p.debug {
+// Stop stops the supervised process
+func (pm *ProcessManager) Stop() error {
+	if pm.debug {
 		fmt.Printf("DEBUG: Stopping supervised process\n")
 	}
 
-	p.setState(states.ProcessStateStopping)
-
-	// Signal stop
-	select {
-	case p.stopChan <- true:
-	default:
-	}
-
-	// Send SIGTERM to the process
-	if p.process != nil && p.process.Process != nil {
-		if err := p.process.Process.Signal(syscall.SIGTERM); err != nil {
-			if p.debug {
-				log.Printf("DEBUG: Failed to send SIGTERM: %v", err)
+	if pm.cmd != nil && pm.cmd.Process != nil {
+		// Check if process is already finished
+		if pm.cmd.ProcessState != nil {
+			if pm.debug {
+				fmt.Printf("DEBUG: Process already finished, no need to stop\n")
 			}
+			return nil
 		}
 
-		// Wait a bit for graceful shutdown
-		gracefulTimeout := time.NewTimer(5 * time.Second)
-		defer gracefulTimeout.Stop()
-
-		// Create a channel to signal when process stops
-		done := make(chan bool, 1)
-		go func() {
-			for {
-				state := p.GetState()
-				if state == states.ProcessStateKilled || state == states.ProcessStateExited || state == states.ProcessStateCrashed || state == states.ProcessStateError {
-					done <- true
-					return
-				}
-				time.Sleep(100 * time.Millisecond)
+		pm.setState(ProcessStopping)
+		if err := pm.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+			if pm.debug {
+				fmt.Printf("DEBUG: Error sending SIGTERM: %v\n", err)
 			}
-		}()
+			return err
+		}
 
+		// Wait for the monitor goroutine to signal completion
+		// The monitor will handle the Wait() and state transitions
 		select {
-		case <-done:
-			// Process stopped gracefully
-			return nil
-		case <-gracefulTimeout.C:
-			// Force kill if still running
-			if p.debug {
-				log.Printf("DEBUG: Graceful shutdown timeout, force killing process")
+		case <-pm.done:
+			// Process exited normally
+		case <-time.After(5 * time.Second):
+			// Timeout - force kill
+			if pm.debug {
+				fmt.Printf("DEBUG: Process didn't exit within 5 seconds, force killing\n")
 			}
-			p.setState(states.ProcessStateSignaling)
-			if err := p.process.Process.Kill(); err != nil {
-				if p.debug {
-					log.Printf("DEBUG: Failed to kill process: %v", err)
-				}
-			}
-
-			// Wait for force kill to complete (with timeout)
-			forceTimeout := time.NewTimer(2 * time.Second)
-			defer forceTimeout.Stop()
-
-			select {
-			case <-done:
-				// Process finally stopped
-				return nil
-			case <-forceTimeout.C:
-				// Something is very wrong, but don't hang forever
-				if p.debug {
-					log.Printf("DEBUG: Force kill timeout exceeded, giving up")
-				}
-				p.setState(states.ProcessStateError)
-				return fmt.Errorf("process failed to stop within timeout")
-			}
+			pm.ForceKill()
+			pm.setState(ProcessKilled)
 		}
 	}
 
@@ -181,53 +174,52 @@ func (p *ProcessManager) Stop() error {
 
 // monitorProcess monitors the supervised process
 func (p *ProcessManager) monitorProcess() {
-	if p.process == nil {
+	if p.cmd == nil {
+		close(p.done)
 		return
 	}
 
-	if err := p.process.Wait(); err != nil {
-		if p.debug {
-			log.Printf("DEBUG: Supervised process exited with error: %v", err)
-		}
+	if err := p.cmd.Wait(); err != nil {
+		log.Printf("ERROR: Supervised process exited with error: %v", err)
 
 		// Check if it was killed
 		if exitError, ok := err.(*exec.ExitError); ok {
-			p.exitCode = exitError.ExitCode()
-			if p.exitCode == -1 || p.exitCode == 137 { // Killed
-				p.setState(states.ProcessStateKilled)
+			if exitError.ExitCode() == -1 || exitError.ExitCode() == 137 { // Killed
+				p.setState(ProcessKilled)
 			} else {
-				p.setState(states.ProcessStateCrashed)
+				p.setState(ProcessCrashed)
 			}
 		} else {
-			p.setState(states.ProcessStateError)
+			p.setState(ProcessError)
 		}
 	} else {
-		if p.debug {
-			log.Printf("DEBUG: Supervised process exited successfully")
-		}
-		p.exitCode = 0
-		p.setState(states.ProcessStateExited)
+		p.logDebug("Supervised process exited successfully")
+		p.setState(ProcessStopped)
 	}
+
+	// Signal that we're done monitoring
+	close(p.done)
 }
 
 // GetExitCode returns the exit code of the process
 func (p *ProcessManager) GetExitCode() int {
-	p.mutex.RLock()
-	defer p.mutex.RUnlock()
-	return p.exitCode
+	if p.cmd == nil || p.cmd.ProcessState == nil {
+		return -1
+	}
+	return p.cmd.ProcessState.ExitCode()
 }
 
 // ForceKill force-kills the supervised process
 func (p *ProcessManager) ForceKill() {
-	if p.process != nil && p.process.Process != nil {
+	if p.cmd != nil && p.cmd.Process != nil {
 		if p.debug {
 			fmt.Printf("DEBUG: Force-killing supervised process\n")
 		}
-		p.process.Process.Kill()
+		p.cmd.Process.Kill()
 	}
 }
 
-// isStoppedState checks if the given state represents a stopped process
-func (p *ProcessManager) isStoppedState(state string) bool {
-	return state == states.ProcessStateKilled || state == states.ProcessStateExited || state == states.ProcessStateCrashed || state == states.ProcessStateError
+// Exited returns a channel that will be closed when the process has exited
+func (p *ProcessManager) Exited() <-chan struct{} {
+	return p.done
 }

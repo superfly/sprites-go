@@ -1,3 +1,3 @@
-module sprites-env
+module sprite-env
 
 go 1.24

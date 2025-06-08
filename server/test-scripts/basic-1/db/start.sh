@@ -1,5 +1,15 @@
 #!/bin/bash
-trap 'echo "db-start.sh: received signal $1"' SIGTERM SIGINT SIGKILL
+
+_term() {
+  echo "db-start.sh: received SIGTERM"
+  exit 0
+}
+_int() {
+  echo "db-start.sh: received SIGINT"
+  exit 0
+}
+trap _term SIGTERM
+trap _int SIGINT
 
 echo "db: starting litestream replication..."
 sleep 0.3

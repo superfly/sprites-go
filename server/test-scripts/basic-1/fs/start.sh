@@ -1,5 +1,15 @@
 #!/bin/bash
-trap 'echo "fs-start.sh: received signal $1"' SIGTERM SIGINT SIGKILL
+
+_term() {
+  echo "fs-start.sh: received SIGTERM"
+  exit 0
+}
+_int() {
+  echo "fs-start.sh: received SIGINT"
+  exit 0
+}
+trap _term SIGTERM
+trap _int SIGINT
 
 echo "fs: starting juicefs mount..."
 sleep 0.2

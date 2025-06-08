@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"sprites-env/lib"
-	"sprites-env/lib/states"
+	"sprite-env/lib"
+	"sprite-env/lib/states"
 )
 
 // Signal types as defined in the TLA+ spec
@@ -62,21 +62,28 @@ const (
 
 // SpriteEnv represents the main application environment
 type SpriteEnv struct {
-	globalStateManager  *states.GlobalStateManager
-	componentSetManager *states.ComponentSetStateManager
-	componentSet        *lib.ComponentSet
-	supervisedProcess   *lib.ProcessManager
-	ctx                 context.Context
-	cancel              context.CancelFunc
-	debug               bool
-	tlaTrace            bool
+	globalStateManager     *states.GlobalStateManager
+	componentSetManager    *states.ComponentSetStateManager
+	overallStateManager    *lib.StateManager // New: manages overall state via aggregation
+	processStateManager    *lib.StateManager // New: tracks process state
+	checkpointStateManager *lib.StateManager // New: tracks checkpoint flag
+	restoreStateManager    *lib.StateManager // New: tracks restore flag
+	shutdownStateManager   *lib.StateManager // New: tracks shutdown flag
+	errorTypeManager       *lib.StateManager // New: tracks error type
+	componentSet           *lib.ComponentSet
+	supervisedProcess      *lib.ProcessManager
+	ctx                    context.Context
+	cancel                 context.CancelFunc
+	debug                  bool
+	tlaTrace               bool
+	server                 *http.Server
 }
 
 // NewSpriteEnv creates a new SpriteEnv instance
 func NewSpriteEnv() *SpriteEnv {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Create state managers
+	// Create state managers (keeping existing ones for compatibility)
 	globalStateManager := states.NewGlobalStateManager(false)
 	componentSetManager := states.NewComponentSetStateManager(false)
 
@@ -90,17 +97,213 @@ func NewSpriteEnv() *SpriteEnv {
 	componentSetManager.AddComponent("DB", dbComponent)
 	componentSetManager.AddComponent("FS", fsComponent)
 
-	return &SpriteEnv{
-		globalStateManager:  globalStateManager,
-		componentSetManager: componentSetManager,
-		ctx:                 ctx,
-		cancel:              cancel,
+	// Create new StateManagers for overall state management
+	debug := false // Will be set later
+	processStateManager := lib.NewStateManager(lib.SMProcessStopped, debug)
+	checkpointStateManager := lib.NewStateManager(lib.BooleanFalse, debug)
+	restoreStateManager := lib.NewStateManager(lib.BooleanFalse, debug)
+	shutdownStateManager := lib.NewStateManager(lib.BooleanFalse, debug)
+	errorTypeManager := lib.NewStateManager(lib.ErrorTypeNone, debug)
+
+	// Create overall state manager with aggregation
+	overallStateManager := lib.NewStateManager(lib.GlobalInitializing, debug)
+
+	// Start all StateManagers
+	processStateManager.Start()
+	checkpointStateManager.Start()
+	restoreStateManager.Start()
+	shutdownStateManager.Start()
+	errorTypeManager.Start()
+	overallStateManager.Start()
+
+	env := &SpriteEnv{
+		globalStateManager:     globalStateManager,
+		componentSetManager:    componentSetManager,
+		overallStateManager:    overallStateManager,
+		processStateManager:    processStateManager,
+		checkpointStateManager: checkpointStateManager,
+		restoreStateManager:    restoreStateManager,
+		shutdownStateManager:   shutdownStateManager,
+		errorTypeManager:       errorTypeManager,
+		ctx:                    ctx,
+		cancel:                 cancel,
+		server:                 &http.Server{Addr: ":8080"},
+	}
+
+	// Set up state transitions after env is created
+	env.setupOverallStateTransitions()
+
+	return env
+}
+
+// setupOverallStateTransitions sets up explicit state transitions for overall state
+func (s *SpriteEnv) setupOverallStateTransitions() {
+	// Set up trace emission callback
+	s.overallStateManager.OnTransition(func(oldState, newState lib.State) {
+		if s.tlaTrace {
+			s.emitTLATrace(newState.String())
+		}
+	})
+
+	// Start with Initializing state
+	s.overallStateManager.SetState(lib.GlobalInitializing)
+}
+
+// emitTLATrace emits TLA+ traces with current state
+func (s *SpriteEnv) emitTLATrace(overallState string) {
+	// Get current states from all sources
+	var componentSetState, dbState, fsState, processState string
+	var processExitCode int
+	var checkpointInProgress, restoreInProgress, shutdownInProgress, exitRequested bool
+	var signalReceived string
+	var dbShutdownTimeout, fsShutdownTimeout int
+	var dbForceKilled, fsForceKilled bool
+	var restartAttempt, restartDelay int
+	var errorType string
+
+	// Get component states
+	if s.componentSet != nil {
+		componentStates := s.componentSet.GetState()
+		componentSetState = s.componentSet.GetOverallState()
+		if dbStateVal, exists := componentStates["DB"]; exists {
+			dbState = dbStateVal
+		}
+		if fsStateVal, exists := componentStates["FS"]; exists {
+			fsState = fsStateVal
+		}
+	}
+
+	// Get process state
+	if s.supervisedProcess != nil {
+		processState = s.supervisedProcess.GetState().String()
+		processExitCode = s.supervisedProcess.GetExitCode()
+	}
+
+	// Get flag states
+	checkpointInProgress = s.checkpointStateManager.GetState().String() == "true"
+	restoreInProgress = s.restoreStateManager.GetState().String() == "true"
+	shutdownInProgress = s.shutdownStateManager.GetState().String() == "true"
+	errorType = s.errorTypeManager.GetState().String()
+
+	// Get additional state from global state manager (for compatibility)
+	if s.globalStateManager != nil && s.globalStateManager.State != nil {
+		exitRequested = s.globalStateManager.State.ExitRequested
+		signalReceived = s.globalStateManager.State.SignalReceived
+		dbShutdownTimeout = s.globalStateManager.State.DBShutdownTimeout
+		fsShutdownTimeout = s.globalStateManager.State.FSShutdownTimeout
+		dbForceKilled = s.globalStateManager.State.DBForceKilled
+		fsForceKilled = s.globalStateManager.State.FSForceKilled
+		restartAttempt = s.globalStateManager.State.RestartAttempt
+		restartDelay = s.globalStateManager.State.RestartDelay
+	}
+
+	// Create TLA+ trace in JSON format
+	trace := map[string]interface{}{
+		"overallState":         overallState,
+		"componentSetState":    componentSetState,
+		"dbState":              dbState,
+		"fsState":              fsState,
+		"processState":         processState,
+		"processExitCode":      processExitCode,
+		"checkpointInProgress": checkpointInProgress,
+		"restoreInProgress":    restoreInProgress,
+		"errorType":            errorType,
+		"restartAttempt":       restartAttempt,
+		"restartDelay":         restartDelay,
+		"shutdownInProgress":   shutdownInProgress,
+		"exitRequested":        exitRequested,
+		"signalReceived":       signalReceived,
+		"dbShutdownTimeout":    dbShutdownTimeout,
+		"fsShutdownTimeout":    fsShutdownTimeout,
+		"dbForceKilled":        dbForceKilled,
+		"fsForceKilled":        fsForceKilled,
+	}
+
+	// Output to stderr in JSON format (atomic write)
+	jsonBytes, err := json.Marshal(trace)
+	if err == nil {
+		os.Stderr.Write(jsonBytes)
+		os.Stderr.Write([]byte("\n"))
 	}
 }
 
 // SetComponentSet sets the component set to be managed
 func (s *SpriteEnv) SetComponentSet(cs *lib.ComponentSet) {
 	s.componentSet = cs
+
+	// Listen for component set state changes to trigger explicit state transitions
+	go func() {
+		for state := range cs.StateChanged() {
+			if s.debug {
+				fmt.Printf("DEBUG: ComponentSet state changed to: %s\n", state.String())
+			}
+			s.handleComponentSetStateChange(state.String())
+		}
+	}()
+}
+
+// triggerOverallStateUpdate triggers a recalculation of overall state
+func (s *SpriteEnv) triggerOverallStateUpdate() {
+	// Update error type based on current states
+	errorType := s.determineErrorType()
+
+	// Convert to ErrorTypeState
+	var errorTypeState lib.ErrorTypeState
+	switch errorType {
+	case ErrorNone:
+		errorTypeState = lib.ErrorTypeNone
+	case ErrorDBError:
+		errorTypeState = lib.ErrorTypeDBError
+	case ErrorFSError:
+		errorTypeState = lib.ErrorTypeFSError
+	case ErrorProcessError:
+		errorTypeState = lib.ErrorTypeProcessError
+	case ErrorProcessCrash:
+		errorTypeState = lib.ErrorTypeProcessCrash
+	case ErrorProcessKilled:
+		errorTypeState = lib.ErrorTypeProcessKilled
+	case ErrorCheckpointError:
+		errorTypeState = lib.ErrorTypeCheckpointError
+	case ErrorRestoreError:
+		errorTypeState = lib.ErrorTypeRestoreError
+	case ErrorStartupError:
+		errorTypeState = lib.ErrorTypeStartupError
+	default:
+		errorTypeState = lib.ErrorTypeNone
+	}
+
+	// Update error type manager (this will trigger overall state aggregation)
+	// This is the key - any child state change triggers the aggregation function
+	s.errorTypeManager.SetState(errorTypeState)
+}
+
+// handleComponentSetStateChange handles explicit state transitions based on component set changes
+func (s *SpriteEnv) handleComponentSetStateChange(componentSetState string) {
+	currentOverallState := s.overallStateManager.GetState().String()
+
+	if s.debug {
+		fmt.Printf("DEBUG: Handling component set state change: %s (current overall: %s)\n", componentSetState, currentOverallState)
+	}
+
+	// Only transition to Running if we're currently Initializing and all components are ready
+	if currentOverallState == "Initializing" && componentSetState == "Running" {
+		// Check if supervised process is also ready to start
+		if s.supervisedProcess != nil {
+			processState := s.supervisedProcess.GetState().String()
+			if processState == "Initializing" {
+				// Start the supervised process
+				if s.debug {
+					fmt.Printf("DEBUG: Components ready, starting supervised process\n")
+				}
+				if err := s.supervisedProcess.Start(); err != nil {
+					if s.debug {
+						fmt.Printf("DEBUG: Error starting supervised process: %v\n", err)
+					}
+					return
+				}
+			}
+		}
+	}
 }
 
 // SetSupervisedProcess sets the supervised process to be managed
@@ -108,67 +311,7 @@ func (s *SpriteEnv) SetSupervisedProcess(proc *lib.ProcessManager) {
 	s.supervisedProcess = proc
 }
 
-// updateState updates the environment state based on component states
-func (s *SpriteEnv) updateState() {
-	// Get current states from actual components
-	var dbState, fsState, processState string
-	var componentSetOverallState string
-
-	if s.componentSet != nil {
-		componentStates := s.componentSet.GetState()
-		componentSetOverallState = s.componentSet.GetOverallState()
-
-		// Update component states in state manager
-		if dbStateVal, exists := componentStates["DB"]; exists {
-			dbState = dbStateVal
-			s.componentSetManager.AddComponent("DB", &states.ComponentState{State: dbState})
-		}
-		if fsStateVal, exists := componentStates["FS"]; exists {
-			fsState = fsStateVal
-			s.componentSetManager.AddComponent("FS", &states.ComponentState{State: fsState})
-		}
-	}
-
-	// Update process state from SupervisedProcess
-	if s.supervisedProcess != nil {
-		processState = s.supervisedProcess.GetState()
-		s.globalStateManager.State.ProcessState = processState
-	}
-
-	// Calculate overall state according to TLA+ spec
-	errorType := s.determineErrorType()
-	s.globalStateManager.State.ErrorType = errorType
-
-	var overallState string
-	if errorType != ErrorNone {
-		overallState = StateError
-	} else if dbState == StateInitializing || fsState == StateInitializing || processState == ProcessStarting {
-		overallState = StateInitializing
-	} else if s.globalStateManager.State.CheckpointInProgress {
-		overallState = StateCheckpointing
-	} else if s.globalStateManager.State.RestoreInProgress {
-		overallState = StateRestoring
-	} else if dbState == StateRunning && fsState == StateRunning && processState == ProcessRunning {
-		overallState = StateRunning
-	} else if s.globalStateManager.State.ShutdownInProgress {
-		overallState = StateShutdown
-	} else {
-		overallState = StateInitializing
-	}
-
-	s.globalStateManager.State.State = overallState
-
-	// Update component set state
-	s.componentSetManager.State.State = componentSetOverallState
-	if componentSetOverallState == StateError {
-		s.componentSetManager.State.ErrorType = errorType
-	} else {
-		s.componentSetManager.State.ErrorType = states.ErrorNone
-	}
-
-	// Record the state change via centralized tracing
-	s.globalStateManager.RecordStateChange("State updated from component states")
-}
+// updateState is no longer needed - state management is handled by the aggregation system
 
 // determineErrorType implements the DetermineErrorType logic from the TLA+ spec
 func (s *SpriteEnv) determineErrorType() string {
@@ -185,7 +328,7 @@ func (s *SpriteEnv) determineErrorType() string {
 	}
 
 	if s.supervisedProcess != nil {
-		processState := s.supervisedProcess.GetState()
+		processState := s.supervisedProcess.GetState().String()
 		if processState == ProcessError {
 			return ErrorProcessError
 		}
@@ -220,72 +363,177 @@ func (s *SpriteEnv) determineErrorType() string {
 	return ErrorNone
 }
 
-// handleSignal implements signal handling according to TLA+ spec
+// handleSignal handles system signals according to the TLA+ spec
 func (s *SpriteEnv) handleSignal(sig os.Signal) {
 	if s.debug {
 		fmt.Printf("DEBUG: Signal handler received: %v\n", sig)
 	}
 
-	// Forward signal to supervised process ONLY
-	// Components will be stopped after supervised process exits
-	if s.supervisedProcess != nil {
-		s.supervisedProcess.Stop()
+	// Handle graceful shutdown signals
+	if sig == syscall.SIGTERM || sig == syscall.SIGINT {
+		// Start shutdown sequence
+		s.startShutdownSequence()
 	}
+}
+
+// startShutdownSequence starts the explicit shutdown sequence
+func (s *SpriteEnv) startShutdownSequence() {
+	if s.debug {
+		fmt.Printf("DEBUG: Starting shutdown sequence\n")
+	}
+
+	// First stop the supervised process
+	if s.supervisedProcess != nil {
+		if s.debug {
+			fmt.Printf("DEBUG: Stopping supervised process\n")
+		}
+		if err := s.supervisedProcess.Stop(); err != nil {
+			if s.debug {
+				fmt.Printf("DEBUG: Error stopping supervised process: %v\n", err)
+			}
+		}
+	}
+
+	// Start a goroutine to handle the rest of shutdown after process stops
+	go func() {
+		// Wait a bit for process to finish stopping
+		time.Sleep(500 * time.Millisecond)
+
+		// Now stop components
+		if s.componentSet != nil {
+			if s.debug {
+				fmt.Printf("DEBUG: Stopping components\n")
+			}
+			if err := s.componentSet.Stop(); err != nil {
+				if s.debug {
+					fmt.Printf("DEBUG: Error stopping components: %v\n", err)
+				}
+			}
+		}
+
+		// Final transition to Shutdown state
+		s.overallStateManager.SetState(lib.GlobalShutdown)
+
+		// Shutdown HTTP server
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.server.Shutdown(ctx); err != nil {
+			if s.debug {
+				fmt.Printf("DEBUG: Error shutting down HTTP server: %v\n", err)
+			}
+		}
+
+		// Cancel context to stop all goroutines
+		s.cancel()
+
+		// Exit cleanly
+		os.Exit(0)
+	}()
 }
 
 // StartCheckpoint implements checkpoint operation according to TLA+ spec
 func (s *SpriteEnv) StartCheckpoint() error {
-	state := s.globalStateManager.State
-	if state.CheckpointInProgress || state.RestoreInProgress {
+	// Check if operations are already in progress
+	checkpointInProgress := s.checkpointStateManager.GetState().String() == "true"
+	restoreInProgress := s.restoreStateManager.GetState().String() == "true"
+
+	if checkpointInProgress || restoreInProgress {
 		return fmt.Errorf("operation already in progress")
 	}
 
+	// Update both legacy and new state managers
 	s.globalStateManager.State.CheckpointInProgress = true
-	s.globalStateManager.RecordStateChange("Starting checkpoint")
+	s.checkpointStateManager.SetState(lib.BooleanTrue)
+
 	return nil
 }
 
 // StartRestore implements restore operation according to TLA+ spec
 func (s *SpriteEnv) StartRestore() error {
-	state := s.globalStateManager.State
-	if state.CheckpointInProgress || state.RestoreInProgress {
+	// Check if operations are already in progress
+	checkpointInProgress := s.checkpointStateManager.GetState().String() == "true"
+	restoreInProgress := s.restoreStateManager.GetState().String() == "true"
+
+	if checkpointInProgress || restoreInProgress {
 		return fmt.Errorf("operation already in progress")
 	}
 
+	// Update both legacy and new state managers
 	s.globalStateManager.State.RestoreInProgress = true
-	s.globalStateManager.RecordStateChange("Starting restore")
+	s.restoreStateManager.SetState(lib.BooleanTrue)
+
 	return nil
 }
 
 // UpdateComponentState updates a single component's state and records the change
 func (s *SpriteEnv) UpdateComponentState(component string, newState string, oldState string) {
-	// Update the existing component's state
-	if componentState, exists := s.componentSetManager.State.Components[component]; exists {
-		componentState.UpdateState(newState)
-		// Trigger state change notification
-		s.componentSetManager.UpdateState(component + " state changed from " + oldState + " to " + newState)
-	}
-
 	if s.debug {
 		fmt.Printf("DEBUG: %s state changed from %s to %s\n", component, oldState, newState)
 	}
+	// Just trigger overall state recalculation - let aggregation handle the rest
+	s.triggerOverallStateUpdate()
 }
 
-// UpdateProcessState updates the process state and records the change
+// UpdateProcessState updates the process state and handles explicit overall state transitions
 func (s *SpriteEnv) UpdateProcessState(newState string, oldState string) {
-	s.globalStateManager.State.ProcessState = newState
-
-	// Trigger overall state recalculation with current component set state
-	if s.componentSetManager != nil {
-		s.globalStateManager.UpdateState(s.componentSetManager.State, "Process state changed from "+oldState+" to "+newState)
-	} else {
-		// If no component set manager, just emit trace
-		s.globalStateManager.RecordStateChange("Process state changed from " + oldState + " to " + newState)
-	}
-
 	if s.debug {
 		fmt.Printf("DEBUG: Process state changed from %s to %s\n", oldState, newState)
 	}
+
+	s.handleProcessStateChange(oldState, newState)
+}
+
+// handleProcessStateChange handles explicit overall state transitions based on process state changes
+func (s *SpriteEnv) handleProcessStateChange(oldState, newState string) {
+	currentOverallState := s.overallStateManager.GetState().String()
+
+	if s.debug {
+		fmt.Printf("DEBUG: Handling process state change: %s -> %s (current overall: %s)\n", oldState, newState, currentOverallState)
+	}
+
+	// Handle specific state transitions
+	switch newState {
+	case "Running":
+		// If process becomes running and we have components running, transition to overall Running
+		if currentOverallState == "Initializing" && s.componentSet != nil {
+			componentSetState := s.componentSet.GetOverallState()
+			if componentSetState == "Running" {
+				s.overallStateManager.SetState(lib.GlobalRunning)
+			}
+		}
+	case "Stopping":
+		// When process starts stopping, transition to ShuttingDown
+		if currentOverallState == "Running" {
+			s.overallStateManager.SetState(lib.GlobalShuttingDown)
+		}
+	case "Stopped":
+		// When process is stopped, continue shutdown sequence
+		if currentOverallState == "ShuttingDown" {
+			// Process is stopped, but we stay in ShuttingDown until components are stopped too
+			if s.debug {
+				fmt.Printf("DEBUG: Process stopped, continuing shutdown of components\n")
+			}
+		}
+	}
+}
+
+// Start starts all components and the supervised process
+func (s *SpriteEnv) Start() error {
+	if s.debug {
+		fmt.Printf("DEBUG: Starting all components\n")
+	}
+
+	// Start components
+	if s.componentSet != nil {
+		if err := s.componentSet.Start(); err != nil {
+			if s.debug {
+				fmt.Printf("DEBUG: Error starting components: %v\n", err)
+			}
+			return err
+		}
+	}
+
+	return nil
 }
 
 func main() {
@@ -330,21 +578,25 @@ func main() {
 	env.globalStateManager.TLATrace = tlaTrace
 	env.componentSetManager.TLATrace = tlaTrace
 
+	// Note: StateManager debug flag is set during creation via NewStateManager
+
 	// Set up signal handling
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
 
 	// Start HTTP server for state inspection
+	http.HandleFunc("/state", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(env.globalStateManager.State)
+	})
+
+	http.HandleFunc("/trace", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(env.globalStateManager.Changes)
+	})
+
 	go func() {
-		http.HandleFunc("/state", func(w http.ResponseWriter, r *http.Request) {
-			json.NewEncoder(w).Encode(env.globalStateManager.State)
-		})
-
-		http.HandleFunc("/trace", func(w http.ResponseWriter, r *http.Request) {
-			json.NewEncoder(w).Encode(env.globalStateManager.Changes)
-		})
-
-		log.Fatal(http.ListenAndServe(":8080", nil))
+		if err := env.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("HTTP server error: %v", err)
+		}
 	}()
 
 	// Initialize components if test directory is provided
@@ -352,6 +604,11 @@ func main() {
 		if debug {
 			fmt.Printf("DEBUG: Using test scripts from %s\n", testDir)
 			fmt.Printf("DEBUG: Using supervised process: %s\n", supervisedProcessPath)
+		}
+
+		// PHASE 1: Initialize everything
+		if debug {
+			fmt.Printf("DEBUG: Initializing components and process\n")
 		}
 
 		// Create ComponentSet for storage components
@@ -365,57 +622,39 @@ func main() {
 		componentSet.AddComponent("DB", dbManager)
 		componentSet.AddComponent("FS", fsManager)
 
-		// Create supervised process with provided path
+		// Create supervised process
 		supervisedProcess := lib.NewProcessManager(env, debug, supervisedProcessPath, "")
 
 		// Set up environment
 		env.SetComponentSet(componentSet)
 		env.SetSupervisedProcess(supervisedProcess)
 
-		// Start ComponentSet first
+		// PHASE 2: Start everything
+		if debug {
+			fmt.Printf("DEBUG: Starting components and process\n")
+		}
+
+		// Start components
 		if err := componentSet.Start(); err != nil {
-			log.Printf("Failed to start component set: %v", err)
+			log.Printf("Failed to start components: %v", err)
 			exitCode = 1
 			return
 		}
+	}
 
-		if debug {
-			fmt.Printf("DEBUG: ComponentSet started, waiting for components to be ready\n")
+	// State management is now handled by explicit state transitions
+
+	// Wait for all components to be ready
+	if env.componentSet != nil {
+		// Wait for all components to be ready
+		for _, component := range env.componentSet.GetComponents() {
+			<-component.GetReadyChan()
 		}
-
-		// Wait for all components to be ready before starting supervised process (per TLA+ spec)
-		go func() {
-			for {
-				if componentSet.GetOverallState() == StateRunning {
-					if debug {
-						fmt.Printf("DEBUG: All components ready, starting supervised process\n")
-					}
-					if err := supervisedProcess.Start(); err != nil {
-						log.Printf("Failed to start supervised process: %v", err)
-						exitCode = 1
-						env.cancel() // Signal main loop to exit
-						return
-					}
-					break
-				}
-				time.Sleep(100 * time.Millisecond)
-			}
-		}()
-
-		if debug {
-			fmt.Printf("DEBUG: ComponentSet started, supervised process will start when components are ready\n")
-		}
+		// Now transition to Running
+		env.componentSet.TransitionToRunning()
 	}
 
 	// Main event loop
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
-	shutdownTimer := time.NewTimer(30 * time.Second) // Give 30 seconds for graceful shutdown
-	shutdownTimer.Stop()                             // Don't start until we get a signal
-
-	var componentsShutdownInitiated bool // Track if we've started component shutdown
-
 	for {
 		select {
 		case sig := <-sigChan:
@@ -423,121 +662,21 @@ func main() {
 				fmt.Printf("DEBUG: Received signal: %v\n", sig)
 			}
 
-			// Set shutdown flag for graceful signals
-			if sig == syscall.SIGTERM || sig == syscall.SIGINT {
-				env.globalStateManager.State.ShutdownInProgress = true
-				env.globalStateManager.State.SignalReceived = SignalGraceful
-
-				// Set exit code based on signal (Unix convention: 128 + signal number)
-				if sig == syscall.SIGTERM {
-					exitCode = 128 + 15 // 143
-				} else if sig == syscall.SIGINT {
-					exitCode = 128 + 2 // 130
-				}
+			// Set exit code based on signal (Unix convention: 128 + signal number)
+			if sig == syscall.SIGTERM {
+				exitCode = 128 + 15 // 143
+			} else if sig == syscall.SIGINT {
+				exitCode = 128 + 2 // 130
 			}
 
 			// Handle signals according to spec
 			env.handleSignal(sig)
-
-			// Start shutdown timer for graceful signals
-			if sig == syscall.SIGTERM || sig == syscall.SIGINT {
-				if debug {
-					fmt.Printf("DEBUG: Starting graceful shutdown, will force exit in 30 seconds\n")
-				}
-				shutdownTimer.Reset(30 * time.Second)
-			}
-
-		case <-shutdownTimer.C:
-			if debug {
-				fmt.Printf("DEBUG: Shutdown timeout exceeded, exiting\n")
-			}
-			exitCode = 1 // Failed shutdown
-			return
 
 		case <-env.ctx.Done():
 			if debug {
 				fmt.Printf("DEBUG: Context cancelled, exiting\n")
 			}
 			return
-
-		case <-ticker.C:
-			// Check if supervised process has stopped and we need to stop components
-			if env.globalStateManager.State.ShutdownInProgress && !componentsShutdownInitiated {
-				var processState string
-				if env.supervisedProcess != nil {
-					processState = env.supervisedProcess.GetState()
-				}
-
-				// If supervised process has stopped, now stop components
-				if processState == ProcessStopped || processState == ProcessExited ||
-					processState == ProcessKilled || processState == ProcessCrashed || processState == ProcessError {
-					if debug {
-						fmt.Printf("DEBUG: Supervised process stopped (%s), now stopping components\n", processState)
-					}
-					if env.componentSet != nil {
-						env.componentSet.Stop()
-					}
-					componentsShutdownInitiated = true
-				}
-			}
-
-			// Handle shutdown timeouts according to TLA+ spec
-			state := env.globalStateManager.State
-			if state.ShutdownInProgress {
-				// Decrement timeouts if not zero
-				if state.DBShutdownTimeout > 0 {
-					state.DBShutdownTimeout--
-				}
-				if state.FSShutdownTimeout > 0 {
-					state.FSShutdownTimeout--
-				}
-
-				// Force kill DB if timeout expires
-				if state.DBShutdownTimeout == 0 && !state.DBForceKilled {
-					state.DBForceKilled = true
-					env.UpdateComponentState("DB", StateError, "Running")
-				}
-
-				// Force kill FS if timeout expires
-				if state.FSShutdownTimeout == 0 && !state.FSForceKilled {
-					state.FSForceKilled = true
-					env.UpdateComponentState("FS", StateError, "Running")
-				}
-
-				// Exit if all components are stopped/killed after shutdown
-				componentStates := make(map[string]string)
-				if env.componentSet != nil {
-					componentStates = env.componentSet.GetState()
-				}
-
-				dbStopped := false
-				fsStopped := false
-				if dbState, exists := componentStates["DB"]; exists {
-					dbStopped = (dbState == StateError || dbState == StateShutdown)
-				}
-				if fsState, exists := componentStates["FS"]; exists {
-					fsStopped = (fsState == StateError || fsState == StateShutdown)
-				}
-
-				processStopped := false
-				if env.supervisedProcess != nil {
-					processState := env.supervisedProcess.GetState()
-					// Only consider truly final states, not intermediate states
-					processStopped = (processState == ProcessStopped || processState == ProcessExited || processState == ProcessKilled || processState == ProcessCrashed || processState == ProcessError)
-				}
-
-				if dbStopped && fsStopped && processStopped {
-					if debug {
-						fmt.Printf("DEBUG: All components shut down, exiting gracefully\n")
-					}
-
-					// Set exit code based on final state (only if not already set by signal)
-					if exitCode == 0 && env.globalStateManager.State.ErrorType != ErrorNone {
-						exitCode = 1
-					}
-					return
-				}
-			}
 		}
 	}
 }

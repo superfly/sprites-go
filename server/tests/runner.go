@@ -53,6 +53,10 @@ func RunTests(t *testing.T) {
 	// Run tests for each directory
 	for _, dir := range testDirs {
 		dir = filepath.Clean(dir)
+		// Skip _shared directory
+		if filepath.Base(dir) == "_shared" {
+			continue
+		}
 		t.Run(filepath.Base(dir), func(t *testing.T) {
 			runTest(t, dir)
 		})
@@ -74,8 +78,20 @@ func runTest(t *testing.T, dir string) {
 		t.Fatalf("Failed to parse expected states: %v", err)
 	}
 
-	// Create command to run the server
-	cmd := exec.Command("../tmp/sprite-env", "-debug", "-tla-trace", "-test-dir", dir, "--", filepath.Join(dir, "supervised-process.sh"))
+	// Get absolute path to sprite-env binary
+	spriteEnvPath, err := filepath.Abs("../tmp/sprite-env")
+	if err != nil {
+		t.Fatalf("Failed to get absolute path to sprite-env: %v", err)
+	}
+
+	// Get absolute path to supervised process script
+	supervisedProcessPath, err := filepath.Abs(filepath.Join(dir, "supervised-process.sh"))
+	if err != nil {
+		t.Fatalf("Failed to get absolute path to supervised process script: %v", err)
+	}
+
+	// Create command to run the server with absolute paths
+	cmd := exec.Command(spriteEnvPath, "-tla-trace", "-debug", "-test-dir", dir, "--", supervisedProcessPath)
 	t.Logf("Running command: %v", cmd.Args)
 
 	// Create pipes for stdout and stderr
@@ -105,6 +121,18 @@ func runTest(t *testing.T, dir string) {
 	stderrDone := make(chan struct{})
 	stdoutDone := make(chan struct{})
 
+	// Create trace file
+	testName := filepath.Base(dir)
+	// Create tmp directory if it doesn't exist
+	if err := os.MkdirAll("tmp", 0755); err != nil {
+		t.Fatalf("Failed to create tmp directory: %v", err)
+	}
+	traceFile, err := os.Create(filepath.Join("tmp", testName+".txt"))
+	if err != nil {
+		t.Fatalf("Failed to create trace file: %v", err)
+	}
+	defer traceFile.Close()
+
 	// Start goroutine to scan stderr for state changes
 	go func() {
 		defer close(stderrDone)
@@ -124,25 +152,22 @@ func runTest(t *testing.T, dir string) {
 				case <-ctx.Done():
 					return
 				default:
-					t.Logf("Raw TLA trace: %s", line)
 					if strings.Contains(line, "\"processState\":\"Running\"") {
 						// Use stopOnce to ensure this only happens once
 						stopOnce.Do(func() {
-							t.Logf("Found processState Running, waiting 2 seconds before shutdown")
 							time.Sleep(2 * time.Second)
 							close(stopChan)
 						})
 					}
-					t.Logf("Unmarshaled trace: %+v", vars)
 					stateChanges <- StateChange{Vars: vars}
+					// Write state change to trace file
+					if _, err := traceFile.WriteString(line + "\n"); err != nil {
+						t.Errorf("Failed to write to trace file: %v", err)
+					}
 				}
 			} else {
-				select {
-				case <-ctx.Done():
-					return
-				default:
-					t.Logf("STDERR: %s", line)
-				}
+				// Forward all output, including debug
+				os.Stderr.WriteString(line + "\n")
 			}
 		}
 		if err := scanner.Err(); err != nil {
@@ -164,7 +189,9 @@ func runTest(t *testing.T, dir string) {
 			case <-ctx.Done():
 				return
 			default:
-				t.Logf("STDOUT: %s", scanner.Text())
+				line := scanner.Text()
+				// Forward all output, including debug
+				os.Stdout.WriteString(line + "\n")
 			}
 		}
 		if err := scanner.Err(); err != nil {
@@ -297,74 +324,91 @@ func matchesExpectedState(overallState, componentSetState, processState, dbState
 	return true
 }
 
+// verifyStateChanges verifies that the actual state changes match the expected states
 func verifyStateChanges(t *testing.T, expectedStates []ExpectedState, actual chan StateChange) {
-	currentStateIndex := 0
-	stateChangesSeen := 0
-
-	for stateChange := range actual {
-		stateChangesSeen++
-
-		// Safely extract state fields, failing if missing or nil
-		overallState, ok := stateChange.Vars["overallState"].(string)
-		if !ok {
-			t.Fatalf("State change missing required field: overallState")
-		}
-		componentSetState, ok := stateChange.Vars["componentSetState"].(string)
-		if !ok {
-			t.Fatalf("State change missing required field: componentSetState")
-		}
-		dbState, ok := stateChange.Vars["dbState"].(string)
-		if !ok {
-			t.Fatalf("State change missing required field: dbState")
-		}
-		fsState, ok := stateChange.Vars["fsState"].(string)
-		if !ok {
-			t.Fatalf("State change missing required field: fsState")
-		}
-		processState, ok := stateChange.Vars["processState"].(string)
-		if !ok {
-			t.Fatalf("State change missing required field: processState")
-		}
-
-		// Check if we should advance to next expected state
-		// Look ahead to see if this state matches the next expected state
-		if currentStateIndex < len(expectedStates)-1 {
-			nextExpected := expectedStates[currentStateIndex+1]
-			if matchesExpectedState(overallState, componentSetState, processState, dbState, fsState, nextExpected) {
-				currentStateIndex++
-			}
-		}
-
-		if currentStateIndex >= len(expectedStates) {
-			t.Fatalf("Unexpected state change after all expected states: %v", stateChange.Vars)
-		}
-
-		expected := expectedStates[currentStateIndex]
-
-		// Validate using the same logic as advancement
-		if !matchesExpectedState(overallState, componentSetState, processState, dbState, fsState, expected) {
-			// Only log specific errors if validation fails
-			if overallState != expected.OverallState {
-				t.Errorf("Expected overall state %s, got %s", expected.OverallState, overallState)
-			}
-			if componentSetState != expected.ComponentSet.State {
-				t.Errorf("Expected component set state %s, got %s", expected.ComponentSet.State, componentSetState)
-			}
-			t.Errorf("Expected process state %v, got %s", expected.ProcessState, processState)
-			if dbStates, ok := expected.ComponentSet.Components["DB"]; ok {
-				t.Errorf("Expected DB state to be one of %v, got %s", dbStates, dbState)
-			}
-			if fsStates, ok := expected.ComponentSet.Components["FS"]; ok {
-				t.Errorf("Expected FS state to be one of %v, got %s", fsStates, fsState)
-			}
-		}
-
-		// Continue processing
+	var stateChanges []StateChange
+	for change := range actual {
+		stateChanges = append(stateChanges, change)
 	}
 
-	if currentStateIndex < len(expectedStates)-1 {
-		t.Fatalf("Did not see all expected states. Saw %d of %d states", currentStateIndex+1, len(expectedStates))
+	t.Logf("=== COLLECTED TRACES ===")
+	t.Logf("Total traces captured: %d", len(stateChanges))
+	for i, change := range stateChanges {
+		vars := change.Vars
+		t.Logf("Trace %d: overallState=%s, componentSetState=%s, processState=%s, dbState=%s, fsState=%s",
+			i, vars["overallState"], vars["componentSetState"], vars["processState"], vars["dbState"], vars["fsState"])
 	}
 
-	t.Logf("Verified %d state changes against %d expected states", stateChangesSeen, len(expectedStates))
+	t.Logf("=== EXPECTED STATES ===")
+	for i, expected := range expectedStates {
+		t.Logf("Expected %d: overallState=%s, componentSetState=%s, processState=%v, DB=%v, FS=%v",
+			i, expected.OverallState, expected.ComponentSet.State, expected.ProcessState,
+			expected.ComponentSet.Components["DB"], expected.ComponentSet.Components["FS"])
+	}
+
+	// Track if we've seen all expected states
+	seenStates := make([]bool, len(expectedStates))
+	var lastSeenIndex int
+
+	// For each actual state change
+	for traceIdx, change := range stateChanges {
+		vars := change.Vars
+		overallState := vars["overallState"].(string)
+		componentSetState := vars["componentSetState"].(string)
+		processState := vars["processState"].(string)
+		dbState := vars["dbState"].(string)
+		fsState := vars["fsState"].(string)
+
+		t.Logf("=== COMPARING TRACE %d ===", traceIdx)
+		t.Logf("Actual: overallState=%s, componentSetState=%s, processState=%s, dbState=%s, fsState=%s",
+			overallState, componentSetState, processState, dbState, fsState)
+
+		// Check if this state matches any expected state
+		matched := false
+		for i := lastSeenIndex; i < len(expectedStates); i++ {
+			t.Logf("  Checking against expected state %d...", i)
+			if matchesExpectedState(overallState, componentSetState, processState, dbState, fsState, expectedStates[i]) {
+				t.Logf("  ✅ MATCHED expected state %d", i)
+				seenStates[i] = true
+				lastSeenIndex = i
+				matched = true
+				break
+			} else {
+				t.Logf("  ❌ No match with expected state %d", i)
+			}
+		}
+
+		if !matched {
+			// Print detailed state comparison before failing
+			t.Errorf("\nSTATE MISMATCH at trace index %d (expected state index %d):", traceIdx, lastSeenIndex)
+			if lastSeenIndex < len(expectedStates) {
+				t.Errorf("  Expected: %+v", expectedStates[lastSeenIndex])
+			} else {
+				t.Errorf("  No more expected states (reached end of expected states list)")
+			}
+			t.Errorf("  Actual:   overallState=%s, componentSetState=%s, processState=%s, dbState=%s, fsState=%s",
+				overallState, componentSetState, processState, dbState, fsState)
+			t.FailNow()
+		}
+	}
+
+	// Check if we saw all expected states
+	var missingStates []int
+	for i, seen := range seenStates {
+		if !seen {
+			missingStates = append(missingStates, i)
+		}
+	}
+
+	if len(missingStates) > 0 {
+		// Print detailed state comparison before failing
+		t.Errorf("Did not see all expected states. Saw %d of %d states", len(stateChanges), len(expectedStates))
+		t.Errorf("Missing states:")
+		for _, i := range missingStates {
+			t.Errorf("  State %d: %+v", i, expectedStates[i])
+		}
+		t.FailNow()
+	}
+
+	t.Logf("Verified %d state changes against %d expected states", len(stateChanges), len(expectedStates))
 }
