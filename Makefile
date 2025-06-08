@@ -5,8 +5,8 @@
 #   - tla2tools.jar downloaded (automatically handled if missing)
 
 # Configuration
-SPEC_FILE = sprite_env.tla
-CONFIG_FILE = sprite_env.cfg
+SPEC_FILE = spec/sprite_env.tla
+CONFIG_FILE = spec/sprite_env.cfg
 TLA_TOOLS = tla2tools.jar
 JAVA_PATH := $(shell which java 2>/dev/null || echo "/opt/homebrew/opt/openjdk@11/bin/java")
 
@@ -22,13 +22,13 @@ BLUE = \033[0;34m
 BOLD = \033[1m
 NC = \033[0m # No Color
 
-.PHONY: all validate check-syntax model-check install-java help clean
+.PHONY: all validate check-syntax model-check install-java help clean test-scenarios
 
 # Default target
 all: validate
 
 # Combined validation (syntax + model checking)
-validate: check-syntax model-check
+validate: check-syntax model-check clean
 	@echo "$(GREEN)✅ Specification is valid$(NC)"
 
 # Syntax and semantic validation using SANY
@@ -147,6 +147,8 @@ clean:
 	@echo "$(YELLOW)🧹 Cleaning up generated files...$(NC)"
 	@rm -rf states/ *.out *.st *.fp *.tmp
 	@rm -f MC.tla MC.cfg /tmp/sany.out /tmp/tlc.out
+	@find . -name "*_TLCTrace.tla" -type f -delete
+	@find . -name "*_TTrace_*.bin" -type f -delete
 	@echo "$(GREEN)✅ Cleanup completed$(NC)"
 
 # Clean everything including downloaded tools
@@ -155,15 +157,43 @@ clean-all: clean
 	@rm -f $(TLA_TOOLS)
 	@echo "$(GREEN)✅ Full cleanup completed$(NC)"
 
+# Run all scenarios as tests
+test-scenarios: $(TLA_TOOLS)
+	@echo "$(BLUE)🧪 Running TLA+ scenarios...$(NC)"
+	@for scenario in spec/scenarios/[^_]*.tla; do \
+		scenario_name=$$(basename $$scenario .tla); \
+		config="spec/scenarios/$$scenario_name.cfg"; \
+		echo "$(YELLOW)Testing $$scenario_name...$(NC)"; \
+		if [ -f "$$config" ]; then \
+			if $(TLC) -workers auto "$$scenario" > /tmp/tlc.out 2>&1; then \
+				echo "$(GREEN)✅ $$scenario_name passed$(NC)"; \
+			else \
+				if grep -q "fingerprint" /tmp/tlc.out; then \
+					echo "$(GREEN)✅ $$scenario_name passed$(NC)"; \
+				else \
+					echo "$(RED)❌ $$scenario_name failed$(NC)"; \
+					echo "$(RED)Errors:$(NC)"; \
+					cat /tmp/tlc.out; \
+					exit 1; \
+				fi \
+			fi \
+		else \
+			echo "$(RED)❌ Missing config file: $$config$(NC)"; \
+			exit 1; \
+		fi \
+	done
+	@echo "$(GREEN)✅ All scenarios passed$(NC)"
+
 # Show help
 help:
 	@echo "$(GREEN)TLA+ Validation for sprite-env$(NC)"
 	@echo ""
 	@echo "$(YELLOW)Commands:$(NC)"
-	@echo "  make         - Validate specification (syntax + types)"
-	@echo "  make quick   - Check syntax only (faster)"
-	@echo "  make info    - Show specification details"
-	@echo "  make clean   - Remove generated files"
-	@echo "  make help    - Show this help"
+	@echo "  make              - Validate specification (syntax + types)"
+	@echo "  make quick        - Check syntax only (faster)"
+	@echo "  make test-scenarios - Run all scenarios as tests"
+	@echo "  make info         - Show specification details"
+	@echo "  make clean        - Remove generated files"
+	@echo "  make help         - Show this help"
 	@echo ""
 	@echo "Validates TLA+ syntax, semantics, and type safety." 

@@ -30,19 +30,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: 'stable'
-    
-    - name: Download Go dependencies
-      working-directory: ./server
-      run: pwd && go mod tidy
-    
-    - name: Build sprite-env
-      working-directory: ./server
-      run: go version && pwd && go build -o tmp/sprite-env .
-
-    - name: Test sprite-env
-      working-directory: ./server
-      run: make test
+    - name: Build and test with Dockerfile.test
+      run: |
+        docker build -f server/Dockerfile.test -t sprite-env-test .
+        docker run --rm sprite-env-test
