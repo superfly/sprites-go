@@ -304,10 +304,32 @@ Next ==
         /\ signalReceived' = "None"
         /\ overallState' = DetermineOverallState
 
-    \/ \* Process exit
+    \/ \* Process exits successfully (autonomous event + system reaction)
         /\ processState = "Running"
-        /\ processExitCode' \in {0..255} \cup {-1..-255}
-        /\ UNCHANGED <<overallState, componentSetState, dbState, fsState, processState, checkpointInProgress, restoreInProgress, errorType, restartAttempt, restartDelay, shutdownInProgress, exitRequested, signalReceived, dbShutdownTimeout, fsShutdownTimeout, dbForceKilled, fsForceKilled>>
+        /\ processExitCode' = 0
+        /\ processState' = "Exited"  
+        /\ componentSetState' = DetermineComponentSetState  
+        /\ overallState' = DetermineOverallState            
+        /\ errorType' = DetermineErrorType                   
+        /\ UNCHANGED <<dbState, fsState, checkpointInProgress, restoreInProgress, restartAttempt, restartDelay, shutdownInProgress, exitRequested, signalReceived, dbShutdownTimeout, fsShutdownTimeout, dbForceKilled, fsForceKilled>>
+
+    \/ \* Process exits with error (autonomous event + system reaction)
+        /\ processState = "Running"
+        /\ processExitCode' \in {1, 2}  
+        /\ processState' = "Exited"     
+        /\ componentSetState' = DetermineComponentSetState  
+        /\ overallState' = DetermineOverallState            
+        /\ errorType' = DetermineErrorType                   
+        /\ UNCHANGED <<dbState, fsState, checkpointInProgress, restoreInProgress, restartAttempt, restartDelay, shutdownInProgress, exitRequested, signalReceived, dbShutdownTimeout, fsShutdownTimeout, dbForceKilled, fsForceKilled>>
+
+    \/ \* Process killed by signal (autonomous event + system reaction)
+        /\ processState = "Running"  
+        /\ processExitCode' \in {130, 137, 143}  
+        /\ processState' = IF processExitCode' = 137 THEN "Killed" ELSE "Crashed"
+        /\ componentSetState' = DetermineComponentSetState  
+        /\ overallState' = DetermineOverallState            
+        /\ errorType' = DetermineErrorType                   
+        /\ UNCHANGED <<dbState, fsState, checkpointInProgress, restoreInProgress, restartAttempt, restartDelay, shutdownInProgress, exitRequested, signalReceived, dbShutdownTimeout, fsShutdownTimeout, dbForceKilled, fsForceKilled>>
 
     \/ \* Process restart after crash/exit
         /\ processState \in {"Crashed", "Exited", "Killed"}
@@ -332,7 +354,7 @@ TypeOK ==
     /\ dbState \in ComponentStates
     /\ fsState \in ComponentStates
     /\ processState \in ProcessStates
-    /\ processExitCode \in {0..255} \cup {-1..-255}
+    /\ processExitCode \in 0..255
     /\ checkpointInProgress \in BOOLEAN
     /\ restoreInProgress \in BOOLEAN
     /\ errorType \in ErrorTypes
