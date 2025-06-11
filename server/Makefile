@@ -1,12 +1,19 @@
-.PHONY: build test clean docker-build-test
+.PHONY: build test test-integration test-unit clean docker-build-test
 
 # Build the server
 build:
 	go build -o tmp/sprite-env .
 
+# Run all tests (integration + unit)
+test: test-integration test-unit
+
 # Run integration tests
-test: build
+test-integration: build
 	TSCRIPTS_DIR=$$(cd test-scripts && pwd) go test -v -failfast ./tests
+
+# Run unit tests
+test-unit:
+	go test -v -failfast ./lib
 
 # Clean build artifacts
 clean:

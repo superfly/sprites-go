@@ -1,0 +1,36 @@
+---
+description: 
+globs: *_state.go,*_state_test.go
+alwaysApply: false
+---
+* State is always managed with the qmuntal/stateless package
+* State modules should be PURELY declarative, external callers must requeste desired state
+* Never use Mutexes or sync primitives without user confirmation
+* NEVER use buffered channels without specific user instruction
+* NEVER add default: to channel switch for inter state communication
+* Use direct callbacks from Stateless based modules, not channels. This is the standard stateless library pattern.
+* NEVER add methods like CanFire or CanTransition or RequestState
+* ALWAYS just request the state (with .Fire or .FireCtx) you need and let it fail
+
+**State machines must be purely declarative intent processors:**
+
+### **API Design:**
+- **Single method**: `RequestState(ctx, desiredState)` - callers declare intent, not actions
+- **No getters**: External code cannot inspect state 
+- **No cleanup methods**: State machines self-manage their lifecycle
+- **No action methods**: No `Start()`, `Stop()`, `Signal()` - only state requests
+
+### **State Management:**
+- **Final states are terminal**: Once reached, no transitions out are possible
+- **Auto-disposal**: Goroutines automatically cancelled when reaching final states  
+- **Fail-fast**: Invalid transitions return clear error messages
+- **Self-contained**: All lifecycle management happens internally
+
+### **Principles:**
+- **Declarative over imperative**: "I want X state" not "do Y action"
+- **Intent over implementation**: Callers express desired outcomes, not steps
+- **Immutable finality**: Final states create naturally unusable objects
+- **Zero manual management**: No cleanup, disposal, or state inspection needed
+
+### **Result:**
+State machines become pure "intent processors" that either fulfill requests or explain why they can't, naturally disposing themselves when work is complete.

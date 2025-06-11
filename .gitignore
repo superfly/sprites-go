@@ -9,4 +9,6 @@ tla2tools.jar
 
 # Temporary files
 /tmp/sany.out
-/tmp/tlc.out 
+/tmp/tlc.out
+tmp/trace_*
+spec/*TTrace*.bin

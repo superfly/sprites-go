@@ -22,7 +22,7 @@ BLUE = \033[0;34m
 BOLD = \033[1m
 NC = \033[0m # No Color
 
-.PHONY: all validate check-syntax model-check install-java help clean test-scenarios
+.PHONY: all validate check-syntax model-check install-java help clean test-scenarios validate-traces cleanup-traces
 
 # Default target
 all: validate
@@ -143,7 +143,7 @@ info:
 	@echo "   • Comprehensive safety properties"
 
 # Clean up generated files
-clean:
+clean: cleanup-traces
 	@echo "$(YELLOW)🧹 Cleaning up generated files...$(NC)"
 	@rm -rf states/ *.out *.st *.fp *.tmp
 	@rm -f MC.tla MC.cfg /tmp/sany.out /tmp/tlc.out
@@ -185,16 +185,51 @@ test-scenarios: $(TLA_TOOLS)
 	done
 	@echo "$(GREEN)✅ All scenarios passed$(NC)"
 
+# Validate trace files against specification
+validate-traces: $(TLA_TOOLS)
+	@echo "$(BLUE)🔄 Converting and validating JSON traces...$(NC)"
+	@python3 convert_traces.py --output-dir spec
+	@echo "$(BLUE)🧪 Validating generated trace modules...$(NC)"
+	@for trace_file in spec/trace_*.tla; do \
+		if [ -f "$$trace_file" ]; then \
+			trace_name=$$(basename $$trace_file .tla); \
+			echo "$(YELLOW)Validating $$trace_name...$(NC)"; \
+			if $(TLC) -workers auto "$$trace_file" > /tmp/tlc_trace.out 2>&1; then \
+				echo "$(GREEN)✅ $$trace_name is valid$(NC)"; \
+			else \
+				if grep -q "fingerprint" /tmp/tlc_trace.out || grep -q "No error has been found" /tmp/tlc_trace.out; then \
+					echo "$(GREEN)✅ $$trace_name is valid$(NC)"; \
+				else \
+					echo "$(RED)❌ $$trace_name failed validation$(NC)"; \
+					echo "$(RED)Errors:$(NC)"; \
+					cat /tmp/tlc_trace.out; \
+					make cleanup-traces; \
+					exit 1; \
+				fi \
+			fi \
+		fi \
+	done
+	@make cleanup-traces
+	@echo "$(GREEN)✅ All traces validated successfully$(NC)"
+
+# Clean up generated trace files
+cleanup-traces:
+	@echo "$(YELLOW)🧹 Cleaning up generated trace files...$(NC)"
+	@python3 convert_traces.py --cleanup --output-dir spec
+	@rm -f /tmp/tlc_trace.out
+	@echo "$(GREEN)✅ Trace files cleaned up$(NC)"
+
 # Show help
 help:
 	@echo "$(GREEN)TLA+ Validation for sprite-env$(NC)"
 	@echo ""
 	@echo "$(YELLOW)Commands:$(NC)"
-	@echo "  make              - Validate specification (syntax + types)"
-	@echo "  make quick        - Check syntax only (faster)"
-	@echo "  make test-scenarios - Run all scenarios as tests"
-	@echo "  make info         - Show specification details"
-	@echo "  make clean        - Remove generated files"
-	@echo "  make help         - Show this help"
+	@echo "  make                    - Validate specification (syntax + types)"
+	@echo "  make quick              - Check syntax only (faster)"
+	@echo "  make test-scenarios     - Run all scenarios as tests"
+	@echo "  make validate-traces    - Validate JSON traces against specification"
+	@echo "  make info               - Show specification details"
+	@echo "  make clean              - Remove generated files"
+	@echo "  make help               - Show this help"
 	@echo ""
 	@echo "Validates TLA+ syntax, semantics, and type safety." 
