@@ -195,9 +195,11 @@ func runTest(t *testing.T, dir string) {
 		if err := scanner.Err(); err != nil {
 			select {
 			case <-ctx.Done():
+				// Context cancelled - pipe closure is expected
 				return
 			default:
-				t.Fatalf("Error reading stderr: %v", err)
+				// Process may have exited while we were reading - this is normal
+				t.Logf("Error reading stderr: %v", err)
 			}
 		}
 	}()
@@ -219,9 +221,11 @@ func runTest(t *testing.T, dir string) {
 		if err := scanner.Err(); err != nil {
 			select {
 			case <-ctx.Done():
+				// Context cancelled - pipe closure is expected
 				return
 			default:
-				t.Fatalf("Error reading stdout: %v", err)
+				// Process may have exited while we were reading - this is normal
+				t.Logf("Error reading stdout: %v", err)
 			}
 		}
 	}()

@@ -104,6 +104,9 @@ func (ssm *SystemState) handleDependencyStateChange() {
 	// Auto-transition Initializing -> Ready when component set is ready
 	if currentSystemState == SystemStateInitializing &&
 		componentSetState == ComponentSetStateRunning {
+		// Use goroutine to ensure this fires in a separate transaction
+		// Without this, SystemStateMachine would transition to Ready DURING
+		// the ComponentSetStateMachine transition, causing incorrect trace ordering
 		go func() {
 			ssm.Fire(SystemTriggerReady)
 		}()
@@ -178,6 +181,8 @@ func (ssm *SystemState) configureStateMachine() {
 		Permit(SystemTriggerFailed, SystemStateError).
 		OnEntry(func(ctx context.Context, args ...any) error {
 			// Start process in separate goroutine = separate transaction
+			// This ensures ProcessStateMachine transitions happen AFTER
+			// SystemStateMachine completes its transition to Ready state
 			go func() {
 				ssm.processState.Fire(TriggerStart, context.Background())
 			}()

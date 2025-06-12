@@ -12,3 +12,5 @@ tla2tools.jar
 /tmp/tlc.out
 tmp/trace_*
 spec/*TTrace*.bin
+spec/trace_*.tla
+spec/trace_*.cfg
