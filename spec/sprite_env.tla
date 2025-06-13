@@ -2,475 +2,269 @@
 
 EXTENDS Integers, Sequences, FiniteSets
 
+CONSTANTS N  \* Number of components (1..N)
+
 VARIABLES 
-    overallState,          \* Overall application state
-    componentSetState,      \* Derived state of all storage components
-    dbState,               \* Individual DB component state
-    fsState,               \* Individual FS component state
-    processState,          \* Supervised process state
-    processExitCode,
-    checkpointInProgress,
-    restoreInProgress,
-    currentOperation,      \* Current high-level operation: "None", "Restore", "Checkpoint", "Shutdown"
-    errorType,
-    restartAttempt,
-    restartDelay,
-    shutdownInProgress,
-    exitRequested,
-    signalReceived,
-    dbShutdownTimeout,
-    fsShutdownTimeout,
-    dbForceKilled,
-    fsForceKilled
+    components  \* Function: 1..N -> ComponentStates
 
-vars == <<overallState, componentSetState, dbState, fsState, processState, processExitCode, checkpointInProgress, restoreInProgress, currentOperation, errorType, restartAttempt, restartDelay, shutdownInProgress, exitRequested, signalReceived, dbShutdownTimeout, fsShutdownTimeout, dbForceKilled, fsForceKilled>>
+vars == <<components>>
 
-\* Process state definitions
-ProcessTransitionStates == {
-    "Initializing", \* Process is being started
-    "Starting",     \* Process is being started
-    "Stopping",     \* Process is being gracefully stopped
-    "Signaling"     \* Process is being sent a signal
+\* Base State Categories (shared across all entities)
+BaseTransitionStates == {
+    "Initializing",    \* Starting up
+    "Starting",        \* Transitioning to active
+    "Stopping",        \* Gracefully stopping
+    "ShuttingDown"     \* Permanent shutdown transition
 }
 
-ProcessFinalStates == {
-    "Stopped",      \* Process is not running
-    "Exited",       \* Process exited normally
-    "Crashed",      \* Process exited unexpectedly
-    "Killed"        \* Process was forcefully terminated
+BaseFinalStates == {
+    "Stopped",         \* Temporarily stopped (can restart)
+    "Shutdown"         \* Permanently shut down
 }
 
-ProcessActiveStates == {
-    "Running"       \* Process is running normally
+BaseActiveStates == {
+    "Running"          \* Normal operation
 }
 
-ProcessErrorStates == {
-    "Error"         \* Process failed to start/stop
+BaseErrorStates == {
+    "Error"            \* Generic error state
 }
 
-ProcessStates == ProcessTransitionStates \cup ProcessFinalStates \cup ProcessActiveStates \cup ProcessErrorStates
-
-\* Component state definitions (what the component is doing)
-ComponentTransitionStates == {
-    "Initializing",      \* Component is being started
-    "Starting",          \* Component is starting managed processes  
-    "Stopping",          \* Component is stopping managed processes
-    "Restoring",         \* Component is performing restore operation
-    "Checkpointing",     \* Component is performing checkpoint operation
-    "ShuttingDown"       \* Component is shutting down permanently
+\* Terminal states (process no longer operational)
+BaseTerminalStates == {
+    "Stopped",         \* Stopped gracefully
+    "Shutdown",        \* Shutdown permanently  
+    "Exited",          \* Exited normally
+    "Crashed",         \* Crashed/failed
+    "Killed"           \* Forcefully terminated
 }
 
-ComponentFinalStates == {
-    "Stopped",      \* Component is fully stopped
-    "Shutdown"      \* Component has completed shutdown
+\* Process-specific states
+ProcessSpecificStates == {
+    "Signaling"        \* Process receiving signal
 }
 
-ComponentActiveStates == {
-    "Running"       \* Component is running normally
+\* Component-specific states  
+ComponentSpecificStates == {
+    "Restoring",       \* Performing restore operation
+    "Checkpointing"    \* Performing checkpoint operation
 }
 
-ComponentErrorStates == {
-    "Error"         \* Component encountered an error
+
+
+\* System-specific states
+SystemSpecificStates == {
+    "Ready",           \* Components ready but process not running
+    "Restoring",       \* System-level restore operation
+    "Checkpointing",   \* System-level checkpoint operation
+    "ErrorRecovery"    \* System responding to component failure
 }
 
-ComponentStates == ComponentTransitionStates \cup ComponentFinalStates \cup ComponentActiveStates \cup ComponentErrorStates
+\* Unified State Definitions (all include terminal states)
+ProcessStates == BaseTransitionStates \cup BaseActiveStates \cup BaseErrorStates \cup BaseTerminalStates \cup ProcessSpecificStates
 
-\* Operation types (why the component is doing something)
-OperationTypes == {
-    "None",              \* No operation in progress
-    "Restore",           \* Restore operation
-    "Checkpoint",        \* Checkpoint operation  
-    "Shutdown"           \* Shutdown operation
-}
+ComponentStates == BaseTransitionStates \cup BaseActiveStates \cup BaseErrorStates \cup BaseTerminalStates \cup ComponentSpecificStates
 
-\* System state definitions
-SystemTransitionStates == {
-    "Initializing",        \* System is starting up
-    "ShuttingDown",        \* System is in the process of shutting down
-    "Restoring",           \* System is performing restore operation
-    "Checkpointing"        \* System is performing checkpoint operation
-}
+ComponentSetStates == BaseTransitionStates \cup BaseActiveStates \cup BaseErrorStates \cup BaseTerminalStates
 
-SystemFinalStates == {
-    "Shutdown"      \* System is fully shut down
-}
+SystemStates == BaseTransitionStates \cup BaseActiveStates \cup BaseErrorStates \cup BaseTerminalStates \cup SystemSpecificStates
 
-SystemActiveStates == {
-    "Running",      \* System is running normally (components ready + process running)
-    "Ready"         \* System components are ready but process is not running
-}
+\* Helper predicates for state types
+IsTransitionState(state) == state \in BaseTransitionStates
+IsActiveState(state) == state \in BaseActiveStates
+IsErrorState(state) == state \in BaseErrorStates
+IsTerminalState(state) == state \in BaseTerminalStates
 
-SystemErrorStates == {
-    "Error"         \* System encountered an error
-}
-
-SystemStates == SystemTransitionStates \cup SystemFinalStates \cup SystemActiveStates \cup SystemErrorStates
-
-\* Error types
-ErrorTypes == {
-    "None",
-    "DBError",
-    "FSError",
-    "ProcessError",
-    "ProcessCrash",
-    "ProcessKilled",
-    "CheckpointError",
-    "RestoreError",
-    "StartupError",
-    "ComponentSetError"
-}
-
-\* Signal definitions
-Signals == {
-    "None",
-    "SIGTERM",  \* Graceful shutdown
-    "SIGINT",   \* Graceful shutdown
-    "SIGKILL"   \* Force kill
-}
-
-\* Initial state
-Init == 
-    /\ overallState = "Initializing"
-    /\ componentSetState = "Initializing"
-    /\ dbState = "Initializing"
-    /\ fsState = "Initializing"
-    /\ processState = "Initializing"
-    /\ processExitCode = 0
-    /\ checkpointInProgress = FALSE
-    /\ restoreInProgress = FALSE
-    /\ currentOperation = "None"
-    /\ errorType = "None"
-    /\ restartAttempt = 0
-    /\ restartDelay = 0
-    /\ shutdownInProgress = FALSE
-    /\ exitRequested = FALSE
-    /\ signalReceived = "None"
-    /\ dbShutdownTimeout = 0
-    /\ fsShutdownTimeout = 0
-    /\ dbForceKilled = FALSE
-    /\ fsForceKilled = FALSE
-
-\* State type predicates
-IsTransitionState(state) == state \in (ProcessTransitionStates \cup ComponentTransitionStates \cup SystemTransitionStates)
-IsFinalState(state) == state \in (ProcessFinalStates \cup ComponentFinalStates \cup SystemFinalStates)
-IsActiveState(state) == state \in (ProcessActiveStates \cup ComponentActiveStates \cup SystemActiveStates)
-IsErrorState(state) == state \in (ProcessErrorStates \cup ComponentErrorStates \cup SystemErrorStates)
-
-\* Helper predicates
+\* Helper predicates for specific states
 IsRunning(state) == state = "Running"
 IsError(state) == state = "Error"
 IsInitializing(state) == state = "Initializing"
-IsStopping(state) == state = "Stopping"
 IsStarting(state) == state = "Starting"
-IsRestoring(state) == state = "Restoring"
-IsCheckpointing(state) == state = "Checkpointing"
+IsStopping(state) == state = "Stopping"
+IsShuttingDown(state) == state = "ShuttingDown"
 IsStopped(state) == state = "Stopped"
-IsOperationInProgress == checkpointInProgress \/ restoreInProgress \/ IsInitializing(componentSetState)
-IsGracefulSignal(signal) == signal \in {"SIGTERM", "SIGINT"}
-IsForceKillSignal(signal) == signal = "SIGKILL"
+IsShutdown(state) == state = "Shutdown"
+IsCheckpointing(state) == state = "Checkpointing"
+IsRestoring(state) == state = "Restoring"
 
-\* State checks for components
-AllComponentsRunning == IsRunning(dbState) /\ IsRunning(fsState)
-AnyComponentError == IsError(dbState) \/ IsError(fsState)
-AnyComponentInitializing == IsInitializing(dbState) \/ IsInitializing(fsState)
-AnyComponentStopping == IsStopping(dbState) \/ IsStopping(fsState)
-AnyComponentStarting == IsStarting(dbState) \/ IsStarting(fsState)
-AnyComponentRestoring == IsRestoring(dbState) \/ IsRestoring(fsState)
-AnyComponentCheckpointing == IsCheckpointing(dbState) \/ IsCheckpointing(fsState)
+\* Consistent terminal state predicates (work for all state machines)
+IsTerminated(state) == state \in BaseTerminalStates
+IsOperational(state) == state \in BaseActiveStates
 
-\* Valid state transition rules
-ValidStateTransition(from, to) ==
-    \/ (IsActiveState(from) /\ IsTransitionState(to))  \* Active -> Transition
-    \/ (IsTransitionState(from) /\ IsFinalState(to))   \* Transition -> Final
-    \/ (IsTransitionState(from) /\ IsErrorState(to))   \* Transition -> Error
-    \/ (IsActiveState(from) /\ IsErrorState(to))       \* Active -> Error
+\* Component aggregate predicates
+AllComponentsRunning == \A i \in 1..N : IsRunning(components[i])
+AllComponentsOperational == \A i \in 1..N : components[i] \in {"Running", "Checkpointing", "Restoring"}
+AllComponentsStopped == \A i \in 1..N : IsStopped(components[i])
+AllComponentsShutdown == \A i \in 1..N : IsShutdown(components[i])
+AnyComponentError == \E i \in 1..N : IsError(components[i])
+AnyComponentInitializing == \E i \in 1..N : IsInitializing(components[i])
+AnyComponentStarting == \E i \in 1..N : IsStarting(components[i])
+AnyComponentStopping == \E i \in 1..N : IsStopping(components[i])
+AnyComponentShuttingDown == \E i \in 1..N : IsShuttingDown(components[i])
+AnyComponentCheckpointing == \E i \in 1..N : IsCheckpointing(components[i])
+AnyComponentRestoring == \E i \in 1..N : IsRestoring(components[i])
 
-\* Component set state machine transitions
-ComponentSetStateTransition(state) ==
-    IF state = "Initializing" /\ AllComponentsRunning THEN
-        "Running"
-    ELSE IF state = "Running" /\ shutdownInProgress THEN
-        "ShuttingDown"
-    ELSE IF state = "ShuttingDown" /\ dbState = "Shutdown" /\ fsState = "Shutdown" THEN
-        "Shutdown"
-    ELSE IF AnyComponentError THEN
-        "Error"
-    ELSE IF state = "Running" /\ AnyComponentRestoring THEN
-        "Restoring"
-    ELSE IF state = "Running" /\ AnyComponentCheckpointing THEN
-        "Checkpointing"
-    ELSE IF state = "Restoring" /\ AllComponentsRunning /\ currentOperation = "None" THEN
-        "Running"
-    ELSE IF state = "Checkpointing" /\ AllComponentsRunning /\ currentOperation = "None" THEN
-        "Running"
-    ELSE
-        state
-
-\* Overall system state machine transitions  
-OverallStateTransition(state) ==
-    IF state = "Initializing" /\ componentSetState = "Running" THEN
-        "Ready"
-    ELSE IF state = "Ready" /\ componentSetState = "Running" /\ processState = "Running" THEN
-        "Running"
-    ELSE IF state = "Running" /\ processState \in ProcessFinalStates THEN
-        "Ready"
-    ELSE IF (state = "Ready" \/ state = "Running") /\ shutdownInProgress THEN
-        "ShuttingDown"
-    ELSE IF state = "ShuttingDown" /\ componentSetState = "Shutdown" /\ processState \in ProcessFinalStates THEN
-        "Shutdown"
-    ELSE IF componentSetState = "Restoring" THEN
-        "Restoring"
-    ELSE IF componentSetState = "Checkpointing" THEN
-        "Checkpointing"
-    ELSE IF errorType # "None" THEN
-        "Error"
-    ELSE
-        state
-
-\* State transitions for DB and FS (different patterns for different operations)
-StateTransition(state, component) ==
-    IF state = "Initializing" THEN
-        "Running"
-    \* Checkpoint flow: Running -> Checkpointing -> Running (no process restart)
-    ELSE IF state = "Running" /\ currentOperation = "Checkpoint" THEN
-        "Checkpointing"
-    ELSE IF state = "Checkpointing" /\ currentOperation = "None" THEN
-        "Running"
-    \* Restore flow: Running -> Stopping -> Restoring -> Starting -> Running
-    ELSE IF state = "Running" /\ currentOperation = "Restore" THEN
-        "Stopping"
-    ELSE IF state = "Stopping" /\ processState = "Stopped" /\ currentOperation = "Restore" THEN
-        "Restoring"
-    ELSE IF state = "Restoring" /\ currentOperation = "None" THEN
+\* ComponentSet State Machine (simple - only reflects component states)
+ComponentSetState ==
+    IF AnyComponentError THEN
+        "Error"  \* At least one component failed
+    ELSE IF AnyComponentInitializing THEN
+        "Initializing"
+    ELSE IF AnyComponentStarting THEN
         "Starting"
-    ELSE IF state = "Starting" /\ processState = "Running" THEN
-        "Running"
-    \* Shutdown flow (permanent shutdown, not operation)
-    ELSE IF state = "Running" /\ shutdownInProgress THEN
-        IF processState = "Running" THEN
-            "ShuttingDown"  \* Start shutdown sequence
-        ELSE IF processState \in ProcessFinalStates THEN
-            "Shutdown"      \* Complete shutdown
-        ELSE
-            state
-    ELSE IF state = "ShuttingDown" /\ processState \in ProcessFinalStates THEN
-        "Shutdown"         \* Move to final state
-    ELSE IF state = "Shutdown" THEN
-        "Stopped"          \* Final state
-    ELSE
-        state
-
-\* Process state transitions (only stops for restore, not checkpoint)
-ProcessTransition(state, exitCode) ==
-    IF state = "Stopped" /\ IsRunning(componentSetState) /\ ~shutdownInProgress /\ currentOperation = "None" THEN
-        "Starting"
-    ELSE IF state = "Starting" THEN
-        "Running"
-    ELSE IF state = "Running" /\ currentOperation = "Restore" THEN
+    ELSE IF AllComponentsOperational THEN
+        "Running"  \* All components operational (running/checkpointing/restoring)
+    ELSE IF AnyComponentStopping THEN
         "Stopping"
-    ELSE IF state = "Stopping" THEN
+    ELSE IF AnyComponentShuttingDown THEN
+        "ShuttingDown"  
+    ELSE IF AllComponentsStopped THEN
         "Stopped"
-    ELSE IF state = "Running" /\ exitCode # 0 THEN
-        IF exitCode = 143 THEN  \* 128 + 15 (SIGTERM)
-            "Exited"
-        ELSE IF exitCode = 130 THEN  \* Ctrl+C
-            "Crashed"
-        ELSE IF exitCode > 128 THEN \* Other signals
-            "Crashed"
-        ELSE
-            "Exited"
-    ELSE IF state = "Signaling" /\ exitCode = 137 THEN  \* 128 + 9 (SIGKILL)
-        "Killed"
-    ELSE
-        state
-
-\* Error state determination
-DetermineErrorType ==
-    IF componentSetState = "Error" THEN
-        IF dbState = "Error" THEN
-            "DBError"
-        ELSE IF fsState = "Error" THEN
-            "FSError"
-        ELSE
-            "ComponentSetError"
-    ELSE IF processState = "Error" THEN
-        "ProcessError"
-    ELSE IF processState = "Crashed" THEN
-        "ProcessCrash"
-    ELSE IF processState = "Killed" THEN
-        "ProcessKilled"
-    ELSE IF checkpointInProgress /\ componentSetState = "Error" THEN
-        "CheckpointError"
-    ELSE IF restoreInProgress /\ componentSetState = "Error" THEN
-        "RestoreError"
-    ELSE IF componentSetState = "Initializing" /\ AnyComponentError THEN
-        "StartupError"
-    ELSE
-        "None"
-
-\* Calculate next restart delay (exponential backoff)
-NextRestartDelay ==
-    IF restartAttempt = 0 THEN
-        1
-    ELSE
-        IF restartDelay * 2 > 60 THEN 60 ELSE restartDelay * 2  \* Cap at 60 seconds
-
-\* Determine current operation from boolean flags
-DetermineCurrentOperation ==
-    IF restoreInProgress THEN
-        "Restore"
-    ELSE IF checkpointInProgress THEN
-        "Checkpoint"
-    ELSE IF shutdownInProgress THEN
+    ELSE IF AllComponentsShutdown THEN
         "Shutdown"
     ELSE
-        "None"
+        "Error"  \* Undefined state combination
+
+\* System State Machine (reacts to ComponentSet state changes)
+SystemState ==
+    IF ComponentSetState = "Error" /\ (\E i \in 1..N : components[i] = "Running") THEN
+        "ErrorRecovery"  \* Component failed, still have running components to stop
+    ELSE IF ComponentSetState = "Error" /\ ~(\E i \in 1..N : components[i] = "Running") THEN
+        "Error"  \* Error recovery complete, system reaches terminal error state
+    ELSE IF ComponentSetState = "Initializing" THEN
+        "Initializing"  \* System initializing when components initializing
+    ELSE IF ComponentSetState = "Starting" THEN
+        "Starting"  \* System starting when components starting
+    ELSE IF ComponentSetState = "Running" THEN
+        "Ready"  \* Components ready, system ready to run process
+    ELSE IF ComponentSetState = "Stopping" THEN
+        "Stopping"  \* System stopping when components stopping
+    ELSE IF ComponentSetState = "ShuttingDown" THEN
+        "ShuttingDown"  \* System shutting down when components shutting down
+    ELSE IF ComponentSetState = "Stopped" THEN
+        "Stopped"  \* System stopped when components stopped
+    ELSE IF ComponentSetState = "Shutdown" THEN
+        "Shutdown"  \* System shutdown when components shutdown
+    ELSE
+        "Error"  \* Undefined state combination
+
+\* Process State Machine (responds to SystemState)
+ProcessState ==
+    IF SystemState = "ErrorRecovery" /\ (\E i \in 1..N : components[i] = "Running") THEN
+        "Stopping"  \* Process stops gracefully during error recovery
+    ELSE IF SystemState = "ErrorRecovery" THEN
+        "Stopped"  \* Process stopped during error recovery
+    ELSE IF SystemState \in {"Initializing", "Starting"} THEN
+        "Stopped"  \* Process waits for system to be ready
+    ELSE IF SystemState = "Ready" THEN
+        "Running"  \* Process runs when system is ready
+    ELSE IF SystemState = "Stopping" THEN
+        "Stopped"  \* Process MUST be stopped before components can stop
+    ELSE IF SystemState = "ShuttingDown" THEN
+        "Shutdown"  \* Process MUST be shutdown before components can shutdown
+    ELSE IF SystemState = "Stopped" THEN
+        "Stopped"  \* Process stopped when system stopped
+    ELSE IF SystemState = "Shutdown" THEN
+        "Shutdown"  \* Process shutdown when system shutdown
+    ELSE
+        "Stopped"  \* Default to stopped for safety
+
+\* Overall System State (combination of System + Process for full picture)
+OverallSystemState ==
+    IF SystemState = "Ready" /\ ProcessState = "Running" THEN
+        "Running"  \* Full system operational
+    ELSE IF SystemState = "Ready" /\ ProcessState = "Stopped" THEN
+        "Ready"  \* Components ready, process not started yet
+    ELSE
+        SystemState  \* Otherwise just use system state
+
+\* Component state transitions
+ComponentTransition(state) ==
+    CASE state = "Initializing" -> "Starting"
+      [] state = "Initializing" -> "Error"       \* Initialization can fail
+      [] state = "Starting" -> "Running"
+      [] state = "Starting" -> "Error"           \* Startup can fail
+      [] state = "Running" -> "Checkpointing"    \* Trigger checkpoint operation
+      [] state = "Running" -> "Restoring"        \* Trigger restore operation
+      [] state = "Running" /\ ComponentSetState = "Stopping" -> "Stopping"
+      [] state = "Running" /\ ComponentSetState = "ShuttingDown" -> "ShuttingDown"
+      [] state = "Running" -> "Error"            \* Running components can fail
+      [] state = "Checkpointing" -> "Running"    \* Return to running after checkpoint
+      [] state = "Checkpointing" -> "Error"      \* Checkpoint can fail
+      [] state = "Restoring" -> "Running"        \* Return to running after restore
+      [] state = "Restoring" -> "Error"          \* Restore can fail
+      [] state = "Stopping" -> "Stopped"
+      [] state = "ShuttingDown" -> "Shutdown" 
+      [] state = "Stopped" /\ ComponentSetState = "Starting" -> "Starting"
+      [] OTHER -> state
+
+\* Initial state
+Init == 
+    /\ components = [i \in 1..N |-> "Initializing"]
 
 \* Next state relation
 Next ==
-    \/ \* DB component transitions independently
-        /\ dbState' = StateTransition(dbState, "DB")
-        /\ dbState' # dbState  \* Only if actually transitioning
-        /\ UNCHANGED <<overallState, componentSetState, fsState, processState, processExitCode, checkpointInProgress, restoreInProgress, currentOperation, errorType, restartAttempt, restartDelay, shutdownInProgress, exitRequested, signalReceived, dbShutdownTimeout, fsShutdownTimeout, dbForceKilled, fsForceKilled>>
+    \* 1. Individual components transition (normal operation)
+    \E i \in 1..N :
+        /\ components' = [components EXCEPT ![i] = ComponentTransition(components[i])]
+        /\ components'[i] # components[i]
 
-    \/ \* FS component transitions independently  
-        /\ fsState' = StateTransition(fsState, "FS")
-        /\ fsState' # fsState  \* Only if actually transitioning
-        /\ UNCHANGED <<overallState, componentSetState, dbState, processState, processExitCode, checkpointInProgress, restoreInProgress, currentOperation, errorType, restartAttempt, restartDelay, shutdownInProgress, exitRequested, signalReceived, dbShutdownTimeout, fsShutdownTimeout, dbForceKilled, fsForceKilled>>
+    \* 2. Error recovery: stop remaining healthy components when system coordinates
+    \/ \* Stop remaining healthy components during error recovery
+        /\ SystemState = "ErrorRecovery"  \* System coordinating error recovery
+        /\ ProcessState = "Stopped"       \* Process has stopped
+        /\ \E r \in 1..N : components[r] = "Running"  \* Still have healthy components
+        /\ components' = [s \in 1..N |-> IF components[s] = "Running" THEN "Stopping" ELSE components[s]]
 
-    \/ \* Component set state machine reacts to component changes
-        /\ componentSetState' = ComponentSetStateTransition(componentSetState)
-        /\ componentSetState' # componentSetState  \* Only if actually transitioning
-        /\ UNCHANGED <<overallState, dbState, fsState, processState, processExitCode, checkpointInProgress, restoreInProgress, currentOperation, errorType, restartAttempt, restartDelay, shutdownInProgress, exitRequested, signalReceived, dbShutdownTimeout, fsShutdownTimeout, dbForceKilled, fsForceKilled>>
+    \* 3. Normal system operations
+    \/ \* Stop system: ONLY when process is terminated (stopped/crashed/killed/etc)
+        /\ IsTerminated(ProcessState)  \* Process MUST be terminated first
+        /\ ComponentSetState = "Running"
+        /\ components' = [m \in 1..N |-> IF IsRunning(components[m]) THEN "Stopping" ELSE components[m]]
 
-    \/ \* Overall system state machine reacts to component set and process changes
-        /\ overallState' = OverallStateTransition(overallState)
-        /\ overallState' # overallState  \* Only if actually transitioning
-        /\ UNCHANGED <<componentSetState, dbState, fsState, processState, processExitCode, checkpointInProgress, restoreInProgress, currentOperation, errorType, restartAttempt, restartDelay, shutdownInProgress, exitRequested, signalReceived, dbShutdownTimeout, fsShutdownTimeout, dbForceKilled, fsForceKilled>>
+    \/ \* Shutdown system: ONLY when process is terminated
+        /\ IsTerminated(ProcessState)  \* Process MUST be terminated first
+        /\ SystemState \in {"Ready", "Stopping"}
+        /\ components' = [p \in 1..N |-> IF components[p] \notin {"Shutdown", "ShuttingDown"} THEN "ShuttingDown" ELSE components[p]]
 
-    \/ \* Process transitions (when not exiting)
-        /\ processState' = ProcessTransition(processState, processExitCode)
-        /\ processState' # processState  \* Only if actually transitioning
-        /\ UNCHANGED <<overallState, componentSetState, dbState, fsState, processExitCode, checkpointInProgress, restoreInProgress, currentOperation, errorType, restartAttempt, restartDelay, shutdownInProgress, exitRequested, signalReceived, dbShutdownTimeout, fsShutdownTimeout, dbForceKilled, fsForceKilled>>
-
-    \/ \* Process exits autonomously (only updates process state)
-        /\ processState = "Running"
-        /\ processExitCode' \in {0, 1, 2, 130, 137, 143}  \* All possible exit codes
-        /\ processState' = IF processExitCode' = 0 THEN "Exited"
-                           ELSE IF processExitCode' = 137 THEN "Killed" 
-                           ELSE IF processExitCode' > 128 THEN "Crashed"
-                           ELSE "Exited"
-        /\ UNCHANGED <<overallState, componentSetState, dbState, fsState, checkpointInProgress, restoreInProgress, currentOperation, errorType, restartAttempt, restartDelay, shutdownInProgress, exitRequested, signalReceived, dbShutdownTimeout, fsShutdownTimeout, dbForceKilled, fsForceKilled>>
-
-    \/ \* Error type determination reacts to state changes
-        /\ errorType' = DetermineErrorType
-        /\ errorType' # errorType  \* Only if actually changing
-        /\ UNCHANGED <<overallState, componentSetState, dbState, fsState, processState, processExitCode, checkpointInProgress, restoreInProgress, currentOperation, restartAttempt, restartDelay, shutdownInProgress, exitRequested, signalReceived, dbShutdownTimeout, fsShutdownTimeout, dbForceKilled, fsForceKilled>>
-
-    \/ \* Current operation tracking reacts to flag changes
-        /\ currentOperation' = DetermineCurrentOperation  
-        /\ currentOperation' # currentOperation  \* Only if actually changing
-        /\ UNCHANGED <<overallState, componentSetState, dbState, fsState, processState, processExitCode, checkpointInProgress, restoreInProgress, errorType, restartAttempt, restartDelay, shutdownInProgress, exitRequested, signalReceived, dbShutdownTimeout, fsShutdownTimeout, dbForceKilled, fsForceKilled>>
-
-    \/ \* Process restart after crash/exit
-        /\ processState \in {"Crashed", "Exited", "Killed"}
-        /\ restartAttempt' = restartAttempt + 1
-        /\ restartDelay' = NextRestartDelay
-        /\ processState' = "Starting"
-        /\ UNCHANGED <<overallState, componentSetState, dbState, fsState, processExitCode, checkpointInProgress, restoreInProgress, currentOperation, errorType, shutdownInProgress, exitRequested, signalReceived, dbShutdownTimeout, fsShutdownTimeout, dbForceKilled, fsForceKilled>>
-
-    \/ \* Signal handling
-        /\ signalReceived' \in Signals
-        /\ IF IsGracefulSignal(signalReceived') THEN
-            /\ shutdownInProgress' = TRUE
-            /\ processState' = "Signaling"
-           ELSE
-            /\ UNCHANGED <<shutdownInProgress, processState>>
-        /\ UNCHANGED <<overallState, componentSetState, dbState, fsState, processExitCode, checkpointInProgress, restoreInProgress, currentOperation, errorType, restartAttempt, restartDelay, exitRequested, dbShutdownTimeout, fsShutdownTimeout, dbForceKilled, fsForceKilled>>
-
-\* Invariants
+\* Type invariant
 TypeOK ==
-    /\ overallState \in SystemStates
-    /\ componentSetState \in SystemStates
-    /\ dbState \in ComponentStates
-    /\ fsState \in ComponentStates
-    /\ processState \in ProcessStates
-    /\ processExitCode \in 0..255
-    /\ checkpointInProgress \in BOOLEAN
-    /\ restoreInProgress \in BOOLEAN
-    /\ currentOperation \in OperationTypes
-    /\ errorType \in ErrorTypes
-    /\ restartAttempt \in Nat
-    /\ restartDelay \in Nat
-    /\ shutdownInProgress \in BOOLEAN
-    /\ exitRequested \in BOOLEAN
-    /\ signalReceived \in Signals
-    /\ dbShutdownTimeout \in Nat
-    /\ fsShutdownTimeout \in Nat
-    /\ dbForceKilled \in BOOLEAN
-    /\ fsForceKilled \in BOOLEAN
+    /\ components \in [1..N -> ComponentStates]
+    /\ SystemState \in SystemStates
+    /\ ComponentSetState \in ComponentSetStates  
+    /\ ProcessState \in ProcessStates
 
-StateTransitionInvariant ==
-    /\ ValidStateTransition(dbState, StateTransition(dbState, "Component"))
-    /\ ValidStateTransition(fsState, StateTransition(fsState, "Component"))
+\* System hierarchy invariant (updated for clean hierarchy)
+HierarchyInvariant ==
+    /\ (SystemState = "Ready" => ComponentSetState = "Running")
+    /\ (ProcessState = "Running" => SystemState = "Ready")
+    /\ (ComponentSetState = "Running" => AllComponentsOperational)
+    /\ (ComponentSetState = "Error" => AnyComponentError)
+    /\ (OverallSystemState = "Running" => (SystemState = "Ready" /\ ProcessState = "Running"))
 
-ShutdownSequenceInvariant ==
-    /\ (dbState = "ShuttingDown" => processState = "Running")
-    /\ (dbState = "Shutdown" => processState \in ProcessFinalStates)
-    /\ (dbState = "Stopped" => processState = "Stopped")
-    /\ (IsTransitionState(dbState) => ~IsFinalState(processState))
-    /\ (IsFinalState(dbState) => IsFinalState(processState))
-    /\ (fsState = "ShuttingDown" => processState = "Running")
-    /\ (fsState = "Shutdown" => processState \in ProcessFinalStates)
-    /\ (fsState = "Stopped" => processState = "Stopped")
-    /\ (IsTransitionState(fsState) => ~IsFinalState(processState))
-    /\ (IsFinalState(fsState) => IsFinalState(processState))
+\* Process state dependency constraints (updated for consistent terminal states)
+ProcessStateDependencyInvariant ==
+    \* Process can only run if components are ready and system is ready
+    /\ (IsOperational(ProcessState) => (ComponentSetState = "Running" /\ SystemState = "Ready"))
+    \* Process must be terminated before components can stop (normal shutdown)
+    /\ (ComponentSetState = "Stopping" => IsTerminated(ProcessState))
+    \* Process must be terminated before components can shutdown  
+    /\ (ComponentSetState = "ShuttingDown" => IsTerminated(ProcessState))
+    \* During error recovery, system coordinates the sequence
+    /\ (SystemState = "ErrorRecovery" /\ ComponentSetState = "Error" => (IsTransitionState(ProcessState) \/ IsTerminated(ProcessState)))
+    \* Components can't be stopping if process is still operational (except during error recovery)
+    /\ (AnyComponentStopping /\ ~AnyComponentError => IsTerminated(ProcessState))
+    \* Components can't be shutting down if process is still operational
+    /\ (AnyComponentShuttingDown => IsTerminated(ProcessState))
 
-\* Temporal properties
-NoStuckTransitions ==
-    /\ [](IsTransitionState(dbState) => <>IsFinalState(dbState) \/ IsErrorState(dbState))
-    /\ [](IsTransitionState(fsState) => <>IsFinalState(fsState) \/ IsErrorState(fsState))
-
-ProperShutdownSequence ==
-    /\ []((dbState = "ShuttingDown" /\ processState = "Running") =>
-            <>(dbState = "Shutdown" /\ processState \in ProcessFinalStates))
-    /\ []((fsState = "ShuttingDown" /\ processState = "Running") =>
-            <>(fsState = "Shutdown" /\ processState \in ProcessFinalStates))
-
-\* Constraint for normal operation only
-NormalOperation == 
-    /\ errorType = "None"
-    /\ signalReceived = "None"
-    /\ ~shutdownInProgress
-    /\ processExitCode = 0
+\* No return to Ready after error - once failed, system cannot recover
+NoRecoveryAfterErrorInvariant ==
+    \* If system ever reached Error state, it cannot return to Ready
+    /\ (AnyComponentError => SystemState # "Ready")
+    \* If any component is in Error state, system stays in Error or ErrorRecovery
+    /\ (AnyComponentError => SystemState \in {"Error", "ErrorRecovery"})
 
 \* The specification
 Spec == Init /\ [][Next]_vars
-
-\* The properties to verify
-Properties ==
-    /\ StateTransitionInvariant
-    /\ ShutdownSequenceInvariant
-    /\ NoStuckTransitions
-    /\ ProperShutdownSequence
-
-overallStateOK == overallState \in SystemStates
-componentSetStateOK == componentSetState \in SystemStates
-dbStateOK == dbState \in ComponentStates
-fsStateOK == fsState \in ComponentStates
-processStateOK == processState \in ProcessStates
-processExitCodeOK == processExitCode \in 0..255
-checkpointInProgressOK == checkpointInProgress \in BOOLEAN
-restoreInProgressOK == restoreInProgress \in BOOLEAN
-errorTypeOK == errorType \in ErrorTypes
-restartAttemptOK == restartAttempt \in Nat
-restartDelayOK == restartDelay \in Nat
-shutdownInProgressOK == shutdownInProgress \in BOOLEAN
-exitRequestedOK == exitRequested \in BOOLEAN
-signalReceivedOK == signalReceived \in Signals
-dbShutdownTimeoutOK == dbShutdownTimeout \in Nat
-fsShutdownTimeoutOK == fsShutdownTimeout \in Nat
-dbForceKilledOK == dbForceKilled \in BOOLEAN
-fsForceKilledOK == fsForceKilled \in BOOLEAN
 
 ============================================================================= 
