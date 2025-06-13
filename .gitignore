@@ -5,7 +5,6 @@
 *.tmp
 MC.tla
 MC.cfg
-tla2tools.jar
 
 # Temporary files
 /tmp/sany.out
@@ -14,3 +13,4 @@ tmp/trace_*
 spec/*TTrace*.bin
 spec/trace_*.tla
 spec/trace_*.cfg
+__pycache__

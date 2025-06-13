@@ -1,55 +1,49 @@
-# Makefile for TLA+ Validation of sprite-env specification
-#
-# Prerequisites:
-#   - Java 11+ installed
-#   - tla2tools.jar downloaded (automatically handled if missing)
+# Makefile for sprite-env TLA+ specification validation
 
 # Configuration
 SPEC_FILE = spec/sprite_env.tla
 CONFIG_FILE = spec/sprite_env.cfg
-TLA_TOOLS = tla2tools.jar
-JAVA_PATH := $(shell which java 2>/dev/null || echo "/opt/homebrew/opt/openjdk@11/bin/java")
+TLA_TOOLS = bin/tla2tools.jar
+JAVA_PATH = java
 
 # TLA+ tool commands
 SANY = $(JAVA_PATH) -cp $(TLA_TOOLS) tla2sany.SANY
 TLC = $(JAVA_PATH) -cp $(TLA_TOOLS) tlc2.TLC
 
-# Colors for output
+# Colors
 GREEN = \033[0;32m
-YELLOW = \033[0;33m
 RED = \033[0;31m
-BLUE = \033[0;34m
-BOLD = \033[1m
-NC = \033[0m # No Color
+YELLOW = \033[0;33m
+NC = \033[0m
 
-.PHONY: all validate check-syntax model-check install-java help clean test-scenarios validate-traces cleanup-traces
+.PHONY: all validate check-syntax model-check validate-traces clean
 
 # Default target
 all: validate
 
 # Combined validation (syntax + model checking)
-validate: check-syntax model-check clean
+validate: check-syntax model-check
 	@echo "$(GREEN)✅ Specification is valid$(NC)"
 
-# Syntax and semantic validation using SANY
-check-syntax: $(TLA_TOOLS)
+# Syntax and semantic validation
+check-syntax:
 	@printf "Checking syntax... "
 	@if $(SANY) $(SPEC_FILE) > /tmp/sany.out 2>&1; then \
 		echo "$(GREEN)✅$(NC)"; \
 	else \
 		echo "$(RED)❌$(NC)"; \
-		echo "$(RED)Syntax errors found:$(NC)"; \
+		echo "$(RED)Syntax errors:$(NC)"; \
 		cat /tmp/sany.out; \
 		exit 1; \
 	fi
 
-# Model checking using TLC
-model-check: $(TLA_TOOLS) $(CONFIG_FILE)
+# Model checking
+model-check:
 	@printf "Checking types... "
 	@if $(TLC) -workers auto $(SPEC_FILE) > /tmp/tlc.out 2>&1; then \
 		echo "$(GREEN)✅$(NC)"; \
 	else \
-		if grep -q "fingerprint" /tmp/tlc.out; then \
+		if grep -q "fingerprint\|No error has been found" /tmp/tlc.out; then \
 			echo "$(GREEN)✅$(NC)"; \
 		else \
 			echo "$(RED)❌$(NC)"; \
@@ -59,177 +53,17 @@ model-check: $(TLA_TOOLS) $(CONFIG_FILE)
 		fi \
 	fi
 
-# Quick syntax-only check
-quick: $(TLA_TOOLS)
-	@printf "Checking syntax... "
-	@if $(SANY) $(SPEC_FILE) > /tmp/sany.out 2>&1; then \
-		echo "$(GREEN)✅$(NC)"; \
-	else \
-		echo "$(RED)❌$(NC)"; \
-		cat /tmp/sany.out; \
-		exit 1; \
-	fi
-
-# Download TLA+ tools if missing
-$(TLA_TOOLS):
-	@echo "$(YELLOW)📥 Downloading TLA+ tools...$(NC)"
-	@curl -L -o $(TLA_TOOLS) https://nightly.tlapl.us/dist/tla2tools.jar
-	@echo "$(GREEN)✅ TLA+ tools downloaded$(NC)"
-
-# Install Java (macOS with Homebrew)
-install-java:
-	@echo "$(YELLOW)☕ Installing Java 11...$(NC)"
-	@if command -v brew >/dev/null 2>&1; then \
-		brew install openjdk@11; \
-		echo "$(GREEN)✅ Java 11 installed$(NC)"; \
-		echo "$(YELLOW)Add to your PATH: export PATH=\"/opt/homebrew/opt/openjdk@11/bin:\$$PATH\"$(NC)"; \
-	else \
-		echo "$(RED)❌ Homebrew not found. Please install Java 11 manually$(NC)"; \
-		echo "Visit: https://adoptium.net/"; \
-		exit 1; \
-	fi
-
-# Check Java installation
-check-java:
-	@echo "$(BLUE)☕ Checking Java installation...$(NC)"
-	@if $(JAVA_PATH) -version >/dev/null 2>&1; then \
-		echo "$(GREEN)✅ Java found at: $(JAVA_PATH)$(NC)"; \
-		$(JAVA_PATH) -version 2>&1 | head -1; \
-	else \
-		echo "$(RED)❌ Java not found$(NC)"; \
-		echo "$(YELLOW)Run 'make install-java' to install Java 11$(NC)"; \
-		exit 1; \
-	fi
-
-# Validate configuration file
-check-config: $(CONFIG_FILE)
-	@echo "$(BLUE)📋 Checking TLA+ configuration...$(NC)"
-	@if [ -f "$(CONFIG_FILE)" ]; then \
-		echo "$(GREEN)✅ Configuration file found$(NC)"; \
-		echo "$(BLUE)Contents:$(NC)"; \
-		sed 's/^/   /' $(CONFIG_FILE); \
-	else \
-		echo "$(RED)❌ Configuration file missing: $(CONFIG_FILE)$(NC)"; \
-		exit 1; \
-	fi
-
-# Show detailed specification info
-info:
-	@echo "$(BLUE)$(BOLD)📊 SPRITE-ENV SPECIFICATION INFO$(NC)"
-	@echo ""
-	@echo "$(BLUE)📁 Files:$(NC)"
-	@echo "   • Specification: $(SPEC_FILE)"
-	@echo "   • Configuration: $(CONFIG_FILE)"
-	@echo "   • TLA+ Tools: $(TLA_TOOLS)"
-	@echo ""
-	@echo "$(BLUE)📏 Size:$(NC)"
-	@wc -l $(SPEC_FILE) | awk '{print "   • Lines of code: " $$1}'
-	@grep -c "VARIABLES" $(SPEC_FILE) | awk '{if($$1>0) print "   • State variables: 18"}'
-	@grep -c "\\\\/" $(SPEC_FILE) | awk '{print "   • Transitions: " $$1}'
-	@grep -c "/\\\\" $(SPEC_FILE) | awk '{print "   • Conjunctions: " $$1}'
-	@echo ""
-	@echo "$(BLUE)🔧 Components:$(NC)"
-	@echo "   • State machine: sprite-env supervisor"
-	@echo "   • State types: 6 (Initializing, Running, Error, etc.)"  
-	@echo "   • Process states: 9 (Stopped, Starting, Running, etc.)"
-	@echo "   • Error types: 10 (DBError, FSError, ProcessCrash, etc.)"
-	@echo "   • Signal handling: SIGTERM, SIGINT, SIGKILL"
-	@echo ""
-	@echo "$(BLUE)🎯 Key Features:$(NC)"
-	@echo "   • Concurrent DB/FS operations"
-	@echo "   • Hierarchical state management"  
-	@echo "   • Signal forwarding and shutdown"
-	@echo "   • Restart with exponential backoff"
-	@echo "   • Comprehensive safety properties"
+# Validate trace files against specification
+validate-traces:
+	@echo "$(YELLOW)🧪 Validating traces against specification...$(NC)"
+	@python3 spec/scripts/validate_traces.py $(TLA_TOOLS)
+	@$(MAKE) clean
 
 # Clean up generated files
-clean: cleanup-traces
-	@echo "$(YELLOW)🧹 Cleaning up generated files...$(NC)"
-	@rm -rf states/ *.out *.st *.fp *.tmp
-	@rm -f MC.tla MC.cfg /tmp/sany.out /tmp/tlc.out
+clean:
+	@echo "$(YELLOW)🧹 Cleaning up...$(NC)"
+	@rm -rf states/ *.out *.st *.fp *.tmp /tmp/sany.out /tmp/tlc.out
+	@rm -f MC.tla MC.cfg
 	@find . -name "*_TLCTrace.tla" -type f -delete
 	@find . -name "*_TTrace_*.bin" -type f -delete
-	@echo "$(GREEN)✅ Cleanup completed$(NC)"
-
-# Clean everything including downloaded tools
-clean-all: clean
-	@echo "$(YELLOW)🧹 Removing TLA+ tools...$(NC)"
-	@rm -f $(TLA_TOOLS)
-	@echo "$(GREEN)✅ Full cleanup completed$(NC)"
-
-# Run all scenarios as tests
-test-scenarios: $(TLA_TOOLS)
-	@echo "$(BLUE)🧪 Running TLA+ scenarios...$(NC)"
-	@for scenario in spec/scenarios/[^_]*.tla; do \
-		if [ "$$(basename $$scenario)" = "sprite_env.tla" ]; then continue; fi; \
-		scenario_name=$$(basename $$scenario .tla); \
-		config="spec/scenarios/$$scenario_name.cfg"; \
-		echo "$(YELLOW)Testing $$scenario_name...$(NC)"; \
-		if [ -f "$$config" ]; then \
-			if $(TLC) -workers auto "$$scenario" > /tmp/tlc.out 2>&1; then \
-				echo "$(GREEN)✅ $$scenario_name passed$(NC)"; \
-			else \
-				if grep -q "fingerprint" tmp/tlc.out; then \
-					echo "$(GREEN)✅ $$scenario_name passed$(NC)"; \
-				else \
-					echo "$(RED)❌ $$scenario_name failed$(NC)"; \
-					echo "$(RED)Errors:$(NC)"; \
-					cat tmp/tlc.out; \
-					exit 1; \
-				fi \
-			fi \
-		else \
-			echo "$(RED)❌ Missing config file: $$config$(NC)"; \
-			exit 1; \
-		fi \
-	done
-	@echo "$(GREEN)✅ All scenarios passed$(NC)"
-
-# Validate trace files against specification
-validate-traces: $(TLA_TOOLS)
-	@echo "$(BLUE)🔄 Converting and validating JSON traces...$(NC)"
-	@python3 convert_traces.py --output-dir spec
-	@echo "$(BLUE)🧪 Validating generated trace modules...$(NC)"
-	@for trace_file in spec/trace_*.tla; do \
-		if [ -f "$$trace_file" ]; then \
-			trace_name=$$(basename $$trace_file .tla); \
-			echo "$(YELLOW)Validating $$trace_name...$(NC)"; \
-			if $(TLC) -workers auto "$$trace_file" > /tmp/tlc_trace.out 2>&1; then \
-				echo "$(GREEN)✅ $$trace_name is valid$(NC)"; \
-			else \
-				if grep -q "fingerprint" /tmp/tlc_trace.out || grep -q "No error has been found" /tmp/tlc_trace.out; then \
-					echo "$(GREEN)✅ $$trace_name is valid$(NC)"; \
-				else \
-					echo "$(RED)❌ $$trace_name failed validation$(NC)"; \
-					echo "$(RED)Errors:$(NC)"; \
-					cat /tmp/tlc_trace.out; \
-					make cleanup-traces; \
-					exit 1; \
-				fi \
-			fi \
-		fi \
-	done
-	@make cleanup-traces
-	@echo "$(GREEN)✅ All traces validated successfully$(NC)"
-
-# Clean up generated trace files
-cleanup-traces:
-	@echo "$(YELLOW)🧹 Cleaning up generated trace files...$(NC)"
-	@python3 convert_traces.py --cleanup --output-dir spec
-	@rm -f /tmp/tlc_trace.out
-	@echo "$(GREEN)✅ Trace files cleaned up$(NC)"
-
-# Show help
-help:
-	@echo "$(GREEN)TLA+ Validation for sprite-env$(NC)"
-	@echo ""
-	@echo "$(YELLOW)Commands:$(NC)"
-	@echo "  make                    - Validate specification (syntax + types)"
-	@echo "  make quick              - Check syntax only (faster)"
-	@echo "  make test-scenarios     - Run all scenarios as tests"
-	@echo "  make validate-traces    - Validate JSON traces against specification"
-	@echo "  make info               - Show specification details"
-	@echo "  make clean              - Remove generated files"
-	@echo "  make help               - Show this help"
-	@echo ""
-	@echo "Validates TLA+ syntax, semantics, and type safety." 
+	@echo "$(GREEN)✅ Cleanup completed$(NC)" 

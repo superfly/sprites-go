@@ -11,6 +11,9 @@ alwaysApply: false
 * Use direct callbacks from Stateless based modules, not channels. This is the standard stateless library pattern.
 * NEVER add methods like CanFire or CanTransition or RequestState
 * ALWAYS just request the state (with .Fire or .FireCtx) you need and let it fail
+* NEVER diagnose something as a race condition, that's almost never the problem
+* NEVER define new top level states that are not part of the TLA spec
+* If it's helpful, define substates of those to make the state flow simpler
 
 **State machines must be purely declarative intent processors:**
 
