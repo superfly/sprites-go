@@ -13,7 +13,7 @@ test-integration: build
 
 # Run unit tests
 test-unit:
-	go test -v -failfast ./lib
+	go test -v -failfast ./lib/...
 
 # Clean build artifacts
 clean:

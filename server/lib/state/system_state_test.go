@@ -1,8 +1,9 @@
-package lib
+package state
 
 import (
 	"context"
 	"fmt"
+	"sprite-env/lib/adapters"
 	"testing"
 	"time"
 
@@ -55,7 +56,7 @@ func TestSystemStateMachine_TLASpecSequences(t *testing.T) {
 		}
 
 		// Complete process startup (process should be in Starting state after system reaches Ready)
-		fakeProcess.EmitEvent(EventStarted)
+		fakeProcess.EmitEvent(adapters.EventStarted)
 
 		// Wait for system to reach Running state through reactive coordination
 		if !waitForSystemState(ssm, SystemStateRunning, 2000*time.Millisecond) {
@@ -108,13 +109,13 @@ func TestSystemStateMachine_TLASpecSequences(t *testing.T) {
 
 		// Complete startup
 		t.Logf("Starting components...")
-		fakeComponents["db"].EmitEvent(ComponentStarting)
-		fakeComponents["fs"].EmitEvent(ComponentStarting)
-		fakeComponents["db"].EmitEvent(ComponentStarted)
-		fakeComponents["fs"].EmitEvent(ComponentStarted)
-		fakeComponents["db"].EmitEvent(ComponentReady)
-		fakeComponents["fs"].EmitEvent(ComponentReady)
-		fakeProcess.EmitEvent(EventStarted)
+		fakeComponents["db"].EmitEvent(adapters.ComponentStarting)
+		fakeComponents["fs"].EmitEvent(adapters.ComponentStarting)
+		fakeComponents["db"].EmitEvent(adapters.ComponentStarted)
+		fakeComponents["fs"].EmitEvent(adapters.ComponentStarted)
+		fakeComponents["db"].EmitEvent(adapters.ComponentReady)
+		fakeComponents["fs"].EmitEvent(adapters.ComponentReady)
+		fakeProcess.EmitEvent(adapters.EventStarted)
 		waitForSystemState(ssm, SystemStateRunning, 500*time.Millisecond)
 
 		t.Logf("System running state: %s", ssm.GetState())
@@ -138,24 +139,24 @@ func TestSystemStateMachine_TLASpecSequences(t *testing.T) {
 
 		// Complete component shutdown
 		t.Logf("Shutting down components...")
-		fakeComponents["db"].EmitEvent(ComponentStopping)
-		fakeComponents["fs"].EmitEvent(ComponentStopping)
+		fakeComponents["db"].EmitEvent(adapters.ComponentStopping)
+		fakeComponents["fs"].EmitEvent(adapters.ComponentStopping)
 		time.Sleep(10 * time.Millisecond)
 		t.Logf("After stopping events - Component set state: %s", ssm.GetComponentSetState())
 
-		fakeComponents["db"].EmitEvent(ComponentStopped)
-		fakeComponents["fs"].EmitEvent(ComponentStopped)
+		fakeComponents["db"].EmitEvent(adapters.ComponentStopped)
+		fakeComponents["fs"].EmitEvent(adapters.ComponentStopped)
 		time.Sleep(10 * time.Millisecond)
 		t.Logf("After stopped events - Component set state: %s", ssm.GetComponentSetState())
 		t.Logf("After component shutdown - System state: %s", ssm.GetState())
 
 		// Complete process shutdown
 		t.Logf("Shutting down process...")
-		fakeProcess.EmitEvent(EventStopping)
+		fakeProcess.EmitEvent(adapters.EventStopping)
 		time.Sleep(10 * time.Millisecond)
 		t.Logf("After process stopping - Process state: %s", ssm.GetProcessState())
 
-		fakeProcess.EmitEvent(EventStopped)
+		fakeProcess.EmitEvent(adapters.EventStopped)
 		time.Sleep(10 * time.Millisecond)
 		t.Logf("After process stopped - Process state: %s", ssm.GetProcessState())
 		t.Logf("After process shutdown - System state: %s", ssm.GetState())
@@ -198,7 +199,7 @@ func TestSystemStateMachine_TLASpecSequences(t *testing.T) {
 		}
 
 		// Complete process startup
-		fakeProcess.EmitEvent(EventStarted)
+		fakeProcess.EmitEvent(adapters.EventStarted)
 
 		// Wait for system to reach Running state before checkpoint
 		if !waitForSystemState(ssm, SystemStateRunning, 2000*time.Millisecond) {
@@ -250,7 +251,7 @@ func TestSystemStateMachine_TLASpecSequences(t *testing.T) {
 		}
 
 		// Complete process startup
-		fakeProcess.EmitEvent(EventStarted)
+		fakeProcess.EmitEvent(adapters.EventStarted)
 
 		// Wait for system to reach Running state before restore
 		if !waitForSystemState(ssm, SystemStateRunning, 2000*time.Millisecond) {
@@ -276,10 +277,10 @@ func TestSystemStateMachine_TLASpecSequences(t *testing.T) {
 		time.Sleep(150 * time.Millisecond)
 
 		// Complete component startup from Starting state (no ComponentStarting needed)
-		fakeComponents["db"].EmitEvent(ComponentStarted)
-		fakeComponents["fs"].EmitEvent(ComponentStarted)
-		fakeComponents["db"].EmitEvent(ComponentReady)
-		fakeComponents["fs"].EmitEvent(ComponentReady)
+		fakeComponents["db"].EmitEvent(adapters.ComponentStarted)
+		fakeComponents["fs"].EmitEvent(adapters.ComponentStarted)
+		fakeComponents["db"].EmitEvent(adapters.ComponentReady)
+		fakeComponents["fs"].EmitEvent(adapters.ComponentReady)
 
 		// Should return to Running
 		if !waitForSystemState(ssm, SystemStateRunning, 300*time.Millisecond) {
@@ -311,8 +312,8 @@ func TestSystemStateMachine_TLASpecSequences(t *testing.T) {
 		// No manual triggers needed
 
 		// Start components transitioning
-		fakeComponents["db"].EmitEvent(ComponentStarting)
-		fakeComponents["fs"].EmitEvent(ComponentStarting)
+		fakeComponents["db"].EmitEvent(adapters.ComponentStarting)
+		fakeComponents["fs"].EmitEvent(adapters.ComponentStarting)
 		time.Sleep(10 * time.Millisecond) // Allow components to transition
 
 		// At this point, process should NOT be Running yet because components aren't ready
@@ -326,10 +327,10 @@ func TestSystemStateMachine_TLASpecSequences(t *testing.T) {
 		}
 
 		// Now complete component startup to get ComponentSetStateMachine to Running
-		fakeComponents["db"].EmitEvent(ComponentStarted)
-		fakeComponents["fs"].EmitEvent(ComponentStarted)
-		fakeComponents["db"].EmitEvent(ComponentReady)
-		fakeComponents["fs"].EmitEvent(ComponentReady)
+		fakeComponents["db"].EmitEvent(adapters.ComponentStarted)
+		fakeComponents["fs"].EmitEvent(adapters.ComponentStarted)
+		fakeComponents["db"].EmitEvent(adapters.ComponentReady)
+		fakeComponents["fs"].EmitEvent(adapters.ComponentReady)
 		time.Sleep(50 * time.Millisecond) // Allow ComponentSetStateMachine to transition
 
 		// Verify ComponentSetStateMachine reaches Running first
@@ -339,7 +340,7 @@ func TestSystemStateMachine_TLASpecSequences(t *testing.T) {
 
 		// Now the SystemStateMachine should have requested the process to start
 		// Complete the process startup sequence
-		fakeProcess.EmitEvent(EventStarted)
+		fakeProcess.EmitEvent(adapters.EventStarted)
 		time.Sleep(50 * time.Millisecond) // Allow process to reach Running
 
 		if ssm.GetProcessState() != ProcessStateRunning {
@@ -376,12 +377,12 @@ func TestSystemStateMachine_TLASpecSequences(t *testing.T) {
 		}
 
 		// Complete component startup to trigger system Ready
-		fakeComponents["db"].EmitEvent(ComponentStarting)
-		fakeComponents["fs"].EmitEvent(ComponentStarting)
-		fakeComponents["db"].EmitEvent(ComponentStarted)
-		fakeComponents["fs"].EmitEvent(ComponentStarted)
-		fakeComponents["db"].EmitEvent(ComponentReady)
-		fakeComponents["fs"].EmitEvent(ComponentReady)
+		fakeComponents["db"].EmitEvent(adapters.ComponentStarting)
+		fakeComponents["fs"].EmitEvent(adapters.ComponentStarting)
+		fakeComponents["db"].EmitEvent(adapters.ComponentStarted)
+		fakeComponents["fs"].EmitEvent(adapters.ComponentStarted)
+		fakeComponents["db"].EmitEvent(adapters.ComponentReady)
+		fakeComponents["fs"].EmitEvent(adapters.ComponentReady)
 
 		// Wait for system to process component changes
 		time.Sleep(50 * time.Millisecond)
@@ -398,7 +399,7 @@ func TestSystemStateMachine_TLASpecSequences(t *testing.T) {
 		}
 
 		// Complete process startup to reach Running
-		fakeProcess.EmitEvent(EventStarted)
+		fakeProcess.EmitEvent(adapters.EventStarted)
 
 		// Should reach Running state
 		if !waitForSystemState(ssm, SystemStateRunning, 200*time.Millisecond) {
@@ -458,7 +459,7 @@ func TestSystemStateMachine_DetermineOverallState(t *testing.T) {
 		waitForSystemState(ssm, SystemStateReady, 500*time.Millisecond)
 
 		// Process should have started automatically, complete its startup
-		fakeProcess.EmitEvent(EventStarted)
+		fakeProcess.EmitEvent(adapters.EventStarted)
 
 		// System should automatically transition Ready -> Running
 		if !waitForSystemState(ssm, SystemStateRunning, 500*time.Millisecond) {
@@ -482,7 +483,7 @@ func TestSystemStateMachine_DetermineOverallState(t *testing.T) {
 		for _, fake := range fakeComponents {
 			completeComponentStartup(fake)
 		}
-		fakeProcess.EmitEvent(EventStarted)
+		fakeProcess.EmitEvent(adapters.EventStarted)
 		waitForSystemState(ssm, SystemStateRunning, 500*time.Millisecond)
 
 		// Request shutdown
@@ -491,11 +492,11 @@ func TestSystemStateMachine_DetermineOverallState(t *testing.T) {
 
 		// Complete shutdown sequence
 		for _, fake := range fakeComponents {
-			fake.EmitEvent(ComponentStopping)
-			fake.EmitEvent(ComponentStopped)
+			fake.EmitEvent(adapters.ComponentStopping)
+			fake.EmitEvent(adapters.ComponentStopped)
 		}
-		fakeProcess.EmitEvent(EventStopping)
-		fakeProcess.EmitEvent(EventStopped)
+		fakeProcess.EmitEvent(adapters.EventStopping)
+		fakeProcess.EmitEvent(adapters.EventStopped)
 
 		// System should automatically transition ShuttingDown -> Shutdown
 		if !waitForSystemState(ssm, SystemStateShutdown, 500*time.Millisecond) {
@@ -519,7 +520,7 @@ func TestSystemStateMachine_DetermineOverallState(t *testing.T) {
 		for _, fake := range fakeComponents {
 			completeComponentStartup(fake)
 		}
-		fakeProcess.EmitEvent(EventStarted)
+		fakeProcess.EmitEvent(adapters.EventStarted)
 		waitForSystemState(ssm, SystemStateRunning, 500*time.Millisecond)
 
 		// Request checkpoint
@@ -549,7 +550,7 @@ func TestSystemStateMachine_DetermineOverallState(t *testing.T) {
 		for _, fake := range fakeComponents {
 			completeComponentStartup(fake)
 		}
-		fakeProcess.EmitEvent(EventStarted)
+		fakeProcess.EmitEvent(adapters.EventStarted)
 		waitForSystemState(ssm, SystemStateRunning, 500*time.Millisecond)
 
 		// Request restore
@@ -561,8 +562,8 @@ func TestSystemStateMachine_DetermineOverallState(t *testing.T) {
 
 		// Complete component startup after restore
 		for _, fake := range fakeComponents {
-			fake.EmitEvent(ComponentStarted)
-			fake.EmitEvent(ComponentReady)
+			fake.EmitEvent(adapters.ComponentStarted)
+			fake.EmitEvent(adapters.ComponentReady)
 		}
 
 		// System should automatically transition Restoring -> Running
@@ -590,11 +591,11 @@ func TestSystemStateMachine_ErrorTypeDetermination(t *testing.T) {
 		for _, fake := range fakeComponents {
 			completeComponentStartup(fake)
 		}
-		fakeProcess.EmitEvent(EventStarted)
+		fakeProcess.EmitEvent(adapters.EventStarted)
 		waitForSystemState(ssm, SystemStateRunning, 500*time.Millisecond)
 
 		// Cause process error
-		fakeProcess.EmitEvent(EventFailed)
+		fakeProcess.EmitEvent(adapters.EventFailed)
 
 		// System should transition to Error state
 		waitForSystemState(ssm, SystemStateError, 500*time.Millisecond)
@@ -621,11 +622,11 @@ func TestSystemStateMachine_ErrorTypeDetermination(t *testing.T) {
 		for _, fake := range fakeComponents {
 			completeComponentStartup(fake)
 		}
-		fakeProcess.EmitEvent(EventStarted)
+		fakeProcess.EmitEvent(adapters.EventStarted)
 		waitForSystemState(ssm, SystemStateRunning, 500*time.Millisecond)
 
 		// Simulate process crash - EventExited leads to ProcessStateCrashed
-		fakeProcess.EmitEvent(EventExited)
+		fakeProcess.EmitEvent(adapters.EventExited)
 
 		// System should transition to Error state
 		waitForSystemState(ssm, SystemStateError, 500*time.Millisecond)
@@ -652,12 +653,12 @@ func TestSystemStateMachine_ErrorTypeDetermination(t *testing.T) {
 		for _, fake := range fakeComponents {
 			completeComponentStartup(fake)
 		}
-		fakeProcess.EmitEvent(EventStarted)
+		fakeProcess.EmitEvent(adapters.EventStarted)
 		waitForSystemState(ssm, SystemStateRunning, 500*time.Millisecond)
 
 		// Simulate process being killed - proper signal flow
-		processSM.Fire(TriggerSignal)        // Go to Signaling state, sets lastSignal to SIGKILL
-		fakeProcess.EmitEvent(EventSignaled) // Process reports it was killed
+		processSM.Fire(TriggerSignal)                 // Go to Signaling state, sets lastSignal to SIGKILL
+		fakeProcess.EmitEvent(adapters.EventSignaled) // Process reports it was killed
 
 		// System should transition to Error state
 		waitForSystemState(ssm, SystemStateError, 500*time.Millisecond)
@@ -684,11 +685,11 @@ func TestSystemStateMachine_ErrorTypeDetermination(t *testing.T) {
 		for _, fake := range fakeComponents {
 			completeComponentStartup(fake)
 		}
-		fakeProcess.EmitEvent(EventStarted)
+		fakeProcess.EmitEvent(adapters.EventStarted)
 		waitForSystemState(ssm, SystemStateRunning, 500*time.Millisecond)
 
 		// Cause component failure to trigger ComponentSet error
-		fakeComponents["db"].EmitEvent(ComponentFailed)
+		fakeComponents["db"].EmitEvent(adapters.ComponentFailed)
 
 		// System should transition to Error state
 		waitForSystemState(ssm, SystemStateError, 500*time.Millisecond)
@@ -721,7 +722,7 @@ func TestSystemStateMachine_ErrorTypeDetermination(t *testing.T) {
 		for _, fake := range fakeComponents {
 			completeComponentStartup(fake)
 		}
-		fakeProcess.EmitEvent(EventStarted)
+		fakeProcess.EmitEvent(adapters.EventStarted)
 		waitForSystemState(ssm, SystemStateRunning, 500*time.Millisecond)
 
 		// Should still be None in running state
@@ -752,25 +753,25 @@ func TestSystemStateMachine_FinalStates(t *testing.T) {
 		// No manual triggers needed
 
 		// Complete startup
-		fakeComponents["db"].EmitEvent(ComponentStarting)
-		fakeComponents["fs"].EmitEvent(ComponentStarting)
-		fakeComponents["db"].EmitEvent(ComponentStarted)
-		fakeComponents["fs"].EmitEvent(ComponentStarted)
-		fakeComponents["db"].EmitEvent(ComponentReady)
-		fakeComponents["fs"].EmitEvent(ComponentReady)
-		fakeProcess.EmitEvent(EventStarted)
+		fakeComponents["db"].EmitEvent(adapters.ComponentStarting)
+		fakeComponents["fs"].EmitEvent(adapters.ComponentStarting)
+		fakeComponents["db"].EmitEvent(adapters.ComponentStarted)
+		fakeComponents["fs"].EmitEvent(adapters.ComponentStarted)
+		fakeComponents["db"].EmitEvent(adapters.ComponentReady)
+		fakeComponents["fs"].EmitEvent(adapters.ComponentReady)
+		fakeProcess.EmitEvent(adapters.EventStarted)
 		waitForSystemState(ssm, SystemStateRunning, 500*time.Millisecond)
 
 		// Request shutdown to reach final state
 		ssm.Fire(SystemTriggerShutdownRequested)
 
 		// Complete shutdown sequence
-		fakeComponents["db"].EmitEvent(ComponentStopping)
-		fakeComponents["fs"].EmitEvent(ComponentStopping)
-		fakeComponents["db"].EmitEvent(ComponentStopped)
-		fakeComponents["fs"].EmitEvent(ComponentStopped)
-		fakeProcess.EmitEvent(EventStopping)
-		fakeProcess.EmitEvent(EventStopped)
+		fakeComponents["db"].EmitEvent(adapters.ComponentStopping)
+		fakeComponents["fs"].EmitEvent(adapters.ComponentStopping)
+		fakeComponents["db"].EmitEvent(adapters.ComponentStopped)
+		fakeComponents["fs"].EmitEvent(adapters.ComponentStopped)
+		fakeProcess.EmitEvent(adapters.EventStopping)
+		fakeProcess.EmitEvent(adapters.EventStopped)
 
 		// Wait for final shutdown state
 		waitForSystemState(ssm, SystemStateShutdown, 500*time.Millisecond)
@@ -801,17 +802,17 @@ func TestSystemStateMachine_FinalStates(t *testing.T) {
 		// No manual triggers needed
 
 		// Complete startup
-		fakeComponents["db"].EmitEvent(ComponentStarting)
-		fakeComponents["fs"].EmitEvent(ComponentStarting)
-		fakeComponents["db"].EmitEvent(ComponentStarted)
-		fakeComponents["fs"].EmitEvent(ComponentStarted)
-		fakeComponents["db"].EmitEvent(ComponentReady)
-		fakeComponents["fs"].EmitEvent(ComponentReady)
-		fakeProcess.EmitEvent(EventStarted)
+		fakeComponents["db"].EmitEvent(adapters.ComponentStarting)
+		fakeComponents["fs"].EmitEvent(adapters.ComponentStarting)
+		fakeComponents["db"].EmitEvent(adapters.ComponentStarted)
+		fakeComponents["fs"].EmitEvent(adapters.ComponentStarted)
+		fakeComponents["db"].EmitEvent(adapters.ComponentReady)
+		fakeComponents["fs"].EmitEvent(adapters.ComponentReady)
+		fakeProcess.EmitEvent(adapters.EventStarted)
 		waitForSystemState(ssm, SystemStateRunning, 500*time.Millisecond)
 
 		// Cause component failure to reach error state
-		fakeComponents["db"].EmitEvent(ComponentFailed)
+		fakeComponents["db"].EmitEvent(adapters.ComponentFailed)
 		waitForSystemState(ssm, SystemStateError, 500*time.Millisecond)
 
 		// Now try to transition from error state - should be rejected
@@ -848,7 +849,7 @@ func TestSystemStateMachine_ReactiveStateChanges(t *testing.T) {
 		}
 
 		// Complete process startup
-		fakeProcess.EmitEvent(EventStarted)
+		fakeProcess.EmitEvent(adapters.EventStarted)
 
 		// Wait for system to reach Running state before crash test
 		if !waitForSystemState(ssm, SystemStateRunning, 2000*time.Millisecond) {
@@ -856,7 +857,7 @@ func TestSystemStateMachine_ReactiveStateChanges(t *testing.T) {
 		}
 
 		// Simulate process crash - use EventFailed for permanent failure instead of EventExited (which restarts)
-		fakeProcess.EmitEvent(EventFailed) // This should cause ProcessStateError
+		fakeProcess.EmitEvent(adapters.EventFailed) // This should cause ProcessStateError
 
 		// Wait for process to reach error state first
 		time.Sleep(50 * time.Millisecond)
@@ -901,7 +902,7 @@ func TestSystemStateMachine_ReactiveStateChanges(t *testing.T) {
 		}
 
 		// Complete process startup
-		fakeProcess.EmitEvent(EventStarted)
+		fakeProcess.EmitEvent(adapters.EventStarted)
 
 		// Wait for system to reach Running state before component error test
 		if !waitForSystemState(ssm, SystemStateRunning, 2000*time.Millisecond) {
@@ -909,7 +910,7 @@ func TestSystemStateMachine_ReactiveStateChanges(t *testing.T) {
 		}
 
 		// Simulate component failure
-		fakeComponents["db"].EmitEvent(ComponentFailed)
+		fakeComponents["db"].EmitEvent(adapters.ComponentFailed)
 
 		// System should react and go to error state
 		if !waitForSystemState(ssm, SystemStateError, 500*time.Millisecond) {

@@ -1,4 +1,4 @@
-package lib
+package adapters
 
 import (
 	"context"
@@ -7,12 +7,12 @@ import (
 )
 
 func TestComponentBasicLifecycle(t *testing.T) {
-	config := ComponentConfig{
+	config := CmdComponentConfig{
 		StartCommand: []string{"echo", "hello"},
 		// No ready command - should emit ready immediately
 	}
 
-	component := NewComponent(config)
+	component := NewCmdComponent(config)
 	ctx := context.Background()
 
 	events := component.Events()
@@ -49,12 +49,12 @@ func TestComponentBasicLifecycle(t *testing.T) {
 }
 
 func TestComponentWithReadyScript(t *testing.T) {
-	config := ComponentConfig{
+	config := CmdComponentConfig{
 		StartCommand: []string{"sh", "-c", "echo 'started'; sleep 1; echo 'output'"},
 		ReadyCommand: []string{"grep", "output"},
 	}
 
-	component := NewComponent(config)
+	component := NewCmdComponent(config)
 	ctx := context.Background()
 
 	events := component.Events()

@@ -1,4 +1,4 @@
-package lib
+package adapters
 
 import (
 	"bufio"
@@ -9,58 +9,39 @@ import (
 	"sync"
 )
 
-// ComponentEventType defines the type of event that can be emitted by a component.
-type ComponentEventType string
-
-const (
-	// ComponentStarting is emitted when the component is about to be started.
-	ComponentStarting ComponentEventType = "starting"
-	// ComponentStarted is emitted when the start process has successfully started.
-	ComponentStarted ComponentEventType = "started"
-	// ComponentChecking is emitted when the ready check is being performed.
-	ComponentChecking ComponentEventType = "checking"
-	// ComponentReady is emitted when the component is ready (ready script succeeded or no ready script).
-	ComponentReady ComponentEventType = "ready"
-	// ComponentStopping is emitted when a stop sequence has been initiated.
-	ComponentStopping ComponentEventType = "stopping"
-	// ComponentStopped is emitted when the component has stopped.
-	ComponentStopped ComponentEventType = "stopped"
-	// ComponentFailed is emitted when the component has failed permanently.
-	ComponentFailed ComponentEventType = "failed"
-)
-
-// ComponentConfig holds configuration for a component
-type ComponentConfig struct {
-	StartCommand      []string // Start script, REQUIRED
-	ReadyCommand      []string // Ready check script, nil if not available
-	CheckpointCommand []string // Checkpoint script, nil if not available
-	RestoreCommand    []string // Restore script, nil if not available
+// CmdComponentConfig holds configuration for a command-based component
+// It implements the ComponentConfig interface
+type CmdComponentConfig struct {
+	StartCommand      []string               // Start script, REQUIRED
+	ReadyCommand      []string               // Ready check script, nil if not available
+	CheckpointCommand []string               // Checkpoint script, nil if not available
+	RestoreCommand    []string               // Restore script, nil if not available
+	EventHandlers     ComponentEventHandlers // Optional event handlers
 }
 
-// Component manages the lifecycle of a component using the process supervisor
-type Component struct {
-	config ComponentConfig
+// GetEventHandlers implements ComponentConfig interface
+func (c CmdComponentConfig) GetEventHandlers() ComponentEventHandlers {
+	return c.EventHandlers
+}
+
+// cmdComponent manages the lifecycle of a component using command execution
+type cmdComponent struct {
+	*BaseComponent // Embed shared event management
+	config         CmdComponentConfig
 
 	startProcess *Process
-
-	events chan ComponentEventType
 }
 
-// NewComponent creates a new component manager
-func NewComponent(config ComponentConfig) *Component {
-	return &Component{
-		config: config,
-		events: make(chan ComponentEventType),
+// NewCmdComponent creates a new command-based component manager
+func NewCmdComponent(config CmdComponentConfig) Component {
+	return &cmdComponent{
+		BaseComponent: NewBaseComponent(config.GetEventHandlers()),
+		config:        config,
 	}
 }
 
-// Events returns the event channel for this component
-func (c *Component) Events() <-chan ComponentEventType {
-	return c.events
-}
-
 // Start initiates the component startup process
-func (c *Component) Start(ctx context.Context) error {
+func (c *cmdComponent) Start(ctx context.Context) error {
 	if len(c.config.StartCommand) == 0 {
 		return fmt.Errorf("no start command configured")
 	}
@@ -72,14 +53,14 @@ func (c *Component) Start(ctx context.Context) error {
 }
 
 // Stop stops the component
-func (c *Component) Stop() {
+func (c *cmdComponent) Stop() {
 	if c.startProcess != nil {
 		c.startProcess.Stop()
 	}
 }
 
 // Checkpoint performs a checkpoint operation on the component
-func (c *Component) Checkpoint(ctx context.Context) error {
+func (c *cmdComponent) Checkpoint(ctx context.Context) error {
 	if len(c.config.CheckpointCommand) == 0 {
 		return nil // No checkpoint command configured
 	}
@@ -105,7 +86,7 @@ func (c *Component) Checkpoint(ctx context.Context) error {
 }
 
 // Restore performs a restore operation on the component
-func (c *Component) Restore(ctx context.Context) error {
+func (c *cmdComponent) Restore(ctx context.Context) error {
 	if len(c.config.RestoreCommand) == 0 {
 		return nil // No restore command configured
 	}
@@ -131,10 +112,10 @@ func (c *Component) Restore(ctx context.Context) error {
 }
 
 // supervise handles the component lifecycle
-func (c *Component) supervise(ctx context.Context) {
-	defer close(c.events)
+func (c *cmdComponent) supervise(ctx context.Context) {
+	defer c.CloseEvents()
 
-	c.events <- ComponentStarting
+	c.EmitEvent(ComponentStarting)
 
 	// Create the main process
 	c.startProcess = NewProcess(ProcessConfig{
@@ -150,12 +131,12 @@ func (c *Component) supervise(ctx context.Context) {
 	if len(c.config.ReadyCommand) > 0 {
 		startStdout, err = c.startProcess.StdoutPipe()
 		if err != nil {
-			c.events <- ComponentFailed
+			c.EmitEvent(ComponentFailed, err)
 			return
 		}
 		startStderr, err = c.startProcess.StderrPipe()
 		if err != nil {
-			c.events <- ComponentFailed
+			c.EmitEvent(ComponentFailed, err)
 			return
 		}
 	}
@@ -170,32 +151,32 @@ func (c *Component) supervise(ctx context.Context) {
 		case event := <-startEvents:
 			switch event {
 			case EventStarted:
-				c.events <- ComponentStarted
+				c.EmitEvent(ComponentStarted)
 				startProcessStarted = true
 			case EventFailed:
-				c.events <- ComponentFailed
+				c.EmitEvent(ComponentFailed)
 				return
 			}
 		case <-ctx.Done():
-			c.events <- ComponentStopped
+			c.EmitEvent(ComponentStopped)
 			return
 		}
 	}
 
 	// If no ready command, emit ready immediately
 	if len(c.config.ReadyCommand) == 0 {
-		c.events <- ComponentReady
+		c.EmitEvent(ComponentReady)
 		// Continue monitoring start process
 		c.monitorStartProcess(ctx, startEvents)
 		return
 	}
 
 	// Start ready check process
-	c.events <- ComponentChecking
+	c.EmitEvent(ComponentChecking)
 
 	readyDone, err := c.startReadyProcess(ctx, startStdout, startStderr)
 	if err != nil {
-		c.events <- ComponentFailed
+		c.EmitEvent(ComponentFailed, err)
 		c.startProcess.Stop()
 		return
 	}
@@ -205,7 +186,7 @@ func (c *Component) supervise(ctx context.Context) {
 }
 
 // startReadyProcess creates and starts the ready check process with piped input
-func (c *Component) startReadyProcess(ctx context.Context, startStdout, startStderr io.ReadCloser) (chan error, error) {
+func (c *cmdComponent) startReadyProcess(ctx context.Context, startStdout, startStderr io.ReadCloser) (chan error, error) {
 
 	// Create ready command directly (not using process supervisor)
 	readyCmd := exec.CommandContext(ctx, c.config.ReadyCommand[0], c.config.ReadyCommand[1:]...)
@@ -240,7 +221,7 @@ func (c *Component) startReadyProcess(ctx context.Context, startStdout, startStd
 }
 
 // pipeOutput safely pipes start process output to ready process input with non-blocking writes
-func (c *Component) pipeOutput(ctx context.Context, stdout, stderr io.ReadCloser, stdinCh chan io.WriteCloser) {
+func (c *cmdComponent) pipeOutput(ctx context.Context, stdout, stderr io.ReadCloser, stdinCh chan io.WriteCloser) {
 	defer stdout.Close()
 	defer stderr.Close()
 
@@ -300,31 +281,31 @@ func (c *Component) pipeOutput(ctx context.Context, stdout, stderr io.ReadCloser
 }
 
 // monitorStartProcess monitors only the start process (when no ready script)
-func (c *Component) monitorStartProcess(ctx context.Context, startEvents <-chan EventType) {
+func (c *cmdComponent) monitorStartProcess(ctx context.Context, startEvents <-chan EventType) {
 	for {
 		select {
 		case event := <-startEvents:
 			switch event {
 			case EventExited:
 				// Process completed successfully - this is normal for one-shot commands
-				c.events <- ComponentStopped
+				c.EmitEvent(ComponentStopped)
 				return
 			case EventFailed:
-				c.events <- ComponentFailed
+				c.EmitEvent(ComponentFailed)
 				return
 			case EventStopped:
-				c.events <- ComponentStopped
+				c.EmitEvent(ComponentStopped)
 				return
 			}
 		case <-ctx.Done():
-			c.events <- ComponentStopped
+			c.EmitEvent(ComponentStopped)
 			return
 		}
 	}
 }
 
 // monitorProcessAndReadyChannel monitors start process and ready command completion
-func (c *Component) monitorProcessAndReadyChannel(ctx context.Context, startEvents <-chan EventType, readyDone <-chan error) {
+func (c *cmdComponent) monitorProcessAndReadyChannel(ctx context.Context, startEvents <-chan EventType, readyDone <-chan error) {
 	readyCompleted := false
 	startProcessExited := false
 
@@ -334,13 +315,13 @@ func (c *Component) monitorProcessAndReadyChannel(ctx context.Context, startEven
 			switch event {
 			case EventFailed:
 				// Start process failed - stop everything
-				c.events <- ComponentFailed
+				c.EmitEvent(ComponentFailed)
 				return
 			case EventExited, EventStopped:
 				// Start process exited
 				if readyCompleted {
 					// Ready script already completed successfully, so we can stop
-					c.events <- ComponentStopped
+					c.EmitEvent(ComponentStopped)
 					return
 				} else {
 					// Ready script still running, mark that start process exited
@@ -354,11 +335,11 @@ func (c *Component) monitorProcessAndReadyChannel(ctx context.Context, startEven
 				readyCompleted = true
 				if err == nil {
 					// Ready script completed successfully
-					c.events <- ComponentReady
+					c.EmitEvent(ComponentReady)
 
 					// If start process already exited, we're done
 					if startProcessExited {
-						c.events <- ComponentStopped
+						c.EmitEvent(ComponentStopped)
 						return
 					}
 
@@ -367,7 +348,7 @@ func (c *Component) monitorProcessAndReadyChannel(ctx context.Context, startEven
 					// Continue in this loop to monitor start process
 				} else {
 					// Ready script failed - this means the component failed
-					c.events <- ComponentFailed
+					c.EmitEvent(ComponentFailed, err)
 					if !startProcessExited {
 						c.startProcess.Stop()
 					}
@@ -376,7 +357,7 @@ func (c *Component) monitorProcessAndReadyChannel(ctx context.Context, startEven
 			}
 
 		case <-ctx.Done():
-			c.events <- ComponentStopped
+			c.EmitEvent(ComponentStopped)
 			return
 		}
 	}

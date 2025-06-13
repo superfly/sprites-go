@@ -1,38 +1,44 @@
-package lib
+package state
 
 import (
 	"context"
+	"sprite-env/lib/adapters"
 	"testing"
 	"time"
 )
 
 // FakeComponent implements ComponentInterface for testing
 type FakeComponent struct {
-	events          chan ComponentEventType
+	events          chan adapters.ComponentEventType
 	closed          bool
 	checkpointError error
 	restoreError    error
+	startCalled     bool
+	stopCalled      bool
+	currentEvent    adapters.ComponentEventType
 }
 
 // NewFakeComponent creates a new fake component for testing
 func NewFakeComponent() *FakeComponent {
 	return &FakeComponent{
-		events: make(chan ComponentEventType), // Unbuffered channel
+		events: make(chan adapters.ComponentEventType), // Unbuffered channel
 	}
 }
 
 // Events returns the event channel for this fake component
-func (f *FakeComponent) Events() <-chan ComponentEventType {
+func (f *FakeComponent) Events() <-chan adapters.ComponentEventType {
 	return f.events
 }
 
 // Start implements ComponentInterface - starts the fake component
 func (f *FakeComponent) Start(ctx context.Context) error {
+	f.startCalled = true
 	return nil
 }
 
 // Stop implements ComponentInterface - no-op for testing
 func (f *FakeComponent) Stop() {
+	f.stopCalled = true
 	// No-op for testing
 }
 
@@ -47,7 +53,7 @@ func (f *FakeComponent) Restore(ctx context.Context) error {
 }
 
 // EmitEvent sends an event for testing (not part of ComponentInterface)
-func (f *FakeComponent) EmitEvent(event ComponentEventType) {
+func (f *FakeComponent) EmitEvent(event adapters.ComponentEventType) {
 	if !f.closed {
 		f.events <- event
 	}
@@ -89,7 +95,7 @@ func TestComponentStateMachine_TLASpecSequences(t *testing.T) {
 		fake := NewFakeComponent()
 		defer fake.Close()
 
-		csm := NewComponentStateWithComponent(fake)
+		csm := NewComponentState(fake)
 
 		// Request Running state: Initializing → Starting → Running
 		if err := csm.Fire(ComponentTriggerStart); err != nil {
@@ -98,9 +104,9 @@ func TestComponentStateMachine_TLASpecSequences(t *testing.T) {
 		time.Sleep(10 * time.Millisecond) // Allow event watching to start
 
 		// Complete startup event sequence
-		fake.EmitEvent(ComponentStarting) // Component beginning startup
-		fake.EmitEvent(ComponentStarted)  // Component started (may have ready check)
-		fake.EmitEvent(ComponentReady)    // Component fully ready
+		fake.EmitEvent(adapters.ComponentStarting) // Component beginning startup
+		fake.EmitEvent(adapters.ComponentStarted)  // Component started (may have ready check)
+		fake.EmitEvent(adapters.ComponentReady)    // Component fully ready
 
 		if !waitForComponentState(csm, ComponentStateRunning, 100*time.Millisecond) {
 			t.Errorf("Expected Running after startup sequence, got %s", csm.MustState())
@@ -111,21 +117,21 @@ func TestComponentStateMachine_TLASpecSequences(t *testing.T) {
 		fake := NewFakeComponent()
 		defer fake.Close()
 
-		csm := NewComponentStateWithComponent(fake)
+		csm := NewComponentState(fake)
 
 		// Complete startup sequence first
 		csm.Fire(ComponentTriggerStart)
-		fake.EmitEvent(ComponentStarting)
-		fake.EmitEvent(ComponentStarted)
-		fake.EmitEvent(ComponentReady)
+		fake.EmitEvent(adapters.ComponentStarting)
+		fake.EmitEvent(adapters.ComponentStarted)
+		fake.EmitEvent(adapters.ComponentReady)
 		waitForComponentState(csm, ComponentStateRunning, 100*time.Millisecond)
 
 		// Complete stop sequence: Running → Stopping → Stopped
 		if err := csm.Fire(ComponentTriggerStop); err != nil {
 			t.Fatalf("Failed to request stop: %v", err)
 		}
-		fake.EmitEvent(ComponentStopping) // Component beginning shutdown
-		fake.EmitEvent(ComponentStopped)  // Component fully stopped
+		fake.EmitEvent(adapters.ComponentStopping) // Component beginning shutdown
+		fake.EmitEvent(adapters.ComponentStopped)  // Component fully stopped
 
 		if !waitForComponentState(csm, ComponentStateStopped, 100*time.Millisecond) {
 			t.Errorf("Expected Stopped after stop sequence, got %s", csm.MustState())
@@ -136,13 +142,13 @@ func TestComponentStateMachine_TLASpecSequences(t *testing.T) {
 		fake := NewFakeComponent()
 		defer fake.Close()
 
-		csm := NewComponentStateWithComponent(fake)
+		csm := NewComponentState(fake)
 
 		// Start component first
 		csm.Fire(ComponentTriggerStart)
-		fake.EmitEvent(ComponentStarting)
-		fake.EmitEvent(ComponentStarted)
-		fake.EmitEvent(ComponentReady)
+		fake.EmitEvent(adapters.ComponentStarting)
+		fake.EmitEvent(adapters.ComponentStarted)
+		fake.EmitEvent(adapters.ComponentReady)
 		waitForComponentState(csm, ComponentStateRunning, 100*time.Millisecond)
 
 		// Checkpoint sequence: Running → Checkpointing → Running (no restart)
@@ -160,13 +166,13 @@ func TestComponentStateMachine_TLASpecSequences(t *testing.T) {
 		fake := NewFakeComponent()
 		defer fake.Close()
 
-		csm := NewComponentStateWithComponent(fake)
+		csm := NewComponentState(fake)
 
 		// Start component first
 		csm.Fire(ComponentTriggerStart)
-		fake.EmitEvent(ComponentStarting)
-		fake.EmitEvent(ComponentStarted)
-		fake.EmitEvent(ComponentReady)
+		fake.EmitEvent(adapters.ComponentStarting)
+		fake.EmitEvent(adapters.ComponentStarted)
+		fake.EmitEvent(adapters.ComponentReady)
 		waitForComponentState(csm, ComponentStateRunning, 100*time.Millisecond)
 
 		// Restore sequence: Running → Restoring → Starting → Running (with restart)
@@ -180,9 +186,9 @@ func TestComponentStateMachine_TLASpecSequences(t *testing.T) {
 		}
 
 		// Complete startup again after restore
-		fake.EmitEvent(ComponentStarting)
-		fake.EmitEvent(ComponentStarted)
-		fake.EmitEvent(ComponentReady)
+		fake.EmitEvent(adapters.ComponentStarting)
+		fake.EmitEvent(adapters.ComponentStarted)
+		fake.EmitEvent(adapters.ComponentReady)
 
 		if !waitForComponentState(csm, ComponentStateRunning, 100*time.Millisecond) {
 			t.Errorf("Expected Running after restore restart sequence, got %s", csm.MustState())
@@ -193,21 +199,21 @@ func TestComponentStateMachine_TLASpecSequences(t *testing.T) {
 		fake := NewFakeComponent()
 		defer fake.Close()
 
-		csm := NewComponentStateWithComponent(fake)
+		csm := NewComponentState(fake)
 
 		// Start component first
 		csm.Fire(ComponentTriggerStart)
-		fake.EmitEvent(ComponentStarting)
-		fake.EmitEvent(ComponentStarted)
-		fake.EmitEvent(ComponentReady)
+		fake.EmitEvent(adapters.ComponentStarting)
+		fake.EmitEvent(adapters.ComponentStarted)
+		fake.EmitEvent(adapters.ComponentReady)
 		waitForComponentState(csm, ComponentStateRunning, 100*time.Millisecond)
 
 		// Shutdown sequence: Running → ShuttingDown → Shutdown (permanent)
 		if err := csm.Fire(ComponentTriggerShutdown); err != nil {
 			t.Fatalf("Failed to request shutdown: %v", err)
 		}
-		fake.EmitEvent(ComponentStopping) // Component beginning shutdown
-		fake.EmitEvent(ComponentStopped)  // Component fully stopped
+		fake.EmitEvent(adapters.ComponentStopping) // Component beginning shutdown
+		fake.EmitEvent(adapters.ComponentStopped)  // Component fully stopped
 
 		if !waitForComponentState(csm, ComponentStateShutdown, 100*time.Millisecond) {
 			t.Errorf("Expected Shutdown after shutdown sequence, got %s", csm.MustState())
@@ -220,14 +226,14 @@ func TestComponentStateMachine_EventMapping(t *testing.T) {
 	tests := []struct {
 		name       string
 		startState ComponentStateType
-		event      ComponentEventType
+		event      adapters.ComponentEventType
 		expectEnd  ComponentStateType
 	}{
-		{"Started_Event", ComponentStateStarting, ComponentStarted, ComponentStateRunning},
-		{"Ready_Event", ComponentStateRunning, ComponentReady, ComponentStateRunning}, // No state change
-		{"Failed_Event", ComponentStateRunning, ComponentFailed, ComponentStateError},
-		{"Stopped_From_Stopping", ComponentStateStopping, ComponentStopped, ComponentStateStopped},
-		{"Stopped_From_ShuttingDown", ComponentStateShuttingDown, ComponentStopped, ComponentStateShutdown},
+		{"Started_Event", ComponentStateStarting, adapters.ComponentStarted, ComponentStateRunning},
+		{"Ready_Event", ComponentStateRunning, adapters.ComponentReady, ComponentStateRunning}, // No state change
+		{"Failed_Event", ComponentStateRunning, adapters.ComponentFailed, ComponentStateError},
+		{"Stopped_From_Stopping", ComponentStateStopping, adapters.ComponentStopped, ComponentStateStopped},
+		{"Stopped_From_ShuttingDown", ComponentStateShuttingDown, adapters.ComponentStopped, ComponentStateShutdown},
 	}
 
 	for _, tt := range tests {
@@ -235,7 +241,7 @@ func TestComponentStateMachine_EventMapping(t *testing.T) {
 			fake := NewFakeComponent()
 			defer fake.Close()
 
-			csm := NewComponentStateWithComponent(fake)
+			csm := NewComponentState(fake)
 
 			// Get the component into the required start state
 			switch tt.startState {
@@ -243,14 +249,14 @@ func TestComponentStateMachine_EventMapping(t *testing.T) {
 				csm.Fire(ComponentTriggerStart)
 			case ComponentStateRunning:
 				csm.Fire(ComponentTriggerStart)
-				fake.EmitEvent(ComponentStarted)
+				fake.EmitEvent(adapters.ComponentStarted)
 			case ComponentStateStopping:
 				csm.Fire(ComponentTriggerStart)
-				fake.EmitEvent(ComponentStarted)
+				fake.EmitEvent(adapters.ComponentStarted)
 				csm.Fire(ComponentTriggerStop)
 			case ComponentStateShuttingDown:
 				csm.Fire(ComponentTriggerStart)
-				fake.EmitEvent(ComponentStarted)
+				fake.EmitEvent(adapters.ComponentStarted)
 				csm.Fire(ComponentTriggerShutdown)
 			}
 
@@ -281,23 +287,23 @@ func TestComponentStateMachine_FinalStates(t *testing.T) {
 			fake := NewFakeComponent()
 			defer fake.Close()
 
-			csm := NewComponentStateWithComponent(fake)
+			csm := NewComponentState(fake)
 
 			// Get the state machine into the final state first
 			switch state {
 			case ComponentStateStopped:
 				csm.Fire(ComponentTriggerStart)
-				fake.EmitEvent(ComponentStarted)
+				fake.EmitEvent(adapters.ComponentStarted)
 				csm.Fire(ComponentTriggerStop)
-				fake.EmitEvent(ComponentStopped)
+				fake.EmitEvent(adapters.ComponentStopped)
 			case ComponentStateShutdown:
 				csm.Fire(ComponentTriggerStart)
-				fake.EmitEvent(ComponentStarted)
+				fake.EmitEvent(adapters.ComponentStarted)
 				csm.Fire(ComponentTriggerShutdown)
-				fake.EmitEvent(ComponentStopped)
+				fake.EmitEvent(adapters.ComponentStopped)
 			case ComponentStateError:
 				csm.Fire(ComponentTriggerStart)
-				fake.EmitEvent(ComponentFailed)
+				fake.EmitEvent(adapters.ComponentFailed)
 			}
 
 			time.Sleep(10 * time.Millisecond) // Allow transitions to complete
@@ -325,13 +331,13 @@ func TestComponentStateMachine_OperationFailures(t *testing.T) {
 		// Configure checkpoint to fail
 		fake.SetCheckpointError(context.Canceled)
 
-		csm := NewComponentStateWithComponent(fake)
+		csm := NewComponentState(fake)
 
 		// Start component first
 		csm.Fire(ComponentTriggerStart)
-		fake.EmitEvent(ComponentStarting)
-		fake.EmitEvent(ComponentStarted)
-		fake.EmitEvent(ComponentReady)
+		fake.EmitEvent(adapters.ComponentStarting)
+		fake.EmitEvent(adapters.ComponentStarted)
+		fake.EmitEvent(adapters.ComponentReady)
 		waitForComponentState(csm, ComponentStateRunning, 100*time.Millisecond)
 
 		// Request checkpoint (should fail)
@@ -352,13 +358,13 @@ func TestComponentStateMachine_OperationFailures(t *testing.T) {
 		// Configure restore to fail
 		fake.SetRestoreError(context.Canceled)
 
-		csm := NewComponentStateWithComponent(fake)
+		csm := NewComponentState(fake)
 
 		// Start component first
 		csm.Fire(ComponentTriggerStart)
-		fake.EmitEvent(ComponentStarting)
-		fake.EmitEvent(ComponentStarted)
-		fake.EmitEvent(ComponentReady)
+		fake.EmitEvent(adapters.ComponentStarting)
+		fake.EmitEvent(adapters.ComponentStarted)
+		fake.EmitEvent(adapters.ComponentReady)
 		waitForComponentState(csm, ComponentStateRunning, 100*time.Millisecond)
 
 		// Request restore (should fail)
@@ -376,7 +382,7 @@ func TestComponentStateMachine_OperationFailures(t *testing.T) {
 // NewTestableComponentStateMachine creates a testable component state machine for system state testing
 func NewTestableComponentStateMachine() (*ComponentState, *FakeComponent) {
 	fake := NewFakeComponent()
-	csm := NewComponentStateWithComponent(fake)
+	csm := NewComponentState(fake)
 	return csm, fake
 }
 
@@ -389,8 +395,8 @@ func NewTestableComponentSetStateMachine() (*ComponentSetState, map[string]*Fake
 	fakeComponents["db"] = NewFakeComponent()
 	fakeComponents["fs"] = NewFakeComponent()
 
-	components["db"] = NewComponentStateWithComponent(fakeComponents["db"])
-	components["fs"] = NewComponentStateWithComponent(fakeComponents["fs"])
+	components["db"] = NewComponentState(fakeComponents["db"])
+	components["fs"] = NewComponentState(fakeComponents["fs"])
 
 	css := NewComponentSetState(components)
 	return css, fakeComponents

@@ -1,8 +1,9 @@
-package lib
+package state
 
 import (
 	"context"
 	"fmt"
+	"sprite-env/lib/adapters"
 	"sync"
 	"testing"
 	"time"
@@ -22,21 +23,21 @@ func waitForComponentSetState(css *ComponentSetState, expected ComponentSetState
 
 // completeComponentStartup completes the full startup sequence for a component
 func completeComponentStartup(fake *FakeComponent) {
-	fake.EmitEvent(ComponentStarting)
-	fake.EmitEvent(ComponentStarted)
-	fake.EmitEvent(ComponentReady)
+	fake.EmitEvent(adapters.ComponentStarting)
+	fake.EmitEvent(adapters.ComponentStarted)
+	fake.EmitEvent(adapters.ComponentReady)
 }
 
 // completeComponentStartupFromStarting completes startup for a component already in Starting state
 func completeComponentStartupFromStarting(fake *FakeComponent) {
-	fake.EmitEvent(ComponentStarted)
-	fake.EmitEvent(ComponentReady)
+	fake.EmitEvent(adapters.ComponentStarted)
+	fake.EmitEvent(adapters.ComponentReady)
 }
 
 // completeComponentShutdown completes the shutdown sequence for a component
 func completeComponentShutdown(fake *FakeComponent) {
-	fake.EmitEvent(ComponentStopping)
-	fake.EmitEvent(ComponentStopped)
+	fake.EmitEvent(adapters.ComponentStopping)
+	fake.EmitEvent(adapters.ComponentStopped)
 }
 
 // Test component set state derivation based on individual component states
@@ -123,7 +124,7 @@ func TestComponentSetStateMachine_StateDerivation(t *testing.T) {
 
 			for name := range tt.componentStates {
 				fakeComponents[name] = NewFakeComponent()
-				components[name] = NewComponentStateWithComponent(fakeComponents[name])
+				components[name] = NewComponentState(fakeComponents[name])
 			}
 
 			css := NewComponentSetState(components)
@@ -303,7 +304,7 @@ func TestComponentSetStateMachine_ComponentStateHandling(t *testing.T) {
 		waitForComponentSetState(css, ComponentSetStateRunning, 200*time.Millisecond)
 
 		// Emit error from one component
-		fakes["db"].EmitEvent(ComponentFailed)
+		fakes["db"].EmitEvent(adapters.ComponentFailed)
 
 		// Component set should transition to Error
 		if !waitForComponentSetState(css, ComponentSetStateError, 200*time.Millisecond) {
@@ -378,7 +379,7 @@ func TestComponentSetStateMachine_FinalStates(t *testing.T) {
 				waitForComponentSetState(css, ComponentSetStateRunning, 200*time.Millisecond)
 
 				// Trigger error
-				fakes["db"].EmitEvent(ComponentFailed)
+				fakes["db"].EmitEvent(adapters.ComponentFailed)
 				waitForComponentSetState(css, ComponentSetStateError, 200*time.Millisecond)
 			}
 
@@ -599,7 +600,7 @@ func TestComponentSetStateMachine_HighScaleConcurrency(t *testing.T) {
 	for i := 0; i < numComponents; i++ {
 		name := fmt.Sprintf("component_%d", i)
 		fakeComponents[name] = NewFakeComponent()
-		components[name] = NewComponentStateWithComponent(fakeComponents[name])
+		components[name] = NewComponentState(fakeComponents[name])
 	}
 
 	css := NewComponentSetState(components)
@@ -641,11 +642,11 @@ func TestComponentSetStateMachine_HighScaleConcurrency(t *testing.T) {
 			time.Sleep(delay)
 
 			// Complete startup sequence
-			f.EmitEvent(ComponentStarting)
+			f.EmitEvent(adapters.ComponentStarting)
 			time.Sleep(2 * time.Millisecond)
-			f.EmitEvent(ComponentStarted)
+			f.EmitEvent(adapters.ComponentStarted)
 			time.Sleep(2 * time.Millisecond)
-			f.EmitEvent(ComponentReady)
+			f.EmitEvent(adapters.ComponentReady)
 		}(index, fake)
 		index++
 	}

@@ -1,4 +1,4 @@
-package lib
+package adapters
 
 import (
 	"context"
@@ -8,15 +8,29 @@ import (
 	"net/http"
 )
 
+// SystemStateMachine interface defines what the HTTP server needs from the system state machine
+type SystemStateMachine interface {
+	GetState() interface{}
+	GetErrorType() interface{}
+	Fire(trigger interface{}) error
+}
+
+// System state constants - these should match the constants in the state package
+const (
+	SystemStateRunning               = "Running"
+	SystemTriggerCheckpointRequested = "CheckpointRequested"
+	SystemTriggerRestoreRequested    = "RestoreRequested"
+)
+
 // HTTPServer provides monitoring endpoints for the system
 type HTTPServer struct {
 	server             *http.Server
-	systemStateMachine *SystemState
+	systemStateMachine SystemStateMachine
 	logger             *slog.Logger
 }
 
 // NewHTTPServer creates a new HTTP server for monitoring
-func NewHTTPServer(addr string, systemStateMachine *SystemState, logger *slog.Logger) *HTTPServer {
+func NewHTTPServer(addr string, systemStateMachine SystemStateMachine, logger *slog.Logger) *HTTPServer {
 	httpServer := &HTTPServer{
 		systemStateMachine: systemStateMachine,
 		logger:             logger,

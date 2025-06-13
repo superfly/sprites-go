@@ -1,14 +1,16 @@
-package lib
+package state
 
 import (
 	"context"
+
+	"sprite-env/lib/adapters"
 
 	"github.com/qmuntal/stateless"
 )
 
 // ComponentInterface defines what we need from a component
 type ComponentInterface interface {
-	Events() <-chan ComponentEventType
+	Events() <-chan adapters.ComponentEventType
 	Start(ctx context.Context) error
 	Stop()
 	Checkpoint(ctx context.Context) error
@@ -60,16 +62,11 @@ type ComponentState struct {
 	component ComponentInterface
 	ctx       context.Context
 	cancel    context.CancelFunc
-	eventCh   <-chan ComponentEventType
+	eventCh   <-chan adapters.ComponentEventType
 }
 
-// NewComponentState creates a new component state machine with a real component
-func NewComponentState(config ComponentConfig) *ComponentState {
-	return NewComponentStateWithComponent(NewComponent(config))
-}
-
-// NewComponentStateWithComponent creates a new component state machine with a custom component implementation
-func NewComponentStateWithComponent(component ComponentInterface) *ComponentState {
+// NewComponentState creates a new component state machine with a generic component
+func NewComponentState(component ComponentInterface) *ComponentState {
 	csm := &ComponentState{
 		component: component,
 	}
@@ -189,7 +186,7 @@ func (csm *ComponentState) configureStateMachine() {
 }
 
 // watchEvents watches for events from the component and updates state accordingly
-func (csm *ComponentState) watchEvents(ctx context.Context, eventCh <-chan ComponentEventType) {
+func (csm *ComponentState) watchEvents(ctx context.Context, eventCh <-chan adapters.ComponentEventType) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -204,24 +201,24 @@ func (csm *ComponentState) watchEvents(ctx context.Context, eventCh <-chan Compo
 }
 
 // handleEvent maps component events to state machine triggers
-func (csm *ComponentState) handleEvent(event ComponentEventType) {
+func (csm *ComponentState) handleEvent(event adapters.ComponentEventType) {
 	var trigger ComponentTrigger
 
 	switch event {
-	case ComponentStarting:
+	case adapters.ComponentStarting:
 		// Component is starting, no trigger needed (already in Starting state)
 		return
-	case ComponentStarted:
+	case adapters.ComponentStarted:
 		trigger = ComponentTriggerStarted
-	case ComponentChecking:
+	case adapters.ComponentChecking:
 		// Component is checking readiness, no state change needed
 		return
-	case ComponentReady:
+	case adapters.ComponentReady:
 		trigger = ComponentTriggerReady
-	case ComponentStopping:
+	case adapters.ComponentStopping:
 		// Component is stopping, no trigger needed
 		return
-	case ComponentStopped:
+	case adapters.ComponentStopped:
 		// Determine the appropriate trigger based on current state
 		currentState := csm.MustState()
 		if currentState == ComponentStateShuttingDown {
@@ -229,7 +226,7 @@ func (csm *ComponentState) handleEvent(event ComponentEventType) {
 		} else {
 			trigger = ComponentTriggerStopped // Will go to Stopped state
 		}
-	case ComponentFailed:
+	case adapters.ComponentFailed:
 		trigger = ComponentTriggerFailed
 	default:
 		return // Unknown event

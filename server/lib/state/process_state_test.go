@@ -1,8 +1,9 @@
-package lib
+package state
 
 import (
 	"context"
 	"os"
+	"sprite-env/lib/adapters"
 	"syscall"
 	"testing"
 	"time"
@@ -12,13 +13,15 @@ import (
 
 // FakeProcess implements ProcessInterface for testing
 type FakeProcess struct {
-	events chan EventType
+	events chan adapters.EventType
 	closed bool
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // TrackingFakeProcess implements ProcessInterface and tracks when methods are called
 type TrackingFakeProcess struct {
-	events      chan EventType
+	events      chan adapters.EventType
 	closed      bool
 	startCalled bool
 	stopCalled  bool
@@ -28,13 +31,13 @@ type TrackingFakeProcess struct {
 // NewTrackingFakeProcess creates a new tracking fake process for testing
 func NewTrackingFakeProcess() *TrackingFakeProcess {
 	return &TrackingFakeProcess{
-		events:      make(chan EventType, 5), // Small buffer to match real usage
+		events:      make(chan adapters.EventType, 5), // Small buffer to match real usage
 		signalCalls: make([]os.Signal, 0),
 	}
 }
 
 // Start implements ProcessInterface and tracks that it was called
-func (f *TrackingFakeProcess) Start(ctx context.Context) <-chan EventType {
+func (f *TrackingFakeProcess) Start(ctx context.Context) <-chan adapters.EventType {
 	f.startCalled = true
 	return f.events
 }
@@ -50,7 +53,7 @@ func (f *TrackingFakeProcess) Signal(sig os.Signal) {
 }
 
 // EmitEvent sends an event for testing (not part of ProcessInterface)
-func (f *TrackingFakeProcess) EmitEvent(event EventType) {
+func (f *TrackingFakeProcess) EmitEvent(event adapters.EventType) {
 	if !f.closed {
 		f.events <- event
 	}
@@ -81,13 +84,16 @@ func (f *TrackingFakeProcess) GetSignalCalls() []os.Signal {
 
 // NewFakeProcess creates a new fake process for testing
 func NewFakeProcess() *FakeProcess {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &FakeProcess{
-		events: make(chan EventType, 5), // Small buffer to match real usage
+		events: make(chan adapters.EventType),
+		ctx:    ctx,
+		cancel: cancel,
 	}
 }
 
 // Start implements ProcessInterface - returns the event channel
-func (f *FakeProcess) Start(ctx context.Context) <-chan EventType {
+func (f *FakeProcess) Start(ctx context.Context) <-chan adapters.EventType {
 	return f.events
 }
 
@@ -102,7 +108,7 @@ func (f *FakeProcess) Signal(sig os.Signal) {
 }
 
 // EmitEvent sends an event for testing (not part of ProcessInterface)
-func (f *FakeProcess) EmitEvent(event EventType) {
+func (f *FakeProcess) EmitEvent(event adapters.EventType) {
 	if !f.closed {
 		f.events <- event
 	}
@@ -143,8 +149,8 @@ func TestProcessStateMachine_TLASpecSequences(t *testing.T) {
 		}
 
 		// Complete startup event sequence: Starting → Running
-		fake.EmitEvent(EventStarting) // Optional: process beginning startup
-		fake.EmitEvent(EventStarted)  // Process fully started
+		fake.EmitEvent(adapters.EventStarting) // Optional: process beginning startup
+		fake.EmitEvent(adapters.EventStarted)  // Process fully started
 
 		if !waitForState(psm, ProcessStateRunning, 100*time.Millisecond) {
 			t.Errorf("Expected Running after startup sequence, got %s", psm.MustState())
@@ -162,16 +168,16 @@ func TestProcessStateMachine_TLASpecSequences(t *testing.T) {
 		if err := psm.Fire(TriggerStart, ctx); err != nil {
 			t.Fatalf("Failed to start process: %v", err)
 		}
-		fake.EmitEvent(EventStarting) // Process beginning startup
-		fake.EmitEvent(EventStarted)  // Process fully started
+		fake.EmitEvent(adapters.EventStarting) // Process beginning startup
+		fake.EmitEvent(adapters.EventStarted)  // Process fully started
 		waitForState(psm, ProcessStateRunning, 100*time.Millisecond)
 
 		// Complete stop sequence: Running → Stopping → Stopped
 		if err := psm.Fire(TriggerStop); err != nil {
 			t.Fatalf("Failed to stop process: %v", err)
 		}
-		fake.EmitEvent(EventStopping) // Process beginning shutdown
-		fake.EmitEvent(EventStopped)  // Process fully stopped
+		fake.EmitEvent(adapters.EventStopping) // Process beginning shutdown
+		fake.EmitEvent(adapters.EventStopped)  // Process fully stopped
 
 		if !waitForState(psm, ProcessStateStopped, 100*time.Millisecond) {
 			t.Errorf("Expected Stopped after stop sequence, got %s", psm.MustState())
@@ -187,12 +193,12 @@ func TestProcessStateMachine_TLASpecSequences(t *testing.T) {
 
 		// Complete startup: Initializing → Starting → Running
 		psm.Fire(TriggerStart, ctx)
-		fake.EmitEvent(EventStarting)
-		fake.EmitEvent(EventStarted)
+		fake.EmitEvent(adapters.EventStarting)
+		fake.EmitEvent(adapters.EventStarted)
 		waitForState(psm, ProcessStateRunning, 100*time.Millisecond)
 
 		// Crash: Running → Crashed
-		fake.EmitEvent(EventExited)
+		fake.EmitEvent(adapters.EventExited)
 		waitForState(psm, ProcessStateCrashed, 100*time.Millisecond)
 
 		// Complete restart: Crashed → Starting → Running
@@ -201,8 +207,8 @@ func TestProcessStateMachine_TLASpecSequences(t *testing.T) {
 		}
 
 		// Process events after restart trigger - no EventRestarting needed since we fired TriggerRestart directly
-		fake.EmitEvent(EventStarting) // Process beginning startup again
-		fake.EmitEvent(EventStarted)  // Process fully running again
+		fake.EmitEvent(adapters.EventStarting) // Process beginning startup again
+		fake.EmitEvent(adapters.EventStarted)  // Process fully running again
 
 		if !waitForState(psm, ProcessStateRunning, 100*time.Millisecond) {
 			t.Errorf("Expected Running after restart sequence, got %s", psm.MustState())
@@ -220,8 +226,8 @@ func TestProcessStateMachine_TLASpecSequences(t *testing.T) {
 		if err := psm.Fire(TriggerStart, ctx); err != nil {
 			t.Fatalf("Failed to start process: %v", err)
 		}
-		fake.EmitEvent(EventStarting) // Process beginning startup
-		fake.EmitEvent(EventStarted)  // Process fully started
+		fake.EmitEvent(adapters.EventStarting) // Process beginning startup
+		fake.EmitEvent(adapters.EventStarted)  // Process fully started
 		waitForState(psm, ProcessStateRunning, 100*time.Millisecond)
 
 		// Complete kill sequence: Running → Signaling → Killed
@@ -229,8 +235,8 @@ func TestProcessStateMachine_TLASpecSequences(t *testing.T) {
 			t.Fatalf("Failed to signal process: %v", err)
 		}
 		// Process gets SIGKILL and dies
-		psm.lastSignal = syscall.SIGKILL // Set the signal type for proper mapping
-		fake.EmitEvent(EventSignaled)    // Process received SIGKILL and died
+		psm.lastSignal = syscall.SIGKILL       // Set the signal type for proper mapping
+		fake.EmitEvent(adapters.EventSignaled) // Process received SIGKILL and died
 
 		if !waitForState(psm, ProcessStateKilled, 100*time.Millisecond) {
 			t.Errorf("Expected Killed after signal sequence, got %s", psm.MustState())
@@ -242,13 +248,13 @@ func TestProcessStateMachine_TLASpecSequences(t *testing.T) {
 func TestProcessStateMachine_EventMapping(t *testing.T) {
 	tests := []struct {
 		startState ProcessStateType
-		event      EventType
+		event      adapters.EventType
 		expectEnd  ProcessStateType
 	}{
-		{ProcessStateStarting, EventStarted, ProcessStateRunning},
-		{ProcessStateRunning, EventExited, ProcessStateCrashed},
-		{ProcessStateRunning, EventFailed, ProcessStateError},
-		{ProcessStateStopping, EventStopped, ProcessStateStopped},
+		{ProcessStateStarting, adapters.EventStarted, ProcessStateRunning},
+		{ProcessStateRunning, adapters.EventExited, ProcessStateCrashed},
+		{ProcessStateRunning, adapters.EventFailed, ProcessStateError},
+		{ProcessStateStopping, adapters.EventStopped, ProcessStateStopped},
 	}
 
 	for _, tt := range tests {
@@ -262,7 +268,7 @@ func TestProcessStateMachine_EventMapping(t *testing.T) {
 			psm.configureStateMachine()
 
 			// Special case for SIGKILL mapping
-			if tt.event == EventSignaled {
+			if tt.event == adapters.EventSignaled {
 				psm.lastSignal = syscall.SIGKILL
 			}
 

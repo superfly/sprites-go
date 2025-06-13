@@ -12,10 +12,39 @@ import (
 	"syscall"
 	"time"
 
-	"sprite-env/lib"
+	"sprite-env/lib/adapters"
+	"sprite-env/lib/state"
 
 	"github.com/qmuntal/stateless"
 )
+
+// SystemStateAdapter adapts state.SystemState to match adapters.SystemStateMachine interface
+type SystemStateAdapter struct {
+	*state.SystemState
+}
+
+// Fire adapts the stateless.Fire method to match the expected interface
+func (adapter *SystemStateAdapter) Fire(trigger interface{}) error {
+	// Convert interface{} trigger to the appropriate SystemTrigger type
+	if systemTrigger, ok := trigger.(state.SystemTrigger); ok {
+		return adapter.SystemState.Fire(systemTrigger)
+	}
+	// Handle string triggers from HTTP endpoints
+	if triggerStr, ok := trigger.(string); ok {
+		return adapter.SystemState.Fire(state.SystemTrigger(triggerStr))
+	}
+	return fmt.Errorf("unsupported trigger type: %T", trigger)
+}
+
+// GetState adapts the GetState method to return interface{}
+func (adapter *SystemStateAdapter) GetState() interface{} {
+	return adapter.SystemState.GetState()
+}
+
+// GetErrorType adapts the GetErrorType method to return interface{}
+func (adapter *SystemStateAdapter) GetErrorType() interface{} {
+	return adapter.SystemState.GetErrorType()
+}
 
 // TLAState holds the complete system state for tracing
 type TLAState struct {
@@ -27,10 +56,10 @@ type TLAState struct {
 
 // Application holds the main application state
 type Application struct {
-	systemStateMachine       *lib.SystemState
-	componentSetStateMachine *lib.ComponentSetState
-	processStateMachine      *lib.ProcessState
-	httpServer               *lib.HTTPServer
+	systemStateMachine       *state.SystemState
+	componentSetStateMachine *state.ComponentSetState
+	processStateMachine      *state.ProcessState
+	httpServer               *adapters.HTTPServer
 	logger                   *slog.Logger
 	ctx                      context.Context
 	cancel                   context.CancelFunc
@@ -106,26 +135,53 @@ func NewApplication(config ApplicationConfig) *Application {
 	}
 
 	// Create component state machines dynamically from configuration
-	components := make(map[string]*lib.ComponentState)
+	components := make(map[string]*state.ComponentState)
 
 	for componentName, componentScripts := range config.Components {
-		componentConfig := lib.ComponentConfig{
+		// Create typed event handlers for component state integration
+		eventHandlers := adapters.ComponentEventHandlers{
+			Started: func() {
+				if config.Debug {
+					logger.Info("Component started", "component", componentName)
+				}
+			},
+			Ready: func() {
+				if config.Debug {
+					logger.Info("Component ready", "component", componentName)
+				}
+			},
+			Failed: func(err error) {
+				logger.Error("Component failed", "component", componentName, "error", err)
+			},
+			Stopped: func() {
+				if config.Debug {
+					logger.Info("Component stopped", "component", componentName)
+				}
+			},
+		}
+
+		// Create concrete CmdComponent with configuration and handlers
+		componentConfig := adapters.CmdComponentConfig{
 			StartCommand:      componentScripts.StartCommand,
 			ReadyCommand:      componentScripts.ReadyCommand,
 			CheckpointCommand: componentScripts.CheckpointCommand,
 			RestoreCommand:    componentScripts.RestoreCommand,
+			EventHandlers:     eventHandlers,
 		}
-		componentStateMachine := lib.NewComponentState(componentConfig)
+		component := adapters.NewCmdComponent(componentConfig)
+
+		// Pass the generic Component interface to ComponentState
+		componentStateMachine := state.NewComponentState(component)
 		components[componentName] = componentStateMachine
 
 		if config.Debug {
 			logger.Info("Created component state machine", "component", componentName)
 		}
 	}
-	componentSetStateMachine := lib.NewComponentSetState(components)
+	componentSetStateMachine := state.NewComponentSetState(components)
 
 	// Create process state machine for the supervised process
-	processConfig := lib.ProcessConfig{
+	processConfig := adapters.ProcessConfig{
 		Command:                 config.ProcessCommand,
 		MaxRetries:              config.ProcessRestartMaxRetries,
 		RestartDelay:            time.Second, // Start with 1 second delay
@@ -139,13 +195,16 @@ func NewApplication(config ApplicationConfig) *Application {
 		logger.Info("Process environment configuration not yet supported", "env", config.ProcessEnvironment)
 	}
 
-	processStateMachine := lib.NewProcessState(processConfig)
+	processStateMachine := state.NewProcessState(processConfig)
 
 	// Create system state machine
-	systemStateMachine := lib.NewSystemState(componentSetStateMachine, processStateMachine)
+	systemStateMachine := state.NewSystemState(componentSetStateMachine, processStateMachine)
+
+	// Create adapter for HTTP server interface compatibility
+	systemStateAdapter := &SystemStateAdapter{SystemState: systemStateMachine}
 
 	// Create HTTP server for monitoring
-	httpServer := lib.NewHTTPServer(":8080", systemStateMachine, logger)
+	httpServer := adapters.NewHTTPServer(":8080", systemStateAdapter, logger)
 
 	app := &Application{
 		systemStateMachine:       systemStateMachine,
@@ -190,7 +249,7 @@ func (app *Application) Stop(ctx context.Context) error {
 	app.logger.Info("Stopping sprite-env application")
 
 	// Request system shutdown using the trigger-based API
-	if err := app.systemStateMachine.Fire(lib.SystemTriggerShutdownRequested); err != nil {
+	if err := app.systemStateMachine.Fire(state.SystemTriggerShutdownRequested); err != nil {
 		app.logger.Error("Failed to request system shutdown", "error", err)
 		// Continue with other cleanup
 	}

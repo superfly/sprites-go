@@ -1,17 +1,18 @@
-package lib
+package state
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"syscall"
+
+	"sprite-env/lib/adapters"
 
 	"github.com/qmuntal/stateless"
 )
 
 // ProcessInterface defines what we need from a process
 type ProcessInterface interface {
-	Start(ctx context.Context) <-chan EventType
+	Start(ctx context.Context) <-chan adapters.EventType
 	Stop()
 	Signal(sig os.Signal)
 }
@@ -62,12 +63,12 @@ type ProcessState struct {
 	lastSignal os.Signal
 	ctx        context.Context
 	cancel     context.CancelFunc
-	eventCh    <-chan EventType
+	eventCh    <-chan adapters.EventType
 }
 
 // NewProcessState creates a new process state machine with a real process
-func NewProcessState(config ProcessConfig) *ProcessState {
-	return NewProcessStateWithProcess(NewProcess(config))
+func NewProcessState(config adapters.ProcessConfig) *ProcessState {
+	return NewProcessStateWithProcess(adapters.NewProcess(config))
 }
 
 // NewProcessStateWithProcess creates a new process state machine with a custom process implementation
@@ -168,7 +169,7 @@ func (psm *ProcessState) Fire(trigger ProcessTrigger, args ...any) error {
 }
 
 // watchEvents watches for events from the process and updates state accordingly
-func (psm *ProcessState) watchEvents(ctx context.Context, eventCh <-chan EventType) {
+func (psm *ProcessState) watchEvents(ctx context.Context, eventCh <-chan adapters.EventType) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -183,45 +184,41 @@ func (psm *ProcessState) watchEvents(ctx context.Context, eventCh <-chan EventTy
 }
 
 // handleEvent maps process events to state machine triggers
-func (psm *ProcessState) handleEvent(event EventType) {
+func (psm *ProcessState) handleEvent(event adapters.EventType) {
 	var trigger ProcessTrigger
 
 	switch event {
-	case EventStarting:
+	case adapters.EventStarting:
 		// Process is already starting, no trigger needed
 		return
-	case EventStarted:
+	case adapters.EventStarted:
 		trigger = TriggerStarted
-	case EventStopping:
+	case adapters.EventStopping:
 		// Process is already stopping, no trigger needed
 		return
-	case EventStopped:
+	case adapters.EventStopped:
 		trigger = TriggerStopped
-	case EventSignaled:
+	case adapters.EventSignaled:
 		// Determine if this is a terminating signal
 		if psm.lastSignal == syscall.SIGKILL {
-			trigger = TriggerKilled
+			trigger = TriggerFailed
 		} else {
-			// Non-terminating signal, no state change
+			// Non-terminating signal - process should handle it gracefully
 			return
 		}
-	case EventExited:
+	case adapters.EventExited:
 		// EventExited means the process will restart - this is a restartable crash
 		trigger = TriggerCrashed
-	case EventRestarting:
+	case adapters.EventRestarting:
 		trigger = TriggerRestart
-	case EventFailed:
+	case adapters.EventFailed:
 		// EventFailed means permanent failure
 		trigger = TriggerFailed
 	default:
 		return // Unknown event
 	}
 
-	if err := psm.StateMachine.Fire(trigger); err != nil {
-		// Log error but don't panic - state machine should be resilient
-		fmt.Printf("Error firing trigger %s: %v\n", trigger, err)
-		return
-	}
+	psm.Fire(trigger)
 }
 
 // AddStateChangeCallback adds a callback that will be called on process state changes
