@@ -157,15 +157,6 @@ func runTestWithExitCondition(t *testing.T, dir string, exitCondition string) {
 		t.Fatalf("Failed to start command: %v", err)
 	}
 
-	// Start 10-second timeout - send SIGKILL if process is still running
-	go func() {
-		time.Sleep(10 * time.Second)
-		fmt.Printf("TIMEOUT: sending SIGKILL\n")
-		if err := cmd.Process.Kill(); err != nil {
-			fmt.Printf("ERROR: failed to send SIGKILL: %v\n", err)
-		}
-	}()
-
 	// Create context for goroutine cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

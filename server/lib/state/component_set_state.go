@@ -13,11 +13,14 @@ type ComponentSetStateType string
 const (
 	// Transition states
 	ComponentSetStateInitializing  ComponentSetStateType = "Initializing"
+	ComponentSetStateStarting      ComponentSetStateType = "Starting"
+	ComponentSetStateStopping      ComponentSetStateType = "Stopping"
 	ComponentSetStateRestoring     ComponentSetStateType = "Restoring"
 	ComponentSetStateCheckpointing ComponentSetStateType = "Checkpointing"
 	ComponentSetStateShuttingDown  ComponentSetStateType = "ShuttingDown"
 
 	// Final states
+	ComponentSetStateStopped  ComponentSetStateType = "Stopped"
 	ComponentSetStateShutdown ComponentSetStateType = "Shutdown"
 
 	// Active states
@@ -32,6 +35,9 @@ type ComponentSetTrigger string
 
 const (
 	ComponentSetTriggerStart              ComponentSetTrigger = "Start"
+	ComponentSetTriggerStarting           ComponentSetTrigger = "Starting"
+	ComponentSetTriggerStop               ComponentSetTrigger = "Stop"
+	ComponentSetTriggerStopped            ComponentSetTrigger = "Stopped"
 	ComponentSetTriggerShutdown           ComponentSetTrigger = "Shutdown"
 	ComponentSetTriggerCheckpoint         ComponentSetTrigger = "Checkpoint"
 	ComponentSetTriggerRestore            ComponentSetTrigger = "Restore"
@@ -96,10 +102,10 @@ func (css *ComponentSetState) startComponents(ctx context.Context, args ...any) 
 	return nil
 }
 
-// shutdownComponents initiates shutdown for all individual components
-func (css *ComponentSetState) shutdownComponents(ctx context.Context, args ...any) error {
+// stopComponents initiates stop for all individual components
+func (css *ComponentSetState) stopComponents(ctx context.Context, args ...any) error {
 	for _, component := range css.components {
-		component.Fire(ComponentTriggerShutdown)
+		component.Fire(ComponentTriggerStop)
 	}
 	return nil
 }
@@ -120,12 +126,28 @@ func (css *ComponentSetState) restoreComponents(ctx context.Context, args ...any
 	return nil
 }
 
+// shutdownComponents initiates shutdown for all individual components
+func (css *ComponentSetState) shutdownComponents(ctx context.Context, args ...any) error {
+	for _, component := range css.components {
+		component.Fire(ComponentTriggerShutdown)
+	}
+	return nil
+}
+
 // configureStateMachine sets up the component set state machine transitions
 func (css *ComponentSetState) configureStateMachine() {
 	// From Initializing
 	css.Configure(ComponentSetStateInitializing).
 		Ignore(ComponentSetTriggerStart).
+		Permit(ComponentSetTriggerStarting, ComponentSetStateStarting).
 		Permit(ComponentSetTriggerAllReady, ComponentSetStateRunning).
+		Permit(ComponentSetTriggerShutdown, ComponentSetStateShuttingDown).
+		Permit(ComponentSetTriggerFailed, ComponentSetStateError)
+
+	// From Starting
+	css.Configure(ComponentSetStateStarting).
+		Permit(ComponentSetTriggerAllReady, ComponentSetStateRunning).
+		Permit(ComponentSetTriggerStop, ComponentSetStateStopping).
 		Permit(ComponentSetTriggerShutdown, ComponentSetStateShuttingDown).
 		Permit(ComponentSetTriggerFailed, ComponentSetStateError)
 
@@ -134,17 +156,29 @@ func (css *ComponentSetState) configureStateMachine() {
 		Ignore(ComponentSetTriggerStart).
 		Permit(ComponentSetTriggerCheckpoint, ComponentSetStateCheckpointing).
 		Permit(ComponentSetTriggerRestore, ComponentSetStateRestoring).
+		Permit(ComponentSetTriggerStop, ComponentSetStateStopping).
+		Permit(ComponentSetTriggerShutdown, ComponentSetStateShuttingDown).
+		Permit(ComponentSetTriggerFailed, ComponentSetStateError)
+
+	// From Stopping
+	css.Configure(ComponentSetStateStopping).
+		OnEntry(css.stopComponents).
+		Permit(ComponentSetTriggerStopped, ComponentSetStateStopped).
 		Permit(ComponentSetTriggerShutdown, ComponentSetStateShuttingDown).
 		Permit(ComponentSetTriggerFailed, ComponentSetStateError)
 
 	// From Checkpointing
 	css.Configure(ComponentSetStateCheckpointing).
 		Permit(ComponentSetTriggerCheckpointComplete, ComponentSetStateRunning).
+		Permit(ComponentSetTriggerStop, ComponentSetStateStopping).
+		Permit(ComponentSetTriggerShutdown, ComponentSetStateShuttingDown).
 		Permit(ComponentSetTriggerFailed, ComponentSetStateError)
 
 	// From Restoring
 	css.Configure(ComponentSetStateRestoring).
 		Permit(ComponentSetTriggerRestoreComplete, ComponentSetStateRunning).
+		Permit(ComponentSetTriggerStop, ComponentSetStateStopping).
+		Permit(ComponentSetTriggerShutdown, ComponentSetStateShuttingDown).
 		Permit(ComponentSetTriggerFailed, ComponentSetStateError)
 
 	// From ShuttingDown
@@ -158,6 +192,7 @@ func (css *ComponentSetState) configureStateMachine() {
 	css.Configure(ComponentSetStateRestoring).OnEntry(css.restoreComponents)
 
 	// Final states - explicitly configure even though they have no outgoing transitions
+	css.Configure(ComponentSetStateStopped).OnEntry(css.cleanup)
 	css.Configure(ComponentSetStateShutdown).OnEntry(css.cleanup)
 	css.Configure(ComponentSetStateError).OnEntry(css.cleanup)
 }
@@ -181,7 +216,7 @@ func (css *ComponentSetState) processStateChanges() {
 func (css *ComponentSetState) handleComponentStateChange(componentName string, newState ComponentStateType) {
 	// Only trigger evaluation for states that could affect ComponentSet transitions
 	switch newState {
-	case ComponentStateRunning, ComponentStateError, ComponentStateShutdown:
+	case ComponentStateRunning, ComponentStateError, ComponentStateStopped, ComponentStateShutdown:
 		// Send notification on unbuffered channel (blocks until processed)
 		css.stateChangeChan <- struct{}{}
 	}
@@ -194,6 +229,7 @@ func (css *ComponentSetState) evaluateStateTransition() {
 
 	// Count component states
 	runningCount := 0
+	stoppedCount := 0
 	shutdownCount := 0
 	errorCount := 0
 
@@ -202,6 +238,8 @@ func (css *ComponentSetState) evaluateStateTransition() {
 		switch state {
 		case ComponentStateRunning:
 			runningCount++
+		case ComponentStateStopped:
+			stoppedCount++
 		case ComponentStateShutdown:
 			shutdownCount++
 		case ComponentStateError:
@@ -222,6 +260,9 @@ func (css *ComponentSetState) evaluateStateTransition() {
 		if currentState == ComponentSetStateInitializing {
 			// Automatic transition: Initializing -> Running when all components ready
 			css.Fire(ComponentSetTriggerAllReady)
+		} else if currentState == ComponentSetStateStarting {
+			// Automatic transition: Starting -> Running when all components ready
+			css.Fire(ComponentSetTriggerAllReady)
 		} else if currentState == ComponentSetStateCheckpointing {
 			// Automatic transition: Checkpointing -> Running when all components ready
 			css.Fire(ComponentSetTriggerCheckpointComplete)
@@ -229,6 +270,9 @@ func (css *ComponentSetState) evaluateStateTransition() {
 			// Automatic transition: Restoring -> Running when all components ready
 			css.Fire(ComponentSetTriggerRestoreComplete)
 		}
+	} else if stoppedCount == totalComponents && currentState == ComponentSetStateStopping {
+		// Automatic transition: Stopping -> Stopped when all components stopped
+		css.Fire(ComponentSetTriggerStopped)
 	} else if shutdownCount == totalComponents && currentState == ComponentSetStateShuttingDown {
 		// Automatic transition: ShuttingDown -> Shutdown when all components shutdown
 		css.Fire(ComponentSetTriggerShutdownComplete)

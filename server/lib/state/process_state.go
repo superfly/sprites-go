@@ -27,13 +27,15 @@ const (
 	ProcessStateInitializing ProcessStateType = "Initializing"
 	ProcessStateStarting     ProcessStateType = "Starting"
 	ProcessStateStopping     ProcessStateType = "Stopping"
+	ProcessStateShuttingDown ProcessStateType = "ShuttingDown"
 	ProcessStateSignaling    ProcessStateType = "Signaling"
 
 	// Final states
-	ProcessStateStopped ProcessStateType = "Stopped"
-	ProcessStateExited  ProcessStateType = "Exited"
-	ProcessStateCrashed ProcessStateType = "Crashed"
-	ProcessStateKilled  ProcessStateType = "Killed"
+	ProcessStateStopped  ProcessStateType = "Stopped"
+	ProcessStateShutdown ProcessStateType = "Shutdown"
+	ProcessStateExited   ProcessStateType = "Exited"
+	ProcessStateCrashed  ProcessStateType = "Crashed"
+	ProcessStateKilled   ProcessStateType = "Killed"
 
 	// Active states
 	ProcessStateRunning ProcessStateType = "Running"
@@ -46,16 +48,17 @@ const (
 type ProcessTrigger string
 
 const (
-	TriggerStart   ProcessTrigger = "Start"
-	TriggerStarted ProcessTrigger = "Started"
-	TriggerStop    ProcessTrigger = "Stop"
-	TriggerStopped ProcessTrigger = "Stopped"
-	TriggerSignal  ProcessTrigger = "Signal"
-	TriggerExited  ProcessTrigger = "Exited"
-	TriggerCrashed ProcessTrigger = "Crashed"
-	TriggerKilled  ProcessTrigger = "Killed"
-	TriggerFailed  ProcessTrigger = "Failed"
-	TriggerRestart ProcessTrigger = "Restart"
+	TriggerStart    ProcessTrigger = "Start"
+	TriggerStarted  ProcessTrigger = "Started"
+	TriggerStop     ProcessTrigger = "Stop"
+	TriggerStopped  ProcessTrigger = "Stopped"
+	TriggerShutdown ProcessTrigger = "Shutdown"
+	TriggerSignal   ProcessTrigger = "Signal"
+	TriggerExited   ProcessTrigger = "Exited"
+	TriggerCrashed  ProcessTrigger = "Crashed"
+	TriggerKilled   ProcessTrigger = "Killed"
+	TriggerFailed   ProcessTrigger = "Failed"
+	TriggerRestart  ProcessTrigger = "Restart"
 )
 
 // ProcessState manages the state of a supervised process
@@ -133,11 +136,24 @@ func (psm *ProcessState) configureStateMachine() {
 	// From Stopping
 	psm.Configure(ProcessStateStopping).
 		Permit(TriggerStopped, ProcessStateStopped).
-		Permit(TriggerSignal, ProcessStateSignaling). // Allow escalating to kill during stop
+		Permit(TriggerShutdown, ProcessStateShuttingDown). // Allow escalating to shutdown
+		Permit(TriggerSignal, ProcessStateSignaling).      // Allow escalating to kill during stop
 		Permit(TriggerFailed, ProcessStateError).
 		PermitReentry(TriggerStop). // Allow multiple stop calls
 		OnEntry(func(ctx context.Context, args ...any) error {
 			// Actually stop the process when entering Stopping state
+			psm.process.Stop()
+			return nil
+		})
+
+	// From ShuttingDown
+	psm.Configure(ProcessStateShuttingDown).
+		Permit(TriggerStopped, ProcessStateShutdown).
+		Permit(TriggerSignal, ProcessStateSignaling). // Allow escalating to kill during shutdown
+		Permit(TriggerFailed, ProcessStateError).
+		PermitReentry(TriggerShutdown). // Allow multiple shutdown calls
+		OnEntry(func(ctx context.Context, args ...any) error {
+			// Actually shutdown the process when entering ShuttingDown state
 			psm.process.Stop()
 			return nil
 		})
@@ -162,16 +178,15 @@ func (psm *ProcessState) configureStateMachine() {
 	psm.Configure(ProcessStateCrashed).
 		Permit(TriggerRestart, ProcessStateStarting)
 
+	psm.Configure(ProcessStateShutdown).
+		Permit(TriggerRestart, ProcessStateStarting)
+
 	// Final states have no outgoing transitions and need cleanup:
-	// ProcessStateStopped, ProcessStateKilled, ProcessStateError are final
+	// ProcessStateStopped, ProcessStateShutdown, ProcessStateKilled, ProcessStateError are final
 	psm.Configure(ProcessStateStopped).OnEntry(psm.cleanup)
+	psm.Configure(ProcessStateShutdown).OnEntry(psm.cleanup)
 	psm.Configure(ProcessStateKilled).OnEntry(psm.cleanup)
 	psm.Configure(ProcessStateError).OnEntry(psm.cleanup)
-}
-
-// Fire wraps the stateless.StateMachine.Fire method
-func (psm *ProcessState) Fire(trigger ProcessTrigger, args ...any) error {
-	return psm.StateMachine.Fire(trigger, args...)
 }
 
 // setupEventHandlers sets up Observer pattern callbacks that trigger state transitions

@@ -84,6 +84,8 @@ type Process struct {
 	config          ProcessConfig
 	cmd             *exec.Cmd
 	signalCh        chan os.Signal
+	signalChClosed  bool         // Track if signal channel is closed
+	signalChMutex   sync.RWMutex // Protect access to signalChClosed flag
 	stdoutBroadcast *outputBroadcaster
 	stderrBroadcast *outputBroadcaster
 	handlers        ProcessEventHandlers
@@ -292,6 +294,16 @@ func (p *Process) Stop() {
 // was called, meaning it will not be restarted.
 func (p *Process) Signal(sig os.Signal) {
 	p.lastSignal = sig // Track the signal for handler callbacks
+
+	// Check if signal channel is closed to avoid panic
+	p.signalChMutex.RLock()
+	closed := p.signalChClosed
+	p.signalChMutex.RUnlock()
+
+	if closed {
+		return // Channel is closed, can't send signal
+	}
+
 	// Use a select to avoid blocking if the supervisor isn't running.
 	select {
 	case p.signalCh <- sig:
@@ -346,7 +358,13 @@ func (p *Process) broadcastFromPipe(pipe io.ReadCloser, broadcaster *outputBroad
 }
 
 func (p *Process) supervise(ctx context.Context) {
-	defer close(p.signalCh)
+	defer func() {
+		// Mark channel as closed and then close it
+		p.signalChMutex.Lock()
+		p.signalChClosed = true
+		p.signalChMutex.Unlock()
+		close(p.signalCh)
+	}()
 
 	// Create an independent context for event handlers to avoid premature cancellation
 	// This ensures event handlers can run even when the main context is canceled

@@ -11,13 +11,17 @@ type SystemStateType string
 
 const (
 	SystemStateInitializing  SystemStateType = "Initializing"
+	SystemStateStarting      SystemStateType = "Starting"
+	SystemStateStopping      SystemStateType = "Stopping"
 	SystemStateReady         SystemStateType = "Ready"
 	SystemStateRunning       SystemStateType = "Running"
 	SystemStateCheckpointing SystemStateType = "Checkpointing"
 	SystemStateRestoring     SystemStateType = "Restoring"
 	SystemStateShuttingDown  SystemStateType = "ShuttingDown"
+	SystemStateStopped       SystemStateType = "Stopped"
 	SystemStateShutdown      SystemStateType = "Shutdown"
 	SystemStateError         SystemStateType = "Error"
+	SystemStateErrorRecovery SystemStateType = "ErrorRecovery"
 )
 
 // SystemTrigger represents the triggers that cause system state transitions
@@ -25,13 +29,17 @@ type SystemTrigger string
 
 const (
 	SystemTriggerStart               SystemTrigger = "Start"
+	SystemTriggerStarting            SystemTrigger = "Starting"
 	SystemTriggerReady               SystemTrigger = "Ready"
 	SystemTriggerRun                 SystemTrigger = "Run"
+	SystemTriggerStop                SystemTrigger = "Stop"
+	SystemTriggerStopped             SystemTrigger = "Stopped"
 	SystemTriggerShutdownRequested   SystemTrigger = "ShutdownRequested"
 	SystemTriggerCheckpointRequested SystemTrigger = "CheckpointRequested"
 	SystemTriggerRestoreRequested    SystemTrigger = "RestoreRequested"
 	SystemTriggerCompleted           SystemTrigger = "Completed"
 	SystemTriggerFailed              SystemTrigger = "Failed"
+	SystemTriggerErrorRecovery       SystemTrigger = "ErrorRecovery"
 )
 
 // ErrorType represents the types of errors

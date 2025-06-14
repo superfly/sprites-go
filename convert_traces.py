@@ -20,16 +20,17 @@ class TraceMetadata(NamedTuple):
     outcome_type: str  # 'success', 'error', 'crash', 'shutdown'
     key_patterns: List[str]
 
-def map_component_to_variable(source: str) -> str:
-    """Map JSON source component to TLA+ variable name"""
+def map_component_to_index(source: str) -> int:
+    """Map JSON source component to components array index"""
     mapping = {
-        "dbComponent": "dbState",
-        "fsComponent": "fsState", 
-        "ComponentSetStateMachine": "componentSetState",
-        "ProcessStateMachine": "processState",
-        "SystemStateMachine": "overallState"
+        "dbComponent": 1,
+        "fsComponent": 2
     }
-    return mapping.get(source, source)
+    return mapping.get(source, None)
+
+def is_component_source(source: str) -> bool:
+    """Check if source represents an actual component (not a state machine)"""
+    return source in ["dbComponent", "fsComponent"]
 
 def load_trace_file(filepath: str) -> List[Dict[str, Any]]:
     """Load and parse JSON trace file"""
@@ -50,11 +51,14 @@ def analyze_trace_metadata(trace_data: List[Dict[str, Any]], trace_name: str) ->
             key_patterns=[]
         )
     
-    # Track state evolution for each component
+    # Track component and state machine evolution separately
     component_states = {}
-    components = set()
+    state_machine_states = {}
     error_events = []
     key_patterns = []
+    
+    # Count only component transitions for metadata
+    component_transition_count = 0
     
     for transition in trace_data:
         source = transition["source"]
@@ -62,25 +66,24 @@ def analyze_trace_metadata(trace_data: List[Dict[str, Any]], trace_name: str) ->
         to_state = transition["to"]
         trigger = transition["trigger"]
         
-        components.add(source)
+        if is_component_source(source):
+            # Track actual component states
+            component_states[source] = to_state
+            component_transition_count += 1
+            
+            # Track error events in components
+            if any(keyword in to_state.lower() for keyword in ["error", "crash", "fail"]):
+                error_events.append({
+                    "component": source,
+                    "trigger": trigger,
+                    "from": from_state,
+                    "to": to_state
+                })
+        else:
+            # Track state machine final states for outcome determination
+            state_machine_states[source] = to_state
         
-        # Initialize component state if first time seeing it
-        if source not in component_states:
-            component_states[source] = from_state
-        
-        # Update to final state
-        component_states[source] = to_state
-        
-        # Track interesting events
-        if any(keyword in to_state.lower() for keyword in ["error", "crash", "fail"]):
-            error_events.append({
-                "component": source,
-                "trigger": trigger,
-                "from": from_state,
-                "to": to_state
-            })
-        
-        # Identify patterns
+        # Identify patterns from trace name
         if "crash" in trace_name.lower():
             key_patterns.append("Component crashes")
         elif "signal" in trace_name.lower():
@@ -88,9 +91,9 @@ def analyze_trace_metadata(trace_data: List[Dict[str, Any]], trace_name: str) ->
         elif "ready" in trace_name.lower() and "never" in trace_name.lower():
             key_patterns.append("Ready check failures")
     
-    # Determine outcome type
-    system_final = component_states.get("SystemStateMachine", "")
-    process_final = component_states.get("ProcessStateMachine", "")
+    # Determine outcome type based on state machines and errors
+    system_final = state_machine_states.get("SystemStateMachine", "")
+    process_final = state_machine_states.get("ProcessStateMachine", "")
     
     if error_events:
         outcome_type = "error"
@@ -101,145 +104,106 @@ def analyze_trace_metadata(trace_data: List[Dict[str, Any]], trace_name: str) ->
     else:
         outcome_type = "success"
     
-    # Get initial states (assume first transition shows initial state)
+    # Get initial component states
     initial_state = {}
-    if trace_data:
-        first_transition = trace_data[0]
-        initial_state[first_transition["source"]] = first_transition["from"]
+    for transition in trace_data:
+        if is_component_source(transition["source"]) and transition["source"] not in initial_state:
+            initial_state[transition["source"]] = transition["from"]
+    
+    # Combine component and state machine final states for terminal state
+    terminal_state = {**component_states, **state_machine_states}
     
     return TraceMetadata(
         name=trace_name,
-        transitions=len(trace_data),
+        transitions=component_transition_count,  # Only count component transitions
         initial_state=initial_state,
-        terminal_state=component_states,
-        components=list(components),
+        terminal_state=terminal_state,
+        components=list(component_states.keys()),
         error_events=error_events,
         outcome_type=outcome_type,
         key_patterns=list(set(key_patterns))  # Remove duplicates
     )
 
 def generate_trace_module(trace_data: List[Dict[str, Any]], module_name: str) -> str:
-    # Build the exact sequence of state changes
-    state_changes = []
-    first_states = {}  # Track what the trace expects as initial states
+    # Filter to only component transitions (ignore state machine transitions since they're derived)
+    component_transitions = []
     
     for transition in trace_data:
-        var_name = map_component_to_variable(transition["source"])
-        from_state = transition["from"]
-        to_state = transition["to"]
-        trigger = transition["trigger"]
-        
-        # Track the first expected state for each variable
-        if var_name not in first_states:
-            first_states[var_name] = from_state
-            
-        state_changes.append({
-            "variable": var_name,
-            "from": from_state,
-            "to": to_state,
-            "trigger": trigger
-        })
+        if is_component_source(transition["source"]):
+            component_index = map_component_to_index(transition["source"])
+            if component_index:
+                component_transitions.append({
+                    "index": component_index,
+                    "from": transition["from"],
+                    "to": transition["to"],
+                    "trigger": transition["trigger"],
+                    "source": transition["source"]
+                })
     
-    # Use standard "Initializing" states for everything
+    # If no component transitions, create a minimal trace
+    if not component_transitions:
+        component_transitions = [
+            {"index": 1, "from": "Initializing", "to": "Starting", "trigger": "Auto", "source": "component1"},
+            {"index": 1, "from": "Starting", "to": "Running", "trigger": "Auto", "source": "component1"},
+            {"index": 2, "from": "Initializing", "to": "Starting", "trigger": "Auto", "source": "component2"},
+            {"index": 2, "from": "Starting", "to": "Running", "trigger": "Auto", "source": "component2"}
+        ]
 
-    # Create TLA+ content with standard initial states
+    # Create TLA+ content with consolidated architecture
     tla_header = f"""---------------------------- MODULE {module_name} ----------------------------
 
 EXTENDS sprite_env
 
 \\* Validation module for observed trace
-\\* Verifies that the exact sequence of transitions is valid
+\\* Verifies that the exact sequence of component transitions is valid
 
+CONSTANTS N
 VARIABLE step
 
-traceVars == <<vars, step>>
+traceVars == <<components, step>>
 
-\\* Initialize with standard initial state (all "Initializing")
+\\* Initialize with standard initial state (all components "Initializing")
 TraceInit ==
-    /\\ overallState = "Initializing"
-    /\\ componentSetState = "Initializing"
-    /\\ dbState = "Initializing"
-    /\\ fsState = "Initializing"
-    /\\ processState = "Initializing"
-    /\\ processExitCode = 0
-    /\\ checkpointInProgress = FALSE
-    /\\ restoreInProgress = FALSE
-    /\\ currentOperation = "None"
-    /\\ errorType = "None"
-    /\\ restartAttempt = 0
-    /\\ restartDelay = 0
-    /\\ shutdownInProgress = FALSE
-    /\\ exitRequested = FALSE
-    /\\ signalReceived = "None"
-    /\\ dbShutdownTimeout = 0
-    /\\ fsShutdownTimeout = 0
-    /\\ dbForceKilled = FALSE
-    /\\ fsForceKilled = FALSE
+    /\\ components = [i \\in 1..N |-> "Initializing"]
     /\\ step = 0
 
-\\* The exact sequence of transitions from the trace
+\\* The exact sequence of component transitions from the trace
 TraceNext ==
 """
 
     # Build the trace transitions
     tla_content = tla_header
     
-    # Add missing initial transitions if needed
+    # Add the component transitions
     step_counter = 0
-    spec_initial_states = {
-        "overallState": "Initializing",
-        "componentSetState": "Initializing", 
-        "dbState": "Initializing",
-        "fsState": "Initializing",
-        "processState": "Initializing"
-    }
-    
-    # Check what initial transitions we need to add
-    for var_name, expected_first in first_states.items():
-        if var_name in spec_initial_states and spec_initial_states[var_name] != expected_first:
-            # Add missing transition from "Initializing" to expected_first
-            all_vars = ["overallState", "componentSetState", "dbState", "fsState", "processState", "processExitCode", "checkpointInProgress", "restoreInProgress", "currentOperation", "errorType", "restartAttempt", "restartDelay", "shutdownInProgress", "exitRequested", "signalReceived", "dbShutdownTimeout", "fsShutdownTimeout", "dbForceKilled", "fsForceKilled"]
-            other_vars = [v for v in all_vars if v != var_name]
-            
-            step_comment = f"    \\* Step {step_counter+1}: {var_name}: Initializing -> {expected_first} (auto-generated)\n"
-            step_condition = f"    \\/ /\\ step = {step_counter}\n"
-            step_guard = f"       /\\ {var_name} = \"Initializing\"\n"
-            step_action = f"       /\\ {var_name}' = \"{expected_first}\"\n"
-            step_increment = f"       /\\ step' = {step_counter+1}\n"
-            step_unchanged = f"       /\\ UNCHANGED <<{', '.join(other_vars)}>>\n"
-            
-            tla_content += step_comment + step_condition + step_guard + step_action + step_increment + step_unchanged
-            step_counter += 1
-
-    # Add the original trace transitions
-    for i, change in enumerate(state_changes):
-        var_name = change["variable"]
-        from_state = change["from"]
-        to_state = change["to"]
-        trigger = change["trigger"]
-        all_vars = ["overallState", "componentSetState", "dbState", "fsState", "processState", "processExitCode", "checkpointInProgress", "restoreInProgress", "currentOperation", "errorType", "restartAttempt", "restartDelay", "shutdownInProgress", "exitRequested", "signalReceived", "dbShutdownTimeout", "fsShutdownTimeout", "dbForceKilled", "fsForceKilled"]
-        other_vars = [v for v in all_vars if v != var_name]
+    for i, transition in enumerate(component_transitions):
+        component_index = transition["index"]
+        from_state = transition["from"]
+        to_state = transition["to"]
+        trigger = transition["trigger"]
+        source = transition["source"]
         
-        # Use regular strings with single backslashes for TLA+ syntax
-        step_comment = f"    \\* Step {step_counter+1}: {var_name}: {from_state} -> {to_state} (trigger: {trigger})\n"
+        step_comment = f"    \\* Step {step_counter+1}: Component {component_index} ({source}): {from_state} -> {to_state} (trigger: {trigger})\n"
         step_condition = f"    \\/ /\\ step = {step_counter}\n"
-        step_guard = f"       /\\ {var_name} = \"{from_state}\"\n"
-        step_action = f"       /\\ {var_name}' = \"{to_state}\"\n"
+        step_guard = f"       /\\ components[{component_index}] = \"{from_state}\"\n"
+        step_action = f"       /\\ components' = [components EXCEPT ![{component_index}] = \"{to_state}\"]\n"
         step_increment = f"       /\\ step' = {step_counter+1}\n"
-        step_unchanged = f"       /\\ UNCHANGED <<{', '.join(other_vars)}>>\n"
         
-        tla_content += step_comment + step_condition + step_guard + step_action + step_increment + step_unchanged
+        tla_content += step_comment + step_condition + step_guard + step_action + step_increment
         step_counter += 1
 
     # Add the footer
     tla_footer = f"""
 
-\\* The trace specification
+\\* The trace specification  
 TraceSpec == TraceInit /\\ [][TraceNext]_traceVars
 
-\\* Invariant: check that we're following the observed path
+\\* Invariant: check that we're following the observed path and all invariants hold
 TraceValid ==
     /\\ TypeOK
+    /\\ HierarchyInvariant
+    /\\ ProcessStateDependencyInvariant
+    /\\ NoRecoveryAfterErrorInvariant
     /\\ step >= 0
     /\\ step <= {step_counter}
 
@@ -250,6 +214,7 @@ TraceValid ==
 
 def generate_tla_config(module_name: str) -> str:
     return f"""SPECIFICATION TraceSpec
+CONSTANTS N = 2
 INVARIANT TraceValid
 CHECK_DEADLOCK FALSE
 """

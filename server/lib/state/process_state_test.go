@@ -397,7 +397,7 @@ func TestProcessStateMachine_EventMapping(t *testing.T) {
 
 // Test that final states reject further transitions
 func TestProcessStateMachine_FinalStates(t *testing.T) {
-	finalStates := []ProcessStateType{ProcessStateStopped, ProcessStateKilled, ProcessStateError}
+	finalStates := []ProcessStateType{ProcessStateStopped, ProcessStateShutdown, ProcessStateKilled, ProcessStateError}
 
 	for _, state := range finalStates {
 		t.Run(string(state), func(t *testing.T) {

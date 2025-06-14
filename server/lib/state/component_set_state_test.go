@@ -35,6 +35,12 @@ func completeComponentStartupFromStarting(fake *FakeComponent) {
 	fake.EmitEvent(adapters.ComponentReady)
 }
 
+// completeComponentStop completes the stop sequence for a component
+func completeComponentStop(fake *FakeComponent) {
+	fake.EmitEvent(adapters.ComponentStopping)
+	fake.EmitEvent(adapters.ComponentStopped)
+}
+
 // completeComponentShutdown completes the shutdown sequence for a component
 func completeComponentShutdown(fake *FakeComponent) {
 	fake.EmitEvent(adapters.ComponentStopping)
@@ -343,6 +349,7 @@ func TestComponentSetStateMachine_ComponentStateHandling(t *testing.T) {
 // Test final states behavior
 func TestComponentSetStateMachine_FinalStates(t *testing.T) {
 	finalStates := []ComponentSetStateType{
+		ComponentSetStateStopped,
 		ComponentSetStateShutdown,
 		ComponentSetStateError,
 	}
@@ -357,7 +364,21 @@ func TestComponentSetStateMachine_FinalStates(t *testing.T) {
 			}()
 
 			// Transition to final state through normal operation
-			if state == ComponentSetStateShutdown {
+			if state == ComponentSetStateStopped {
+				// Start components first, then stop them
+				css.Fire(ComponentSetTriggerStart)
+				for _, fake := range fakes {
+					completeComponentStartup(fake)
+				}
+				waitForComponentSetState(css, ComponentSetStateRunning, 200*time.Millisecond)
+
+				// Now stop
+				css.Fire(ComponentSetTriggerStop)
+				for _, fake := range fakes {
+					completeComponentStop(fake)
+				}
+				waitForComponentSetState(css, ComponentSetStateStopped, 200*time.Millisecond)
+			} else if state == ComponentSetStateShutdown {
 				// Start components first, then shut them down
 				css.Fire(ComponentSetTriggerStart)
 				for _, fake := range fakes {
