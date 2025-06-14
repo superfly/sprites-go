@@ -8,8 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -18,7 +20,79 @@ type StateChange struct {
 	Vars map[string]interface{} `json:"vars"`
 }
 
+// killExistingSpriteEnvProcesses finds and kills any existing sprite-env processes
+// This is equivalent to: ps aux | grep sprite-env | grep -v grep | awk '{print $2}' | xargs kill -9
+func killExistingSpriteEnvProcesses(t *testing.T) {
+	// Run ps aux to get all processes
+	cmd := exec.Command("ps", "aux")
+	output, err := cmd.Output()
+	if err != nil {
+		t.Logf("Warning: Failed to run ps aux: %v", err)
+		return
+	}
+
+	// Parse the output line by line
+	scanner := bufio.NewScanner(strings.NewReader(string(output)))
+	var killedPids []int
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// Skip if line doesn't contain sprite-env
+		if !strings.Contains(line, "sprite-env") {
+			continue
+		}
+
+		// Skip if line contains grep (avoid killing the grep process itself)
+		if strings.Contains(line, "grep") {
+			continue
+		}
+
+		// Parse the PID from the ps output (second column)
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+
+		pidStr := fields[1]
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
+			continue
+		}
+
+		// Skip our own process
+		if pid == os.Getpid() {
+			continue
+		}
+
+		// Try to kill the process
+		process, err := os.FindProcess(pid)
+		if err != nil {
+			continue
+		}
+
+		// Send SIGKILL to the process
+		err = process.Signal(syscall.SIGKILL)
+		if err != nil {
+			// Process might already be gone, which is fine
+			continue
+		}
+
+		killedPids = append(killedPids, pid)
+		t.Logf("Killed existing sprite-env process with PID %d", pid)
+	}
+
+	if len(killedPids) > 0 {
+		// Give killed processes a moment to clean up
+		time.Sleep(100 * time.Millisecond)
+		t.Logf("Cleaned up %d existing sprite-env processes", len(killedPids))
+	}
+}
+
 func RunTests(t *testing.T) {
+	// Clean up any existing sprite-env processes first
+	killExistingSpriteEnvProcesses(t)
+
 	testScriptsDir := os.Getenv("TSCRIPTS_DIR")
 	if testScriptsDir == "" {
 		t.Fatalf("TSCRIPTS_DIR environment variable not set. Please run 'make test'.")
@@ -403,6 +477,9 @@ func createTestDirectory(t *testing.T, scenario TestScenario) string {
 
 // RunDynamicTests generates and runs several dynamic test scenarios using a test matrix
 func RunDynamicTests(t *testing.T) {
+	// Clean up any existing sprite-env processes first
+	killExistingSpriteEnvProcesses(t)
+
 	scenarios := []TestScenario{
 		{
 			Name:       "supervised-ignores-signals",

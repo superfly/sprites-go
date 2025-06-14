@@ -30,6 +30,8 @@ type cmdComponent struct {
 	config         CmdComponentConfig
 
 	startProcess *Process
+	startStdout  io.ReadCloser
+	startStderr  io.ReadCloser
 }
 
 // NewCmdComponent creates a new command-based component manager
@@ -65,24 +67,9 @@ func (c *cmdComponent) Checkpoint(ctx context.Context) error {
 		return nil // No checkpoint command configured
 	}
 
-	checkpointProcess := NewProcess(ProcessConfig{
-		Command:    c.config.CheckpointCommand,
-		MaxRetries: 0, // No retries for checkpoint
-	})
-
-	events := checkpointProcess.Start(ctx)
-
-	// Wait for checkpoint to complete
-	for event := range events {
-		switch event {
-		case EventFailed:
-			return fmt.Errorf("checkpoint failed")
-		case EventStopped:
-			return nil // Success
-		}
-	}
-
-	return nil
+	// Use a simple synchronous approach for checkpoint/restore operations
+	cmd := exec.CommandContext(ctx, c.config.CheckpointCommand[0], c.config.CheckpointCommand[1:]...)
+	return cmd.Run()
 }
 
 // Restore performs a restore operation on the component
@@ -91,39 +78,36 @@ func (c *cmdComponent) Restore(ctx context.Context) error {
 		return nil // No restore command configured
 	}
 
-	restoreProcess := NewProcess(ProcessConfig{
-		Command:    c.config.RestoreCommand,
-		MaxRetries: 0, // No retries for restore
-	})
-
-	events := restoreProcess.Start(ctx)
-
-	// Wait for restore to complete
-	for event := range events {
-		switch event {
-		case EventFailed:
-			return fmt.Errorf("restore failed")
-		case EventStopped:
-			return nil // Success
-		}
-	}
-
-	return nil
+	// Use a simple synchronous approach for checkpoint/restore operations
+	cmd := exec.CommandContext(ctx, c.config.RestoreCommand[0], c.config.RestoreCommand[1:]...)
+	return cmd.Run()
 }
 
 // supervise handles the component lifecycle
 func (c *cmdComponent) supervise(ctx context.Context) {
-	defer c.CloseEvents()
-
 	c.EmitEvent(ComponentStarting)
 
-	// Create the main process
+	// Create the main process with event handlers
 	c.startProcess = NewProcess(ProcessConfig{
 		Command:    c.config.StartCommand,
 		MaxRetries: 0, // No auto-restart for components
+		EventHandlers: ProcessEventHandlers{
+			Started: func() {
+				c.EmitEvent(ComponentStarted)
+				c.handleProcessStarted(ctx)
+			},
+			Failed: func(err error) {
+				c.EmitEvent(ComponentFailed, err)
+			},
+			Stopped: func() {
+				c.EmitEvent(ComponentStopped)
+			},
+			Exited: func() {
+				c.EmitEvent(ComponentStopped)
+			},
+		},
 	})
 
-	var startEvents <-chan EventType
 	var startStdout, startStderr io.ReadCloser
 	var err error
 
@@ -141,48 +125,50 @@ func (c *cmdComponent) supervise(ctx context.Context) {
 		}
 	}
 
-	// Start the process and monitor events
-	startEvents = c.startProcess.Start(ctx)
-
-	// Wait for start process to actually start
-	var startProcessStarted bool
-	for !startProcessStarted {
-		select {
-		case event := <-startEvents:
-			switch event {
-			case EventStarted:
-				c.EmitEvent(ComponentStarted)
-				startProcessStarted = true
-			case EventFailed:
-				c.EmitEvent(ComponentFailed)
-				return
-			}
-		case <-ctx.Done():
-			c.EmitEvent(ComponentStopped)
-			return
-		}
+	// Start the process
+	err = c.startProcess.Start(ctx)
+	if err != nil {
+		c.EmitEvent(ComponentFailed, err)
+		return
 	}
 
+	// Store stdout/stderr for ready check
+	c.startStdout = startStdout
+	c.startStderr = startStderr
+}
+
+// handleProcessStarted is called when the start process has started
+func (c *cmdComponent) handleProcessStarted(ctx context.Context) {
 	// If no ready command, emit ready immediately
 	if len(c.config.ReadyCommand) == 0 {
 		c.EmitEvent(ComponentReady)
-		// Continue monitoring start process
-		c.monitorStartProcess(ctx, startEvents)
 		return
 	}
 
 	// Start ready check process
 	c.EmitEvent(ComponentChecking)
 
-	readyDone, err := c.startReadyProcess(ctx, startStdout, startStderr)
+	readyDone, err := c.startReadyProcess(ctx, c.startStdout, c.startStderr)
 	if err != nil {
 		c.EmitEvent(ComponentFailed, err)
 		c.startProcess.Stop()
 		return
 	}
 
-	// Monitor both processes
-	c.monitorProcessAndReadyChannel(ctx, startEvents, readyDone)
+	// Monitor ready completion
+	go func() {
+		select {
+		case err := <-readyDone:
+			if err == nil {
+				c.EmitEvent(ComponentReady)
+			} else {
+				c.EmitEvent(ComponentFailed, err)
+				c.startProcess.Stop()
+			}
+		case <-ctx.Done():
+			c.EmitEvent(ComponentStopped)
+		}
+	}()
 }
 
 // startReadyProcess creates and starts the ready check process with piped input
@@ -278,87 +264,4 @@ func (c *cmdComponent) pipeOutput(ctx context.Context, stdout, stderr io.ReadClo
 	// Wait for all piping to complete, then close stdin to signal EOF to ready script
 	wg.Wait()
 	stdin.Close()
-}
-
-// monitorStartProcess monitors only the start process (when no ready script)
-func (c *cmdComponent) monitorStartProcess(ctx context.Context, startEvents <-chan EventType) {
-	for {
-		select {
-		case event := <-startEvents:
-			switch event {
-			case EventExited:
-				// Process completed successfully - this is normal for one-shot commands
-				c.EmitEvent(ComponentStopped)
-				return
-			case EventFailed:
-				c.EmitEvent(ComponentFailed)
-				return
-			case EventStopped:
-				c.EmitEvent(ComponentStopped)
-				return
-			}
-		case <-ctx.Done():
-			c.EmitEvent(ComponentStopped)
-			return
-		}
-	}
-}
-
-// monitorProcessAndReadyChannel monitors start process and ready command completion
-func (c *cmdComponent) monitorProcessAndReadyChannel(ctx context.Context, startEvents <-chan EventType, readyDone <-chan error) {
-	readyCompleted := false
-	startProcessExited := false
-
-	for {
-		select {
-		case event := <-startEvents:
-			switch event {
-			case EventFailed:
-				// Start process failed - stop everything
-				c.EmitEvent(ComponentFailed)
-				return
-			case EventExited, EventStopped:
-				// Start process exited
-				if readyCompleted {
-					// Ready script already completed successfully, so we can stop
-					c.EmitEvent(ComponentStopped)
-					return
-				} else {
-					// Ready script still running, mark that start process exited
-					startProcessExited = true
-					// The ready script will determine final outcome
-				}
-			}
-
-		case err := <-readyDone:
-			if !readyCompleted {
-				readyCompleted = true
-				if err == nil {
-					// Ready script completed successfully
-					c.EmitEvent(ComponentReady)
-
-					// If start process already exited, we're done
-					if startProcessExited {
-						c.EmitEvent(ComponentStopped)
-						return
-					}
-
-					// Otherwise continue monitoring start process in the same goroutine
-					readyCompleted = true
-					// Continue in this loop to monitor start process
-				} else {
-					// Ready script failed - this means the component failed
-					c.EmitEvent(ComponentFailed, err)
-					if !startProcessExited {
-						c.startProcess.Stop()
-					}
-					return
-				}
-			}
-
-		case <-ctx.Done():
-			c.EmitEvent(ComponentStopped)
-			return
-		}
-	}
 }

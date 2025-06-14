@@ -6,99 +6,124 @@ import (
 	"time"
 )
 
-func TestComponentBasicLifecycle(t *testing.T) {
-	config := CmdComponentConfig{
+func TestCmdComponentBasicLifecycle(t *testing.T) {
+	// Create channel to capture events
+	eventsChan := make(chan ComponentEventType, 10)
+
+	component := NewCmdComponent(CmdComponentConfig{
 		StartCommand: []string{"echo", "hello"},
-		// No ready command - should emit ready immediately
-	}
+		EventHandlers: ComponentEventHandlers{
+			Starting: func() {
+				eventsChan <- ComponentStarting
+			},
+			Started: func() {
+				eventsChan <- ComponentStarted
+			},
+			Ready: func() {
+				eventsChan <- ComponentReady
+			},
+			Stopped: func() {
+				eventsChan <- ComponentStopped
+			},
+		},
+	})
 
-	component := NewCmdComponent(config)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	events := component.Events()
 	err := component.Start(ctx)
 	if err != nil {
 		t.Fatalf("Failed to start component: %v", err)
 	}
 
+	// Wait for expected events
 	var receivedEvents []ComponentEventType
-	for event := range events {
-		receivedEvents = append(receivedEvents, event)
-		if event == ComponentStopped || event == ComponentFailed {
-			break
+	timeout := time.After(2 * time.Second)
+
+eventLoop:
+	for {
+		select {
+		case event := <-eventsChan:
+			receivedEvents = append(receivedEvents, event)
+			if event == ComponentStopped {
+				break eventLoop
+			}
+		case <-timeout:
+			t.Fatalf("Timeout waiting for events. Received: %v", receivedEvents)
 		}
 	}
 
-	// Should see: Starting -> Started -> Ready -> Stopped
-	expectedEvents := []ComponentEventType{
-		ComponentStarting,
-		ComponentStarted,
-		ComponentReady,
-		ComponentStopped,
-	}
-
+	expectedEvents := []ComponentEventType{ComponentStarting, ComponentStarted, ComponentReady, ComponentStopped}
 	if len(receivedEvents) != len(expectedEvents) {
 		t.Fatalf("Expected %d events, got %d: %v", len(expectedEvents), len(receivedEvents), receivedEvents)
 	}
 
 	for i, expected := range expectedEvents {
 		if receivedEvents[i] != expected {
-			t.Errorf("Event %d: expected %v, got %v", i, expected, receivedEvents[i])
+			t.Errorf("Event %d: expected %s, got %s", i, expected, receivedEvents[i])
 		}
 	}
 }
 
-func TestComponentWithReadyScript(t *testing.T) {
-	config := CmdComponentConfig{
-		StartCommand: []string{"sh", "-c", "echo 'started'; sleep 1; echo 'output'"},
-		ReadyCommand: []string{"grep", "output"},
-	}
+func TestCmdComponentWithReadyScript(t *testing.T) {
+	// Create channel to capture events
+	eventsChan := make(chan ComponentEventType, 10)
 
-	component := NewCmdComponent(config)
-	ctx := context.Background()
+	component := NewCmdComponent(CmdComponentConfig{
+		StartCommand: []string{"sh", "-c", "echo started; sleep 0.1; echo output"},
+		ReadyCommand: []string{"sh", "-c", "read line && echo $line"},
+		EventHandlers: ComponentEventHandlers{
+			Starting: func() {
+				eventsChan <- ComponentStarting
+			},
+			Started: func() {
+				eventsChan <- ComponentStarted
+			},
+			Checking: func() {
+				eventsChan <- ComponentChecking
+			},
+			Ready: func() {
+				eventsChan <- ComponentReady
+			},
+			Stopped: func() {
+				eventsChan <- ComponentStopped
+			},
+		},
+	})
 
-	events := component.Events()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	err := component.Start(ctx)
 	if err != nil {
 		t.Fatalf("Failed to start component: %v", err)
 	}
 
+	// Wait for expected events
 	var receivedEvents []ComponentEventType
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(2 * time.Second)
 
+eventLoop:
 	for {
 		select {
-		case event, ok := <-events:
-			if !ok {
-				// Channel closed
-				goto done
-			}
+		case event := <-eventsChan:
 			receivedEvents = append(receivedEvents, event)
-			if event == ComponentStopped || event == ComponentFailed {
-				goto done
+			if event == ComponentStopped {
+				break eventLoop
 			}
 		case <-timeout:
-			t.Fatal("Test timed out")
+			t.Fatalf("Timeout waiting for events. Received: %v", receivedEvents)
 		}
 	}
 
-done:
-	// Should see: Starting -> Started -> Checking -> Ready -> Stopped
-	expectedSequence := []ComponentEventType{
-		ComponentStarting,
-		ComponentStarted,
-		ComponentChecking,
-		ComponentReady,
-		ComponentStopped,
+	expectedEvents := []ComponentEventType{ComponentStarting, ComponentStarted, ComponentChecking, ComponentReady, ComponentStopped}
+	if len(receivedEvents) != len(expectedEvents) {
+		t.Fatalf("Expected %d events, got %d: %v", len(expectedEvents), len(receivedEvents), receivedEvents)
 	}
 
-	if len(receivedEvents) < len(expectedSequence) {
-		t.Fatalf("Expected at least %d events, got %d: %v", len(expectedSequence), len(receivedEvents), receivedEvents)
-	}
-
-	for i, expected := range expectedSequence {
-		if i >= len(receivedEvents) || receivedEvents[i] != expected {
-			t.Errorf("Event %d: expected %v, got %v", i, expected, receivedEvents[i])
+	for i, expected := range expectedEvents {
+		if receivedEvents[i] != expected {
+			t.Errorf("Event %d: expected %s, got %s", i, expected, receivedEvents[i])
 		}
 	}
 }

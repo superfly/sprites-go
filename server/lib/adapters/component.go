@@ -57,29 +57,24 @@ type ComponentConfig interface {
 // BaseComponent provides shared event management functionality
 // Embed this in concrete component implementations
 type BaseComponent struct {
-	events   chan ComponentEventType
 	handlers ComponentEventHandlers
 }
 
 // NewBaseComponent creates a new base component with event management
 func NewBaseComponent(handlers ComponentEventHandlers) *BaseComponent {
 	return &BaseComponent{
-		events:   make(chan ComponentEventType),
 		handlers: handlers,
 	}
 }
 
-// Events returns the event channel for this component
-func (b *BaseComponent) Events() <-chan ComponentEventType {
-	return b.events
+// SetEventHandlers sets up Observer pattern callbacks for component events
+func (b *BaseComponent) SetEventHandlers(handlers ComponentEventHandlers) {
+	b.handlers = handlers
 }
 
-// EmitEvent sends an event to the channel and calls the corresponding handler if set
+// EmitEvent calls the corresponding handler if set
 func (b *BaseComponent) EmitEvent(event ComponentEventType, err ...error) {
-	// Send to channel (legacy)
-	b.events <- event
-
-	// Call handler if set (new type-safe approach)
+	// Call handler if set (type-safe approach)
 	switch event {
 	case ComponentStarting:
 		if b.handlers.Starting != nil {
@@ -116,16 +111,8 @@ func (b *BaseComponent) EmitEvent(event ComponentEventType, err ...error) {
 	}
 }
 
-// CloseEvents closes the event channel (call this when component is done)
-func (b *BaseComponent) CloseEvents() {
-	close(b.events)
-}
-
 // Component defines the interface for component lifecycle management
 type Component interface {
-	// Events returns the event channel for this component (legacy)
-	Events() <-chan ComponentEventType
-
 	// Start initiates the component startup process
 	Start(ctx context.Context) error
 
@@ -137,4 +124,7 @@ type Component interface {
 
 	// Restore performs a restore operation on the component
 	Restore(ctx context.Context) error
+
+	// SetEventHandlers sets up Observer pattern callbacks
+	SetEventHandlers(handlers ComponentEventHandlers)
 }

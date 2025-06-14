@@ -33,22 +33,63 @@ const (
 	EventFailed EventType = "failed"
 )
 
+// Typed Event Handler approach for processes
+// Each event type has its own handler function signature
+type (
+	ProcessStarting   func()
+	ProcessStarted    func()
+	ProcessStopping   func()
+	ProcessStopped    func()
+	ProcessSignaled   func(os.Signal)
+	ProcessExited     func()
+	ProcessRestarting func()
+	ProcessFailed     func(error)
+)
+
+// ProcessEventHandlers allows registering specific typed handlers for process events
+type ProcessEventHandlers struct {
+	Starting   ProcessStarting
+	Started    ProcessStarted
+	Stopping   ProcessStopping
+	Stopped    ProcessStopped
+	Signaled   ProcessSignaled
+	Exited     ProcessExited
+	Restarting ProcessRestarting
+	Failed     ProcessFailed
+}
+
+// ProcessConfigInterface defines the interface for process configuration
+// Implementations provide both configuration data and event handlers
+type ProcessConfigInterface interface {
+	// GetEventHandlers returns the event handlers (can be empty)
+	GetEventHandlers() ProcessEventHandlers
+}
+
 // ProcessConfig holds the configuration for a supervised process.
 type ProcessConfig struct {
 	Command                 []string
-	MaxRetries              int           // Number of times to retry before giving up. -1 for infinite.
-	RestartDelay            time.Duration // Initial delay before a restart attempt. It will be doubled on each subsequent failure.
-	GracefulShutdownTimeout time.Duration // Timeout for graceful shutdown before force killing.
+	MaxRetries              int                  // Number of times to retry before giving up. -1 for infinite.
+	RestartDelay            time.Duration        // Initial delay before a restart attempt. It will be doubled on each subsequent failure.
+	GracefulShutdownTimeout time.Duration        // Timeout for graceful shutdown before force killing.
+	EventHandlers           ProcessEventHandlers // Optional event handlers
+}
+
+// GetEventHandlers implements ProcessConfigInterface
+func (pc ProcessConfig) GetEventHandlers() ProcessEventHandlers {
+	return pc.EventHandlers
 }
 
 // Process is a supervisor for a single command.
 type Process struct {
 	config          ProcessConfig
 	cmd             *exec.Cmd
-	events          chan EventType
 	signalCh        chan os.Signal
 	stdoutBroadcast *outputBroadcaster
 	stderrBroadcast *outputBroadcaster
+	handlers        ProcessEventHandlers
+	lastSignal      os.Signal          // Track the last signal sent for handler callback
+	ctx             context.Context    // Context for goroutine cleanup
+	cancel          context.CancelFunc // Cancel function for cleanup
 }
 
 // outputBroadcaster manages broadcasting output to multiple subscribers
@@ -137,10 +178,66 @@ func NewProcess(config ProcessConfig) *Process {
 	return &Process{
 		config:          config,
 		cmd:             nil, // Will be created when needed
-		events:          make(chan EventType),
 		signalCh:        make(chan os.Signal, 1),
 		stdoutBroadcast: newOutputBroadcaster(os.Stdout),
 		stderrBroadcast: newOutputBroadcaster(os.Stderr),
+		handlers:        config.EventHandlers,
+	}
+}
+
+// EmitEvent calls the corresponding handler if set
+func (p *Process) EmitEvent(event EventType, err ...error) {
+	// Call handler if set (type-safe approach)
+	// Run handler in a goroutine to avoid blocking the supervisor
+	// Use context to ensure proper cleanup
+	if p.ctx != nil {
+		go func() {
+			// Check if context is canceled before running handler
+			select {
+			case <-p.ctx.Done():
+				return // Context canceled, don't run handler
+			default:
+			}
+
+			switch event {
+			case EventStarting:
+				if p.handlers.Starting != nil {
+					p.handlers.Starting()
+				}
+			case EventStarted:
+				if p.handlers.Started != nil {
+					p.handlers.Started()
+				}
+			case EventStopping:
+				if p.handlers.Stopping != nil {
+					p.handlers.Stopping()
+				}
+			case EventStopped:
+				if p.handlers.Stopped != nil {
+					p.handlers.Stopped()
+				}
+			case EventSignaled:
+				if p.handlers.Signaled != nil {
+					p.handlers.Signaled(p.lastSignal)
+				}
+			case EventExited:
+				if p.handlers.Exited != nil {
+					p.handlers.Exited()
+				}
+			case EventRestarting:
+				if p.handlers.Restarting != nil {
+					p.handlers.Restarting()
+				}
+			case EventFailed:
+				if p.handlers.Failed != nil {
+					var failErr error
+					if len(err) > 0 {
+						failErr = err[0]
+					}
+					p.handlers.Failed(failErr)
+				}
+			}
+		}()
 	}
 }
 
@@ -179,10 +276,9 @@ func (p *Process) StderrPipe() (io.ReadCloser, error) {
 }
 
 // Start begins supervising the process in a new goroutine.
-// It returns a channel that provides a stream of events.
-func (p *Process) Start(ctx context.Context) <-chan EventType {
+func (p *Process) Start(ctx context.Context) error {
 	go p.supervise(ctx)
-	return p.events
+	return nil
 }
 
 // Stop signals the process to terminate gracefully. If the process does not
@@ -195,11 +291,17 @@ func (p *Process) Stop() {
 // If the signal is SIGINT, SIGTERM, or SIGKILL, the process will be treated as if Stop()
 // was called, meaning it will not be restarted.
 func (p *Process) Signal(sig os.Signal) {
+	p.lastSignal = sig // Track the signal for handler callbacks
 	// Use a select to avoid blocking if the supervisor isn't running.
 	select {
 	case p.signalCh <- sig:
 	default:
 	}
+}
+
+// SetEventHandlers sets up Observer pattern callbacks for process events
+func (p *Process) SetEventHandlers(handlers ProcessEventHandlers) {
+	p.handlers = handlers
 }
 
 func (p *Process) createCommand(ctx context.Context) *exec.Cmd {
@@ -244,7 +346,16 @@ func (p *Process) broadcastFromPipe(pipe io.ReadCloser, broadcaster *outputBroad
 }
 
 func (p *Process) supervise(ctx context.Context) {
-	defer close(p.events)
+	defer close(p.signalCh)
+
+	// Create an independent context for event handlers to avoid premature cancellation
+	// This ensures event handlers can run even when the main context is canceled
+	p.ctx, p.cancel = context.WithCancel(context.Background())
+	defer func() {
+		if p.cancel != nil {
+			p.cancel() // Clean up any remaining event handler goroutines
+		}
+	}()
 
 	retries := 0
 	shouldRestart := true // Control restart logic
@@ -254,10 +365,11 @@ func (p *Process) supervise(ctx context.Context) {
 			return
 		}
 
-		p.events <- EventStarting
+		p.EmitEvent(EventStarting)
 
 		if len(p.config.Command) == 0 {
-			p.events <- EventFailed
+			p.EmitEvent(EventFailed)
+			time.Sleep(time.Millisecond)
 			return
 		}
 
@@ -268,11 +380,12 @@ func (p *Process) supervise(ctx context.Context) {
 
 		err := p.cmd.Start()
 		if err != nil {
-			p.events <- EventFailed
+			p.EmitEvent(EventFailed, err)
+			time.Sleep(time.Millisecond)
 			return
 		}
 
-		p.events <- EventStarted
+		p.EmitEvent(EventStarted)
 
 		processExited := make(chan error, 1)
 		go func() {
@@ -295,21 +408,49 @@ func (p *Process) supervise(ctx context.Context) {
 				}
 
 				// Non-terminating signal - just forward it
-				p.events <- EventSignaled
+				p.EmitEvent(EventSignaled)
 				_ = p.cmd.Process.Signal(sig)
+			case <-ctx.Done():
+				// Context was cancelled - emit EventStopped first, then stop process
+				p.EmitEvent(EventStopped)
+				time.Sleep(time.Millisecond) // Ensure handler runs
+
+				// Now stop the process
+				if p.cmd.Process != nil {
+					_ = p.cmd.Process.Signal(syscall.SIGTERM)
+
+					// Wait briefly for graceful exit
+					done := make(chan struct{})
+					go func() {
+						_, _ = p.cmd.Process.Wait()
+						close(done)
+					}()
+
+					select {
+					case <-done:
+						// Process exited gracefully
+					case <-time.After(100 * time.Millisecond):
+						// Force kill if it doesn't exit quickly
+						_ = p.cmd.Process.Kill()
+						<-done
+					}
+				}
+				return
 			case <-processExited:
 				if ctx.Err() != nil {
-					p.events <- EventStopped
+					p.EmitEvent(EventStopped)
+					time.Sleep(time.Millisecond)
 					return
 				}
 
 				if shouldRestart && (p.config.MaxRetries == -1 || retries < p.config.MaxRetries) {
-					p.events <- EventExited
+					p.EmitEvent(EventExited)
 
-					delay := p.config.RestartDelay * (1 << retries)
+					// Only increment retries if we're actually going to retry
 					retries++
+					delay := p.config.RestartDelay * (1 << (retries - 1))
 
-					p.events <- EventRestarting
+					p.EmitEvent(EventRestarting)
 
 					// Reset command for restart (exec.Cmd can only be started once)
 					p.cmd = nil
@@ -319,29 +460,36 @@ func (p *Process) supervise(ctx context.Context) {
 						// continue to next iteration of the outer for loop
 						break processLoop
 					case <-ctx.Done():
-						p.events <- EventStopped
+						p.EmitEvent(EventStopped)
+						time.Sleep(time.Millisecond)
 						return
 					case sig := <-p.signalCh:
+						p.lastSignal = sig // Track signal for callbacks
 						isTerminating := sig == syscall.SIGINT || sig == syscall.SIGTERM || sig == syscall.SIGKILL
 						if isTerminating {
-							p.events <- EventStopping
-							p.events <- EventStopped
+							p.EmitEvent(EventStopping)
+							p.EmitEvent(EventStopped)
+							time.Sleep(time.Millisecond)
 							return
 						}
 						// Non-terminating signal during backoff - just log it
-						p.events <- EventSignaled
+						p.EmitEvent(EventSignaled)
 					}
 				} else {
 					// Process exhausted retries or no retries configured
 					if p.config.MaxRetries == 0 && retries == 0 {
 						// No retries configured - natural completion is success
-						p.events <- EventStopped
+						p.EmitEvent(EventStopped)
+						// Small delay to ensure handler goroutine runs before context is canceled
+						time.Sleep(time.Millisecond)
 					} else if shouldRestart {
 						// Retries were configured but exhausted - this is failure
-						p.events <- EventFailed
+						p.EmitEvent(EventFailed)
+						time.Sleep(time.Millisecond)
 					} else {
 						// Explicitly stopped
-						p.events <- EventStopped
+						p.EmitEvent(EventStopped)
+						time.Sleep(time.Millisecond)
 					}
 					return
 				}
@@ -355,7 +503,7 @@ func (p *Process) stopOrKill(cmd *exec.Cmd, sig os.Signal) {
 		return
 	}
 
-	p.events <- EventStopping
+	p.EmitEvent(EventStopping)
 
 	_ = cmd.Process.Signal(sig)
 
@@ -369,15 +517,18 @@ func (p *Process) stopOrKill(cmd *exec.Cmd, sig os.Signal) {
 	if p.config.GracefulShutdownTimeout > 0 {
 		select {
 		case <-done:
-			p.events <- EventStopped
+			p.EmitEvent(EventStopped)
+			time.Sleep(time.Millisecond)
 		case <-time.After(p.config.GracefulShutdownTimeout):
 			_ = cmd.Process.Kill()
 			<-done // Wait for the process to die
-			p.events <- EventStopped
+			p.EmitEvent(EventStopped)
+			time.Sleep(time.Millisecond)
 		}
 	} else {
 		// No timeout configured, wait indefinitely
 		<-done
-		p.events <- EventStopped
+		p.EmitEvent(EventStopped)
+		time.Sleep(time.Millisecond)
 	}
 }

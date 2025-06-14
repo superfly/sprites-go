@@ -14,6 +14,7 @@ alwaysApply: false
 * NEVER diagnose something as a race condition, that's almost never the problem
 * NEVER define new top level states that are not part of the TLA spec
 * If it's helpful, define substates of those to make the state flow simpler
+* NEVER add variables to TLA+ files without confirming with the user
 
 **State machines must be purely declarative intent processors:**
 

@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"time"
 
 	"sprite-env/lib/adapters"
 
@@ -10,11 +11,12 @@ import (
 
 // ComponentInterface defines what we need from a component
 type ComponentInterface interface {
-	Events() <-chan adapters.ComponentEventType
 	Start(ctx context.Context) error
 	Stop()
 	Checkpoint(ctx context.Context) error
 	Restore(ctx context.Context) error
+	// SetEventHandlers sets up Observer pattern callbacks (new approach)
+	SetEventHandlers(handlers adapters.ComponentEventHandlers)
 }
 
 // ComponentStateType represents the states from the TLA+ spec
@@ -62,7 +64,6 @@ type ComponentState struct {
 	component ComponentInterface
 	ctx       context.Context
 	cancel    context.CancelFunc
-	eventCh   <-chan adapters.ComponentEventType
 }
 
 // NewComponentState creates a new component state machine with a generic component
@@ -77,10 +78,9 @@ func NewComponentState(component ComponentInterface) *ComponentState {
 	// Configure state transitions based on TLA+ spec
 	csm.configureStateMachine()
 
-	// Set up event watching immediately to avoid race conditions
-	csm.ctx, csm.cancel = context.WithCancel(context.Background())
-	csm.eventCh = csm.component.Events()
-	go csm.watchEvents(csm.ctx, csm.eventCh)
+	// Set up our internal event handlers with the component immediately
+	// This ensures handlers are registered before the component starts emitting events
+	csm.setupEventHandlers()
 
 	// Activate the state machine to trigger OnEntry callbacks
 	csm.Activate()
@@ -96,9 +96,12 @@ func (csm *ComponentState) cleanup(ctx context.Context, args ...any) error {
 	return nil
 }
 
-// startComponent starts the component (event watching is already set up in constructor)
+// startComponent starts the component (event handlers already registered in constructor)
 func (csm *ComponentState) startComponent(ctx context.Context, args ...any) error {
-	// Start the component (event watching already running)
+	// Set up context for component lifecycle
+	csm.ctx, csm.cancel = context.WithCancel(ctx)
+
+	// Start the component (our handlers are already registered)
 	err := csm.component.Start(csm.ctx)
 	if err != nil {
 		csm.Fire(ComponentTriggerFailed)
@@ -113,8 +116,10 @@ func (csm *ComponentState) performCheckpoint(ctx context.Context, args ...any) e
 		err := csm.component.Checkpoint(csm.ctx)
 		if err != nil {
 			csm.Fire(ComponentTriggerFailed)
+			time.Sleep(time.Millisecond) // Ensure handler runs
 		} else {
 			csm.Fire(ComponentTriggerCompleted)
+			time.Sleep(time.Millisecond) // Ensure handler runs
 		}
 	}()
 	return nil
@@ -126,8 +131,10 @@ func (csm *ComponentState) performRestore(ctx context.Context, args ...any) erro
 		err := csm.component.Restore(csm.ctx)
 		if err != nil {
 			csm.Fire(ComponentTriggerFailed)
+			time.Sleep(time.Millisecond) // Ensure handler runs
 		} else {
 			csm.Fire(ComponentTriggerCompleted)
+			time.Sleep(time.Millisecond) // Ensure handler runs
 		}
 	}()
 	return nil
@@ -185,52 +192,37 @@ func (csm *ComponentState) configureStateMachine() {
 	csm.Configure(ComponentStateError).OnEntry(csm.cleanup)
 }
 
-// watchEvents watches for events from the component and updates state accordingly
-func (csm *ComponentState) watchEvents(ctx context.Context, eventCh <-chan adapters.ComponentEventType) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case event, ok := <-eventCh:
-			if !ok {
-				return // Channel closed
+// setupEventHandlers sets up Observer pattern callbacks that trigger state transitions
+func (csm *ComponentState) setupEventHandlers() {
+	handlers := adapters.ComponentEventHandlers{
+		Starting: func() {
+			// Component is starting, no trigger needed (already in Starting state)
+		},
+		Started: func() {
+			csm.Fire(ComponentTriggerStarted)
+		},
+		Checking: func() {
+			// Component is checking readiness, no state change needed
+		},
+		Ready: func() {
+			csm.Fire(ComponentTriggerReady)
+		},
+		Stopping: func() {
+			// Component is stopping, no trigger needed
+		},
+		Stopped: func() {
+			// Determine the appropriate trigger based on current state
+			currentState := csm.MustState()
+			if currentState == ComponentStateShuttingDown {
+				csm.Fire(ComponentTriggerStopped) // Will go to Shutdown state
+			} else {
+				csm.Fire(ComponentTriggerStopped) // Will go to Stopped state
 			}
-			csm.handleEvent(event)
-		}
-	}
-}
-
-// handleEvent maps component events to state machine triggers
-func (csm *ComponentState) handleEvent(event adapters.ComponentEventType) {
-	var trigger ComponentTrigger
-
-	switch event {
-	case adapters.ComponentStarting:
-		// Component is starting, no trigger needed (already in Starting state)
-		return
-	case adapters.ComponentStarted:
-		trigger = ComponentTriggerStarted
-	case adapters.ComponentChecking:
-		// Component is checking readiness, no state change needed
-		return
-	case adapters.ComponentReady:
-		trigger = ComponentTriggerReady
-	case adapters.ComponentStopping:
-		// Component is stopping, no trigger needed
-		return
-	case adapters.ComponentStopped:
-		// Determine the appropriate trigger based on current state
-		currentState := csm.MustState()
-		if currentState == ComponentStateShuttingDown {
-			trigger = ComponentTriggerStopped // Will go to Shutdown state
-		} else {
-			trigger = ComponentTriggerStopped // Will go to Stopped state
-		}
-	case adapters.ComponentFailed:
-		trigger = ComponentTriggerFailed
-	default:
-		return // Unknown event
+		},
+		Failed: func(err error) {
+			csm.Fire(ComponentTriggerFailed)
+		},
 	}
 
-	csm.Fire(trigger)
+	csm.component.SetEventHandlers(handlers)
 }

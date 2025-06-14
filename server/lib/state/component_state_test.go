@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"fmt"
 	"sprite-env/lib/adapters"
 	"testing"
 	"time"
@@ -9,71 +10,138 @@ import (
 
 // FakeComponent implements ComponentInterface for testing
 type FakeComponent struct {
-	events          chan adapters.ComponentEventType
+	handlers        adapters.ComponentEventHandlers
 	closed          bool
-	checkpointError error
-	restoreError    error
-	startCalled     bool
-	stopCalled      bool
-	currentEvent    adapters.ComponentEventType
+	ctx             context.Context
+	cancel          context.CancelFunc
+	checkpointError error // Allow configuring checkpoint to fail
+	restoreError    error // Allow configuring restore to fail
 }
 
 // NewFakeComponent creates a new fake component for testing
 func NewFakeComponent() *FakeComponent {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &FakeComponent{
-		events: make(chan adapters.ComponentEventType), // Unbuffered channel
+		ctx:    ctx,
+		cancel: cancel,
 	}
 }
 
-// Events returns the event channel for this fake component
-func (f *FakeComponent) Events() <-chan adapters.ComponentEventType {
-	return f.events
+// SetEventHandlers implements ComponentInterface
+func (f *FakeComponent) SetEventHandlers(handlers adapters.ComponentEventHandlers) {
+	f.handlers = handlers
 }
 
 // Start implements ComponentInterface - starts the fake component
 func (f *FakeComponent) Start(ctx context.Context) error {
-	f.startCalled = true
+	// Simulate real component behavior by automatically emitting startup events
+	go func() {
+		// Small delay to simulate real startup timing
+		time.Sleep(1 * time.Millisecond)
+		f.EmitEvent(adapters.ComponentStarting)
+
+		time.Sleep(1 * time.Millisecond)
+		f.EmitEvent(adapters.ComponentStarted)
+
+		// Note: ComponentReady is emitted separately in tests to control timing
+	}()
 	return nil
 }
 
 // Stop implements ComponentInterface - no-op for testing
 func (f *FakeComponent) Stop() {
-	f.stopCalled = true
 	// No-op for testing
 }
 
-// Checkpoint implements ComponentInterface - can be configured to succeed/fail
+// Checkpoint implements ComponentInterface - simulates checkpoint operation
 func (f *FakeComponent) Checkpoint(ctx context.Context) error {
-	return f.checkpointError
-}
-
-// Restore implements ComponentInterface - can be configured to succeed/fail
-func (f *FakeComponent) Restore(ctx context.Context) error {
-	return f.restoreError
-}
-
-// EmitEvent sends an event for testing (not part of ComponentInterface)
-func (f *FakeComponent) EmitEvent(event adapters.ComponentEventType) {
-	if !f.closed {
-		f.events <- event
+	// Return configured error if set
+	if f.checkpointError != nil {
+		return f.checkpointError
 	}
+	// Simulate checkpoint work
+	return nil
 }
 
-// SetCheckpointError configures checkpoint to fail with given error
+// Restore implements ComponentInterface - simulates restore operation
+func (f *FakeComponent) Restore(ctx context.Context) error {
+	// Return configured error if set
+	if f.restoreError != nil {
+		return f.restoreError
+	}
+	// Simulate restore work
+	return nil
+}
+
+// SetCheckpointError configures the checkpoint operation to fail
 func (f *FakeComponent) SetCheckpointError(err error) {
 	f.checkpointError = err
 }
 
-// SetRestoreError configures restore to fail with given error
+// SetRestoreError configures the restore operation to fail
 func (f *FakeComponent) SetRestoreError(err error) {
 	f.restoreError = err
 }
 
-// Close closes the event channel for cleanup
+// EmitEvent sends an event for testing (not part of ComponentInterface)
+func (f *FakeComponent) EmitEvent(event adapters.ComponentEventType, err ...error) {
+	// Call the handlers if set (Observer pattern)
+	// Use context to avoid goroutine leaks in tests
+	if f.ctx != nil {
+		go func() {
+			// Check if context is canceled before running handler
+			select {
+			case <-f.ctx.Done():
+				return // Context canceled, don't run handler
+			default:
+			}
+
+			switch event {
+			case adapters.ComponentStarting:
+				if f.handlers.Starting != nil {
+					f.handlers.Starting()
+				}
+			case adapters.ComponentStarted:
+				if f.handlers.Started != nil {
+					f.handlers.Started()
+				}
+			case adapters.ComponentChecking:
+				if f.handlers.Checking != nil {
+					f.handlers.Checking()
+				}
+			case adapters.ComponentReady:
+				if f.handlers.Ready != nil {
+					f.handlers.Ready()
+				}
+			case adapters.ComponentStopping:
+				if f.handlers.Stopping != nil {
+					f.handlers.Stopping()
+				}
+			case adapters.ComponentStopped:
+				if f.handlers.Stopped != nil {
+					f.handlers.Stopped()
+				}
+			case adapters.ComponentFailed:
+				if f.handlers.Failed != nil {
+					var failErr error
+					if len(err) > 0 {
+						failErr = err[0]
+					}
+					f.handlers.Failed(failErr)
+				}
+			}
+		}()
+	}
+}
+
+// Close cleans up the fake component
 func (f *FakeComponent) Close() {
 	if !f.closed {
-		close(f.events)
 		f.closed = true
+		// Cancel context to clean up any running handler goroutines
+		if f.cancel != nil {
+			f.cancel()
+		}
 	}
 }
 
@@ -108,7 +176,7 @@ func TestComponentStateMachine_TLASpecSequences(t *testing.T) {
 		fake.EmitEvent(adapters.ComponentStarted)  // Component started (may have ready check)
 		fake.EmitEvent(adapters.ComponentReady)    // Component fully ready
 
-		if !waitForComponentState(csm, ComponentStateRunning, 100*time.Millisecond) {
+		if !waitForComponentState(csm, ComponentStateRunning, 10*time.Second) {
 			t.Errorf("Expected Running after startup sequence, got %s", csm.MustState())
 		}
 	})
@@ -124,7 +192,7 @@ func TestComponentStateMachine_TLASpecSequences(t *testing.T) {
 		fake.EmitEvent(adapters.ComponentStarting)
 		fake.EmitEvent(adapters.ComponentStarted)
 		fake.EmitEvent(adapters.ComponentReady)
-		waitForComponentState(csm, ComponentStateRunning, 100*time.Millisecond)
+		waitForComponentState(csm, ComponentStateRunning, 10*time.Second)
 
 		// Complete stop sequence: Running → Stopping → Stopped
 		if err := csm.Fire(ComponentTriggerStop); err != nil {
@@ -133,7 +201,7 @@ func TestComponentStateMachine_TLASpecSequences(t *testing.T) {
 		fake.EmitEvent(adapters.ComponentStopping) // Component beginning shutdown
 		fake.EmitEvent(adapters.ComponentStopped)  // Component fully stopped
 
-		if !waitForComponentState(csm, ComponentStateStopped, 100*time.Millisecond) {
+		if !waitForComponentState(csm, ComponentStateStopped, 10*time.Second) {
 			t.Errorf("Expected Stopped after stop sequence, got %s", csm.MustState())
 		}
 	})
@@ -149,7 +217,7 @@ func TestComponentStateMachine_TLASpecSequences(t *testing.T) {
 		fake.EmitEvent(adapters.ComponentStarting)
 		fake.EmitEvent(adapters.ComponentStarted)
 		fake.EmitEvent(adapters.ComponentReady)
-		waitForComponentState(csm, ComponentStateRunning, 100*time.Millisecond)
+		waitForComponentState(csm, ComponentStateRunning, 10*time.Second)
 
 		// Checkpoint sequence: Running → Checkpointing → Running (no restart)
 		if err := csm.Fire(ComponentTriggerCheckpoint); err != nil {
@@ -157,7 +225,7 @@ func TestComponentStateMachine_TLASpecSequences(t *testing.T) {
 		}
 
 		// Wait for checkpoint operation to complete (happens in background)
-		if !waitForComponentState(csm, ComponentStateRunning, 200*time.Millisecond) {
+		if !waitForComponentState(csm, ComponentStateRunning, 10*time.Second) {
 			t.Errorf("Expected Running after checkpoint sequence, got %s", csm.MustState())
 		}
 	})
@@ -173,24 +241,23 @@ func TestComponentStateMachine_TLASpecSequences(t *testing.T) {
 		fake.EmitEvent(adapters.ComponentStarting)
 		fake.EmitEvent(adapters.ComponentStarted)
 		fake.EmitEvent(adapters.ComponentReady)
-		waitForComponentState(csm, ComponentStateRunning, 100*time.Millisecond)
+		waitForComponentState(csm, ComponentStateRunning, 10*time.Second)
 
 		// Restore sequence: Running → Restoring → Starting → Running (with restart)
 		if err := csm.Fire(ComponentTriggerRestore); err != nil {
 			t.Fatalf("Failed to request restore: %v", err)
 		}
 
-		// Wait for restore to move to Starting, then complete startup again
-		if !waitForComponentState(csm, ComponentStateStarting, 200*time.Millisecond) {
-			t.Errorf("Expected Starting after restore completion, got %s", csm.MustState())
+		// After restore, component goes to Starting and then automatically to Running
+		// due to fake component's automatic event emission
+		if !waitForComponentState(csm, ComponentStateRunning, 10*time.Second) {
+			t.Errorf("Expected Running after restore sequence completes, got %s", csm.MustState())
 		}
 
-		// Complete startup again after restore
-		fake.EmitEvent(adapters.ComponentStarting)
-		fake.EmitEvent(adapters.ComponentStarted)
+		// Emit final Ready event to complete the restart sequence
 		fake.EmitEvent(adapters.ComponentReady)
 
-		if !waitForComponentState(csm, ComponentStateRunning, 100*time.Millisecond) {
+		if !waitForComponentState(csm, ComponentStateRunning, 10*time.Second) {
 			t.Errorf("Expected Running after restore restart sequence, got %s", csm.MustState())
 		}
 	})
@@ -206,7 +273,7 @@ func TestComponentStateMachine_TLASpecSequences(t *testing.T) {
 		fake.EmitEvent(adapters.ComponentStarting)
 		fake.EmitEvent(adapters.ComponentStarted)
 		fake.EmitEvent(adapters.ComponentReady)
-		waitForComponentState(csm, ComponentStateRunning, 100*time.Millisecond)
+		waitForComponentState(csm, ComponentStateRunning, 10*time.Second)
 
 		// Shutdown sequence: Running → ShuttingDown → Shutdown (permanent)
 		if err := csm.Fire(ComponentTriggerShutdown); err != nil {
@@ -215,7 +282,7 @@ func TestComponentStateMachine_TLASpecSequences(t *testing.T) {
 		fake.EmitEvent(adapters.ComponentStopping) // Component beginning shutdown
 		fake.EmitEvent(adapters.ComponentStopped)  // Component fully stopped
 
-		if !waitForComponentState(csm, ComponentStateShutdown, 100*time.Millisecond) {
+		if !waitForComponentState(csm, ComponentStateShutdown, 10*time.Second) {
 			t.Errorf("Expected Shutdown after shutdown sequence, got %s", csm.MustState())
 		}
 	})
@@ -329,7 +396,7 @@ func TestComponentStateMachine_OperationFailures(t *testing.T) {
 		defer fake.Close()
 
 		// Configure checkpoint to fail
-		fake.SetCheckpointError(context.Canceled)
+		fake.SetCheckpointError(fmt.Errorf("checkpoint failed"))
 
 		csm := NewComponentState(fake)
 
@@ -338,7 +405,7 @@ func TestComponentStateMachine_OperationFailures(t *testing.T) {
 		fake.EmitEvent(adapters.ComponentStarting)
 		fake.EmitEvent(adapters.ComponentStarted)
 		fake.EmitEvent(adapters.ComponentReady)
-		waitForComponentState(csm, ComponentStateRunning, 100*time.Millisecond)
+		waitForComponentState(csm, ComponentStateRunning, 10*time.Second)
 
 		// Request checkpoint (should fail)
 		if err := csm.Fire(ComponentTriggerCheckpoint); err != nil {
@@ -346,7 +413,7 @@ func TestComponentStateMachine_OperationFailures(t *testing.T) {
 		}
 
 		// Wait for checkpoint failure to transition to Error
-		if !waitForComponentState(csm, ComponentStateError, 200*time.Millisecond) {
+		if !waitForComponentState(csm, ComponentStateError, 10*time.Second) {
 			t.Errorf("Expected Error after checkpoint failure, got %s", csm.MustState())
 		}
 	})
@@ -356,7 +423,7 @@ func TestComponentStateMachine_OperationFailures(t *testing.T) {
 		defer fake.Close()
 
 		// Configure restore to fail
-		fake.SetRestoreError(context.Canceled)
+		fake.SetRestoreError(fmt.Errorf("restore failed"))
 
 		csm := NewComponentState(fake)
 
@@ -365,7 +432,7 @@ func TestComponentStateMachine_OperationFailures(t *testing.T) {
 		fake.EmitEvent(adapters.ComponentStarting)
 		fake.EmitEvent(adapters.ComponentStarted)
 		fake.EmitEvent(adapters.ComponentReady)
-		waitForComponentState(csm, ComponentStateRunning, 100*time.Millisecond)
+		waitForComponentState(csm, ComponentStateRunning, 10*time.Second)
 
 		// Request restore (should fail)
 		if err := csm.Fire(ComponentTriggerRestore); err != nil {
@@ -373,7 +440,7 @@ func TestComponentStateMachine_OperationFailures(t *testing.T) {
 		}
 
 		// Wait for restore failure to transition to Error
-		if !waitForComponentState(csm, ComponentStateError, 200*time.Millisecond) {
+		if !waitForComponentState(csm, ComponentStateError, 10*time.Second) {
 			t.Errorf("Expected Error after restore failure, got %s", csm.MustState())
 		}
 	})

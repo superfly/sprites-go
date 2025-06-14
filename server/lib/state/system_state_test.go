@@ -55,6 +55,11 @@ func TestSystemStateMachine_TLASpecSequences(t *testing.T) {
 			completeComponentStartup(fake)
 		}
 
+		// Wait for system to reach Ready and process to reach Starting
+		waitForSystemState(ssm, SystemStateReady, 500*time.Millisecond)
+		// Also wait for process to reach Starting state
+		time.Sleep(50 * time.Millisecond) // Allow process to transition to Starting
+
 		// Complete process startup (process should be in Starting state after system reaches Ready)
 		fakeProcess.EmitEvent(adapters.EventStarted)
 
@@ -198,6 +203,11 @@ func TestSystemStateMachine_TLASpecSequences(t *testing.T) {
 			completeComponentStartup(fake)
 		}
 
+		// Wait for system to reach Ready and process to reach Starting
+		waitForSystemState(ssm, SystemStateReady, 500*time.Millisecond)
+		// Also wait for process to reach Starting state
+		time.Sleep(50 * time.Millisecond) // Allow process to transition to Starting
+
 		// Complete process startup
 		fakeProcess.EmitEvent(adapters.EventStarted)
 
@@ -250,6 +260,11 @@ func TestSystemStateMachine_TLASpecSequences(t *testing.T) {
 			completeComponentStartup(fake)
 		}
 
+		// Wait for system to reach Ready and process to reach Starting
+		waitForSystemState(ssm, SystemStateReady, 500*time.Millisecond)
+		// Also wait for process to reach Starting state
+		time.Sleep(50 * time.Millisecond) // Allow process to transition to Starting
+
 		// Complete process startup
 		fakeProcess.EmitEvent(adapters.EventStarted)
 
@@ -294,26 +309,38 @@ func TestSystemStateMachine_TLASpecSequences(t *testing.T) {
 	})
 
 	t.Run("Process_Waits_For_ComponentSet_Coordination", func(t *testing.T) {
-		// Create test dependencies
+		// Create test dependencies with manual control over event timing
 		processSM, fakeProcess := NewTestableProcessStateMachine()
-		componentSetSM, fakeComponents := NewTestableComponentSetStateMachine()
+
+		// Use ManualFakeComponent to control coordination timing precisely
+		manualFakes := map[string]*ManualFakeComponent{
+			"db": NewManualFakeComponent(),
+			"fs": NewManualFakeComponent(),
+		}
+		manualComponents := map[string]*ComponentState{
+			"db": NewComponentState(manualFakes["db"]),
+			"fs": NewComponentState(manualFakes["fs"]),
+		}
+		componentSetSM := NewComponentSetState(manualComponents)
 
 		// Clean up
 		defer fakeProcess.Close()
-		defer fakeComponents["db"].Close()
-		defer fakeComponents["fs"].Close()
+		defer manualFakes["db"].Close()
+		defer manualFakes["fs"].Close()
 
 		// Create system state machine
 		ssm := NewSystemState(componentSetSM, processSM)
 
-		// Start system state machine
+		// First, start the components to get them into Starting state
+		for _, component := range manualComponents {
+			component.Fire(ComponentTriggerStart)
+		}
+		time.Sleep(5 * time.Millisecond) // Allow state transitions
 
 		// System automatically coordinates based on component readiness
-		// No manual triggers needed
-
-		// Start components transitioning
-		fakeComponents["db"].EmitEvent(adapters.ComponentStarting)
-		fakeComponents["fs"].EmitEvent(adapters.ComponentStarting)
+		// Manually emit Starting events only (don't emit Started yet)
+		manualFakes["db"].EmitEvent(adapters.ComponentStarting)
+		manualFakes["fs"].EmitEvent(adapters.ComponentStarting)
 		time.Sleep(10 * time.Millisecond) // Allow components to transition
 
 		// At this point, process should NOT be Running yet because components aren't ready
@@ -327,11 +354,22 @@ func TestSystemStateMachine_TLASpecSequences(t *testing.T) {
 		}
 
 		// Now complete component startup to get ComponentSetStateMachine to Running
-		fakeComponents["db"].EmitEvent(adapters.ComponentStarted)
-		fakeComponents["fs"].EmitEvent(adapters.ComponentStarted)
-		fakeComponents["db"].EmitEvent(adapters.ComponentReady)
-		fakeComponents["fs"].EmitEvent(adapters.ComponentReady)
+		// Emit events sequentially with delays to avoid race conditions
+		manualFakes["db"].EmitEvent(adapters.ComponentStarted)
+		time.Sleep(10 * time.Millisecond)
+		manualFakes["fs"].EmitEvent(adapters.ComponentStarted)
+		time.Sleep(10 * time.Millisecond)
+		manualFakes["db"].EmitEvent(adapters.ComponentReady)
+		time.Sleep(10 * time.Millisecond)
+		manualFakes["fs"].EmitEvent(adapters.ComponentReady)
 		time.Sleep(50 * time.Millisecond) // Allow ComponentSetStateMachine to transition
+
+		// Debug: Check individual component states
+		for name, component := range manualComponents {
+			state := ComponentStateType(component.MustState().(ComponentStateType))
+			t.Logf("Component %s state: %s", name, state)
+		}
+		t.Logf("ComponentSet state: %s", ssm.GetComponentSetState())
 
 		// Verify ComponentSetStateMachine reaches Running first
 		if ssm.GetComponentSetState() != ComponentSetStateRunning {
@@ -457,6 +495,8 @@ func TestSystemStateMachine_DetermineOverallState(t *testing.T) {
 			completeComponentStartup(fake)
 		}
 		waitForSystemState(ssm, SystemStateReady, 500*time.Millisecond)
+		// Also wait for process to reach Starting state
+		time.Sleep(50 * time.Millisecond) // Allow process to transition to Starting
 
 		// Process should have started automatically, complete its startup
 		fakeProcess.EmitEvent(adapters.EventStarted)
@@ -520,6 +560,10 @@ func TestSystemStateMachine_DetermineOverallState(t *testing.T) {
 		for _, fake := range fakeComponents {
 			completeComponentStartup(fake)
 		}
+		// Wait for system to reach Ready and process to reach Starting
+		waitForSystemState(ssm, SystemStateReady, 500*time.Millisecond)
+		// Also wait for process to reach Starting state
+		time.Sleep(50 * time.Millisecond) // Allow process to transition to Starting
 		fakeProcess.EmitEvent(adapters.EventStarted)
 		waitForSystemState(ssm, SystemStateRunning, 500*time.Millisecond)
 
@@ -550,6 +594,10 @@ func TestSystemStateMachine_DetermineOverallState(t *testing.T) {
 		for _, fake := range fakeComponents {
 			completeComponentStartup(fake)
 		}
+		// Wait for system to reach Ready and process to reach Starting
+		waitForSystemState(ssm, SystemStateReady, 500*time.Millisecond)
+		// Also wait for process to reach Starting state
+		time.Sleep(50 * time.Millisecond) // Allow process to transition to Starting
 		fakeProcess.EmitEvent(adapters.EventStarted)
 		waitForSystemState(ssm, SystemStateRunning, 500*time.Millisecond)
 
@@ -622,6 +670,10 @@ func TestSystemStateMachine_ErrorTypeDetermination(t *testing.T) {
 		for _, fake := range fakeComponents {
 			completeComponentStartup(fake)
 		}
+		// Wait for system to reach Ready and process to reach Starting
+		waitForSystemState(ssm, SystemStateReady, 500*time.Millisecond)
+		// Also wait for process to reach Starting state
+		time.Sleep(50 * time.Millisecond) // Allow process to transition to Starting
 		fakeProcess.EmitEvent(adapters.EventStarted)
 		waitForSystemState(ssm, SystemStateRunning, 500*time.Millisecond)
 
@@ -848,6 +900,11 @@ func TestSystemStateMachine_ReactiveStateChanges(t *testing.T) {
 			completeComponentStartup(fake)
 		}
 
+		// Wait for system to reach Ready and process to reach Starting
+		waitForSystemState(ssm, SystemStateReady, 500*time.Millisecond)
+		// Also wait for process to reach Starting state
+		time.Sleep(50 * time.Millisecond) // Allow process to transition to Starting
+
 		// Complete process startup
 		fakeProcess.EmitEvent(adapters.EventStarted)
 
@@ -900,6 +957,11 @@ func TestSystemStateMachine_ReactiveStateChanges(t *testing.T) {
 		for _, fake := range fakeComponents {
 			completeComponentStartup(fake)
 		}
+
+		// Wait for system to reach Ready and process to reach Starting
+		waitForSystemState(ssm, SystemStateReady, 500*time.Millisecond)
+		// Also wait for process to reach Starting state
+		time.Sleep(50 * time.Millisecond) // Allow process to transition to Starting
 
 		// Complete process startup
 		fakeProcess.EmitEvent(adapters.EventStarted)

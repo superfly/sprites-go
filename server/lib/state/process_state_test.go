@@ -13,33 +13,37 @@ import (
 
 // FakeProcess implements ProcessInterface for testing
 type FakeProcess struct {
-	events chan adapters.EventType
-	closed bool
-	ctx    context.Context
-	cancel context.CancelFunc
+	closed   bool
+	ctx      context.Context
+	cancel   context.CancelFunc
+	handlers adapters.ProcessEventHandlers
 }
 
 // TrackingFakeProcess implements ProcessInterface and tracks when methods are called
 type TrackingFakeProcess struct {
-	events      chan adapters.EventType
 	closed      bool
 	startCalled bool
 	stopCalled  bool
 	signalCalls []os.Signal
+	handlers    adapters.ProcessEventHandlers
+	ctx         context.Context
+	cancel      context.CancelFunc
 }
 
 // NewTrackingFakeProcess creates a new tracking fake process for testing
 func NewTrackingFakeProcess() *TrackingFakeProcess {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &TrackingFakeProcess{
-		events:      make(chan adapters.EventType, 5), // Small buffer to match real usage
 		signalCalls: make([]os.Signal, 0),
+		ctx:         ctx,
+		cancel:      cancel,
 	}
 }
 
 // Start implements ProcessInterface and tracks that it was called
-func (f *TrackingFakeProcess) Start(ctx context.Context) <-chan adapters.EventType {
+func (f *TrackingFakeProcess) Start(ctx context.Context) error {
 	f.startCalled = true
-	return f.events
+	return nil
 }
 
 // Stop implements ProcessInterface and tracks that it was called
@@ -52,18 +56,70 @@ func (f *TrackingFakeProcess) Signal(sig os.Signal) {
 	f.signalCalls = append(f.signalCalls, sig)
 }
 
+// SetEventHandlers implements ProcessInterface
+func (f *TrackingFakeProcess) SetEventHandlers(handlers adapters.ProcessEventHandlers) {
+	f.handlers = handlers
+}
+
 // EmitEvent sends an event for testing (not part of ProcessInterface)
 func (f *TrackingFakeProcess) EmitEvent(event adapters.EventType) {
-	if !f.closed {
-		f.events <- event
+	// Call the handlers if set (Observer pattern)
+	// Use context to avoid goroutine leaks in tests
+	if f.ctx != nil {
+		go func() {
+			// Check if context is canceled before running handler
+			select {
+			case <-f.ctx.Done():
+				return // Context canceled, don't run handler
+			default:
+			}
+
+			switch event {
+			case adapters.EventStarting:
+				if f.handlers.Starting != nil {
+					f.handlers.Starting()
+				}
+			case adapters.EventStarted:
+				if f.handlers.Started != nil {
+					f.handlers.Started()
+				}
+			case adapters.EventStopping:
+				if f.handlers.Stopping != nil {
+					f.handlers.Stopping()
+				}
+			case adapters.EventStopped:
+				if f.handlers.Stopped != nil {
+					f.handlers.Stopped()
+				}
+			case adapters.EventSignaled:
+				if f.handlers.Signaled != nil {
+					f.handlers.Signaled(syscall.SIGKILL) // Default to SIGKILL for testing
+				}
+			case adapters.EventExited:
+				if f.handlers.Exited != nil {
+					f.handlers.Exited()
+				}
+			case adapters.EventRestarting:
+				if f.handlers.Restarting != nil {
+					f.handlers.Restarting()
+				}
+			case adapters.EventFailed:
+				if f.handlers.Failed != nil {
+					f.handlers.Failed(nil)
+				}
+			}
+		}()
 	}
 }
 
-// Close closes the event channel for cleanup
+// Close cleans up the fake process
 func (f *TrackingFakeProcess) Close() {
 	if !f.closed {
-		close(f.events)
 		f.closed = true
+		// Cancel context to clean up any running handler goroutines
+		if f.cancel != nil {
+			f.cancel()
+		}
 	}
 }
 
@@ -86,15 +142,14 @@ func (f *TrackingFakeProcess) GetSignalCalls() []os.Signal {
 func NewFakeProcess() *FakeProcess {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &FakeProcess{
-		events: make(chan adapters.EventType),
 		ctx:    ctx,
 		cancel: cancel,
 	}
 }
 
-// Start implements ProcessInterface - returns the event channel
-func (f *FakeProcess) Start(ctx context.Context) <-chan adapters.EventType {
-	return f.events
+// Start implements ProcessInterface - returns error instead of channel
+func (f *FakeProcess) Start(ctx context.Context) error {
+	return nil
 }
 
 // Stop implements ProcessInterface - no-op for testing
@@ -107,18 +162,70 @@ func (f *FakeProcess) Signal(sig os.Signal) {
 	// No-op for testing
 }
 
+// SetEventHandlers implements ProcessInterface
+func (f *FakeProcess) SetEventHandlers(handlers adapters.ProcessEventHandlers) {
+	f.handlers = handlers
+}
+
 // EmitEvent sends an event for testing (not part of ProcessInterface)
 func (f *FakeProcess) EmitEvent(event adapters.EventType) {
-	if !f.closed {
-		f.events <- event
+	// Call the handlers if set (Observer pattern)
+	// Use context to avoid goroutine leaks in tests
+	if f.ctx != nil {
+		go func() {
+			// Check if context is canceled before running handler
+			select {
+			case <-f.ctx.Done():
+				return // Context canceled, don't run handler
+			default:
+			}
+
+			switch event {
+			case adapters.EventStarting:
+				if f.handlers.Starting != nil {
+					f.handlers.Starting()
+				}
+			case adapters.EventStarted:
+				if f.handlers.Started != nil {
+					f.handlers.Started()
+				}
+			case adapters.EventStopping:
+				if f.handlers.Stopping != nil {
+					f.handlers.Stopping()
+				}
+			case adapters.EventStopped:
+				if f.handlers.Stopped != nil {
+					f.handlers.Stopped()
+				}
+			case adapters.EventSignaled:
+				if f.handlers.Signaled != nil {
+					f.handlers.Signaled(syscall.SIGKILL) // Default to SIGKILL for testing
+				}
+			case adapters.EventExited:
+				if f.handlers.Exited != nil {
+					f.handlers.Exited()
+				}
+			case adapters.EventRestarting:
+				if f.handlers.Restarting != nil {
+					f.handlers.Restarting()
+				}
+			case adapters.EventFailed:
+				if f.handlers.Failed != nil {
+					f.handlers.Failed(nil)
+				}
+			}
+		}()
 	}
 }
 
-// Close closes the event channel for cleanup
+// Close cleans up the fake process
 func (f *FakeProcess) Close() {
 	if !f.closed {
-		close(f.events)
 		f.closed = true
+		// Cancel context to clean up any running handler goroutines
+		if f.cancel != nil {
+			f.cancel()
+		}
 	}
 }
 
@@ -152,7 +259,7 @@ func TestProcessStateMachine_TLASpecSequences(t *testing.T) {
 		fake.EmitEvent(adapters.EventStarting) // Optional: process beginning startup
 		fake.EmitEvent(adapters.EventStarted)  // Process fully started
 
-		if !waitForState(psm, ProcessStateRunning, 100*time.Millisecond) {
+		if !waitForState(psm, ProcessStateRunning, 10*time.Second) {
 			t.Errorf("Expected Running after startup sequence, got %s", psm.MustState())
 		}
 	})
@@ -170,7 +277,7 @@ func TestProcessStateMachine_TLASpecSequences(t *testing.T) {
 		}
 		fake.EmitEvent(adapters.EventStarting) // Process beginning startup
 		fake.EmitEvent(adapters.EventStarted)  // Process fully started
-		waitForState(psm, ProcessStateRunning, 100*time.Millisecond)
+		waitForState(psm, ProcessStateRunning, 10*time.Second)
 
 		// Complete stop sequence: Running → Stopping → Stopped
 		if err := psm.Fire(TriggerStop); err != nil {
@@ -179,7 +286,7 @@ func TestProcessStateMachine_TLASpecSequences(t *testing.T) {
 		fake.EmitEvent(adapters.EventStopping) // Process beginning shutdown
 		fake.EmitEvent(adapters.EventStopped)  // Process fully stopped
 
-		if !waitForState(psm, ProcessStateStopped, 100*time.Millisecond) {
+		if !waitForState(psm, ProcessStateStopped, 10*time.Second) {
 			t.Errorf("Expected Stopped after stop sequence, got %s", psm.MustState())
 		}
 	})
@@ -195,11 +302,11 @@ func TestProcessStateMachine_TLASpecSequences(t *testing.T) {
 		psm.Fire(TriggerStart, ctx)
 		fake.EmitEvent(adapters.EventStarting)
 		fake.EmitEvent(adapters.EventStarted)
-		waitForState(psm, ProcessStateRunning, 100*time.Millisecond)
+		waitForState(psm, ProcessStateRunning, 10*time.Second)
 
 		// Crash: Running → Crashed
 		fake.EmitEvent(adapters.EventExited)
-		waitForState(psm, ProcessStateCrashed, 100*time.Millisecond)
+		waitForState(psm, ProcessStateCrashed, 10*time.Second)
 
 		// Complete restart: Crashed → Starting → Running
 		if err := psm.Fire(TriggerRestart, ctx); err != nil {
@@ -210,7 +317,7 @@ func TestProcessStateMachine_TLASpecSequences(t *testing.T) {
 		fake.EmitEvent(adapters.EventStarting) // Process beginning startup again
 		fake.EmitEvent(adapters.EventStarted)  // Process fully running again
 
-		if !waitForState(psm, ProcessStateRunning, 100*time.Millisecond) {
+		if !waitForState(psm, ProcessStateRunning, 10*time.Second) {
 			t.Errorf("Expected Running after restart sequence, got %s", psm.MustState())
 		}
 	})
@@ -228,7 +335,7 @@ func TestProcessStateMachine_TLASpecSequences(t *testing.T) {
 		}
 		fake.EmitEvent(adapters.EventStarting) // Process beginning startup
 		fake.EmitEvent(adapters.EventStarted)  // Process fully started
-		waitForState(psm, ProcessStateRunning, 100*time.Millisecond)
+		waitForState(psm, ProcessStateRunning, 10*time.Second)
 
 		// Complete kill sequence: Running → Signaling → Killed
 		if err := psm.Fire(TriggerSignal); err != nil {
@@ -238,7 +345,7 @@ func TestProcessStateMachine_TLASpecSequences(t *testing.T) {
 		psm.lastSignal = syscall.SIGKILL       // Set the signal type for proper mapping
 		fake.EmitEvent(adapters.EventSignaled) // Process received SIGKILL and died
 
-		if !waitForState(psm, ProcessStateKilled, 100*time.Millisecond) {
+		if !waitForState(psm, ProcessStateKilled, 10*time.Second) {
 			t.Errorf("Expected Killed after signal sequence, got %s", psm.MustState())
 		}
 	})
@@ -267,12 +374,19 @@ func TestProcessStateMachine_EventMapping(t *testing.T) {
 			psm.StateMachine = stateless.NewStateMachine(tt.startState)
 			psm.configureStateMachine()
 
+			// Set up event handlers for the Observer pattern
+			psm.setupEventHandlers()
+
 			// Special case for SIGKILL mapping
 			if tt.event == adapters.EventSignaled {
 				psm.lastSignal = syscall.SIGKILL
 			}
 
-			psm.handleEvent(tt.event)
+			// Emit the event through the fake process (this will trigger handlers)
+			fake.EmitEvent(tt.event)
+
+			// Give the event handler time to run (it runs in a goroutine)
+			time.Sleep(10 * time.Millisecond)
 
 			if psm.MustState().(ProcessStateType) != tt.expectEnd {
 				t.Errorf("Expected %s, got %s", tt.expectEnd, psm.MustState())

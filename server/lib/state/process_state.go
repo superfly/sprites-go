@@ -12,9 +12,11 @@ import (
 
 // ProcessInterface defines what we need from a process
 type ProcessInterface interface {
-	Start(ctx context.Context) <-chan adapters.EventType
+	Start(ctx context.Context) error
 	Stop()
 	Signal(sig os.Signal)
+	// SetEventHandlers sets up Observer pattern callbacks (new approach)
+	SetEventHandlers(handlers adapters.ProcessEventHandlers)
 }
 
 // ProcessStateType represents the states from the TLA+ spec
@@ -63,7 +65,6 @@ type ProcessState struct {
 	lastSignal os.Signal
 	ctx        context.Context
 	cancel     context.CancelFunc
-	eventCh    <-chan adapters.EventType
 }
 
 // NewProcessState creates a new process state machine with a real process
@@ -82,6 +83,10 @@ func NewProcessStateWithProcess(process ProcessInterface) *ProcessState {
 
 	// Configure state transitions based on TLA+ spec
 	psm.configureStateMachine()
+
+	// Set up our internal event handlers with the process immediately
+	// This ensures handlers are registered before the process starts emitting events
+	psm.setupEventHandlers()
 
 	return psm
 }
@@ -108,10 +113,11 @@ func (psm *ProcessState) configureStateMachine() {
 		Permit(TriggerSignal, ProcessStateSignaling). // Allow killing during startup
 		Permit(TriggerFailed, ProcessStateError).
 		OnEntry(func(ctx context.Context, args ...any) error {
-			// Actually start the process when entering Starting state
+			// Set up context for process lifecycle
 			psm.ctx, psm.cancel = context.WithCancel(ctx)
-			psm.eventCh = psm.process.Start(psm.ctx)
-			go psm.watchEvents(psm.ctx, psm.eventCh)
+
+			// Start the process (our handlers are already registered)
+			_ = psm.process.Start(psm.ctx)
 			return nil
 		})
 
@@ -168,57 +174,47 @@ func (psm *ProcessState) Fire(trigger ProcessTrigger, args ...any) error {
 	return psm.StateMachine.Fire(trigger, args...)
 }
 
-// watchEvents watches for events from the process and updates state accordingly
-func (psm *ProcessState) watchEvents(ctx context.Context, eventCh <-chan adapters.EventType) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case event, ok := <-eventCh:
-			if !ok {
-				return // Channel closed
+// setupEventHandlers sets up Observer pattern callbacks that trigger state transitions
+func (psm *ProcessState) setupEventHandlers() {
+	handlers := adapters.ProcessEventHandlers{
+		Starting: func() {
+			// Process is already starting, no trigger needed
+		},
+		Started: func() {
+			// EmitEvent already runs in goroutine, so no need for another one
+			psm.Fire(TriggerStarted)
+		},
+		Stopping: func() {
+			// Process is already stopping, no trigger needed
+		},
+		Stopped: func() {
+			// EmitEvent already runs in goroutine, so no need for another one
+			psm.Fire(TriggerStopped)
+		},
+		Signaled: func(sig os.Signal) {
+			// EmitEvent already runs in goroutine, so no need for another one
+			psm.lastSignal = sig
+			// Determine if this is a terminating signal
+			if sig == syscall.SIGKILL {
+				psm.Fire(TriggerKilled)
 			}
-			psm.handleEvent(event)
-		}
-	}
-}
-
-// handleEvent maps process events to state machine triggers
-func (psm *ProcessState) handleEvent(event adapters.EventType) {
-	var trigger ProcessTrigger
-
-	switch event {
-	case adapters.EventStarting:
-		// Process is already starting, no trigger needed
-		return
-	case adapters.EventStarted:
-		trigger = TriggerStarted
-	case adapters.EventStopping:
-		// Process is already stopping, no trigger needed
-		return
-	case adapters.EventStopped:
-		trigger = TriggerStopped
-	case adapters.EventSignaled:
-		// Determine if this is a terminating signal
-		if psm.lastSignal == syscall.SIGKILL {
-			trigger = TriggerFailed
-		} else {
-			// Non-terminating signal - process should handle it gracefully
-			return
-		}
-	case adapters.EventExited:
-		// EventExited means the process will restart - this is a restartable crash
-		trigger = TriggerCrashed
-	case adapters.EventRestarting:
-		trigger = TriggerRestart
-	case adapters.EventFailed:
-		// EventFailed means permanent failure
-		trigger = TriggerFailed
-	default:
-		return // Unknown event
+			// Non-terminating signals don't trigger state changes
+		},
+		Exited: func() {
+			// EmitEvent already runs in goroutine, so no need for another one
+			psm.Fire(TriggerCrashed)
+		},
+		Restarting: func() {
+			// EmitEvent already runs in goroutine, so no need for another one
+			psm.Fire(TriggerRestart)
+		},
+		Failed: func(err error) {
+			// EmitEvent already runs in goroutine, so no need for another one
+			psm.Fire(TriggerFailed)
+		},
 	}
 
-	psm.Fire(trigger)
+	psm.process.SetEventHandlers(handlers)
 }
 
 // AddStateChangeCallback adds a callback that will be called on process state changes
