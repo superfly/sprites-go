@@ -65,7 +65,7 @@ ProcessStates == BaseTransitionStates \cup BaseActiveStates \cup BaseErrorStates
 
 ComponentStates == BaseTransitionStates \cup BaseActiveStates \cup BaseErrorStates \cup BaseTerminalStates \cup ComponentSpecificStates
 
-ComponentSetStates == BaseTransitionStates \cup BaseActiveStates \cup BaseErrorStates \cup BaseTerminalStates
+ComponentSetStates == BaseTransitionStates \cup BaseActiveStates \cup BaseErrorStates \cup BaseTerminalStates \cup {"ErrorStopping"}
 
 SystemStates == BaseTransitionStates \cup BaseActiveStates \cup BaseErrorStates \cup BaseTerminalStates \cup SystemSpecificStates
 
@@ -104,10 +104,14 @@ AnyComponentShuttingDown == \E i \in 1..N : IsShuttingDown(components[i])
 AnyComponentCheckpointing == \E i \in 1..N : IsCheckpointing(components[i])
 AnyComponentRestoring == \E i \in 1..N : IsRestoring(components[i])
 
-\* ComponentSet State Machine (simple - only reflects component states)
+\* ComponentSet State Machine (shows component collective state)
 ComponentSetState ==
-    IF AnyComponentError THEN
-        "Error"  \* At least one component failed
+    IF AnyComponentError /\ AnyComponentStopping THEN
+        "Stopping"  \* Component failed AND actively stopping healthy components
+    ELSE IF AnyComponentError /\ (\E i \in 1..N : components[i] = "Running") THEN
+        "ErrorStopping"  \* Component failed, healthy components need to be stopped
+    ELSE IF AnyComponentError THEN
+        "Error"  \* Component failed and all components stopped
     ELSE IF AnyComponentInitializing THEN
         "Initializing"
     ELSE IF AnyComponentStarting THEN
@@ -127,7 +131,9 @@ ComponentSetState ==
 
 \* System State Machine (reacts to ComponentSet state changes)
 SystemState ==
-    IF ComponentSetState = "Error" /\ (\E i \in 1..N : components[i] = "Running") THEN
+    IF ComponentSetState = "ErrorStopping" THEN
+        "ErrorRecovery"  \* ComponentSet ready to stop healthy components
+    ELSE IF ComponentSetState = "Error" /\ (\E i \in 1..N : components[i] = "Running") THEN
         "ErrorRecovery"  \* Component failed, still have running components to stop
     ELSE IF ComponentSetState = "Error" /\ ~(\E i \in 1..N : components[i] = "Running") THEN
         "Error"  \* Error recovery complete, system reaches terminal error state
@@ -209,10 +215,10 @@ Next ==
         /\ components' = [components EXCEPT ![i] = ComponentTransition(components[i])]
         /\ components'[i] # components[i]
 
-    \* 2. Error recovery: stop remaining healthy components when system coordinates
-    \/ \* Stop remaining healthy components during error recovery
-        /\ SystemState = "ErrorRecovery"  \* System coordinating error recovery
-        /\ ProcessState = "Stopped"       \* Process has stopped
+    \* 2. Error recovery: stop remaining healthy components when ready
+    \/ \* Stop remaining healthy components after process terminates
+        /\ ComponentSetState = "ErrorStopping"  \* ComponentSet shows error + healthy components
+        /\ IsTerminated(ProcessState)           \* Process must be terminated first
         /\ \E r \in 1..N : components[r] = "Running"  \* Still have healthy components
         /\ components' = [s \in 1..N |-> IF components[s] = "Running" THEN "Stopping" ELSE components[s]]
 
