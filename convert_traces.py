@@ -26,16 +26,68 @@ def map_component_to_index(source: str) -> int:
         "dbComponent": 1,
         "fsComponent": 2
     }
-    return mapping.get(source, None)
+    if source not in mapping:
+        raise ValueError(f"Unknown component source: '{source}'. Expected one of: {list(mapping.keys())}")
+    return mapping[source]
 
 def is_component_source(source: str) -> bool:
     """Check if source represents an actual component (not a state machine)"""
     return source in ["dbComponent", "fsComponent"]
 
+def validate_trace_format(trace_data: List[Dict[str, Any]], filepath: str):
+    """Validate that trace has expected format and required fields"""
+    if not isinstance(trace_data, list):
+        raise ValueError(f"Invalid trace format in {filepath}: Expected list, got {type(trace_data)}")
+    
+    if not trace_data:
+        raise ValueError(f"Empty trace file: {filepath}")
+    
+    expected_sources = {
+        "SystemStateMachine",
+        "ComponentGroupStateMachine", 
+        "ProcessStateMachine",
+        "dbComponent",
+        "fsComponent"
+    }
+    
+    required_fields = {"from", "to", "source", "trigger"}
+    
+    for i, transition in enumerate(trace_data):
+        if not isinstance(transition, dict):
+            raise ValueError(f"Invalid transition format in {filepath}[{i}]: Expected dict, got {type(transition)}")
+        
+        # Check required fields
+        missing_fields = required_fields - set(transition.keys())
+        if missing_fields:
+            raise ValueError(f"Missing required fields in {filepath}[{i}]: {missing_fields}")
+        
+        # Validate source is recognized
+        source = transition["source"]
+        if source not in expected_sources:
+            raise ValueError(f"Unknown source in {filepath}[{i}]: '{source}'. Expected one of: {sorted(expected_sources)}")
+        
+        # Validate states are non-empty strings
+        for field in ["from", "to", "trigger"]:
+            value = transition[field]
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"Invalid {field} value in {filepath}[{i}]: '{value}' (must be non-empty string)")
+    
+    print(f"✅ Validated trace format: {filepath}")
+    return True
+
 def load_trace_file(filepath: str) -> List[Dict[str, Any]]:
-    """Load and parse JSON trace file"""
-    with open(filepath, 'r') as f:
-        return json.load(f)
+    """Load and parse JSON trace file with validation"""
+    try:
+        with open(filepath, 'r') as f:
+            trace_data = json.load(f)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON in {filepath}: {e}")
+    except Exception as e:
+        raise ValueError(f"Failed to read {filepath}: {e}")
+    
+    # Validate the trace format
+    validate_trace_format(trace_data, filepath)
+    return trace_data
 
 def analyze_trace_metadata(trace_data: List[Dict[str, Any]], trace_name: str) -> TraceMetadata:
     """Analyze trace and collect detailed metadata"""
@@ -130,15 +182,14 @@ def generate_trace_module(trace_data: List[Dict[str, Any]], module_name: str) ->
     
     for transition in trace_data:
         if is_component_source(transition["source"]):
-            component_index = map_component_to_index(transition["source"])
-            if component_index:
-                component_transitions.append({
-                    "index": component_index,
-                    "from": transition["from"],
-                    "to": transition["to"],
-                    "trigger": transition["trigger"],
-                    "source": transition["source"]
-                })
+            component_index = map_component_to_index(transition["source"])  # This will raise if invalid
+            component_transitions.append({
+                "index": component_index,
+                "from": transition["from"],
+                "to": transition["to"],
+                "trigger": transition["trigger"],
+                "source": transition["source"]
+            })
     
     # If no component transitions, create a minimal trace
     if not component_transitions:
@@ -268,13 +319,9 @@ def main():
         base_name = os.path.basename(trace_file).replace('.trace', '').replace('-', '_')
         module_name = f"trace_{base_name}"
         
-        # Load trace data
+        # Load trace data with strict validation
         try:
             trace_data = load_trace_file(trace_file)
-            
-            # Skip empty trace files
-            if not trace_data:
-                continue
             
             # Analyze trace metadata
             metadata = analyze_trace_metadata(trace_data, base_name)
@@ -302,9 +349,11 @@ def main():
             })
             
         except Exception as e:
-            if not args.return_metadata:
-                print(f"❌ Error processing {base_name}: {e}")
-    
+            # Always crash on validation errors - don't continue with invalid traces
+            print(f"❌ FATAL: Invalid trace format in {trace_file}")
+            print(f"    Error: {e}")
+            print(f"    Trace conversion failed - fix trace format and try again")
+            raise SystemExit(1)
     if args.return_metadata:
         return trace_metadata
     else:

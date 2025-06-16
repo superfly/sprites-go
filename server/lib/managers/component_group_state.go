@@ -9,6 +9,7 @@ import (
 
 // ComponentGroupConfig holds the configuration for a component group state manager
 type ComponentGroupConfig struct {
+	InitialState      string // Initial state, defaults to "Initializing"
 	Components        []ManagedComponent
 	ComponentMonitors []StateMonitor // Separate field for monitors to pass to individual components
 }
@@ -105,11 +106,15 @@ func (cgsm *ComponentGroupState) Fire(trigger string, args ...any) error {
 }
 
 // NewComponentGroupState creates a new component group state manager
-// Initial state is "Initializing" as per TLA+ spec
+// Initial state is "Initializing" as per TLA+ spec (unless overridden in config)
 // monitors parameter uses splat - these are for the ComponentGroupState itself
 // config.ComponentMonitors are passed to individual components
 func NewComponentGroupState(config ComponentGroupConfig, monitors ...StateMonitor) *ComponentGroupState {
-	sm := stateless.NewStateMachine("Initializing")
+	initialState := config.InitialState
+	if initialState == "" {
+		initialState = "Initializing" // Default per TLA+ spec
+	}
+	sm := stateless.NewStateMachine(initialState)
 
 	monitorCtx, monitorCancel := context.WithCancel(context.Background())
 
@@ -160,6 +165,7 @@ func NewComponentGroupState(config ComponentGroupConfig, monitors ...StateMonito
 	// Starting - components transitioning to active
 	sm.Configure("Starting").
 		Permit("Running", "Running").
+		Permit("Stopping", "Stopping").
 		Permit("ErrorStopping", "ErrorStopping").
 		OnEntry(cgsm.handleStarting)
 

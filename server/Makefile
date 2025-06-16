@@ -4,8 +4,8 @@
 build:
 	go build -o tmp/sprite-env .
 
-# Run all tests (integration + unit)
-test: test-integration test-unit
+# Run all tests (unit first, then integration)
+test: test-unit test-integration
 
 # Run integration tests
 test-integration: build
@@ -20,6 +20,7 @@ clean:
 	rm -rf tmp/
 
 # Build Docker image and run tests using Docker
+# Same resources as github actions
 docker-build-test:
 	docker build -t sprite-env-test -f Dockerfile.test .
-	docker run --rm sprite-env-test 
+	docker run --rm --cpus="2" --memory="7g" sprite-env-test 

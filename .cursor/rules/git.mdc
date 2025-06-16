@@ -1,0 +1,7 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+- ALWAYS use no-pager functionality with `git` commands
+- ALWAYS use no-pager or pipe `gh` commands through cat

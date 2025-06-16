@@ -45,15 +45,16 @@ type ProcessConfig struct {
 type Process struct {
 	config          ProcessConfig
 	cmd             *exec.Cmd
-	signalCh        chan os.Signal
-	signalChClosed  bool         // Track if signal channel is closed
-	signalChMutex   sync.RWMutex // Protect access to signalChClosed flag
+	signalCh        chan os.Signal // Unbuffered - supervisor always ready to receive, no signals dropped
+	signalChClosed  bool           // Track if signal channel is closed
+	signalChMutex   sync.RWMutex   // Protect access to signalChClosed flag
 	stdoutBroadcast *outputBroadcaster
 	stderrBroadcast *outputBroadcaster
-	eventCh         chan ProcessEventType // Event channel for listeners
+	eventCh         chan ProcessEventType // Buffered - external resource with unpredictable timing, consumers need reliable delivery
 	lastSignal      os.Signal             // Track the last signal sent for handler callback
 	ctx             context.Context       // Context for goroutine cleanup
 	cancel          context.CancelFunc    // Cancel function for cleanup
+	eventWg         sync.WaitGroup        // Tracks event emission goroutines
 }
 
 // outputBroadcaster manages broadcasting output to multiple subscribers
@@ -141,11 +142,11 @@ func (prw *pipeReaderWrapper) Close() error {
 func NewProcess(config ProcessConfig) *Process {
 	return &Process{
 		config:          config,
-		cmd:             nil, // Will be created when needed
-		signalCh:        make(chan os.Signal, 1),
+		cmd:             nil,                  // Will be created when needed
+		signalCh:        make(chan os.Signal), // Unbuffered channel
 		stdoutBroadcast: newOutputBroadcaster(os.Stdout),
 		stderrBroadcast: newOutputBroadcaster(os.Stderr),
-		eventCh:         make(chan ProcessEventType), // Unbuffered channel as required
+		eventCh:         make(chan ProcessEventType, 10), // Buffered channel with some buffer
 	}
 }
 
@@ -156,21 +157,15 @@ func (p *Process) Events() <-chan ProcessEventType {
 
 // EmitEvent sends an event to the channel
 func (p *Process) EmitEvent(event ProcessEventType, err ...error) {
-	// Run emission in a goroutine to avoid blocking the supervisor
-	// Use context to ensure proper cleanup
+	// Emit events synchronously to guarantee ordering, especially important for
+	// terminal events like ProcessFailedEvent that should be the final event
 	if p.ctx != nil {
-		go func() {
-			// Check if context is canceled before emitting event
-			select {
-			case <-p.ctx.Done():
-				return // Context canceled, don't emit event
-			case p.eventCh <- event:
-				// Event sent successfully
-			default:
-				// Channel might be closed or blocked, don't panic
-				return
-			}
-		}()
+		select {
+		case <-p.ctx.Done():
+			return // Context canceled, don't emit event
+		case p.eventCh <- event:
+			// Event sent successfully - synchronous to maintain order
+		}
 	}
 }
 
@@ -235,10 +230,13 @@ func (p *Process) Signal(sig os.Signal) {
 		return // Channel is closed, can't send signal
 	}
 
-	// Use a select to avoid blocking if the supervisor isn't running.
+	// Send signal to supervisor - use select to avoid blocking on closed channel
 	select {
 	case p.signalCh <- sig:
+		// Signal sent successfully
 	default:
+		// Channel is full or closed, signal couldn't be sent
+		// This can happen during shutdown races - not a critical error
 	}
 }
 
@@ -298,6 +296,7 @@ func (p *Process) supervise(ctx context.Context) {
 		p.signalChMutex.Unlock()
 
 		// Close the event channel to signal no more events will be sent
+		// No need to wait for goroutines since events are now synchronous
 		close(p.eventCh)
 
 		// Clean up event handler goroutines
@@ -318,7 +317,6 @@ func (p *Process) supervise(ctx context.Context) {
 
 		if len(p.config.Command) == 0 {
 			p.EmitEvent(ProcessFailedEvent)
-			time.Sleep(time.Millisecond)
 			return
 		}
 
@@ -330,7 +328,6 @@ func (p *Process) supervise(ctx context.Context) {
 		err := p.cmd.Start()
 		if err != nil {
 			p.EmitEvent(ProcessFailedEvent, err)
-			time.Sleep(time.Millisecond)
 			return
 		}
 
@@ -399,7 +396,6 @@ func (p *Process) supervise(ctx context.Context) {
 							shouldRestart = false
 							p.EmitEvent(ProcessStoppingEvent)
 							p.EmitEvent(ProcessStoppedEvent)
-							time.Sleep(time.Millisecond)
 							return
 						}
 						// Non-terminating signal during backoff - just log it
@@ -421,7 +417,6 @@ func (p *Process) supervise(ctx context.Context) {
 						p.EmitEvent(ProcessFailedEvent, fmt.Errorf("process exited with code %d", exitCode))
 					}
 
-					time.Sleep(time.Millisecond)
 					return
 				}
 			}
@@ -455,18 +450,15 @@ func (p *Process) stopOrKill(cmd *exec.Cmd, sig os.Signal) {
 		select {
 		case <-done:
 			p.EmitEvent(ProcessStoppedEvent)
-			time.Sleep(time.Millisecond)
 		case <-time.After(p.config.GracefulShutdownTimeout):
 			_ = cmd.Process.Kill()
 			<-done // Wait for the process to die
 			p.EmitEvent(ProcessStoppedEvent)
-			time.Sleep(time.Millisecond)
 		}
 	} else {
 		// No timeout configured, wait indefinitely
 		<-done
 		p.EmitEvent(ProcessStoppedEvent)
-		time.Sleep(time.Millisecond)
 	}
 }
 

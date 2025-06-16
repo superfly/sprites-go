@@ -20,7 +20,9 @@ type ManagedProcess interface {
 
 // ProcessStateConfig holds the configuration for a process state manager
 type ProcessStateConfig struct {
-	Process ManagedProcess
+	InitialState string // Initial state, defaults to "Initializing"
+	Process      ManagedProcess
+	SystemState  *SystemState // Reference to system state for constraint validation
 }
 
 // ProcessState is a purely declarative intent processor for process states
@@ -33,9 +35,13 @@ type ProcessState struct {
 }
 
 // NewProcessState creates a new process state manager with a managed process
-// Initial state is "Initializing" as per TLA+ spec: Init == components = [i \in 1..N |-> "Initializing"]
+// Initial state is "Initializing" as per TLA+ spec (unless overridden in config)
 func NewProcessState(config ProcessStateConfig, monitors []StateMonitor) *ProcessState {
-	sm := stateless.NewStateMachine("Initializing")
+	initialState := config.InitialState
+	if initialState == "" {
+		initialState = "Initializing" // Default per TLA+ spec
+	}
+	sm := stateless.NewStateMachine(initialState)
 
 	eventCtx, eventCancel := context.WithCancel(context.Background())
 
@@ -57,12 +63,13 @@ func NewProcessState(config ProcessStateConfig, monitors []StateMonitor) *Proces
 	// Also allow Stopping for error recovery scenarios
 	sm.Configure("Initializing").
 		Permit("Starting", "Starting").
-		Permit("Stopping", "Stopping").
+		Permit("Stopping", "Stopped").
 		Permit("Error", "Error")
 
 	// Starting - can go to Running or Error (per TLA+ ComponentTransition)
 	sm.Configure("Starting").
 		Permit("Running", "Running").
+		Permit("Stopping", "Stopping").
 		Permit("Error", "Error").
 		OnEntry(psm.handleStarting)
 
@@ -205,4 +212,37 @@ func (psm *ProcessState) handleSignaling(ctx context.Context, args ...any) error
 		psm.config.Process.Signal(os.Signal(os.Interrupt))
 	}
 	return nil
+}
+
+// Fire overrides the base Fire method to add constraint validation
+func (psm *ProcessState) Fire(trigger string, args ...any) error {
+	// Validate constraints before allowing state transitions
+	if psm.config.SystemState != nil {
+		currentSystemState := psm.config.SystemState.MustState().(string)
+
+		switch trigger {
+		case "Starting":
+			// Process can only start when system is Ready or Running
+			if currentSystemState != "Ready" && currentSystemState != "Running" {
+				// Constraint violation - notify system and reject transition
+				psm.config.SystemState.Fire("ProcessError")
+				return fmt.Errorf("process cannot start when system state is %s", currentSystemState)
+			}
+		case "Running":
+			// Process can only run when system is Ready or Running
+			if currentSystemState != "Ready" && currentSystemState != "Running" {
+				// Constraint violation - notify system and reject transition
+				psm.config.SystemState.Fire("ProcessError")
+				return fmt.Errorf("process cannot run when system state is %s", currentSystemState)
+			}
+		}
+	}
+
+	// If constraints pass, proceed with the transition
+	return psm.StateMachine.Fire(trigger, args...)
+}
+
+// SetSystemState sets the system state reference for constraint validation
+func (psm *ProcessState) SetSystemState(systemState *SystemState) {
+	psm.config.SystemState = systemState
 }

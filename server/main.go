@@ -16,47 +16,21 @@ import (
 	"sprite-env/lib/managers"
 )
 
-// TLAMonitor implements StateMonitor interface to output TLA+ traces
-type TLAMonitor struct {
-	logger *slog.Logger
-	events chan managers.StateTransition
-}
-
-// NewTLAMonitor creates a new TLA monitor with a buffered channel
-func NewTLAMonitor(logger *slog.Logger) *TLAMonitor {
-	monitor := &TLAMonitor{
-		logger: logger,
-		events: make(chan managers.StateTransition, 100), // Buffered channel
+// outputTrace outputs a single trace event
+func outputTrace(transition managers.StateTransition) {
+	// Create a simple flat trace with just the transition info
+	trace := map[string]interface{}{
+		"source":  transition.Name,
+		"from":    transition.From,
+		"to":      transition.To,
+		"trigger": transition.Trigger,
 	}
 
-	// Start a goroutine to process events
-	go monitor.processEvents()
-
-	return monitor
-}
-
-// Events implements StateMonitor interface
-func (tm *TLAMonitor) Events() chan<- managers.StateTransition {
-	return tm.events
-}
-
-// processEvents processes state transition events and outputs TLA traces
-func (tm *TLAMonitor) processEvents() {
-	for transition := range tm.events {
-		// Create a simple flat trace with just the transition info
-		trace := map[string]interface{}{
-			"source":  transition.Name,
-			"from":    transition.From,
-			"to":      transition.To,
-			"trigger": transition.Trigger,
-		}
-
-		now := time.Now()
-		fmt.Fprintf(os.Stdout, "TLA+ trace: %v %s\n", trace, now.Format("2006-01-02 15:04:05.000000000 MST"))
-		// Output JSON to stderr
-		if jsonBytes, err := json.Marshal(trace); err == nil {
-			fmt.Fprintf(os.Stderr, "%s\n", jsonBytes)
-		}
+	now := time.Now()
+	fmt.Fprintf(os.Stdout, "TLA+ trace: %v %s\n", trace, now.Format("2006-01-02 15:04:05.000000000 MST"))
+	// Output JSON to stderr
+	if jsonBytes, err := json.Marshal(trace); err == nil {
+		fmt.Fprintf(os.Stderr, "%s\n", jsonBytes)
 	}
 }
 
@@ -90,7 +64,7 @@ type Application struct {
 	ctx                context.Context
 	cancel             context.CancelFunc
 	config             ApplicationConfig
-	monitor            *TLAMonitor // State monitor for TLA tracing
+	monitor            managers.StateMonitor // State monitor for TLA tracing
 }
 
 // ComponentScripts holds the script commands for a component
@@ -140,10 +114,10 @@ func NewApplication(config ApplicationConfig) *Application {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Create TLA monitor if tracing is enabled
-	var monitor *TLAMonitor
+	var monitor managers.StateMonitor
 	if config.TLATrace {
 		logger.Info("TLA+ trace logging enabled")
-		monitor = NewTLAMonitor(logger)
+		monitor = managers.NewStateMonitor(outputTrace)
 	}
 
 	if config.Debug {

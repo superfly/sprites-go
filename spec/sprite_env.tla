@@ -13,13 +13,11 @@ vars == <<components>>
 BaseTransitionStates == {
     "Initializing",    \* Starting up
     "Starting",        \* Transitioning to active
-    "Stopping",        \* Gracefully stopping
-    "ShuttingDown"     \* Permanent shutdown transition
+    "Stopping"         \* Gracefully stopping (terminal)
 }
 
 BaseFinalStates == {
-    "Stopped",         \* Temporarily stopped (can restart)
-    "Shutdown"         \* Permanently shut down
+    "Stopped"          \* Gracefully stopped (terminal)
 }
 
 BaseActiveStates == {
@@ -33,7 +31,6 @@ BaseErrorStates == {
 \* Terminal states (process no longer operational)
 BaseTerminalStates == {
     "Stopped",         \* Stopped gracefully
-    "Shutdown",        \* Shutdown permanently  
     "Exited",          \* Exited normally
     "Crashed",         \* Crashed/failed
     "Killed"           \* Forcefully terminated
@@ -135,6 +132,8 @@ SystemState ==
         "ErrorRecovery"  \* ComponentSet ready to stop healthy components
     ELSE IF ComponentSetState = "Error" /\ (\E i \in 1..N : components[i] = "Running") THEN
         "ErrorRecovery"  \* Component failed, still have running components to stop
+    ELSE IF ComponentSetState = "Error" /\ (AnyComponentInitializing \/ AnyComponentStarting) THEN
+        "Error"  \* Startup failure - system reaches terminal error state
     ELSE IF ComponentSetState = "Error" /\ ~(\E i \in 1..N : components[i] = "Running") THEN
         "Error"  \* Error recovery complete, system reaches terminal error state
     ELSE IF ComponentSetState = "Initializing" THEN
@@ -157,11 +156,15 @@ SystemState ==
 \* Process State Machine (responds to SystemState)
 ProcessState ==
     IF SystemState = "ErrorRecovery" /\ (\E i \in 1..N : components[i] = "Running") THEN
-        "Stopping"  \* Process stops gracefully during error recovery
+        "Stopping"  \* Process stops gracefully during error recovery (was previously "Running")
+    ELSE IF SystemState = "ErrorRecovery" /\ (AnyComponentInitializing \/ AnyComponentStarting) THEN
+        "Initializing"  \* Process stays in initializing during startup error recovery
     ELSE IF SystemState = "ErrorRecovery" THEN
         "Stopped"  \* Process stopped during error recovery
-    ELSE IF SystemState \in {"Initializing", "Starting"} THEN
-        "Stopped"  \* Process waits for system to be ready
+    ELSE IF SystemState = "Initializing" THEN
+        "Initializing"  \* Process initializing when system initializing
+    ELSE IF SystemState = "Starting" THEN
+        "Starting"  \* Process starting when system starting
     ELSE IF SystemState = "Ready" THEN
         "Running"  \* Process runs when system is ready
     ELSE IF SystemState = "Stopping" THEN
@@ -189,6 +192,7 @@ ComponentTransition(state) ==
     CASE state = "Initializing" -> "Starting"
       [] state = "Initializing" -> "Error"       \* Initialization can fail
       [] state = "Starting" -> "Running"
+      [] state = "Starting" -> "Stopping"       \* Can stop during startup
       [] state = "Starting" -> "Error"           \* Startup can fail
       [] state = "Running" -> "Checkpointing"    \* Trigger checkpoint operation
       [] state = "Running" -> "Restoring"        \* Trigger restore operation
@@ -201,7 +205,6 @@ ComponentTransition(state) ==
       [] state = "Restoring" -> "Error"          \* Restore can fail
       [] state = "Stopping" -> "Stopped"
       [] state = "ShuttingDown" -> "Shutdown" 
-      [] state = "Stopped" /\ ComponentSetState = "Starting" -> "Starting"
       [] OTHER -> state
 
 \* Initial state
@@ -244,6 +247,7 @@ TypeOK ==
 HierarchyInvariant ==
     /\ (SystemState = "Ready" => ComponentSetState = "Running")
     /\ (ProcessState = "Running" => SystemState = "Ready")
+    /\ (SystemState = "Ready" => ProcessState = "Running")  \* Process MUST be running if system is ready
     /\ (ComponentSetState = "Running" => AllComponentsOperational)
     /\ (ComponentSetState = "Error" => AnyComponentError)
     /\ (OverallSystemState = "Running" => (SystemState = "Ready" /\ ProcessState = "Running"))

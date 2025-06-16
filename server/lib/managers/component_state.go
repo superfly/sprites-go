@@ -53,8 +53,13 @@ type ComponentState struct {
 
 // NewComponentState creates a new component state manager with a managed component
 // Initial state is "Initializing" as per TLA+ spec: Init == components = [i \in 1..N |-> "Initializing"]
-func NewComponentState(name string, component ManagedComponent, monitors []StateMonitor) *ComponentState {
-	sm := stateless.NewStateMachine("Initializing")
+// initialState parameter is optional - if empty, defaults to "Initializing"
+func NewComponentState(name string, component ManagedComponent, monitors []StateMonitor, initialState ...string) *ComponentState {
+	defaultState := "Initializing"
+	if len(initialState) > 0 && initialState[0] != "" {
+		defaultState = initialState[0]
+	}
+	sm := stateless.NewStateMachine(defaultState)
 
 	eventCtx, eventCancel := context.WithCancel(context.Background())
 
@@ -175,12 +180,16 @@ func (csm *ComponentState) listenForEvents() {
 
 // Close stops the event listener and cleans up resources
 func (csm *ComponentState) Close() {
+	// Check if component is already in a terminal state or stopping before calling Stop()
+	currentState := csm.MustState().(string)
+	isTerminalOrStopping := currentState == "Stopped" || currentState == "Error" || currentState == "Crashed" || currentState == "Killed" || currentState == "Stopping"
+
 	// Close the underlying component (which will also stop it)
-	if csm.component != nil {
+	if csm.component != nil && !isTerminalOrStopping {
 		if closer, ok := csm.component.(interface{ Close() error }); ok {
 			closer.Close()
 		} else {
-			// Fallback to Stop() if Close() is not available
+			// Fallback to Stop() if Close() is not available, but only if not already stopped
 			csm.component.Stop()
 		}
 	}
@@ -248,6 +257,12 @@ func (csm *ComponentState) Fire(trigger string, args ...any) error {
 func (csm *ComponentState) FireAsync(trigger string) {
 	go func() {
 		if err := csm.Fire(trigger); err != nil {
+			// Check if we're in a terminal state - if so, ignore the error
+			currentState := csm.MustState().(string)
+			if currentState == "Stopped" || currentState == "Error" || currentState == "Crashed" || currentState == "Killed" {
+				// Component is in terminal state, ignore invalid transitions
+				return
+			}
 			panic(fmt.Sprintf("State machine error firing %s: %v", trigger, err))
 		}
 	}()

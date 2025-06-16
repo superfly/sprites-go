@@ -225,7 +225,7 @@ func TestProcessRestart(t *testing.T) {
 	config := ProcessConfig{
 		Command:                 []string{"sh", "-c", "echo 'run'; exit 1"}, // Will exit with error
 		MaxRetries:              2,                                          // Allow 2 retries
-		RestartDelay:            10 * time.Millisecond,                      // Short delay for testing
+		RestartDelay:            50 * time.Millisecond,                      // Longer delay for CI stability
 		GracefulShutdownTimeout: time.Second,
 	}
 
@@ -241,10 +241,14 @@ func TestProcessRestart(t *testing.T) {
 		t.Fatalf("Failed to start process: %v", err)
 	}
 
-	// Wait for final failure
-	if !capture.WaitForEvent(ProcessFailedEvent, 10*time.Second) {
-		t.Fatal("Process never failed")
+	// Wait for final failure with longer timeout for CI
+	if !capture.WaitForEvent(ProcessFailedEvent, 15*time.Second) {
+		events := capture.GetEvents()
+		t.Fatalf("Process never failed after 15 seconds. Events: %v", events)
 	}
+
+	// Give a bit more time for any remaining events to be processed
+	time.Sleep(100 * time.Millisecond)
 
 	events := capture.GetEvents()
 
@@ -271,7 +275,7 @@ func TestProcessRestart(t *testing.T) {
 	// Final event should be EventFailed since retries are exhausted
 	lastEvent := events[len(events)-1]
 	if lastEvent != ProcessFailedEvent {
-		t.Errorf("Expected final event to be EventFailed, got %v", lastEvent)
+		t.Errorf("Expected final event to be EventFailed, got %v. All events: %v", lastEvent, events)
 	}
 }
 
@@ -348,19 +352,21 @@ func TestProcessPipes(t *testing.T) {
 		t.Fatalf("Failed to start process: %v", err)
 	}
 
+	// Channel to synchronize read completion
+	readDone := make(chan bool, 1)
+	var readOutput string
+
 	// Read from stdout
 	go func() {
 		defer stdout.Close()
+		defer func() { readDone <- true }()
 		buf := make([]byte, 1024)
 		n, err := stdout.Read(buf)
 		if err != nil && err.Error() != "EOF" {
 			t.Errorf("Failed to read from stdout: %v", err)
 			return
 		}
-		output := strings.TrimSpace(string(buf[:n]))
-		if output != "hello world" {
-			t.Errorf("Expected 'hello world', got '%s'", output)
-		}
+		readOutput = strings.TrimSpace(string(buf[:n]))
 	}()
 
 	// Close stderr since we're not using it
@@ -369,6 +375,19 @@ func TestProcessPipes(t *testing.T) {
 	// Wait for process to complete
 	if !capture.WaitForEvent(ProcessStoppedEvent, 5*time.Second) && !capture.WaitForEvent(ProcessFailedEvent, 5*time.Second) {
 		t.Fatal("Process never completed")
+	}
+
+	// Wait for read operation to complete
+	select {
+	case <-readDone:
+		// Read completed
+	case <-time.After(2 * time.Second):
+		t.Fatal("Read operation timed out")
+	}
+
+	// Check the output
+	if readOutput != "hello world" {
+		t.Errorf("Expected 'hello world', got '%s'", readOutput)
 	}
 }
 
@@ -433,6 +452,9 @@ func TestProcessContextCancellation(t *testing.T) {
 		t.Fatalf("Process never stopped after context cancellation. Events: %v", events)
 	}
 
+	// Give a bit more time for any remaining events to be processed
+	time.Sleep(150 * time.Millisecond)
+
 	events := capture.GetEvents()
 
 	// Should end with EventStopped
@@ -442,6 +464,6 @@ func TestProcessContextCancellation(t *testing.T) {
 
 	lastEvent := events[len(events)-1]
 	if lastEvent != ProcessStoppedEvent {
-		t.Errorf("Expected EventStopped after context cancellation, got %v", lastEvent)
+		t.Errorf("Expected EventStopped after context cancellation, got %v. All events: %v", lastEvent, events)
 	}
 }

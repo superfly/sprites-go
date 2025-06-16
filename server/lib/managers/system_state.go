@@ -3,12 +3,14 @@ package managers
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/qmuntal/stateless"
 )
 
 // SystemConfig holds the configuration for a system state manager
 type SystemConfig struct {
+	InitialState string // Initial state, defaults to "Initializing"
 	ProcessState *ProcessState
 	Components   []ManagedComponent
 }
@@ -17,10 +19,12 @@ type SystemConfig struct {
 // Following cursor rules: extends stateless.StateMachine
 type SystemState struct {
 	*stateless.StateMachine
-	config              SystemConfig
-	componentGroupState *ComponentGroupState
-	terminalChan        chan int // Channel to signal terminal state reached with exit code
-	externalExitChan    chan int // External channel for sending exit codes to main app
+	config                SystemConfig
+	componentGroupState   *ComponentGroupState
+	externalExitChan      chan int       // External channel for sending exit codes to main app
+	externalMonitors      []StateMonitor // Store external monitors for graceful shutdown
+	componentGroupMonitor *systemMonitor // Internal monitor for component group events
+	processMonitor        *systemMonitor // Internal monitor for process events
 }
 
 // Fire overrides the base Fire method
@@ -30,15 +34,19 @@ func (ssm *SystemState) Fire(trigger string, args ...any) error {
 }
 
 // NewSystemState creates a new system state manager
-// Initial state is "Initializing" as per TLA+ spec
+// Initial state is "Initializing" as per TLA+ spec (unless overridden in config)
 func NewSystemState(config SystemConfig, monitors []StateMonitor) *SystemState {
-	sm := stateless.NewStateMachine("Initializing")
+	initialState := config.InitialState
+	if initialState == "" {
+		initialState = "Initializing" // Default per TLA+ spec
+	}
+	sm := stateless.NewStateMachine(initialState)
 
 	ssm := &SystemState{
 		StateMachine:        sm,
 		config:              config,
 		componentGroupState: nil,
-		terminalChan:        make(chan int, 1), // Buffered channel for exit code
+		externalMonitors:    monitors, // Store external monitors for graceful shutdown
 	}
 
 	// Attach monitors if provided
@@ -49,6 +57,9 @@ func NewSystemState(config SystemConfig, monitors []StateMonitor) *SystemState {
 	// Add transition callback to detect terminal states
 	sm.OnTransitioned(func(ctx context.Context, transition stateless.Transition) {
 		if transition.Destination == "Error" {
+			// Close external monitors gracefully first
+			CloseMonitors(ssm.externalMonitors, 1*time.Second)
+
 			// Close child managers to stop their goroutines
 			if ssm.componentGroupState != nil {
 				ssm.componentGroupState.Close()
@@ -65,13 +76,10 @@ func NewSystemState(config SystemConfig, monitors []StateMonitor) *SystemState {
 					// Channel already has a value, ignore
 				}
 			}
-
-			// Also send to internal channel for backward compatibility
-			select {
-			case ssm.terminalChan <- 1:
-			default:
-			}
 		} else if transition.Destination == "Stopped" {
+			// Close external monitors gracefully first
+			CloseMonitors(ssm.externalMonitors, 1*time.Second)
+
 			// Close child managers to stop their goroutines
 			if ssm.componentGroupState != nil {
 				ssm.componentGroupState.Close()
@@ -88,12 +96,6 @@ func NewSystemState(config SystemConfig, monitors []StateMonitor) *SystemState {
 					// Channel already has a value, ignore
 				}
 			}
-
-			// Also send to internal channel for backward compatibility
-			select {
-			case ssm.terminalChan <- 0:
-			default:
-			}
 		}
 	})
 
@@ -107,6 +109,7 @@ func NewSystemState(config SystemConfig, monitors []StateMonitor) *SystemState {
 
 		// Create component group monitor to translate component events to system events
 		componentGroupMonitor := ssm.createComponentGroupMonitor()
+		ssm.componentGroupMonitor = componentGroupMonitor.(*systemMonitor) // Store reference for cleanup
 
 		// Pass both the componentGroupMonitor (for SystemState coordination)
 		// and the external monitors (for TLA+ trace generation)
@@ -118,7 +121,11 @@ func NewSystemState(config SystemConfig, monitors []StateMonitor) *SystemState {
 
 	// Create process monitor to translate process events to system events
 	if config.ProcessState != nil {
+		// Set system state reference for constraint validation
+		config.ProcessState.SetSystemState(ssm)
+
 		processMonitor := ssm.createProcessMonitor()
+		ssm.processMonitor = processMonitor.(*systemMonitor) // Store reference for cleanup
 		// Attach the process monitor to the existing process state manager
 		config.ProcessState.OnTransitioning(CreateMonitorCallback("ProcessState", []StateMonitor{processMonitor}))
 	}
@@ -154,10 +161,10 @@ func NewSystemState(config SystemConfig, monitors []StateMonitor) *SystemState {
 		Permit("ComponentsStopping", "Stopping").
 		Permit("ComponentsStopped", "Stopped").
 		Permit("ProcessStopped", "Stopping").
-		Permit("ProcessError", "Error").
-		Permit("ProcessCrashed", "Error").
-		Permit("ProcessKilled", "Error").
-		Permit("ProcessExited", "Error").
+		Permit("ProcessError", "ErrorRecovery").
+		Permit("ProcessCrashed", "ErrorRecovery").
+		Permit("ProcessKilled", "ErrorRecovery").
+		Permit("ProcessExited", "ErrorRecovery").
 		OnEntry(ssm.handleReady)
 
 	// Running - full system operational (components ready + process running)
@@ -167,10 +174,10 @@ func NewSystemState(config SystemConfig, monitors []StateMonitor) *SystemState {
 		Permit("ComponentsStopping", "Stopping").
 		Permit("ComponentsStopped", "Stopped").
 		Permit("ProcessStopped", "Stopping").
-		Permit("ProcessError", "Error").
-		Permit("ProcessCrashed", "Error").
-		Permit("ProcessKilled", "Error").
-		Permit("ProcessExited", "Error")
+		Permit("ProcessError", "ErrorRecovery").
+		Permit("ProcessCrashed", "ErrorRecovery").
+		Permit("ProcessKilled", "ErrorRecovery").
+		Permit("ProcessExited", "ErrorRecovery")
 
 	// ErrorRecovery - handling component failures
 	sm.Configure("ErrorRecovery").
@@ -190,6 +197,7 @@ func NewSystemState(config SystemConfig, monitors []StateMonitor) *SystemState {
 		Permit("ProcessError", "Error").
 		Permit("ProcessCrashed", "Error").
 		Permit("ProcessKilled", "Error").
+		Ignore("ComponentsStopping"). // Ignore redundant stopping events when already stopping
 		OnEntry(ssm.handleStopping)
 
 	// Terminal states - no transitions out (no OnEntry handlers needed now)
@@ -200,11 +208,6 @@ func NewSystemState(config SystemConfig, monitors []StateMonitor) *SystemState {
 	// This will replace the old callback-based approach
 
 	return ssm
-}
-
-// Wait blocks until the system reaches a terminal state and returns the appropriate exit code
-func (ssm *SystemState) Wait() int {
-	return <-ssm.terminalChan
 }
 
 // handleStarting is called when entering Starting state - should start components
@@ -233,15 +236,8 @@ func (ssm *SystemState) handleReady(ctx context.Context, args ...any) error {
 // handleErrorRecovery is called when entering ErrorRecovery state - should stop process first
 func (ssm *SystemState) handleErrorRecovery(ctx context.Context, args ...any) error {
 	if ssm.config.ProcessState != nil {
-		// Check current process state
-		processState := ssm.config.ProcessState.MustState().(string)
-		if processState == "Initializing" {
-			// Process was never started - transition directly to Stopped
-			ssm.config.ProcessState.Fire("Stopped")
-		} else {
-			// Process was started - fire Stopping to gracefully stop it
-			ssm.config.ProcessState.Fire("Stopping")
-		}
+		// Fire Stopping - the ProcessState will handle whether it needs to actually stop a process or not
+		ssm.config.ProcessState.Fire("Stopping")
 	}
 	return nil
 }
@@ -267,6 +263,22 @@ func (ssm *SystemState) createComponentGroupMonitor() StateMonitor {
 	// Start goroutine to process component group state changes
 	go func() {
 		for transition := range events {
+			// Check if system is in terminal state - if so, ignore component events
+			currentSystemState := ssm.MustState().(string)
+			if currentSystemState == "Error" || currentSystemState == "Stopped" {
+				// System is in terminal state, ignore component events
+				continue
+			}
+
+			// Also check if component group is in terminal state - if so, ignore events
+			if ssm.componentGroupState != nil {
+				currentComponentState := ssm.componentGroupState.MustState().(string)
+				if currentComponentState == "Error" || currentComponentState == "Stopped" {
+					// Component group is in terminal state, ignore events
+					continue
+				}
+			}
+
 			switch transition.To {
 			case "Running":
 				if err := ssm.Fire("ComponentsRunning"); err != nil {
@@ -303,36 +315,18 @@ func (ssm *SystemState) createProcessMonitor() StateMonitor {
 	// Start goroutine to process process state changes
 	go func() {
 		for transition := range events {
+			// Check if system is in terminal state - if so, ignore process events
+			currentSystemState := ssm.MustState().(string)
+			if currentSystemState == "Error" || currentSystemState == "Stopped" {
+				// System is in terminal state, ignore process events
+				continue
+			}
+
 			switch transition.To {
 			case "Starting":
-				// Process starting - validate system state constraints
-				currentSystemState := ssm.MustState().(string)
-
-				// Process can only start when system is Ready (or already Running for restarts)
-				if currentSystemState != "Ready" && currentSystemState != "Running" {
-					// Constraint violation - process started when system not ready
-					// Transition system to Error state
-					if err := ssm.Fire("ProcessError"); err != nil {
-						panic(fmt.Sprintf("State machine error firing ProcessError for constraint violation: %v", err))
-					}
-					return
-				}
-				// Valid transition - no system state change needed for Starting
+				// Process starting - no system state change needed for Starting
 			case "Running":
-				// Process successfully started - validate system state constraints
-				currentSystemState := ssm.MustState().(string)
-
-				// Process can only transition to Running when system is Ready or Running
-				if currentSystemState != "Ready" && currentSystemState != "Running" {
-					// Constraint violation - process started when system not ready
-					// Transition system to Error state
-					if err := ssm.Fire("ProcessError"); err != nil {
-						panic(fmt.Sprintf("State machine error firing ProcessError for constraint violation: %v", err))
-					}
-					return
-				}
-
-				// Valid transition - system transitions to Running (full system operational)
+				// Process successfully started - system transitions to Running (full system operational)
 				if err := ssm.Fire("ProcessRunning"); err != nil {
 					// If ProcessRunning is not allowed from current state, treat as constraint violation
 					if err := ssm.Fire("ProcessError"); err != nil {
@@ -378,10 +372,33 @@ func (sm *systemMonitor) Events() chan<- StateTransition {
 	return sm.events
 }
 
-// Close stops the component group state manager if it exists
+// Close closes the monitor channel to stop the associated goroutine
+func (sm *systemMonitor) Close() error {
+	if sm.events != nil {
+		close(sm.events)
+		sm.events = nil
+	}
+	return nil
+}
+
+// Close stops all child managers and monitor goroutines
 func (ssm *SystemState) Close() {
+	// Close internal monitors first to stop their goroutines
+	if ssm.componentGroupMonitor != nil {
+		ssm.componentGroupMonitor.Close()
+		ssm.componentGroupMonitor = nil
+	}
+	if ssm.processMonitor != nil {
+		ssm.processMonitor.Close()
+		ssm.processMonitor = nil
+	}
+
+	// Close child managers
 	if ssm.componentGroupState != nil {
 		ssm.componentGroupState.Close()
+	}
+	if ssm.config.ProcessState != nil {
+		ssm.config.ProcessState.Close()
 	}
 }
 

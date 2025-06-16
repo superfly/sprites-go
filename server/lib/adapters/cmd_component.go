@@ -36,7 +36,7 @@ type cmdComponent struct {
 func NewCmdComponent(config CmdComponentConfig) Component {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &cmdComponent{
-		BaseComponent: NewBaseComponent(),
+		BaseComponent: NewBaseComponent(ctx),
 		config:        config,
 		ctx:           ctx,
 		cancel:        cancel,
@@ -169,7 +169,7 @@ func (c *cmdComponent) listenForProcessEvents() {
 		case event := <-events:
 			switch event {
 			case ProcessStartedEvent:
-				c.EmitEvent(ComponentStarted)
+				c.EmitEventSync(ComponentStarted)
 				c.handleProcessStarted()
 			case ProcessFailedEvent:
 				c.EmitEvent(ComponentFailed)
@@ -184,7 +184,7 @@ func (c *cmdComponent) listenForProcessEvents() {
 func (c *cmdComponent) handleProcessStarted() {
 	// If no ready command, emit ready immediately
 	if len(c.config.ReadyCommand) == 0 {
-		c.EmitEvent(ComponentReady)
+		c.EmitEventSync(ComponentReady)
 		return
 	}
 
@@ -241,20 +241,24 @@ func (c *cmdComponent) startReadyProcess(startStdout, startStderr io.ReadCloser)
 		return nil, nil, fmt.Errorf("failed to start ready command: %w", err)
 	}
 
-	// Create channel to pass stdin safely
-	stdinCh := make(chan io.WriteCloser, 1)
-	stdinCh <- readyStdin
-
-	// Start piping in background
-	go c.pipeOutput(startStdout, startStderr, stdinCh)
+	// Create a context for the piping operation that we can cancel when ready script exits
+	pipeCtx, cancelPiping := context.WithCancel(c.ctx)
 
 	// Monitor ready command completion
 	readyDone := make(chan error, 1)
 	go func() {
 		err := readyCmd.Wait()
+		// Cancel piping immediately when ready script exits
+		cancelPiping()
+
 		readyDone <- err
 		close(readyDone)
 	}()
+
+	// Start piping immediately but with cancellable context
+	stdinCh := make(chan io.WriteCloser, 1)
+	stdinCh <- readyStdin
+	go c.pipeOutputWithContext(pipeCtx, startStdout, startStderr, stdinCh)
 
 	return readyDone, readyCmd, nil
 }
@@ -271,50 +275,190 @@ func (c *cmdComponent) pipeOutput(stdout, stderr io.ReadCloser, stdinCh chan io.
 		if stdin == nil {
 			return // Ready process not available
 		}
-		// Don't defer close here - we'll close it explicitly when done
+		defer stdin.Close()
 	case <-c.ctx.Done():
 		return
 	}
 
-	// Use separate goroutines for stdout and stderr to avoid blocking
+	// Create a channel for write requests
+	writeQueue := make(chan []byte, 100) // Buffered to avoid blocking producers
+
+	// Start a single writer goroutine
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		for {
+			select {
+			case data, ok := <-writeQueue:
+				if !ok {
+					return // Channel closed
+				}
+				// Try to write with a timeout
+				done := make(chan bool, 1)
+				go func() {
+					_, err := stdin.Write(data)
+					done <- (err == nil)
+				}()
+
+				select {
+				case success := <-done:
+					if success {
+					} else {
+					}
+				case <-time.After(50 * time.Millisecond):
+					// Write timed out - ready script not reading, stop trying
+					return
+				case <-c.ctx.Done():
+					return
+				}
+			case <-c.ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// Use separate goroutines for stdout and stderr to collect output
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// Pipe stdout
+	// Pipe stdout in real-time
 	go func() {
 		defer wg.Done()
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
-			line := scanner.Text()
 			select {
 			case <-c.ctx.Done():
 				return
+			case writeQueue <- []byte(scanner.Text() + "\n"):
 			default:
-				if _, err := stdin.Write([]byte(line + "\n")); err != nil {
-					return // Ready script stdin closed or errored
-				}
+				// Queue full, ready script not keeping up - that's ok, just drop the line
 			}
 		}
 	}()
 
-	// Pipe stderr
+	// Pipe stderr in real-time
 	go func() {
 		defer wg.Done()
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
-			line := scanner.Text()
 			select {
 			case <-c.ctx.Done():
 				return
+			case writeQueue <- []byte(scanner.Text() + "\n"):
 			default:
-				if _, err := stdin.Write([]byte(line + "\n")); err != nil {
-					return // Ready script stdin closed or errored
-				}
+				// Queue full, ready script not keeping up - that's ok, just drop the line
 			}
 		}
 	}()
 
-	// Wait for all piping to complete, then close stdin to signal EOF to ready script
+	// Wait for all input to be processed
 	wg.Wait()
-	stdin.Close()
+
+	// Close the write queue and wait for writer to finish
+	close(writeQueue)
+	select {
+	case <-writerDone:
+	case <-time.After(100 * time.Millisecond):
+	case <-c.ctx.Done():
+	}
+}
+
+// pipeOutputWithContext safely pipes start process output to ready process input with non-blocking writes
+func (c *cmdComponent) pipeOutputWithContext(ctx context.Context, stdout, stderr io.ReadCloser, stdinCh chan io.WriteCloser) {
+	defer stdout.Close()
+	defer stderr.Close()
+
+	// Wait for stdin to be available
+	var stdin io.WriteCloser
+	select {
+	case stdin = <-stdinCh:
+		if stdin == nil {
+			return // Ready process not available
+		}
+		defer stdin.Close()
+	case <-ctx.Done():
+		return
+	}
+
+	// Create a channel for write requests
+	writeQueue := make(chan []byte, 100) // Buffered to avoid blocking producers
+
+	// Start a single writer goroutine
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		for {
+			select {
+			case data, ok := <-writeQueue:
+				if !ok {
+					return // Channel closed
+				}
+				// Try to write with a timeout
+				done := make(chan bool, 1)
+				go func() {
+					_, err := stdin.Write(data)
+					done <- (err == nil)
+				}()
+
+				select {
+				case success := <-done:
+					if success {
+					} else {
+					}
+				case <-time.After(50 * time.Millisecond):
+					// Write timed out - ready script not reading, stop trying
+					return
+				case <-ctx.Done():
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// Use separate goroutines for stdout and stderr to collect output
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Pipe stdout in real-time
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				return
+			case writeQueue <- []byte(scanner.Text() + "\n"):
+			default:
+				// Queue full, ready script not keeping up - that's ok, just drop the line
+			}
+		}
+	}()
+
+	// Pipe stderr in real-time
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				return
+			case writeQueue <- []byte(scanner.Text() + "\n"):
+			default:
+				// Queue full, ready script not keeping up - that's ok, just drop the line
+			}
+		}
+	}()
+
+	// Wait for all input to be processed
+	wg.Wait()
+
+	// Close the write queue and wait for writer to finish
+	close(writeQueue)
+	select {
+	case <-writerDone:
+	case <-time.After(100 * time.Millisecond):
+	case <-ctx.Done():
+	}
 }
