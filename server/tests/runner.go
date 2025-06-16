@@ -20,6 +20,23 @@ type StateChange struct {
 	Vars map[string]interface{} `json:"vars"`
 }
 
+// normalizeTraceName converts internal *StateManager names to expected *StateMachine names for TLA traces
+func normalizeTraceName(source string) string {
+	switch source {
+	case "SystemStateManager", "SystemState":
+		return "SystemStateMachine"
+	case "ProcessStateManager", "ProcessState":
+		return "ProcessStateMachine"
+	case "ComponentStateManager", "ComponentState":
+		return "ComponentStateMachine"
+	case "ComponentGroupStateManager", "ComponentGroupState":
+		return "ComponentGroupStateMachine"
+	default:
+		// Keep component-specific names like "dbComponent", "fsComponent" as-is
+		return source
+	}
+}
+
 // killExistingSpriteEnvProcesses finds and kills any existing sprite-env processes
 // This is equivalent to: ps aux | grep sprite-env | grep -v grep | awk '{print $2}' | xargs kill -9
 func killExistingSpriteEnvProcesses(t *testing.T) {
@@ -140,7 +157,7 @@ func runTestWithExitCondition(t *testing.T, dir string, exitCondition string) {
 	}
 
 	// Create command to run the server with absolute paths
-	cmd := exec.Command(spriteEnvPath, "-tla-trace", "-test-dir", dir, "--", supervisedProcessPath)
+	cmd := exec.Command(spriteEnvPath, "-tla-trace", "-test-dir", dir, "-graceful-shutdown-timeout", "3s", "--", supervisedProcessPath)
 
 	// Create pipes for stdout and stderr
 	stdout, err := cmd.StdoutPipe()
@@ -190,60 +207,90 @@ func runTestWithExitCondition(t *testing.T, dir string, exitCondition string) {
 		defer close(stderrDone)
 		defer close(stateChanges)
 		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			select {
-			case <-ctx.Done():
-				return
-			default:
+
+		// Create a channel to receive lines from the scanner
+		lines := make(chan string)
+		go func() {
+			for scanner.Scan() {
+				lines <- scanner.Text()
 			}
-			line := scanner.Text()
-			// Try to parse the line as JSON
-			var vars map[string]interface{}
-			if err := json.Unmarshal([]byte(line), &vars); err == nil {
-				select {
-				case <-ctx.Done():
+			close(lines)
+		}()
+
+		// Track when we've seen the exit condition
+		exitConditionSeen := false
+
+		// Loop with a timeout
+		for {
+			select {
+			case line, ok := <-lines:
+				if !ok {
+					// Channel closed, scanner is done
 					return
-				default:
-					// Check for exit condition (skip if TIMEOUT)
-					if exitCondition != "TIMEOUT" {
+				}
+				// Try to parse the line as JSON
+				var vars map[string]interface{}
+				if err := json.Unmarshal([]byte(line), &vars); err == nil {
+					// Normalize the source name for TLA compliance
+					if source, ok := vars["source"].(string); ok {
+						normalizedSource := normalizeTraceName(source)
+						vars["source"] = normalizedSource
+					}
+
+					// Only print trace JSON if DEBUG_OUTPUT is enabled (not TEST_VERBOSE)
+					if os.Getenv("DEBUG_OUTPUT") != "" {
+						if jsonBytes, err := json.Marshal(vars); err == nil {
+							t.Logf("TRACE JSON: %s", string(jsonBytes))
+						}
+					}
+
+					select {
+					case <-ctx.Done():
+						return
+					default:
+						// Check for exit condition
 						if source, ok := vars["source"].(string); ok {
 							if to, ok := vars["to"].(string); ok {
 								currentTransition := fmt.Sprintf("%s:%s", source, to)
-								if currentTransition == exitCondition {
-									// Use stopOnce to ensure this only happens once
-									stopOnce.Do(func() {
-										if err := cmd.Process.Signal(os.Interrupt); err != nil {
-											fmt.Printf("ERROR: failed to send SIGTERM: %v\n", err)
-										}
-										close(stopChan)
-									})
+								if currentTransition == exitCondition && !exitConditionSeen {
+									exitConditionSeen = true
+									// For terminal states, close stopChan immediately since app should exit naturally
+									if strings.Contains(exitCondition, ":Error") || strings.Contains(exitCondition, ":Stopped") {
+										t.Logf("Detected %s - waiting for natural application exit", exitCondition)
+										stopOnce.Do(func() {
+											close(stopChan)
+										})
+									} else {
+										// Use stopOnce to ensure this only happens once
+										stopOnce.Do(func() {
+											go func() {
+												t.Logf("Detected %s - sending SIGTERM to process", exitCondition)
+												if err := cmd.Process.Signal(os.Interrupt); err != nil {
+													fmt.Printf("ERROR: failed to send SIGTERM: %v\n", err)
+												}
+												close(stopChan)
+											}()
+										})
+									}
 								}
 							}
 						}
+						stateChanges <- StateChange{Vars: vars}
+						// Collect trace for JSON output
+						traces = append(traces, vars)
 					}
-					stateChanges <- StateChange{Vars: vars}
-					// Collect trace for JSON output
-					traces = append(traces, vars)
+				} else {
+					// Only print failed JSON parse if DEBUG_OUTPUT is enabled
+					if os.Getenv("DEBUG_OUTPUT") != "" && strings.Contains(line, "{") {
+						t.Logf("FAILED JSON PARSE: %s", line)
+					}
+					// Forward stderr output only if DEBUG_OUTPUT is enabled
+					if os.Getenv("DEBUG_OUTPUT") != "" {
+						t.Logf("STDERR: %s", line)
+					}
 				}
-			} else {
-				// Print raw line if JSON parsing fails and line contains "{"
-				if os.Getenv("TEST_VERBOSE") != "" && strings.Contains(line, "{") {
-					t.Logf("FAILED JSON PARSE: %s", line)
-				}
-				// Forward stderr output only if verbose
-				if os.Getenv("TEST_VERBOSE") != "" {
-					os.Stderr.WriteString(line + "\n")
-				}
-			}
-		}
-		if err := scanner.Err(); err != nil {
-			select {
 			case <-ctx.Done():
-				// Context cancelled - pipe closure is expected
 				return
-			default:
-				// Process may have exited while we were reading - this is normal
-				t.Logf("Error reading stderr: %v", err)
 			}
 		}
 	}()
@@ -257,9 +304,9 @@ func runTestWithExitCondition(t *testing.T, dir string, exitCondition string) {
 			case <-ctx.Done():
 				return
 			default:
-				// Forward stdout to test output only if verbose
+				// Only forward stdout to test output if DEBUG_OUTPUT is enabled
 				line := scanner.Text()
-				if os.Getenv("TEST_VERBOSE") != "" {
+				if os.Getenv("DEBUG_OUTPUT") != "" {
 					t.Logf("STDOUT: %s", line)
 				}
 			}
@@ -276,41 +323,72 @@ func runTestWithExitCondition(t *testing.T, dir string, exitCondition string) {
 		}
 	}()
 
-	// Wait for completion signal (unless using TIMEOUT mode)
-	if exitCondition != "TIMEOUT" {
-		<-stopChan
-	}
-
-	// Wait for process to exit with timeout
-	done := make(chan error, 1)
+	// Wait for completion signal OR process exit
+	processExited := make(chan error, 1)
 	go func() {
-		done <- cmd.Wait()
+		processExited <- cmd.Wait()
 	}()
 
 	select {
-	case err := <-done:
-		// Process exited within timeout
-		if err != nil {
-			// Check if it's an exit error with a signal-based exit code
-			if exitError, ok := err.(*exec.ExitError); ok {
-				exitCode := exitError.ExitCode()
-				// Accept signal-based exit codes (128 + signal number)
-				// SIGINT = 130 (128 + 2), SIGTERM = 143 (128 + 15), SIGKILL = 137 (128 + 9)
-				if exitCode != 130 && exitCode != 143 && exitCode != 137 {
-					t.Fatalf("Process exited with unexpected exit code %d: %v", exitCode, err)
+	case <-stopChan:
+		// Expected exit condition reached, now wait for process to exit
+		select {
+		case err := <-processExited:
+			// Process exited after reaching exit condition
+			if err != nil {
+				// Check if it's an exit error with a signal-based exit code
+				if exitError, ok := err.(*exec.ExitError); ok {
+					exitCode := exitError.ExitCode()
+					t.Logf("sprite-env process exited with code %d", exitCode)
+
+					// Accept different exit codes based on the exit condition
+					validExitCodes := []int{130, 143, 137} // Signal-based exit codes: SIGINT, SIGTERM, SIGKILL
+
+					// For error scenarios, also accept exit code 1 (application error)
+					if strings.Contains(exitCondition, ":Error") {
+						validExitCodes = append(validExitCodes, 1)
+					}
+
+					// Check if exit code is valid
+					isValidExitCode := false
+					for _, validCode := range validExitCodes {
+						if exitCode == validCode {
+							isValidExitCode = true
+							break
+						}
+					}
+
+					if !isValidExitCode {
+						t.Fatalf("Process exited with unexpected exit code %d: %v", exitCode, err)
+					}
+				} else {
+					t.Fatalf("Process exited with error: %v", err)
 				}
 			} else {
-				t.Fatalf("Process exited with error: %v", err)
+				t.Logf("sprite-env process exited successfully with code 0")
 			}
+		case <-time.After(10 * time.Second):
+			// Timeout - force kill the process
+			t.Logf("TIMEOUT: sending SIGKILL to sprite-env process")
+			if err := cmd.Process.Kill(); err != nil {
+				t.Fatalf("Failed to send SIGKILL: %v", err)
+			}
+			// Wait for the kill to take effect
+			<-processExited
+			t.Fatalf("Test failed: process did not shut down gracefully within 10 seconds after reaching exit condition '%s', had to use SIGKILL", exitCondition)
 		}
-	case <-time.After(10 * time.Second):
-		// Timeout - force kill the process
-		fmt.Printf("TIMEOUT: sending SIGKILL\n")
-		if err := cmd.Process.Kill(); err != nil {
-			t.Fatalf("Failed to send SIGKILL: %v", err)
+	case err := <-processExited:
+		// Process exited unexpectedly before reaching exit condition
+		if err != nil {
+			if exitError, ok := err.(*exec.ExitError); ok {
+				exitCode := exitError.ExitCode()
+				t.Fatalf("UNEXPECTED EXIT: sprite-env process exited with code %d before reaching exit condition '%s': %v", exitCode, exitCondition, err)
+			} else {
+				t.Fatalf("UNEXPECTED EXIT: sprite-env process exited with error before reaching exit condition '%s': %v", exitCondition, err)
+			}
+		} else {
+			t.Fatalf("UNEXPECTED EXIT: sprite-env process exited successfully (code 0) before reaching exit condition '%s'", exitCondition)
 		}
-		// Wait for the kill to take effect
-		<-done
 	}
 
 	// Wait specifically for stderr and stdout goroutines to finish
@@ -339,9 +417,9 @@ func runTestWithExitCondition(t *testing.T, dir string, exitCondition string) {
 		}
 	}
 
-	// Verify we collected traces and log summary
+	// Verify we collected traces and fail if none
 	if len(collectedChanges) == 0 {
-		t.Errorf("No TLA traces were collected - system may not be emitting traces properly")
+		t.Fatalf("FAIL: No TLA traces were collected - system may not be emitting traces properly")
 	}
 
 	// Build state transition summary
@@ -356,7 +434,70 @@ func runTestWithExitCondition(t *testing.T, dir string, exitCondition string) {
 		}
 	}
 
+	// Validate that the final SystemStateMachine trace leads to proper shutdown
+	validateFinalSystemState(t, collectedChanges, exitCondition)
+
 	fmt.Printf("%d traces → %s\n", len(collectedChanges), strings.Join(stateTransitions, " → "))
+}
+
+// validateFinalSystemState checks that the final SystemStateMachine trace leads to proper shutdown
+func validateFinalSystemState(t *testing.T, collectedChanges []StateChange, exitCondition string) {
+
+	// Find the last SystemStateMachine transition
+	var lastSystemTransition *StateChange
+	for i := len(collectedChanges) - 1; i >= 0; i-- {
+		change := &collectedChanges[i]
+		if source, ok := change.Vars["source"].(string); ok {
+			if source == "SystemStateMachine" {
+				lastSystemTransition = change
+				break
+			}
+		}
+	}
+
+	if lastSystemTransition == nil {
+		t.Fatalf("No SystemStateMachine transitions found in traces")
+		return
+	}
+
+	// Check if the final System state leads to proper shutdown
+	finalState, ok := lastSystemTransition.Vars["to"].(string)
+	if !ok {
+		t.Fatalf("Could not parse final SystemStateMachine state from trace")
+		return
+	}
+
+	// Valid final states that lead to shutdown
+	validFinalStates := map[string]bool{
+		"Shutdown":     true, // Complete shutdown
+		"Error":        true, // Final error state
+		"ShuttingDown": true, // Acceptable final trace (graceful shutdown in progress)
+	}
+
+	// Allow Running state if the exit condition explicitly targets a Running transition
+	if strings.Contains(exitCondition, ":Running") {
+		validFinalStates["Running"] = true
+	}
+
+	// Invalid intermediate states that indicate hanging
+	invalidFinalStates := map[string]string{
+		"ErrorRecovery": "system should complete error recovery and transition to Error state",
+		"Ready":         "system should not remain in Ready state",
+		"Initializing":  "system should not remain in Initializing state",
+	}
+
+	// Only mark Running as invalid if it wasn't explicitly allowed
+	if !validFinalStates["Running"] {
+		invalidFinalStates["Running"] = "system should not remain in Running state unless explicitly intended"
+	}
+
+	if !validFinalStates[finalState] {
+		if reason, isInvalid := invalidFinalStates[finalState]; isInvalid {
+			t.Fatalf("Test failed: final SystemStateMachine state '%s' is invalid - %s", finalState, reason)
+		} else {
+			t.Fatalf("Test failed: final SystemStateMachine state '%s' does not lead to proper shutdown", finalState)
+		}
+	}
 }
 
 // ComponentConfig defines the scripts for a component
@@ -515,14 +656,14 @@ func RunDynamicTests(t *testing.T) {
 			var exitCondition string
 			switch scenario.Name {
 			case "supervised-ignores-signals", "component-ignores-signals":
-				// Test shutdown behavior - exit when process is running
+				// Test shutdown behavior - exit when process is running (then test SIGKILL escalation)
 				exitCondition = "ProcessStateMachine:Running"
 			case "component-crashes-after-5s":
-				// Wait to see component crash - use timeout instead of immediate exit
-				exitCondition = "TIMEOUT" // Special case: let it run until timeout
+				// Wait to see system reach final error state after component crash
+				exitCondition = "SystemStateMachine:Error"
 			case "one-healthy-one-fails-ready", "ready-never-succeeds":
-				// Wait to see component failure behavior
-				exitCondition = "ProcessStateMachine:Running" // For now, can be changed later
+				// Wait to see system reach final error state after component failure
+				exitCondition = "SystemStateMachine:Error"
 			default:
 				exitCondition = "ProcessStateMachine:Running"
 			}

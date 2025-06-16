@@ -1,0 +1,8 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+- `make test-unit` MUST always succeed after you have completed a task
+- `make test-integration` MUST always succeed before a push
+- You may run more specific tests manually in lib/

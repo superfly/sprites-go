@@ -7,25 +7,8 @@ import (
 )
 
 func TestCmdComponentBasicLifecycle(t *testing.T) {
-	// Create channel to capture events
-	eventsChan := make(chan ComponentEventType, 10)
-
 	component := NewCmdComponent(CmdComponentConfig{
-		StartCommand: []string{"echo", "hello"},
-		EventHandlers: ComponentEventHandlers{
-			Starting: func() {
-				eventsChan <- ComponentStarting
-			},
-			Started: func() {
-				eventsChan <- ComponentStarted
-			},
-			Ready: func() {
-				eventsChan <- ComponentReady
-			},
-			Stopped: func() {
-				eventsChan <- ComponentStopped
-			},
-		},
+		StartCommand: []string{"sh", "-c", "echo hello; sleep 0.1"},
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -36,14 +19,15 @@ func TestCmdComponentBasicLifecycle(t *testing.T) {
 		t.Fatalf("Failed to start component: %v", err)
 	}
 
-	// Wait for expected events
+	// Listen to events from the component
+	events := component.Events()
 	var receivedEvents []ComponentEventType
 	timeout := time.After(2 * time.Second)
 
 eventLoop:
 	for {
 		select {
-		case event := <-eventsChan:
+		case event := <-events:
 			receivedEvents = append(receivedEvents, event)
 			if event == ComponentStopped {
 				break eventLoop
@@ -53,6 +37,7 @@ eventLoop:
 		}
 	}
 
+	// For component with no ReadyCommand, ComponentReady should be emitted after ComponentStarted
 	expectedEvents := []ComponentEventType{ComponentStarting, ComponentStarted, ComponentReady, ComponentStopped}
 	if len(receivedEvents) != len(expectedEvents) {
 		t.Fatalf("Expected %d events, got %d: %v", len(expectedEvents), len(receivedEvents), receivedEvents)
@@ -66,29 +51,9 @@ eventLoop:
 }
 
 func TestCmdComponentWithReadyScript(t *testing.T) {
-	// Create channel to capture events
-	eventsChan := make(chan ComponentEventType, 10)
-
 	component := NewCmdComponent(CmdComponentConfig{
 		StartCommand: []string{"sh", "-c", "echo started; sleep 0.1; echo output"},
 		ReadyCommand: []string{"sh", "-c", "read line && echo $line"},
-		EventHandlers: ComponentEventHandlers{
-			Starting: func() {
-				eventsChan <- ComponentStarting
-			},
-			Started: func() {
-				eventsChan <- ComponentStarted
-			},
-			Checking: func() {
-				eventsChan <- ComponentChecking
-			},
-			Ready: func() {
-				eventsChan <- ComponentReady
-			},
-			Stopped: func() {
-				eventsChan <- ComponentStopped
-			},
-		},
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -99,14 +64,15 @@ func TestCmdComponentWithReadyScript(t *testing.T) {
 		t.Fatalf("Failed to start component: %v", err)
 	}
 
-	// Wait for expected events
+	// Listen to events from the component
+	events := component.Events()
 	var receivedEvents []ComponentEventType
 	timeout := time.After(2 * time.Second)
 
 eventLoop:
 	for {
 		select {
-		case event := <-eventsChan:
+		case event := <-events:
 			receivedEvents = append(receivedEvents, event)
 			if event == ComponentStopped {
 				break eventLoop

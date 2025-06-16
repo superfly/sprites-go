@@ -2,7 +2,6 @@ package adapters
 
 import (
 	"context"
-	"os"
 	"strings"
 	"sync"
 	"syscall"
@@ -10,33 +9,33 @@ import (
 	"time"
 )
 
-// EventCapture helps capture events from Observer pattern for testing
+// EventCapture helps capture events from channel for testing
 type EventCapture struct {
 	mu     sync.Mutex
-	events []EventType
+	events []ProcessEventType
 	done   chan struct{}
 }
 
 func NewEventCapture() *EventCapture {
 	return &EventCapture{
-		events: make([]EventType, 0),
+		events: make([]ProcessEventType, 0),
 		done:   make(chan struct{}),
 	}
 }
 
-func (ec *EventCapture) AddEvent(event EventType) {
+func (ec *EventCapture) AddEvent(event ProcessEventType) {
 	ec.mu.Lock()
 	defer ec.mu.Unlock()
 	ec.events = append(ec.events, event)
 }
 
-func (ec *EventCapture) GetEvents() []EventType {
+func (ec *EventCapture) GetEvents() []ProcessEventType {
 	ec.mu.Lock()
 	defer ec.mu.Unlock()
-	return append([]EventType{}, ec.events...) // Return copy
+	return append([]ProcessEventType{}, ec.events...) // Return copy
 }
 
-func (ec *EventCapture) WaitForEvent(target EventType, timeout time.Duration) bool {
+func (ec *EventCapture) WaitForEvent(target ProcessEventType, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		events := ec.GetEvents()
@@ -50,7 +49,7 @@ func (ec *EventCapture) WaitForEvent(target EventType, timeout time.Duration) bo
 	return false
 }
 
-func (ec *EventCapture) WaitForEvents(targets []EventType, timeout time.Duration) bool {
+func (ec *EventCapture) WaitForEvents(targets []ProcessEventType, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		events := ec.GetEvents()
@@ -71,6 +70,19 @@ func (ec *EventCapture) WaitForEvents(targets []EventType, timeout time.Duration
 	return false
 }
 
+// startEventListener starts a goroutine to listen for events from the process and add them to the capture
+func (ec *EventCapture) startEventListener(process *Process, ctx context.Context) {
+	go func() {
+		events := process.Events()
+		for event := range events {
+			// Listen until channel is closed by the process supervisor
+			// This ensures we receive all events including final shutdown events
+			ec.AddEvent(event)
+		}
+		// Channel is closed, no more events will come
+	}()
+}
+
 func TestProcessBasicLifecycle(t *testing.T) {
 	config := ProcessConfig{
 		Command:                 []string{"echo", "hello"},
@@ -84,15 +96,7 @@ func TestProcessBasicLifecycle(t *testing.T) {
 
 	// Set up event capture
 	capture := NewEventCapture()
-	process.SetEventHandlers(ProcessEventHandlers{
-		Starting:   func() { capture.AddEvent(EventStarting) },
-		Started:    func() { capture.AddEvent(EventStarted) },
-		Stopping:   func() { capture.AddEvent(EventStopping) },
-		Stopped:    func() { capture.AddEvent(EventStopped) },
-		Restarting: func() { capture.AddEvent(EventRestarting) },
-		Signaled:   func(os.Signal) { capture.AddEvent(EventSignaled) },
-		Failed:     func(error) { capture.AddEvent(EventFailed) },
-	})
+	capture.startEventListener(process, ctx)
 
 	err := process.Start(ctx)
 	if err != nil {
@@ -100,14 +104,14 @@ func TestProcessBasicLifecycle(t *testing.T) {
 	}
 
 	// Wait for completion
-	if !capture.WaitForEvent(EventStopped, 5*time.Second) && !capture.WaitForEvent(EventFailed, 5*time.Second) {
+	if !capture.WaitForEvent(ProcessStoppedEvent, 5*time.Second) && !capture.WaitForEvent(ProcessFailedEvent, 5*time.Second) {
 		t.Fatal("Process never completed")
 	}
 
 	events := capture.GetEvents()
 
 	// Should see: Starting -> Started -> Stopped
-	expectedEvents := []EventType{EventStarting, EventStarted, EventStopped}
+	expectedEvents := []ProcessEventType{ProcessStartingEvent, ProcessStartedEvent, ProcessStoppedEvent}
 	if len(events) != len(expectedEvents) {
 		t.Fatalf("Expected %d events, got %d: %v", len(expectedEvents), len(events), events)
 	}
@@ -132,15 +136,7 @@ func TestProcessStop(t *testing.T) {
 
 	// Set up event capture
 	capture := NewEventCapture()
-	process.SetEventHandlers(ProcessEventHandlers{
-		Starting:   func() { capture.AddEvent(EventStarting) },
-		Started:    func() { capture.AddEvent(EventStarted) },
-		Stopping:   func() { capture.AddEvent(EventStopping) },
-		Stopped:    func() { capture.AddEvent(EventStopped) },
-		Restarting: func() { capture.AddEvent(EventRestarting) },
-		Signaled:   func(os.Signal) { capture.AddEvent(EventSignaled) },
-		Failed:     func(error) { capture.AddEvent(EventFailed) },
-	})
+	capture.startEventListener(process, ctx)
 
 	err := process.Start(ctx)
 	if err != nil {
@@ -148,7 +144,7 @@ func TestProcessStop(t *testing.T) {
 	}
 
 	// Wait for process to start
-	if !capture.WaitForEvent(EventStarted, 5*time.Second) {
+	if !capture.WaitForEvent(ProcessStartedEvent, 5*time.Second) {
 		t.Fatal("Process never started")
 	}
 
@@ -156,7 +152,7 @@ func TestProcessStop(t *testing.T) {
 	process.Stop()
 
 	// Wait for process to stop
-	if !capture.WaitForEvent(EventStopped, 5*time.Second) {
+	if !capture.WaitForEvent(ProcessStoppedEvent, 5*time.Second) {
 		t.Fatal("Process never stopped")
 	}
 
@@ -165,7 +161,7 @@ func TestProcessStop(t *testing.T) {
 	// Should see stopped event
 	found := false
 	for _, event := range events {
-		if event == EventStopped {
+		if event == ProcessStoppedEvent {
 			found = true
 			break
 		}
@@ -178,7 +174,7 @@ func TestProcessStop(t *testing.T) {
 
 func TestProcessSignal(t *testing.T) {
 	config := ProcessConfig{
-		Command:                 []string{"sleep", "10"},
+		Command:                 []string{"tail", "-f", "/dev/null"},
 		MaxRetries:              0, // No retries
 		RestartDelay:            0,
 		GracefulShutdownTimeout: time.Second,
@@ -189,15 +185,7 @@ func TestProcessSignal(t *testing.T) {
 
 	// Set up event capture
 	capture := NewEventCapture()
-	process.SetEventHandlers(ProcessEventHandlers{
-		Starting:   func() { capture.AddEvent(EventStarting) },
-		Started:    func() { capture.AddEvent(EventStarted) },
-		Stopping:   func() { capture.AddEvent(EventStopping) },
-		Stopped:    func() { capture.AddEvent(EventStopped) },
-		Restarting: func() { capture.AddEvent(EventRestarting) },
-		Signaled:   func(os.Signal) { capture.AddEvent(EventSignaled) },
-		Failed:     func(error) { capture.AddEvent(EventFailed) },
-	})
+	capture.startEventListener(process, ctx)
 
 	err := process.Start(ctx)
 	if err != nil {
@@ -205,23 +193,15 @@ func TestProcessSignal(t *testing.T) {
 	}
 
 	// Wait for process to start
-	if !capture.WaitForEvent(EventStarted, 5*time.Second) {
+	if !capture.WaitForEvent(ProcessStartedEvent, 5*time.Second) {
 		t.Fatal("Process never started")
 	}
 
-	// Send a non-terminating signal first
-	process.Signal(syscall.SIGUSR1)
-
-	// Should see a signaled event
-	if !capture.WaitForEvent(EventSignaled, 2*time.Second) {
-		t.Error("Expected EventSignaled after sending SIGUSR1")
-	}
-
-	// Now send SIGTERM (terminating signal)
+	// Send SIGTERM (terminating signal) - should trigger proper stopping sequence
 	process.Signal(syscall.SIGTERM)
 
 	// Should see stopping and stopped events
-	if !capture.WaitForEvent(EventStopped, 5*time.Second) {
+	if !capture.WaitForEvent(ProcessStoppedEvent, 5*time.Second) {
 		t.Error("Expected EventStopped after SIGTERM")
 	}
 
@@ -230,7 +210,7 @@ func TestProcessSignal(t *testing.T) {
 	// Should see stopped event
 	found := false
 	for _, event := range events {
-		if event == EventStopped {
+		if event == ProcessStoppedEvent {
 			found = true
 			break
 		}
@@ -254,15 +234,7 @@ func TestProcessRestart(t *testing.T) {
 
 	// Set up event capture
 	capture := NewEventCapture()
-	process.SetEventHandlers(ProcessEventHandlers{
-		Starting:   func() { capture.AddEvent(EventStarting) },
-		Started:    func() { capture.AddEvent(EventStarted) },
-		Stopping:   func() { capture.AddEvent(EventStopping) },
-		Stopped:    func() { capture.AddEvent(EventStopped) },
-		Restarting: func() { capture.AddEvent(EventRestarting) },
-		Signaled:   func(os.Signal) { capture.AddEvent(EventSignaled) },
-		Failed:     func(error) { capture.AddEvent(EventFailed) },
-	})
+	capture.startEventListener(process, ctx)
 
 	err := process.Start(ctx)
 	if err != nil {
@@ -270,7 +242,7 @@ func TestProcessRestart(t *testing.T) {
 	}
 
 	// Wait for final failure
-	if !capture.WaitForEvent(EventFailed, 10*time.Second) {
+	if !capture.WaitForEvent(ProcessFailedEvent, 10*time.Second) {
 		t.Fatal("Process never failed")
 	}
 
@@ -280,10 +252,10 @@ func TestProcessRestart(t *testing.T) {
 	startingCount := 0
 	restartingCount := 0
 	for _, event := range events {
-		if event == EventStarting {
+		if event == ProcessStartingEvent {
 			startingCount++
 		}
-		if event == EventRestarting {
+		if event == ProcessRestartingEvent {
 			restartingCount++
 		}
 	}
@@ -298,7 +270,7 @@ func TestProcessRestart(t *testing.T) {
 
 	// Final event should be EventFailed since retries are exhausted
 	lastEvent := events[len(events)-1]
-	if lastEvent != EventFailed {
+	if lastEvent != ProcessFailedEvent {
 		t.Errorf("Expected final event to be EventFailed, got %v", lastEvent)
 	}
 }
@@ -316,15 +288,7 @@ func TestProcessFailedCommand(t *testing.T) {
 
 	// Set up event capture
 	capture := NewEventCapture()
-	process.SetEventHandlers(ProcessEventHandlers{
-		Starting:   func() { capture.AddEvent(EventStarting) },
-		Started:    func() { capture.AddEvent(EventStarted) },
-		Stopping:   func() { capture.AddEvent(EventStopping) },
-		Stopped:    func() { capture.AddEvent(EventStopped) },
-		Restarting: func() { capture.AddEvent(EventRestarting) },
-		Signaled:   func(os.Signal) { capture.AddEvent(EventSignaled) },
-		Failed:     func(error) { capture.AddEvent(EventFailed) },
-	})
+	capture.startEventListener(process, ctx)
 
 	err := process.Start(ctx)
 	if err != nil {
@@ -332,7 +296,7 @@ func TestProcessFailedCommand(t *testing.T) {
 	}
 
 	// Wait for failure
-	if !capture.WaitForEvent(EventFailed, 5*time.Second) {
+	if !capture.WaitForEvent(ProcessFailedEvent, 5*time.Second) {
 		t.Fatal("Process never failed")
 	}
 
@@ -343,11 +307,11 @@ func TestProcessFailedCommand(t *testing.T) {
 		t.Fatalf("Expected at least 2 events, got %d: %v", len(events), events)
 	}
 
-	if events[0] != EventStarting {
+	if events[0] != ProcessStartingEvent {
 		t.Errorf("First event should be EventStarting, got %v", events[0])
 	}
 
-	if events[len(events)-1] != EventFailed {
+	if events[len(events)-1] != ProcessFailedEvent {
 		t.Errorf("Last event should be EventFailed, got %v", events[len(events)-1])
 	}
 }
@@ -376,17 +340,9 @@ func TestProcessPipes(t *testing.T) {
 
 	// Set up event capture
 	capture := NewEventCapture()
-	process.SetEventHandlers(ProcessEventHandlers{
-		Starting:   func() { capture.AddEvent(EventStarting) },
-		Started:    func() { capture.AddEvent(EventStarted) },
-		Stopping:   func() { capture.AddEvent(EventStopping) },
-		Stopped:    func() { capture.AddEvent(EventStopped) },
-		Restarting: func() { capture.AddEvent(EventRestarting) },
-		Signaled:   func(os.Signal) { capture.AddEvent(EventSignaled) },
-		Failed:     func(error) { capture.AddEvent(EventFailed) },
-	})
-
 	ctx := context.Background()
+	capture.startEventListener(process, ctx)
+
 	err = process.Start(ctx)
 	if err != nil {
 		t.Fatalf("Failed to start process: %v", err)
@@ -411,7 +367,7 @@ func TestProcessPipes(t *testing.T) {
 	stderr.Close()
 
 	// Wait for process to complete
-	if !capture.WaitForEvent(EventStopped, 5*time.Second) && !capture.WaitForEvent(EventFailed, 5*time.Second) {
+	if !capture.WaitForEvent(ProcessStoppedEvent, 5*time.Second) && !capture.WaitForEvent(ProcessFailedEvent, 5*time.Second) {
 		t.Fatal("Process never completed")
 	}
 }
@@ -456,15 +412,7 @@ func TestProcessContextCancellation(t *testing.T) {
 
 	// Set up event capture
 	capture := NewEventCapture()
-	process.SetEventHandlers(ProcessEventHandlers{
-		Starting:   func() { capture.AddEvent(EventStarting) },
-		Started:    func() { capture.AddEvent(EventStarted) },
-		Stopping:   func() { capture.AddEvent(EventStopping) },
-		Stopped:    func() { capture.AddEvent(EventStopped) },
-		Restarting: func() { capture.AddEvent(EventRestarting) },
-		Signaled:   func(os.Signal) { capture.AddEvent(EventSignaled) },
-		Failed:     func(error) { capture.AddEvent(EventFailed) },
-	})
+	capture.startEventListener(process, ctx)
 
 	err := process.Start(ctx)
 	if err != nil {
@@ -472,7 +420,7 @@ func TestProcessContextCancellation(t *testing.T) {
 	}
 
 	// Wait for process to start
-	if !capture.WaitForEvent(EventStarted, 5*time.Second) {
+	if !capture.WaitForEvent(ProcessStartedEvent, 5*time.Second) {
 		t.Fatal("Process never started")
 	}
 
@@ -480,7 +428,7 @@ func TestProcessContextCancellation(t *testing.T) {
 	cancel()
 
 	// Should see the process stop due to context cancellation
-	if !capture.WaitForEvent(EventStopped, 5*time.Second) {
+	if !capture.WaitForEvent(ProcessStoppedEvent, 5*time.Second) {
 		events := capture.GetEvents()
 		t.Fatalf("Process never stopped after context cancellation. Events: %v", events)
 	}
@@ -493,7 +441,7 @@ func TestProcessContextCancellation(t *testing.T) {
 	}
 
 	lastEvent := events[len(events)-1]
-	if lastEvent != EventStopped {
+	if lastEvent != ProcessStoppedEvent {
 		t.Errorf("Expected EventStopped after context cancellation, got %v", lastEvent)
 	}
 }

@@ -15,6 +15,7 @@ alwaysApply: false
 * NEVER define new top level states that are not part of the TLA spec
 * If it's helpful, define substates of those to make the state flow simpler
 * NEVER add variables to TLA+ files without confirming with the user
+* DO NOT write defensive code in state managers, let the state machine plumbing do its job
 
 **State machines must be purely declarative intent processors:**
 

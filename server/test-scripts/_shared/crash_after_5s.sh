@@ -2,6 +2,8 @@
 echo "Running crash_after_5s.sh"
 echo "Starting up normally..."
 sleep 0.3
+echo "Component started successfully"
+echo "Component health: healthy"
 echo "Running normally..."
 echo "Will crash in 5 seconds..."
 

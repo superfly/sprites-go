@@ -24,107 +24,59 @@ const (
 	ComponentFailed ComponentEventType = "failed"
 )
 
-// Typed Event Handler approach
-// Each event type has its own handler function signature
-type (
-	Starting func()
-	Started  func()
-	Checking func()
-	Ready    func()
-	Stopping func()
-	Stopped  func()
-	Failed   func(error)
-)
-
-// ComponentEventHandlers allows registering specific typed handlers
-type ComponentEventHandlers struct {
-	Starting Starting
-	Started  Started
-	Checking Checking
-	Ready    Ready
-	Stopping Stopping
-	Stopped  Stopped
-	Failed   Failed
-}
-
-// ComponentConfig defines the interface for component configuration
-// Implementations provide both configuration data and event handlers
-type ComponentConfig interface {
-	// GetEventHandlers returns the event handlers (can be empty)
-	GetEventHandlers() ComponentEventHandlers
-}
-
 // BaseComponent provides shared event management functionality
 // Embed this in concrete component implementations
 type BaseComponent struct {
-	handlers ComponentEventHandlers
+	eventCh chan ComponentEventType
 }
 
 // NewBaseComponent creates a new base component with event management
-func NewBaseComponent(handlers ComponentEventHandlers) *BaseComponent {
+func NewBaseComponent() *BaseComponent {
 	return &BaseComponent{
-		handlers: handlers,
+		eventCh: make(chan ComponentEventType), // Unbuffered channel as required
 	}
 }
 
-// SetEventHandlers sets up Observer pattern callbacks for component events
-func (b *BaseComponent) SetEventHandlers(handlers ComponentEventHandlers) {
-	b.handlers = handlers
+// Events returns the unbuffered channel for listening to component events
+func (b *BaseComponent) Events() <-chan ComponentEventType {
+	return b.eventCh
 }
 
-// EmitEvent calls the corresponding handler if set
-func (b *BaseComponent) EmitEvent(event ComponentEventType, err ...error) {
-	// Call handler if set (type-safe approach)
-	switch event {
-	case ComponentStarting:
-		if b.handlers.Starting != nil {
-			b.handlers.Starting()
-		}
-	case ComponentStarted:
-		if b.handlers.Started != nil {
-			b.handlers.Started()
-		}
-	case ComponentChecking:
-		if b.handlers.Checking != nil {
-			b.handlers.Checking()
-		}
-	case ComponentReady:
-		if b.handlers.Ready != nil {
-			b.handlers.Ready()
-		}
-	case ComponentStopping:
-		if b.handlers.Stopping != nil {
-			b.handlers.Stopping()
-		}
-	case ComponentStopped:
-		if b.handlers.Stopped != nil {
-			b.handlers.Stopped()
-		}
-	case ComponentFailed:
-		if b.handlers.Failed != nil {
-			var failErr error
-			if len(err) > 0 {
-				failErr = err[0]
-			}
-			b.handlers.Failed(failErr)
-		}
+// EmitEvent sends an event to the channel
+func (b *BaseComponent) EmitEvent(event ComponentEventType) {
+	// Direct blocking send with unbuffered channel
+	b.eventCh <- event
+}
+
+// Close permanently disposes of the base component resources
+func (b *BaseComponent) Close() error {
+	if b.eventCh != nil {
+		close(b.eventCh)
+		b.eventCh = nil
 	}
+	return nil
 }
 
 // Component defines the interface for component lifecycle management
 type Component interface {
+	// GetName returns the component name for identification
+	GetName() string
+
 	// Start initiates the component startup process
 	Start(ctx context.Context) error
 
 	// Stop stops the component
 	Stop()
 
+	// Close permanently disposes of the component and all its resources
+	Close() error
+
 	// Checkpoint performs a checkpoint operation on the component
-	Checkpoint(ctx context.Context) error
+	Checkpoint() error
 
 	// Restore performs a restore operation on the component
-	Restore(ctx context.Context) error
+	Restore() error
 
-	// SetEventHandlers sets up Observer pattern callbacks
-	SetEventHandlers(handlers ComponentEventHandlers)
+	// Events returns a channel for listening to component events
+	Events() <-chan ComponentEventType
 }
