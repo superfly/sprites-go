@@ -37,7 +37,7 @@ func TestSystemStateManager_ComprehensiveTransitionMatrix(t *testing.T) {
 		{[]string{"SystemReady", "ProcessRunning"}, "Running", false, "", "Starting"},
 		{[]string{"ProcessRunning"}, "Running", false, "", "Ready"},
 		{[]string{"ComponentsStopping", "ComponentsStopped"}, "Stopped", false, "", "Running"},
-		{[]string{"ProcessError", "ProcessStopped"}, "Error", false, "", "Ready"},
+		{[]string{"ProcessError"}, "ErrorRecovery", false, "", "Ready"},
 
 		// Invalid sequences from default initial state
 		{[]string{"SystemReady"}, "Initializing", true, "SystemReady", ""},

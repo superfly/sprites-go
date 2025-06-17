@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -95,24 +96,38 @@ func (c *cmdComponent) Close() error {
 }
 
 // Checkpoint performs a checkpoint operation on the component
-func (c *cmdComponent) Checkpoint() error {
+func (c *cmdComponent) Checkpoint(checkpointID string) error {
 	if len(c.config.CheckpointCommand) == 0 {
 		return nil // No checkpoint command configured
 	}
 
 	// Use a simple synchronous approach for checkpoint/restore operations
 	cmd := exec.CommandContext(c.ctx, c.config.CheckpointCommand[0], c.config.CheckpointCommand[1:]...)
+
+	// Inherit existing environment and add checkpoint ID
+	cmd.Env = os.Environ()
+	if checkpointID != "" {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("CHECKPOINT_ID=%s", checkpointID))
+	}
+
 	return cmd.Run()
 }
 
 // Restore performs a restore operation on the component
-func (c *cmdComponent) Restore() error {
+func (c *cmdComponent) Restore(checkpointID string) error {
 	if len(c.config.RestoreCommand) == 0 {
 		return nil // No restore command configured
 	}
 
 	// Use a simple synchronous approach for checkpoint/restore operations
 	cmd := exec.CommandContext(c.ctx, c.config.RestoreCommand[0], c.config.RestoreCommand[1:]...)
+
+	// Inherit existing environment and add checkpoint ID
+	cmd.Env = os.Environ()
+	if checkpointID != "" {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("CHECKPOINT_ID=%s", checkpointID))
+	}
+
 	return cmd.Run()
 }
 

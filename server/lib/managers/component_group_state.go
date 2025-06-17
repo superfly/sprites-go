@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"sprite-env/lib"
+
 	"github.com/qmuntal/stateless"
 )
 
@@ -11,7 +13,7 @@ import (
 type ComponentGroupConfig struct {
 	InitialState      string // Initial state, defaults to "Initializing"
 	Components        []ManagedComponent
-	ComponentMonitors []StateMonitor // Separate field for monitors to pass to individual components
+	ComponentMonitors []lib.StateMonitor // Separate field for monitors to pass to individual components
 }
 
 // ComponentTransition represents a component state transition
@@ -22,7 +24,7 @@ type ComponentTransition struct {
 
 // componentGroupMonitor implements StateMonitor to track individual component state changes
 type componentGroupMonitor struct {
-	events       chan StateTransition
+	events       chan lib.StateTransition
 	cgsm         *ComponentGroupState
 	componentIdx int
 	healthyCount int
@@ -31,7 +33,7 @@ type componentGroupMonitor struct {
 }
 
 // Events implements StateMonitor interface
-func (cgm *componentGroupMonitor) Events() chan<- StateTransition {
+func (cgm *componentGroupMonitor) Events() chan<- lib.StateTransition {
 	return cgm.events
 }
 
@@ -109,7 +111,7 @@ func (cgsm *ComponentGroupState) Fire(trigger string, args ...any) error {
 // Initial state is "Initializing" as per TLA+ spec (unless overridden in config)
 // monitors parameter uses splat - these are for the ComponentGroupState itself
 // config.ComponentMonitors are passed to individual components
-func NewComponentGroupState(config ComponentGroupConfig, monitors ...StateMonitor) *ComponentGroupState {
+func NewComponentGroupState(config ComponentGroupConfig, monitors ...lib.StateMonitor) *ComponentGroupState {
 	initialState := config.InitialState
 	if initialState == "" {
 		initialState = "Initializing" // Default per TLA+ spec
@@ -128,7 +130,7 @@ func NewComponentGroupState(config ComponentGroupConfig, monitors ...StateMonito
 
 	// Create shared monitor that will track all component state changes
 	sharedMonitor := &componentGroupMonitor{
-		events:       make(chan StateTransition, 100),
+		events:       make(chan lib.StateTransition, 100),
 		cgsm:         cgsm,
 		componentIdx: -1, // -1 indicates this is the shared monitor
 		healthyCount: 0,
@@ -142,14 +144,14 @@ func NewComponentGroupState(config ComponentGroupConfig, monitors ...StateMonito
 
 	// Attach monitors to the ComponentGroupState itself (using splat monitors)
 	if len(monitors) > 0 {
-		sm.OnTransitioning(CreateMonitorCallback("ComponentGroupStateManager", monitors))
+		sm.OnTransitioning(lib.CreateMonitorCallback("ComponentGroupStateManager", monitors))
 	}
 
 	// Create ComponentStateManager instances for each component
 	for _, component := range config.Components {
 		// Pass the shared monitor for internal coordination AND the component-specific monitors
 		// Use the separate ComponentMonitors field for what we send to individual components
-		componentMonitors := append([]StateMonitor{sharedMonitor}, config.ComponentMonitors...)
+		componentMonitors := append([]lib.StateMonitor{sharedMonitor}, config.ComponentMonitors...)
 
 		componentName := component.GetName() + "Component"
 		componentManager := NewComponentState(componentName, component, componentMonitors)
@@ -173,7 +175,21 @@ func NewComponentGroupState(config ComponentGroupConfig, monitors ...StateMonito
 	sm.Configure("Running").
 		Permit("Stopping", "Stopping").
 		Permit("ErrorStopping", "ErrorStopping").
-		Permit("Error", "Error")
+		Permit("Error", "Error").
+		Permit("Checkpointing", "Checkpointing").
+		Permit("Restoring", "Restoring")
+
+	// Checkpointing - performing checkpoint on all components
+	sm.Configure("Checkpointing").
+		Permit("Running", "Running").
+		Permit("Error", "Error").
+		OnEntry(cgsm.handleCheckpointing)
+
+	// Restoring - performing restore on all components
+	sm.Configure("Restoring").
+		Permit("Running", "Running").
+		Permit("Error", "Error").
+		OnEntry(cgsm.handleRestoring)
 
 	// ErrorStopping - component failed, system needs to know
 	sm.Configure("ErrorStopping").
@@ -225,6 +241,54 @@ func (cgsm *ComponentGroupState) handleStopping(ctx context.Context, args ...any
 		// Fire on components - synchronous because this is parent->child
 		componentManager.Fire("Stopping")
 	}
+	return nil
+}
+
+// handleCheckpointing is called when entering Checkpointing state - should checkpoint all components
+func (cgsm *ComponentGroupState) handleCheckpointing(ctx context.Context, args ...any) error {
+	// Extract checkpoint ID from args if provided
+	checkpointID := ""
+	if len(args) > 0 {
+		if id, ok := args[0].(string); ok {
+			checkpointID = id
+		}
+	}
+
+	// Fire checkpointing on all components with the checkpoint ID
+	for _, componentManager := range cgsm.componentManagers {
+		if err := componentManager.Fire("Checkpointing", checkpointID); err != nil {
+			// If any component fails, transition to Error
+			cgsm.Fire("Error")
+			return err
+		}
+	}
+
+	// All components checkpointed successfully, transition back to Running
+	cgsm.Fire("Running")
+	return nil
+}
+
+// handleRestoring is called when entering Restoring state - should restore all components
+func (cgsm *ComponentGroupState) handleRestoring(ctx context.Context, args ...any) error {
+	// Extract checkpoint ID from args if provided
+	checkpointID := ""
+	if len(args) > 0 {
+		if id, ok := args[0].(string); ok {
+			checkpointID = id
+		}
+	}
+
+	// Fire restoring on all components with the checkpoint ID
+	for _, componentManager := range cgsm.componentManagers {
+		if err := componentManager.Fire("Restoring", checkpointID); err != nil {
+			// If any component fails, transition to Error
+			cgsm.Fire("Error")
+			return err
+		}
+	}
+
+	// All components restored successfully, transition back to Running
+	cgsm.Fire("Running")
 	return nil
 }
 

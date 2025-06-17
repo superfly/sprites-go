@@ -3,6 +3,7 @@ package managers
 import (
 	"context"
 	"fmt"
+	"sprite-env/lib"
 	"sprite-env/lib/adapters"
 
 	"github.com/qmuntal/stateless"
@@ -37,8 +38,8 @@ type ManagedComponent interface {
 	GetName() string
 	Start(ctx context.Context) error
 	Stop()
-	Checkpoint() error
-	Restore() error
+	Checkpoint(checkpointID string) error
+	Restore(checkpointID string) error
 	Events() <-chan adapters.ComponentEventType
 }
 
@@ -54,7 +55,7 @@ type ComponentState struct {
 // NewComponentState creates a new component state manager with a managed component
 // Initial state is "Initializing" as per TLA+ spec: Init == components = [i \in 1..N |-> "Initializing"]
 // initialState parameter is optional - if empty, defaults to "Initializing"
-func NewComponentState(name string, component ManagedComponent, monitors []StateMonitor, initialState ...string) *ComponentState {
+func NewComponentState(name string, component ManagedComponent, monitors []lib.StateMonitor, initialState ...string) *ComponentState {
 	defaultState := "Initializing"
 	if len(initialState) > 0 && initialState[0] != "" {
 		defaultState = initialState[0]
@@ -72,7 +73,7 @@ func NewComponentState(name string, component ManagedComponent, monitors []State
 
 	// Attach monitors if provided
 	if len(monitors) > 0 {
-		sm.OnTransitioning(CreateMonitorCallback(name, monitors))
+		sm.OnTransitioning(lib.CreateMonitorCallback(name, monitors))
 	}
 
 	// Configure states in execution sequence order
@@ -171,6 +172,16 @@ func (csm *ComponentState) listenForEvents() {
 			case adapters.ComponentFailed:
 				// Component failed - transition to Error
 				csm.FireAsync("Error")
+			case adapters.ComponentCheckpointed:
+				// Component successfully checkpointed - transition back to Running
+				if currentState == "Checkpointing" {
+					csm.FireAsync("Running")
+				}
+			case adapters.ComponentRestored:
+				// Component successfully restored - transition back to Running
+				if currentState == "Restoring" {
+					csm.FireAsync("Running")
+				}
 			default:
 				// Unknown event, ignore
 			}
@@ -224,12 +235,22 @@ func (csm *ComponentState) handleStopping(ctx context.Context, args ...any) erro
 // handleCheckpointing is called when entering Checkpointing state - should checkpoint the component
 func (csm *ComponentState) handleCheckpointing(ctx context.Context, args ...any) error {
 	if csm.component != nil {
-		err := csm.component.Checkpoint()
+		// Extract checkpoint ID from args if provided
+		checkpointID := ""
+		if len(args) > 0 {
+			if id, ok := args[0].(string); ok {
+				checkpointID = id
+			}
+		}
+
+		err := csm.component.Checkpoint(checkpointID)
 		if err != nil {
 			// Checkpoint failed - fire Error transition
 			csm.FireAsync("Error")
 			return nil
 		}
+		// Transition back to Running after successful checkpoint
+		// Component will automatically transition when it's ready
 	}
 	return nil
 }
@@ -237,12 +258,22 @@ func (csm *ComponentState) handleCheckpointing(ctx context.Context, args ...any)
 // handleRestoring is called when entering Restoring state - should restore the component
 func (csm *ComponentState) handleRestoring(ctx context.Context, args ...any) error {
 	if csm.component != nil {
-		err := csm.component.Restore()
+		// Extract checkpoint ID from args if provided
+		checkpointID := ""
+		if len(args) > 0 {
+			if id, ok := args[0].(string); ok {
+				checkpointID = id
+			}
+		}
+
+		err := csm.component.Restore(checkpointID)
 		if err != nil {
 			// Restore failed - fire Error transition
 			csm.FireAsync("Error")
 			return nil
 		}
+		// Transition back to Running after successful restore
+		// Component will automatically transition when it's ready
 	}
 	return nil
 }

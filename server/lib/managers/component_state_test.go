@@ -52,7 +52,7 @@ func (tmc *testManagedComponent) Stop() {
 	// Don't send events automatically for table-driven tests
 }
 
-func (tmc *testManagedComponent) Checkpoint() error {
+func (tmc *testManagedComponent) Checkpoint(checkpointID string) error {
 	tmc.checkpointCalls++
 	if tmc.shouldFailCheckpoint {
 		return fmt.Errorf("checkpoint failed")
@@ -61,7 +61,7 @@ func (tmc *testManagedComponent) Checkpoint() error {
 	return nil
 }
 
-func (tmc *testManagedComponent) Restore() error {
+func (tmc *testManagedComponent) Restore(checkpointID string) error {
 	tmc.restoreCalls++
 	if tmc.shouldFailRestore {
 		return fmt.Errorf("restore failed")

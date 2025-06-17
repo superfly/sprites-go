@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sprite-env/lib"
 	"sprite-env/lib/adapters"
 	"testing"
 	"time"
@@ -120,14 +121,18 @@ func (tmp *EnhancedTestManagedProcess) TriggerEvent(event adapters.ProcessEventT
 
 // EnhancedTestManagedComponent provides comprehensive call tracking for testing
 type EnhancedTestManagedComponent struct {
-	name                string
-	startCalls          int
-	stopCalls           int
-	checkpointCalls     int
-	restoreCalls        int
-	eventsCh            chan adapters.ComponentEventType
-	shouldFailStart     bool
-	autoTransitionDelay time.Duration
+	name                 string
+	startCalls           int
+	stopCalls            int
+	checkpointCalls      int
+	restoreCalls         int
+	eventsCh             chan adapters.ComponentEventType
+	shouldFailStart      bool
+	autoTransitionDelay  time.Duration
+	checkpointCalled     bool
+	log                  []string
+	shouldFailCheckpoint bool
+	shouldFailRestore    bool
 }
 
 func NewEnhancedTestManagedComponent(name string, shouldFailStart bool) *EnhancedTestManagedComponent {
@@ -178,13 +183,40 @@ func (mc *EnhancedTestManagedComponent) Stop() {
 	}()
 }
 
-func (mc *EnhancedTestManagedComponent) Checkpoint() error {
+func (mc *EnhancedTestManagedComponent) Checkpoint(checkpointID string) error {
+	mc.checkpointCalled = true
 	mc.checkpointCalls++
+	if checkpointID != "" {
+		mc.log = append(mc.log, "checkpoint with ID: "+checkpointID)
+	} else {
+		mc.log = append(mc.log, "checkpoint")
+	}
+	if mc.shouldFailCheckpoint {
+		return fmt.Errorf("checkpoint failed")
+	}
+	// Send checkpoint complete event
+	go func() {
+		time.Sleep(mc.autoTransitionDelay)
+		mc.TriggerEvent(adapters.ComponentCheckpointed)
+	}()
 	return nil
 }
 
-func (mc *EnhancedTestManagedComponent) Restore() error {
+func (mc *EnhancedTestManagedComponent) Restore(checkpointID string) error {
 	mc.restoreCalls++
+	if checkpointID != "" {
+		mc.log = append(mc.log, "restore with ID: "+checkpointID)
+	} else {
+		mc.log = append(mc.log, "restore")
+	}
+	if mc.shouldFailRestore {
+		return fmt.Errorf("restore failed")
+	}
+	// Send restore complete event
+	go func() {
+		time.Sleep(mc.autoTransitionDelay)
+		mc.TriggerEvent(adapters.ComponentRestored)
+	}()
 	return nil
 }
 
@@ -323,7 +355,7 @@ func CreateEnhancedSystemWithAllManagersAndConfig(t *testing.T, numComponents in
 	testProcess := NewEnhancedTestManagedProcess(processSucceeds)
 	psm := NewProcessState(ProcessStateConfig{
 		Process: testProcess,
-	}, []StateMonitor(nil))
+	}, []lib.StateMonitor(nil))
 
 	// Create state change recorder
 	var stateChanges []string
@@ -349,7 +381,7 @@ func CreateEnhancedSystemWithAllManagersAndConfig(t *testing.T, numComponents in
 	}
 
 	// Create system state manager
-	ssm := NewSystemState(config, []StateMonitor{systemMonitor})
+	ssm := NewSystemState(config, []lib.StateMonitor{systemMonitor})
 
 	// Get references to all state managers
 	refs := &EnhancedStateManagerRefs{
@@ -375,7 +407,7 @@ func CreateEnhancedSystemWithAllManagersAndConfig(t *testing.T, numComponents in
 type TestStateMonitor struct {
 	name         string
 	stateChanges *[]string
-	events       chan StateTransition
+	events       chan lib.StateTransition
 	done         chan struct{}
 	finished     chan struct{}
 }
@@ -384,7 +416,7 @@ func NewTestStateMonitor(name string, stateChanges *[]string) *TestStateMonitor 
 	monitor := &TestStateMonitor{
 		name:         name,
 		stateChanges: stateChanges,
-		events:       make(chan StateTransition, 50), // Buffered channel
+		events:       make(chan lib.StateTransition, 50), // Buffered channel
 		done:         make(chan struct{}),
 		finished:     make(chan struct{}),
 	}
@@ -396,7 +428,7 @@ func NewTestStateMonitor(name string, stateChanges *[]string) *TestStateMonitor 
 }
 
 // Events implements StateMonitor interface
-func (tsm *TestStateMonitor) Events() chan<- StateTransition {
+func (tsm *TestStateMonitor) Events() chan<- lib.StateTransition {
 	return tsm.events
 }
 

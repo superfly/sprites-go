@@ -12,12 +12,14 @@ import (
 	"syscall"
 	"time"
 
+	"sprite-env/lib"
 	"sprite-env/lib/adapters"
+	"sprite-env/lib/api"
 	"sprite-env/lib/managers"
 )
 
 // outputTrace outputs a single trace event
-func outputTrace(transition managers.StateTransition) {
+func outputTrace(transition lib.StateTransition) {
 	// Create a simple flat trace with just the transition info
 	trace := map[string]interface{}{
 		"source":  transition.Name,
@@ -34,69 +36,19 @@ func outputTrace(transition managers.StateTransition) {
 	}
 }
 
-// SystemStateAdapter adapts managers.SystemStateManager to match adapters.SystemStateMachine interface
-type SystemStateAdapter struct {
-	*managers.SystemState
-}
-
-// Fire adapts the stateless.Fire method to match the expected interface
-func (adapter *SystemStateAdapter) Fire(trigger interface{}) error {
-	// Convert interface{} trigger to string for the SystemStateManager
-	return adapter.SystemState.Fire(fmt.Sprintf("%v", trigger))
-}
-
-// GetState adapts the GetState method to return interface{}
-func (adapter *SystemStateAdapter) GetState() interface{} {
-	return adapter.SystemState.MustState()
-}
-
-// GetErrorType adapts the GetErrorType method to return interface{}
-func (adapter *SystemStateAdapter) GetErrorType() interface{} {
-	// SystemStateManager doesn't have an error type, return current state
-	return adapter.SystemState.MustState()
-}
-
 // Application holds the main application state
 type Application struct {
-	systemStateMachine *managers.SystemState
-	httpServer         *adapters.HTTPServer
-	logger             *slog.Logger
-	ctx                context.Context
-	cancel             context.CancelFunc
-	config             ApplicationConfig
-	monitor            managers.StateMonitor // State monitor for TLA tracing
-}
-
-// ComponentScripts holds the script commands for a component
-type ComponentScripts struct {
-	StartCommand      []string
-	ReadyCommand      []string
-	CheckpointCommand []string
-	RestoreCommand    []string
-}
-
-// ApplicationConfig holds configuration for the application
-type ApplicationConfig struct {
-	// Logging configuration
-	LogLevel slog.Level
-	LogJSON  bool
-	TLATrace bool
-	Debug    bool
-
-	// Dynamic component configurations (keyed by component name)
-	Components map[string]ComponentScripts
-
-	// Process configuration
-	ProcessCommand                 []string
-	ProcessWorkingDir              string
-	ProcessEnvironment             []string
-	ProcessRestartMaxRetries       int
-	ProcessRestartBackoffMax       time.Duration
-	ProcessGracefulShutdownTimeout time.Duration
+	systemState *managers.SystemState
+	apiServer   *api.Server
+	logger      *slog.Logger
+	ctx         context.Context
+	cancel      context.CancelFunc
+	config      lib.ApplicationConfig
+	monitor     lib.StateMonitor // State monitor for TLA tracing
 }
 
 // NewApplication creates a new application instance
-func NewApplication(config ApplicationConfig) *Application {
+func NewApplication(config lib.ApplicationConfig) *Application {
 	// Set up logging
 	var handler slog.Handler
 	if config.LogJSON {
@@ -114,10 +66,10 @@ func NewApplication(config ApplicationConfig) *Application {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Create TLA monitor if tracing is enabled
-	var monitor managers.StateMonitor
+	var monitor lib.StateMonitor
 	if config.TLATrace {
 		logger.Info("TLA+ trace logging enabled")
-		monitor = managers.NewStateMonitor(outputTrace)
+		monitor = lib.NewStateMonitor(outputTrace)
 	}
 
 	if config.Debug {
@@ -137,6 +89,7 @@ func NewApplication(config ApplicationConfig) *Application {
 			RestoreCommand:    componentScripts.RestoreCommand,
 		}
 		component := adapters.NewCmdComponent(componentConfig)
+		// Cast adapters.Component to managers.ManagedComponent (interfaces are compatible)
 		components = append(components, component)
 
 		if config.Debug {
@@ -162,9 +115,9 @@ func NewApplication(config ApplicationConfig) *Application {
 	process := adapters.NewProcess(processConfig)
 
 	// Create process state manager with monitor
-	var processMonitors []managers.StateMonitor
+	var processMonitors []lib.StateMonitor
 	if monitor != nil {
-		processMonitors = []managers.StateMonitor{monitor}
+		processMonitors = []lib.StateMonitor{monitor}
 	}
 	processStateMachine := managers.NewProcessState(managers.ProcessStateConfig{
 		Process: process,
@@ -175,27 +128,27 @@ func NewApplication(config ApplicationConfig) *Application {
 		ProcessState: processStateMachine,
 		Components:   components,
 	}
-	var systemMonitors []managers.StateMonitor
+	var systemMonitors []lib.StateMonitor
 	if monitor != nil {
 		systemMonitors = append(systemMonitors, monitor)
 	}
 
-	systemStateMachine := managers.NewSystemState(systemConfig, systemMonitors)
+	systemState := managers.NewSystemState(systemConfig, systemMonitors)
 
-	// Create adapter for HTTP server interface compatibility
-	systemStateAdapter := &SystemStateAdapter{SystemState: systemStateMachine}
-
-	// Create HTTP server for monitoring
-	httpServer := adapters.NewHTTPServer(":8080", systemStateAdapter, logger)
+	// Create API server if listen address is specified
+	var apiServer *api.Server
+	if config.APIListenAddr != "" {
+		apiServer = api.NewServer(config.APIListenAddr, systemState, logger)
+	}
 
 	app := &Application{
-		systemStateMachine: systemStateMachine,
-		httpServer:         httpServer,
-		logger:             logger,
-		ctx:                ctx,
-		cancel:             cancel,
-		config:             config,
-		monitor:            monitor,
+		systemState: systemState,
+		apiServer:   apiServer,
+		logger:      logger,
+		ctx:         ctx,
+		cancel:      cancel,
+		config:      config,
+		monitor:     monitor,
 	}
 
 	return app
@@ -205,15 +158,17 @@ func NewApplication(config ApplicationConfig) *Application {
 func (app *Application) Start(ctx context.Context) error {
 	app.logger.Info("Starting sprite-env application")
 
-	// Start HTTP server
-	if err := app.httpServer.Start(); err != nil {
-		app.logger.Error("Failed to start HTTP server", "error", err)
-		return err
+	// Start API server if configured
+	if app.apiServer != nil {
+		if err := app.apiServer.Start(); err != nil {
+			app.logger.Error("Failed to start API server", "error", err)
+			return err
+		}
 	}
 
 	// Trigger the initial system startup sequence
 	app.logger.Info("Starting system state machine...")
-	app.systemStateMachine.Fire("SystemStarting")
+	app.systemState.Fire("SystemStarting")
 
 	app.logger.Info("System state machine started, awaiting component readiness...")
 	app.logger.Info("Application started successfully")
@@ -225,11 +180,13 @@ func (app *Application) Stop(ctx context.Context) error {
 	app.logger.Info("Stopping sprite-env application")
 
 	// Request system shutdown using the trigger-based API
-	app.systemStateMachine.Fire("ShutdownRequested")
+	app.systemState.Fire("ShutdownRequested")
 
-	// Stop HTTP server
-	if err := app.httpServer.Stop(ctx); err != nil {
-		app.logger.Error("Failed to shutdown HTTP server", "error", err)
+	// Stop API server if running
+	if app.apiServer != nil {
+		if err := app.apiServer.Stop(ctx); err != nil {
+			app.logger.Error("Failed to shutdown API server", "error", err)
+		}
 	}
 
 	// Cancel application context
@@ -240,13 +197,14 @@ func (app *Application) Stop(ctx context.Context) error {
 }
 
 // parseCommandLineArgs parses command line arguments and returns configuration
-func parseCommandLineArgs() (ApplicationConfig, error) {
+func parseCommandLineArgs() (lib.ApplicationConfig, error) {
 	var componentsDir string
 	var testDir string
 	var debug bool
 	var tlaTrace bool
 	var logJSON bool
 	var gracefulShutdownTimeout time.Duration
+	var listenAddr string
 
 	flag.StringVar(&componentsDir, "components-dir", "", "Directory containing component subdirectories with management scripts")
 	flag.StringVar(&testDir, "test-dir", "", "Test directory containing component subdirectories (alias for -components-dir)")
@@ -254,17 +212,18 @@ func parseCommandLineArgs() (ApplicationConfig, error) {
 	flag.BoolVar(&tlaTrace, "tla-trace", false, "Enable TLA+ state change tracing")
 	flag.BoolVar(&logJSON, "log-json", false, "Output logs in JSON format")
 	flag.DurationVar(&gracefulShutdownTimeout, "graceful-shutdown-timeout", 30*time.Second, "Timeout for graceful process shutdown before SIGKILL")
+	flag.StringVar(&listenAddr, "listen", "", "HTTP API server listen address (e.g., 0.0.0.0:8090)")
 	flag.Parse()
 
 	// Get supervised process path from remaining arguments
 	args := flag.Args()
 	if len(args) == 0 {
-		return ApplicationConfig{}, fmt.Errorf("supervised process command is required")
+		return lib.ApplicationConfig{}, fmt.Errorf("supervised process command is required")
 	}
 
 	// Handle both -components-dir and -test-dir flags
 	if componentsDir == "" && testDir == "" {
-		return ApplicationConfig{}, fmt.Errorf("either -components-dir or -test-dir is required")
+		return lib.ApplicationConfig{}, fmt.Errorf("either -components-dir or -test-dir is required")
 	}
 
 	// Use testDir if specified, otherwise use componentsDir
@@ -312,10 +271,10 @@ func parseCommandLineArgs() (ApplicationConfig, error) {
 	// Discover component directories
 	entries, err := os.ReadDir(componentsDir)
 	if err != nil {
-		return ApplicationConfig{}, fmt.Errorf("failed to read components directory %s: %w", componentsDir, err)
+		return lib.ApplicationConfig{}, fmt.Errorf("failed to read components directory %s: %w", componentsDir, err)
 	}
 
-	components := make(map[string]ComponentScripts)
+	components := make(map[string]lib.ComponentScripts)
 
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -333,10 +292,10 @@ func parseCommandLineArgs() (ApplicationConfig, error) {
 
 		// Validate that required start command exists
 		if len(startCommand) == 0 {
-			return ApplicationConfig{}, fmt.Errorf("%s start script is required but not found at: %s or %s", componentName, filepath.Join(componentDir, "start"), filepath.Join(componentDir, "start.sh"))
+			return lib.ApplicationConfig{}, fmt.Errorf("%s start script is required but not found at: %s or %s", componentName, filepath.Join(componentDir, "start"), filepath.Join(componentDir, "start.sh"))
 		}
 
-		components[componentName] = ComponentScripts{
+		components[componentName] = lib.ComponentScripts{
 			StartCommand:      startCommand,
 			ReadyCommand:      readyCommand,
 			CheckpointCommand: checkpointCommand,
@@ -349,15 +308,16 @@ func parseCommandLineArgs() (ApplicationConfig, error) {
 	}
 
 	if len(components) == 0 {
-		return ApplicationConfig{}, fmt.Errorf("no component directories found in %s", componentsDir)
+		return lib.ApplicationConfig{}, fmt.Errorf("no component directories found in %s", componentsDir)
 	}
 
 	// Build configuration
-	config := ApplicationConfig{
-		LogLevel: logLevel,
-		LogJSON:  logJSON,
-		TLATrace: tlaTrace,
-		Debug:    debug,
+	config := lib.ApplicationConfig{
+		LogLevel:      logLevel,
+		LogJSON:       logJSON,
+		TLATrace:      tlaTrace,
+		Debug:         debug,
+		APIListenAddr: listenAddr,
 
 		// Dynamic component configurations
 		Components: components,
@@ -406,7 +366,7 @@ func main() {
 	systemExitChan := make(chan int, 1)
 
 	// Set up the system state machine to send exit codes to our channel
-	app.systemStateMachine.SetExitChannel(systemExitChan)
+	app.systemState.SetExitChannel(systemExitChan)
 
 	select {
 	case sig := <-sigChan:

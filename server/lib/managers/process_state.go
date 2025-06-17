@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"sprite-env/lib"
 	"sprite-env/lib/adapters"
 
 	"github.com/qmuntal/stateless"
@@ -36,7 +37,7 @@ type ProcessState struct {
 
 // NewProcessState creates a new process state manager with a managed process
 // Initial state is "Initializing" as per TLA+ spec (unless overridden in config)
-func NewProcessState(config ProcessStateConfig, monitors []StateMonitor) *ProcessState {
+func NewProcessState(config ProcessStateConfig, monitors []lib.StateMonitor) *ProcessState {
 	initialState := config.InitialState
 	if initialState == "" {
 		initialState = "Initializing" // Default per TLA+ spec
@@ -54,7 +55,7 @@ func NewProcessState(config ProcessStateConfig, monitors []StateMonitor) *Proces
 
 	// Attach monitors if provided
 	if len(monitors) > 0 {
-		sm.OnTransitioning(CreateMonitorCallback("ProcessState", monitors))
+		sm.OnTransitioning(lib.CreateMonitorCallback("ProcessState", monitors))
 	}
 
 	// Configure states in execution sequence order

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"sprite-env/lib"
+
 	"github.com/qmuntal/stateless"
 )
 
@@ -21,10 +23,10 @@ type SystemState struct {
 	*stateless.StateMachine
 	config                SystemConfig
 	componentGroupState   *ComponentGroupState
-	externalExitChan      chan int       // External channel for sending exit codes to main app
-	externalMonitors      []StateMonitor // Store external monitors for graceful shutdown
-	componentGroupMonitor *systemMonitor // Internal monitor for component group events
-	processMonitor        *systemMonitor // Internal monitor for process events
+	externalExitChan      chan int           // External channel for sending exit codes to main app
+	externalMonitors      []lib.StateMonitor // Store external monitors for graceful shutdown
+	componentGroupMonitor *systemMonitor     // Internal monitor for component group events
+	processMonitor        *systemMonitor     // Internal monitor for process events
 }
 
 // Fire overrides the base Fire method
@@ -35,7 +37,7 @@ func (ssm *SystemState) Fire(trigger string, args ...any) error {
 
 // NewSystemState creates a new system state manager
 // Initial state is "Initializing" as per TLA+ spec (unless overridden in config)
-func NewSystemState(config SystemConfig, monitors []StateMonitor) *SystemState {
+func NewSystemState(config SystemConfig, monitors []lib.StateMonitor) *SystemState {
 	initialState := config.InitialState
 	if initialState == "" {
 		initialState = "Initializing" // Default per TLA+ spec
@@ -51,14 +53,14 @@ func NewSystemState(config SystemConfig, monitors []StateMonitor) *SystemState {
 
 	// Attach monitors if provided
 	if len(monitors) > 0 {
-		sm.OnTransitioning(CreateMonitorCallback("SystemState", monitors))
+		sm.OnTransitioning(lib.CreateMonitorCallback("SystemState", monitors))
 	}
 
 	// Add transition callback to detect terminal states
 	sm.OnTransitioned(func(ctx context.Context, transition stateless.Transition) {
 		if transition.Destination == "Error" {
 			// Close external monitors gracefully first
-			CloseMonitors(ssm.externalMonitors, 1*time.Second)
+			lib.CloseMonitors(ssm.externalMonitors, 1*time.Second)
 
 			// Close child managers to stop their goroutines
 			if ssm.componentGroupState != nil {
@@ -78,7 +80,7 @@ func NewSystemState(config SystemConfig, monitors []StateMonitor) *SystemState {
 			}
 		} else if transition.Destination == "Stopped" {
 			// Close external monitors gracefully first
-			CloseMonitors(ssm.externalMonitors, 1*time.Second)
+			lib.CloseMonitors(ssm.externalMonitors, 1*time.Second)
 
 			// Close child managers to stop their goroutines
 			if ssm.componentGroupState != nil {
@@ -113,7 +115,7 @@ func NewSystemState(config SystemConfig, monitors []StateMonitor) *SystemState {
 
 		// Pass both the componentGroupMonitor (for SystemState coordination)
 		// and the external monitors (for TLA+ trace generation)
-		allMonitors := append([]StateMonitor{componentGroupMonitor}, monitors...)
+		allMonitors := append([]lib.StateMonitor{componentGroupMonitor}, monitors...)
 		componentGroupState = NewComponentGroupState(componentGroupConfig, allMonitors...)
 
 		ssm.componentGroupState = componentGroupState
@@ -127,7 +129,7 @@ func NewSystemState(config SystemConfig, monitors []StateMonitor) *SystemState {
 		processMonitor := ssm.createProcessMonitor()
 		ssm.processMonitor = processMonitor.(*systemMonitor) // Store reference for cleanup
 		// Attach the process monitor to the existing process state manager
-		config.ProcessState.OnTransitioning(CreateMonitorCallback("ProcessState", []StateMonitor{processMonitor}))
+		config.ProcessState.OnTransitioning(lib.CreateMonitorCallback("ProcessState", []lib.StateMonitor{processMonitor}))
 	}
 
 	// Configure system states based on TLA+ SystemState definition
@@ -177,7 +179,22 @@ func NewSystemState(config SystemConfig, monitors []StateMonitor) *SystemState {
 		Permit("ProcessError", "ErrorRecovery").
 		Permit("ProcessCrashed", "ErrorRecovery").
 		Permit("ProcessKilled", "ErrorRecovery").
-		Permit("ProcessExited", "ErrorRecovery")
+		Permit("ProcessExited", "ErrorRecovery").
+		Permit("CheckpointRequested", "Checkpointing").
+		Permit("RestoreRequested", "Restoring").
+		Ignore("ComponentsRunning") // Ignore if components report running when already in Running state
+
+	// Checkpointing - system is creating a checkpoint
+	sm.Configure("Checkpointing").
+		Permit("CheckpointCompleted", "Running").
+		Permit("CheckpointFailed", "Running").
+		OnEntry(ssm.handleCheckpointing)
+
+	// Restoring - system is restoring from a checkpoint
+	sm.Configure("Restoring").
+		Permit("RestoreCompleted", "Running").
+		Permit("RestoreFailed", "Running").
+		OnEntry(ssm.handleRestoring)
 
 	// ErrorRecovery - handling component failures
 	sm.Configure("ErrorRecovery").
@@ -256,9 +273,65 @@ func (ssm *SystemState) handleStopping(ctx context.Context, args ...any) error {
 	return nil
 }
 
+// handleCheckpointing is called when entering Checkpointing state
+func (ssm *SystemState) handleCheckpointing(ctx context.Context, args ...any) error {
+	if ssm.componentGroupState != nil {
+		// Extract checkpoint ID from args if provided
+		checkpointID := ""
+		if len(args) > 0 {
+			if id, ok := args[0].(string); ok {
+				checkpointID = id
+			}
+		}
+
+		// Fire Checkpointing on all components with the checkpoint ID
+		err := ssm.componentGroupState.Fire("Checkpointing", checkpointID)
+		if err != nil {
+			// Handle error by transitioning back to Running
+			if fireErr := ssm.Fire("CheckpointFailed"); fireErr != nil {
+				panic(fmt.Sprintf("State machine error firing CheckpointFailed: %v", fireErr))
+			}
+		} else {
+			// Success - transition back to Running
+			if fireErr := ssm.Fire("CheckpointCompleted"); fireErr != nil {
+				panic(fmt.Sprintf("State machine error firing CheckpointCompleted: %v", fireErr))
+			}
+		}
+	}
+	return nil
+}
+
+// handleRestoring is called when entering Restoring state
+func (ssm *SystemState) handleRestoring(ctx context.Context, args ...any) error {
+	if ssm.componentGroupState != nil {
+		// Extract checkpoint ID from args if provided
+		checkpointID := ""
+		if len(args) > 0 {
+			if id, ok := args[0].(string); ok {
+				checkpointID = id
+			}
+		}
+
+		// Fire Restoring on all components with the checkpoint ID
+		err := ssm.componentGroupState.Fire("Restoring", checkpointID)
+		if err != nil {
+			// Handle error by transitioning back to Running
+			if fireErr := ssm.Fire("RestoreFailed"); fireErr != nil {
+				panic(fmt.Sprintf("State machine error firing RestoreFailed: %v", fireErr))
+			}
+		} else {
+			// Success - transition back to Running
+			if fireErr := ssm.Fire("RestoreCompleted"); fireErr != nil {
+				panic(fmt.Sprintf("State machine error firing RestoreCompleted: %v", fireErr))
+			}
+		}
+	}
+	return nil
+}
+
 // createComponentGroupMonitor creates a monitor to translate component group events to system events
-func (ssm *SystemState) createComponentGroupMonitor() StateMonitor {
-	events := make(chan StateTransition, 100) // Buffered channel
+func (ssm *SystemState) createComponentGroupMonitor() lib.StateMonitor {
+	events := make(chan lib.StateTransition, 100) // Buffered channel
 
 	// Start goroutine to process component group state changes
 	go func() {
@@ -309,8 +382,8 @@ func (ssm *SystemState) createComponentGroupMonitor() StateMonitor {
 }
 
 // createProcessMonitor creates a monitor to translate process events to system events
-func (ssm *SystemState) createProcessMonitor() StateMonitor {
-	events := make(chan StateTransition, 100) // Buffered channel
+func (ssm *SystemState) createProcessMonitor() lib.StateMonitor {
+	events := make(chan lib.StateTransition, 100) // Buffered channel
 
 	// Start goroutine to process process state changes
 	go func() {
@@ -365,10 +438,10 @@ func (ssm *SystemState) createProcessMonitor() StateMonitor {
 
 // systemMonitor implements StateMonitor interface for internal system coordination
 type systemMonitor struct {
-	events chan StateTransition
+	events chan lib.StateTransition
 }
 
-func (sm *systemMonitor) Events() chan<- StateTransition {
+func (sm *systemMonitor) Events() chan<- lib.StateTransition {
 	return sm.events
 }
 
