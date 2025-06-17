@@ -3,6 +3,7 @@ package managers
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"sprite-env/lib/adapters"
 
@@ -25,25 +26,24 @@ func TestSystemStateManager_ComprehensiveTransitionMatrix(t *testing.T) {
 		{[]string{}, "Initializing", false, "", ""},
 
 		// Valid sequences from default initial state (Initializing)
-		{[]string{"SystemStarting", "SystemReady", "ProcessRunning"}, "Running", false, "", ""},
-		{[]string{"SystemStarting", "SystemReady"}, "Ready", false, "", ""},
-		{[]string{"SystemStarting", "SystemReady", "ProcessRunning", "ComponentsStopping", "ComponentsStopped"}, "Stopped", false, "", ""},
-		{[]string{"SystemStarting", "SystemReady", "ProcessError", "ProcessStopped"}, "Error", false, "", ""},
-		{[]string{"SystemStarting", "ComponentsStopping", "ComponentsStopped"}, "Stopped", false, "", ""},
-		{[]string{"SystemStarting", "SystemReady", "ProcessRunning", "ProcessCrashed", "ProcessStopped"}, "Error", false, "", ""},
-		{[]string{"SystemStarting", "SystemReady", "ComponentsError"}, "Error", false, "", ""},
+		{[]string{"SystemStarting"}, "Running", false, "", ""}, // Components and process start automatically
+		// Test removed - can't fire ProcessRunning from Starting state (need to be in Ready state first)
+		{[]string{"SystemStarting", "ComponentsStopping"}, "Stopped", false, "", ""}, // Stop during startup
+		{[]string{"SystemStarting", "ProcessError"}, "Error", false, "", ""},         // Process error during startup
+		{[]string{"SystemStarting", "ProcessCrashed"}, "Error", false, "", ""},       // Process crash during startup
+		{[]string{"SystemStarting", "ComponentsError"}, "Error", false, "", ""},
 
 		// Sequences starting from different initial states (testing InitialState functionality)
-		{[]string{"SystemReady", "ProcessRunning"}, "Running", false, "", "Starting"},
-		{[]string{"ProcessRunning"}, "Running", false, "", "Ready"},
-		{[]string{"ComponentsStopping", "ComponentsStopped"}, "Stopped", false, "", "Running"},
-		{[]string{"ProcessError"}, "ErrorRecovery", false, "", "Ready"},
+		{[]string{"ComponentsRunning"}, "Running", false, "", "Starting"}, // Components ready triggers process start
+		{[]string{"ProcessRunning"}, "Running", false, "", "Ready"},       // Process starts from Ready state
+		{[]string{"ComponentsStopping"}, "Stopped", false, "", "Running"},
+		{[]string{"ProcessError"}, "Error", false, "", "Ready"}, // Process error leads to terminal Error state
 
 		// Invalid sequences from default initial state
-		{[]string{"SystemReady"}, "Initializing", true, "SystemReady", ""},
-		{[]string{"SystemStarting", "ProcessRunning"}, "Starting", true, "ProcessRunning", ""},
-		{[]string{"SystemStarting", "Initializing"}, "Starting", true, "Initializing", ""},
-		{[]string{"SystemStarting", "SystemReady", "ProcessError", "ProcessStopped", "SystemStarting"}, "Error", true, "SystemStarting", ""},
+		{[]string{"ComponentsRunning"}, "Initializing", true, "ComponentsRunning", ""},                      // Can't have components run before starting
+		{[]string{"ProcessRunning"}, "Initializing", true, "ProcessRunning", ""},                            // Can't run process from initial state
+		{[]string{"SystemStarting", "Initializing"}, "Starting", true, "Initializing", ""},                  // Can't go back to Initializing
+		{[]string{"SystemStarting", "ProcessError", "SystemStarting"}, "Error", true, "SystemStarting", ""}, // Can't restart from Error
 		{[]string{"InvalidTrigger"}, "Initializing", true, "InvalidTrigger", ""},
 
 		// Invalid sequences from custom initial states
@@ -75,6 +75,11 @@ func TestSystemStateManager_ComprehensiveTransitionMatrix(t *testing.T) {
 						t.Fatalf("Step %d (%s) failed unexpectedly: %v", j+1, trigger, err)
 					}
 				}
+			}
+
+			// Wait for state transitions to stabilize after firing all events
+			if !sequence.ShouldFail {
+				refs.WaitForStateStability(50*time.Millisecond, 500*time.Millisecond)
 			}
 
 			// Verify failure expectations

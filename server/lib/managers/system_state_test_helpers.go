@@ -167,6 +167,12 @@ func (mc *EnhancedTestManagedComponent) Start(ctx context.Context) error {
 		case mc.eventsCh <- adapters.ComponentStarted:
 		default:
 		}
+		// Then send Ready event to transition to Running
+		time.Sleep(mc.autoTransitionDelay)
+		select {
+		case mc.eventsCh <- adapters.ComponentReady:
+		default:
+		}
 	}()
 	return nil
 }

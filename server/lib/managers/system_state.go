@@ -259,13 +259,24 @@ func (ssm *SystemState) handleErrorRecovery(ctx context.Context, args ...any) er
 	return nil
 }
 
-// handleStopping is called when entering Stopping state - coordinate component shutdown
+// handleStopping is called when entering Stopping state - coordinate component and process shutdown
 func (ssm *SystemState) handleStopping(ctx context.Context, args ...any) error {
-	if ssm.componentGroupState != nil {
+	// Stop both components and process
+	hasComponents := ssm.componentGroupState != nil
+	hasProcess := ssm.config.ProcessState != nil
+
+	if hasComponents {
 		// Stop the component group - synchronous because this is parent->child
 		ssm.componentGroupState.Fire("Stopping")
-	} else {
-		// No components to coordinate, can transition directly to stopped
+	}
+
+	if hasProcess {
+		// Stop the process - synchronous because this is parent->child
+		ssm.config.ProcessState.Fire("Stopping")
+	}
+
+	// If we have neither components nor process, transition directly to stopped
+	if !hasComponents && !hasProcess {
 		if err := ssm.Fire("ComponentsStopped"); err != nil {
 			panic(fmt.Sprintf("State machine error firing ComponentsStopped: %v", err))
 		}
