@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sprite-env/lib"
 	"sync"
 	"syscall"
 	"time"
@@ -48,105 +49,22 @@ type Process struct {
 	signalCh        chan os.Signal // Unbuffered - supervisor always ready to receive, no signals dropped
 	signalChClosed  bool           // Track if signal channel is closed
 	signalChMutex   sync.RWMutex   // Protect access to signalChClosed flag
-	stdoutBroadcast *outputBroadcaster
-	stderrBroadcast *outputBroadcaster
+	stdoutMultiPipe *lib.MultiPipe
+	stderrMultiPipe *lib.MultiPipe
 	eventCh         chan ProcessEventType // Buffered - external resource with unpredictable timing, consumers need reliable delivery
 	lastSignal      os.Signal             // Track the last signal sent for handler callback
 	ctx             context.Context       // Context for goroutine cleanup
 	cancel          context.CancelFunc    // Cancel function for cleanup
-	eventWg         sync.WaitGroup        // Tracks event emission goroutines
-	broadcastWg     sync.WaitGroup        // Tracks broadcast goroutines
-}
-
-// outputBroadcaster manages broadcasting output to multiple subscribers
-type outputBroadcaster struct {
-	pipes        map[io.WriteCloser]bool
-	mutex        sync.RWMutex
-	parentWriter io.Writer
-}
-
-func newOutputBroadcaster(parentWriter io.Writer) *outputBroadcaster {
-	return &outputBroadcaster{
-		pipes:        make(map[io.WriteCloser]bool),
-		parentWriter: parentWriter,
-	}
-}
-
-func (ob *outputBroadcaster) newPipe() (io.ReadCloser, io.WriteCloser) {
-	r, w := io.Pipe()
-
-	ob.mutex.Lock()
-	ob.pipes[w] = true
-	ob.mutex.Unlock()
-
-	// When the reader is closed, remove the writer from our map
-	return &pipeReaderWrapper{ReadCloser: r, broadcaster: ob, writer: w}, w
-}
-
-func (ob *outputBroadcaster) removePipe(w io.WriteCloser) {
-	ob.mutex.Lock()
-	defer ob.mutex.Unlock()
-
-	if ob.pipes[w] {
-		delete(ob.pipes, w)
-		w.Close()
-	}
-}
-
-func (ob *outputBroadcaster) closeAll() {
-	ob.mutex.Lock()
-	defer ob.mutex.Unlock()
-
-	for pipe := range ob.pipes {
-		pipe.Close()
-		delete(ob.pipes, pipe)
-	}
-}
-
-func (ob *outputBroadcaster) broadcast(data []byte) {
-	// Always write to parent first - this MUST succeed
-	ob.parentWriter.Write(data)
-
-	ob.mutex.Lock()
-	defer ob.mutex.Unlock()
-
-	// Broadcast to all pipes, removing any that fail
-	var toRemove []io.WriteCloser
-	for pipe := range ob.pipes {
-		_, err := pipe.Write(data)
-		if err != nil {
-			// Pipe errored or closed, mark for removal
-			toRemove = append(toRemove, pipe)
-		}
-	}
-
-	// Remove failed pipes
-	for _, pipe := range toRemove {
-		delete(ob.pipes, pipe)
-		pipe.Close()
-	}
-}
-
-// pipeReaderWrapper wraps a pipe reader to clean up when closed
-type pipeReaderWrapper struct {
-	io.ReadCloser
-	broadcaster *outputBroadcaster
-	writer      io.WriteCloser
-}
-
-func (prw *pipeReaderWrapper) Close() error {
-	prw.broadcaster.removePipe(prw.writer)
-	return prw.ReadCloser.Close()
 }
 
 // NewProcess creates a new process supervisor.
 func NewProcess(config ProcessConfig) *Process {
 	return &Process{
 		config:          config,
-		cmd:             nil,                  // Will be created when needed
-		signalCh:        make(chan os.Signal), // Unbuffered channel
-		stdoutBroadcast: newOutputBroadcaster(os.Stdout),
-		stderrBroadcast: newOutputBroadcaster(os.Stderr),
+		cmd:             nil,                             // Will be created when needed
+		signalCh:        make(chan os.Signal),            // Unbuffered channel
+		stdoutMultiPipe: lib.NewMultiPipe(4096),          // 4KB buffer per reader
+		stderrMultiPipe: lib.NewMultiPipe(4096),          // 4KB buffer per reader
 		eventCh:         make(chan ProcessEventType, 10), // Buffered channel with some buffer
 	}
 }
@@ -186,22 +104,14 @@ func (p *Process) StdinPipe() (io.WriteCloser, error) {
 // The output will also continue to go to os.Stdout. This maintains backward compatibility.
 // The pipe will continue to receive data even across process restarts.
 func (p *Process) StdoutPipe() (io.ReadCloser, error) {
-	if p.config.MaxRetries != 0 {
-		return nil, fmt.Errorf("stdout pipe not compatible with auto-restart (MaxRetries=%d)", p.config.MaxRetries)
-	}
-	reader, _ := p.stdoutBroadcast.newPipe()
-	return reader, nil
+	return p.stdoutMultiPipe.NewReader(), nil
 }
 
 // StderrPipe returns a pipe that will be connected to the command's standard error when the command starts.
 // The output will also continue to go to os.Stderr. This maintains backward compatibility.
 // The pipe will continue to receive data even across process restarts.
 func (p *Process) StderrPipe() (io.ReadCloser, error) {
-	if p.config.MaxRetries != 0 {
-		return nil, fmt.Errorf("stderr pipe not compatible with auto-restart (MaxRetries=%d)", p.config.MaxRetries)
-	}
-	reader, _ := p.stderrBroadcast.newPipe()
-	return reader, nil
+	return p.stderrMultiPipe.NewReader(), nil
 }
 
 // Start begins supervising the process in a new goroutine.
@@ -249,43 +159,11 @@ func (p *Process) createCommand(ctx context.Context) *exec.Cmd {
 	// 	Setpgid: true,
 	// }
 
-	// Set up pipes to capture stdout/stderr and broadcast them
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err == nil {
-		p.broadcastWg.Add(1)
-		go p.broadcastFromPipe(stdoutPipe, p.stdoutBroadcast)
-	}
-
-	stderrPipe, err := cmd.StderrPipe()
-	if err == nil {
-		p.broadcastWg.Add(1)
-		go p.broadcastFromPipe(stderrPipe, p.stderrBroadcast)
-	}
+	// Use MultiWriter to send output to both parent and multipipe
+	cmd.Stdout = io.MultiWriter(os.Stdout, p.stdoutMultiPipe)
+	cmd.Stderr = io.MultiWriter(os.Stderr, p.stderrMultiPipe)
 
 	return cmd
-}
-
-// broadcastFromPipe reads from a pipe and broadcasts to all subscribers
-func (p *Process) broadcastFromPipe(pipe io.ReadCloser, broadcaster *outputBroadcaster) {
-	defer p.broadcastWg.Done()
-	defer pipe.Close()
-	// Don't close subscriber pipes when source ends - let them read any buffered data
-
-	buf := make([]byte, 4096)
-	for {
-		n, err := pipe.Read(buf)
-		if n > 0 {
-			data := make([]byte, n)
-			copy(data, buf[:n])
-			broadcaster.broadcast(data)
-		}
-		if err != nil {
-			break
-		}
-	}
-
-	// Close all subscriber pipes after source is done to signal EOF to readers
-	broadcaster.closeAll()
 }
 
 func (p *Process) supervise(ctx context.Context) {
@@ -303,7 +181,6 @@ func (p *Process) supervise(ctx context.Context) {
 		p.signalChMutex.Unlock()
 
 		// Close the event channel to signal no more events will be sent
-		// No need to wait for goroutines since events are now synchronous
 		close(p.eventCh)
 
 		// Clean up event handler goroutines
@@ -311,9 +188,9 @@ func (p *Process) supervise(ctx context.Context) {
 			p.cancel()
 		}
 
-		// Clean up any remaining broadcaster pipes
-		p.stdoutBroadcast.closeAll()
-		p.stderrBroadcast.closeAll()
+		// Close multipipes
+		p.stdoutMultiPipe.Close()
+		p.stderrMultiPipe.Close()
 	}()
 
 	retries := 0
@@ -375,10 +252,6 @@ func (p *Process) supervise(ctx context.Context) {
 				}
 				return
 			case <-processExited:
-				// Wait for all broadcast goroutines to finish before proceeding
-				// This ensures all output has been fully broadcasted to pipes
-				p.broadcastWg.Wait()
-
 				if ctx.Err() != nil {
 					// Context was cancelled - the context cancellation handler will emit ProcessStoppedEvent
 					return

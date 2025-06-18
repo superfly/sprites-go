@@ -1,7 +1,11 @@
 package adapters
 
 import (
+	"bufio"
 	"context"
+	"fmt"
+	"io"
+	"os"
 	"strings"
 	"sync"
 	"syscall"
@@ -355,48 +359,20 @@ func TestProcessPipes(t *testing.T) {
 		t.Fatalf("Failed to start process: %v", err)
 	}
 
-	// Channel to synchronize read completion
-	readDone := make(chan bool, 1)
-	var readOutput string
+	// Read stdout to completion
+	output, err := io.ReadAll(stdout)
+	if err != nil {
+		t.Fatalf("Failed to read stdout: %v", err)
+	}
 
-	// Read from stdout
-	go func() {
-		defer stdout.Close()
-		defer func() { readDone <- true }()
-		buf := make([]byte, 1024)
-		var output strings.Builder
-		for {
-			n, err := stdout.Read(buf)
-			if n > 0 {
-				output.Write(buf[:n])
-			}
-			if err != nil {
-				if err.Error() != "EOF" && err.Error() != "io: read/write on closed pipe" {
-					t.Errorf("Failed to read from stdout: %v", err)
-				}
-				break
-			}
-			// Continue reading even if n==0, until we get an error (EOF)
-		}
-		readOutput = strings.TrimSpace(output.String())
-	}()
-
-	// Close stderr since we're not using it
-	stderr.Close()
+	// Verify output
+	if got := strings.TrimSpace(string(output)); got != "hello world" {
+		t.Errorf("Expected 'hello world', got '%s'", got)
+	}
 
 	// Wait for process to complete
 	if !capture.WaitForEvent(ProcessStoppedEvent, 5*time.Second) && !capture.WaitForEvent(ProcessFailedEvent, 5*time.Second) {
 		t.Fatal("Process never completed")
-	}
-
-	// Wait for reading to complete
-	select {
-	case <-readDone:
-		if readOutput != "hello world" {
-			t.Errorf("Expected 'hello world', got '%s'", readOutput)
-		}
-	case <-time.After(2 * time.Second):
-		t.Error("Timeout waiting for output")
 	}
 }
 
@@ -410,20 +386,105 @@ func TestProcessPipeIncompatibilityWithRetries(t *testing.T) {
 
 	process := NewProcess(config)
 
-	// Should fail to get pipes when retries are enabled
-	_, err := process.StdoutPipe()
-	if err == nil {
-		t.Error("Expected error when getting stdout pipe with MaxRetries > 0")
+	// Should now work to get pipes even when retries are enabled
+	stdout, err := process.StdoutPipe()
+	if err != nil {
+		t.Error("Expected to get stdout pipe with MaxRetries > 0")
+	}
+	if stdout != nil {
+		stdout.Close()
 	}
 
-	_, err = process.StderrPipe()
-	if err == nil {
-		t.Error("Expected error when getting stderr pipe with MaxRetries > 0")
+	stderr, err := process.StderrPipe()
+	if err != nil {
+		t.Error("Expected to get stderr pipe with MaxRetries > 0")
+	}
+	if stderr != nil {
+		stderr.Close()
 	}
 
+	// StdinPipe still doesn't work with retries (can't reconnect stdin to new process)
 	_, err = process.StdinPipe()
 	if err == nil {
 		t.Error("Expected error when getting stdin pipe with MaxRetries > 0")
+	}
+}
+
+func TestProcessPipesAcrossRestarts(t *testing.T) {
+	// Create a temp file for counter
+	counterFile := "/tmp/test-process-counter-" + strings.ReplaceAll(t.Name(), "/", "-")
+	defer os.Remove(counterFile)
+
+	// Create a script that outputs its run number and exits with error to trigger restart
+	script := fmt.Sprintf(`
+		if [ -f %s ]; then
+			COUNT=$(cat %s)
+		else
+			COUNT=0
+		fi
+		echo "run $COUNT"
+		echo $((COUNT + 1)) > %s
+		exit 1
+	`, counterFile, counterFile, counterFile)
+
+	config := ProcessConfig{
+		Command:                 []string{"sh", "-c", script},
+		MaxRetries:              2, // Allow 2 retries (total 3 runs)
+		RestartDelay:            50 * time.Millisecond,
+		GracefulShutdownTimeout: time.Second,
+	}
+
+	process := NewProcess(config)
+	ctx := context.Background()
+
+	// Get stdout pipe before starting
+	stdoutPipe, err := process.StdoutPipe()
+	if err != nil {
+		t.Fatalf("Failed to get stdout pipe: %v", err)
+	}
+	defer stdoutPipe.Close()
+
+	// Set up event capture
+	capture := NewEventCapture()
+	capture.startEventListener(process, ctx)
+
+	// Start the process
+	err = process.Start(ctx)
+	if err != nil {
+		t.Fatalf("Failed to start process: %v", err)
+	}
+
+	// Collect all output
+	outputChan := make(chan string, 10)
+	go func() {
+		scanner := bufio.NewScanner(stdoutPipe)
+		for scanner.Scan() {
+			outputChan <- scanner.Text()
+		}
+		close(outputChan)
+	}()
+
+	// Wait for process to fail after retries
+	if !capture.WaitForEvent(ProcessFailedEvent, 5*time.Second) {
+		t.Fatal("Process never failed")
+	}
+
+	// Collect all output
+	var outputs []string
+	for output := range outputChan {
+		outputs = append(outputs, output)
+	}
+
+	// Should have received output from all runs: "run 0", "run 1", "run 2"
+	if len(outputs) != 3 {
+		t.Errorf("Expected 3 outputs from 3 runs, got %d outputs: %v", len(outputs), outputs)
+	}
+
+	// Verify we got the expected sequence
+	for i, expected := range []string{"run 0", "run 1", "run 2"} {
+		if i < len(outputs) && outputs[i] != expected {
+			t.Errorf("Output %d: expected %q, got %q", i, expected, outputs[i])
+		}
 	}
 }
 
