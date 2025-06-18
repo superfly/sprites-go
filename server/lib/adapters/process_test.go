@@ -2,6 +2,7 @@ package adapters
 
 import (
 	"context"
+	"io"
 	"strings"
 	"sync"
 	"syscall"
@@ -335,59 +336,53 @@ func TestProcessPipes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get stdout pipe: %v", err)
 	}
+	defer stdout.Close()
 
 	// Test stderr pipe
 	stderr, err := process.StderrPipe()
 	if err != nil {
 		t.Fatalf("Failed to get stderr pipe: %v", err)
 	}
+	defer stderr.Close()
+
+	// Start reading stdout in a goroutine before starting the process
+	// This is the standard pattern for using cmd.StdoutPipe()
+	outputChan := make(chan string, 1)
+	go func() {
+		output, err := io.ReadAll(stdout)
+		if err != nil {
+			t.Errorf("Failed to read from stdout: %v", err)
+			outputChan <- ""
+			return
+		}
+		outputChan <- string(output)
+	}()
 
 	// Set up event capture
 	capture := NewEventCapture()
 	ctx := context.Background()
 	capture.startEventListener(process, ctx)
 
+	// Start the process
 	err = process.Start(ctx)
 	if err != nil {
 		t.Fatalf("Failed to start process: %v", err)
 	}
-
-	// Channel to synchronize read completion
-	readDone := make(chan bool, 1)
-	var readOutput string
-
-	// Read from stdout
-	go func() {
-		defer stdout.Close()
-		defer func() { readDone <- true }()
-		buf := make([]byte, 1024)
-		n, err := stdout.Read(buf)
-		if err != nil && err.Error() != "EOF" {
-			t.Errorf("Failed to read from stdout: %v", err)
-			return
-		}
-		readOutput = strings.TrimSpace(string(buf[:n]))
-	}()
-
-	// Close stderr since we're not using it
-	stderr.Close()
 
 	// Wait for process to complete
 	if !capture.WaitForEvent(ProcessStoppedEvent, 5*time.Second) && !capture.WaitForEvent(ProcessFailedEvent, 5*time.Second) {
 		t.Fatal("Process never completed")
 	}
 
-	// Wait for read operation to complete
+	// Get the output from the goroutine
 	select {
-	case <-readDone:
-		// Read completed
+	case output := <-outputChan:
+		readOutput := strings.TrimSpace(output)
+		if readOutput != "hello world" {
+			t.Errorf("Expected 'hello world', got '%s'", readOutput)
+		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("Read operation timed out")
-	}
-
-	// Check the output
-	if readOutput != "hello world" {
-		t.Errorf("Expected 'hello world', got '%s'", readOutput)
+		t.Error("Timeout waiting for output")
 	}
 }
 

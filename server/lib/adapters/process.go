@@ -55,6 +55,7 @@ type Process struct {
 	ctx             context.Context       // Context for goroutine cleanup
 	cancel          context.CancelFunc    // Cancel function for cleanup
 	eventWg         sync.WaitGroup        // Tracks event emission goroutines
+	broadcastWg     sync.WaitGroup        // Tracks broadcast goroutines
 }
 
 // outputBroadcaster manages broadcasting output to multiple subscribers
@@ -251,11 +252,13 @@ func (p *Process) createCommand(ctx context.Context) *exec.Cmd {
 	// Set up pipes to capture stdout/stderr and broadcast them
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err == nil {
+		p.broadcastWg.Add(1)
 		go p.broadcastFromPipe(stdoutPipe, p.stdoutBroadcast)
 	}
 
 	stderrPipe, err := cmd.StderrPipe()
 	if err == nil {
+		p.broadcastWg.Add(1)
 		go p.broadcastFromPipe(stderrPipe, p.stderrBroadcast)
 	}
 
@@ -264,8 +267,8 @@ func (p *Process) createCommand(ctx context.Context) *exec.Cmd {
 
 // broadcastFromPipe reads from a pipe and broadcasts to all subscribers
 func (p *Process) broadcastFromPipe(pipe io.ReadCloser, broadcaster *outputBroadcaster) {
+	defer p.broadcastWg.Done()
 	defer pipe.Close()
-	defer broadcaster.closeAll() // Close all subscriber pipes when source ends
 
 	buf := make([]byte, 4096)
 	for {
@@ -279,6 +282,9 @@ func (p *Process) broadcastFromPipe(pipe io.ReadCloser, broadcaster *outputBroad
 			break
 		}
 	}
+
+	// Close all subscriber pipes after source is done to signal EOF to readers
+	broadcaster.closeAll()
 }
 
 func (p *Process) supervise(ctx context.Context) {
@@ -303,6 +309,10 @@ func (p *Process) supervise(ctx context.Context) {
 		if p.cancel != nil {
 			p.cancel()
 		}
+
+		// Clean up any remaining broadcaster pipes
+		p.stdoutBroadcast.closeAll()
+		p.stderrBroadcast.closeAll()
 	}()
 
 	retries := 0
@@ -364,6 +374,10 @@ func (p *Process) supervise(ctx context.Context) {
 				}
 				return
 			case <-processExited:
+				// Wait for all broadcast goroutines to finish before proceeding
+				// This ensures all output has been fully broadcasted to pipes
+				p.broadcastWg.Wait()
+
 				if ctx.Err() != nil {
 					// Context was cancelled - the context cancellation handler will emit ProcessStoppedEvent
 					return
