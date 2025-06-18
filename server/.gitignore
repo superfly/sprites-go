@@ -10,3 +10,4 @@ sprite-env
 # Build artifacts
 tmp
 tests/tmp
+dist

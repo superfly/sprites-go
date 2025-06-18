@@ -18,6 +18,9 @@ import (
 	"sprite-env/lib/managers"
 )
 
+// version is set at build time via ldflags
+var version = "dev"
+
 // outputTrace outputs a single trace event
 func outputTrace(transition lib.StateTransition) {
 	// Create a simple flat trace with just the transition info
@@ -156,7 +159,7 @@ func NewApplication(config lib.ApplicationConfig) *Application {
 
 // Start starts the application
 func (app *Application) Start(ctx context.Context) error {
-	app.logger.Info("Starting sprite-env application")
+	app.logger.Info("Starting sprite-env application", "version", version)
 
 	// Start API server if configured
 	if app.apiServer != nil {
@@ -206,6 +209,7 @@ func parseCommandLineArgs() (lib.ApplicationConfig, error) {
 	var gracefulShutdownTimeout time.Duration
 	var listenAddr string
 	var configFile string
+	var showVersion bool
 
 	flag.StringVar(&configFile, "config", "", "JSON configuration file path")
 	flag.StringVar(&componentsDir, "components-dir", "", "Directory containing component subdirectories with management scripts")
@@ -215,7 +219,14 @@ func parseCommandLineArgs() (lib.ApplicationConfig, error) {
 	flag.BoolVar(&logJSON, "log-json", false, "Output logs in JSON format")
 	flag.DurationVar(&gracefulShutdownTimeout, "graceful-shutdown-timeout", 30*time.Second, "Timeout for graceful process shutdown before SIGKILL")
 	flag.StringVar(&listenAddr, "listen", "", "HTTP API server listen address (e.g., 0.0.0.0:8090)")
+	flag.BoolVar(&showVersion, "version", false, "Display version and exit")
 	flag.Parse()
+
+	// Handle version flag
+	if showVersion {
+		fmt.Printf("sprite-env version %s\n", version)
+		os.Exit(0)
+	}
 
 	var config lib.ApplicationConfig
 

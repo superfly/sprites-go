@@ -1,0 +1,134 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+
+permissions:
+  contents: write
+
+jobs:
+  # First run all tests by calling the test workflow
+  tests:
+    uses: ./.github/workflows/test.yml
+    
+  # Then release if tests pass
+  release:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    needs: tests
+    if: success()
+    defaults:
+      run:
+        working-directory: server
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: 1.24
+
+    - name: Get version
+      id: version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+    - name: Build binaries
+      run: |
+        # Create output directory
+        mkdir -p ../dist
+        
+        # Build for Linux AMD64
+        echo "Building for Linux AMD64..."
+        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+          -ldflags="-w -s -X main.version=${{ steps.version.outputs.VERSION }}" \
+          -o ../dist/sprite-env-linux-amd64 .
+        
+        # Build for Linux ARM64
+        echo "Building for Linux ARM64..."
+        CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
+          -ldflags="-w -s -X main.version=${{ steps.version.outputs.VERSION }}" \
+          -o ../dist/sprite-env-linux-arm64 .
+        
+        # Build for macOS AMD64
+        echo "Building for macOS AMD64..."
+        CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build \
+          -ldflags="-w -s -X main.version=${{ steps.version.outputs.VERSION }}" \
+          -o ../dist/sprite-env-darwin-amd64 .
+        
+        # Build for macOS ARM64 (Apple Silicon)
+        echo "Building for macOS ARM64..."
+        CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
+          -ldflags="-w -s -X main.version=${{ steps.version.outputs.VERSION }}" \
+          -o ../dist/sprite-env-darwin-arm64 .
+
+    - name: Compress binaries
+      run: |
+        cd ../dist
+        for file in sprite-env-*; do
+          echo "Compressing $file..."
+          tar -czf "${file}.tar.gz" "$file"
+          rm "$file"
+        done
+        
+        # Create checksums
+        echo "Creating checksums..."
+        sha256sum *.tar.gz > checksums.txt
+
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ steps.version.outputs.VERSION }}
+        body: |
+          ## sprite-env ${{ steps.version.outputs.VERSION }}
+          
+          ### Installation
+          
+          Download the appropriate binary for your platform:
+          
+          #### Linux
+          ```bash
+          # For AMD64
+          curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/sprite-env-linux-amd64.tar.gz | tar xz
+          chmod +x sprite-env-linux-amd64
+          
+          # For ARM64
+          curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/sprite-env-linux-arm64.tar.gz | tar xz
+          chmod +x sprite-env-linux-arm64
+          ```
+          
+          #### macOS
+          ```bash
+          # For Intel Macs
+          curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/sprite-env-darwin-amd64.tar.gz | tar xz
+          chmod +x sprite-env-darwin-amd64
+          
+          # For Apple Silicon Macs
+          curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/sprite-env-darwin-arm64.tar.gz | tar xz
+          chmod +x sprite-env-darwin-arm64
+          ```
+          
+          ### Checksums
+          
+          Verify the integrity of your download by checking the SHA256 checksums in `checksums.txt`.
+        draft: false
+        prerelease: ${{ contains(steps.version.outputs.VERSION, '-') }}
+
+    - name: Upload Release Assets
+      run: |
+        cd ../dist
+        for file in *.tar.gz checksums.txt; do
+          echo "Uploading $file..."
+          gh release upload "${{ steps.version.outputs.VERSION }}" "$file" \
+            --repo "${{ github.repository }}"
+        done
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
