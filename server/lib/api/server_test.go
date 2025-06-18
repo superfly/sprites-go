@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"sprite-env/lib"
 )
 
 // mockSystemState implements the SystemStateMachine interface for testing
@@ -225,7 +227,14 @@ func TestAuthMiddleware(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			os.Setenv("SPRITE_HTTP_API_TOKEN", tt.apiToken)
-			server := NewServer(":8080", mockState, logger)
+			// Create a test config
+			config := &lib.ApplicationConfig{
+				Exec: lib.ExecConfig{
+					WrapperCommand:    []string{},
+					TTYWrapperCommand: []string{},
+				},
+			}
+			server := NewServer(":8080", mockState, logger, config)
 
 			// Create a simple test handler
 			testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -267,7 +276,14 @@ func TestCheckpointEndpoint(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mockState := &mockSystemState{}
-	server := NewServer(":8080", mockState, logger)
+	// Create a test config
+	config := &lib.ApplicationConfig{
+		Exec: lib.ExecConfig{
+			WrapperCommand:    []string{},
+			TTYWrapperCommand: []string{},
+		},
+	}
+	server := NewServer(":8080", mockState, logger, config)
 	ts := httptest.NewServer(server.server.Handler)
 	defer ts.Close()
 
@@ -353,7 +369,14 @@ func TestExecEndpoint(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mockState := &mockSystemState{}
-	server := NewServer(":8080", mockState, logger)
+	// Create a test config
+	config := &lib.ApplicationConfig{
+		Exec: lib.ExecConfig{
+			WrapperCommand:    []string{},
+			TTYWrapperCommand: []string{},
+		},
+	}
+	server := NewServer(":8080", mockState, logger, config)
 	ts := httptest.NewServer(server.server.Handler)
 	defer ts.Close()
 
@@ -426,7 +449,14 @@ func TestServerShutdown(t *testing.T) {
 	mockState := &mockSystemState{}
 
 	t.Run("graceful shutdown with in-flight request", func(t *testing.T) {
-		server := NewServer(":0", mockState, logger) // Use :0 for random port
+		// Create a test config
+		config := &lib.ApplicationConfig{
+			Exec: lib.ExecConfig{
+				WrapperCommand:    []string{},
+				TTYWrapperCommand: []string{},
+			},
+		}
+		server := NewServer(":0", mockState, logger, config) // Use :0 for random port
 
 		// Start the server
 		if err := server.Start(); err != nil {
@@ -439,7 +469,7 @@ func TestServerShutdown(t *testing.T) {
 		// The server's actual address is not directly accessible, so we need to try connecting
 		// Since the Start() method launches the server in a goroutine, we need to find the actual port
 		// For this test, let's use a fixed port instead
-		server = NewServer(":18090", mockState, logger)
+		server = NewServer(":18090", mockState, logger, config)
 		if err := server.Start(); err != nil {
 			t.Fatalf("failed to start server: %v", err)
 		}
@@ -522,7 +552,14 @@ func TestServerShutdown(t *testing.T) {
 	})
 
 	t.Run("shutdown timeout with slow request", func(t *testing.T) {
-		server := NewServer(":18091", mockState, logger)
+		// Create a test config
+		config := &lib.ApplicationConfig{
+			Exec: lib.ExecConfig{
+				WrapperCommand:    []string{},
+				TTYWrapperCommand: []string{},
+			},
+		}
+		server := NewServer(":18091", mockState, logger, config)
 
 		// Start the server
 		if err := server.Start(); err != nil {
@@ -575,7 +612,14 @@ func TestServerShutdown(t *testing.T) {
 	})
 
 	t.Run("server refuses new connections after Stop", func(t *testing.T) {
-		server := NewServer(":18092", mockState, logger)
+		// Create a test config
+		config := &lib.ApplicationConfig{
+			Exec: lib.ExecConfig{
+				WrapperCommand:    []string{},
+				TTYWrapperCommand: []string{},
+			},
+		}
+		server := NewServer(":18092", mockState, logger, config)
 
 		// Start the server
 		if err := server.Start(); err != nil {

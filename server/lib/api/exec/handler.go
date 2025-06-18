@@ -10,12 +10,15 @@ import (
 	"net/http"
 	"os/exec"
 	"time"
+
+	"sprite-env/lib"
 )
 
 // Request represents the request body for exec endpoint
 type Request struct {
 	Command []string      `json:"command"`
 	Timeout time.Duration `json:"timeout"`
+	TTY     bool          `json:"tty"` // Whether to use TTY wrapper
 }
 
 // Message represents a line of output or the final exit status
@@ -30,12 +33,14 @@ type Message struct {
 // Handler handles the /exec endpoint
 type Handler struct {
 	logger *slog.Logger
+	config *lib.ApplicationConfig
 }
 
 // NewHandler creates a new exec handler
-func NewHandler(logger *slog.Logger) *Handler {
+func NewHandler(logger *slog.Logger, config *lib.ApplicationConfig) *Handler {
 	return &Handler{
 		logger: logger,
+		config: config,
 	}
 }
 
@@ -62,12 +67,29 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		req.Timeout = 30 * time.Second
 	}
 
+	// Build the actual command with wrapper if configured
+	var cmdArgs []string
+	if req.TTY && len(h.config.Exec.TTYWrapperCommand) > 0 {
+		// Use TTY wrapper
+		cmdArgs = append(cmdArgs, h.config.Exec.TTYWrapperCommand...)
+		cmdArgs = append(cmdArgs, req.Command...)
+	} else if len(h.config.Exec.WrapperCommand) > 0 {
+		// Use regular wrapper
+		cmdArgs = append(cmdArgs, h.config.Exec.WrapperCommand...)
+		cmdArgs = append(cmdArgs, req.Command...)
+	} else {
+		// No wrapper, use command directly
+		cmdArgs = req.Command
+	}
+
+	h.logger.Debug("Executing command", "command", cmdArgs, "timeout", req.Timeout)
+
 	// Create command context with timeout
 	ctx, cancel := context.WithTimeout(r.Context(), req.Timeout)
 	defer cancel()
 
 	// Set up the command
-	cmd := exec.CommandContext(ctx, req.Command[0], req.Command[1:]...)
+	cmd := exec.CommandContext(ctx, cmdArgs[0], cmdArgs[1:]...)
 
 	// Get stdout and stderr pipes
 	stdoutPipe, err := cmd.StdoutPipe()

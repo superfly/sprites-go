@@ -11,11 +11,20 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"sprite-env/lib"
 )
 
 func TestExecHandler(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	handler := NewHandler(logger)
+	// Create a test config with no wrappers
+	config := &lib.ApplicationConfig{
+		Exec: lib.ExecConfig{
+			WrapperCommand:    []string{},
+			TTYWrapperCommand: []string{},
+		},
+	}
+	handler := NewHandler(logger, config)
 
 	t.Run("successful command with stdout", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/exec", strings.NewReader(`{
@@ -335,6 +344,87 @@ func TestExecHandler(t *testing.T) {
 		// Context cancellation should result in non-zero exit code
 		if lastMsg.ExitCode == 0 {
 			t.Errorf("expected non-zero exit code for cancelled command, got %d", lastMsg.ExitCode)
+		}
+	})
+
+	t.Run("command with wrapper", func(t *testing.T) {
+		// Create handler with wrapper configuration
+		wrapperConfig := &lib.ApplicationConfig{
+			Exec: lib.ExecConfig{
+				WrapperCommand:    []string{"sh", "-c"},
+				TTYWrapperCommand: []string{},
+			},
+		}
+		wrapperHandler := NewHandler(logger, wrapperConfig)
+
+		req := httptest.NewRequest("POST", "/exec", strings.NewReader(`{
+			"command": ["echo hello"],
+			"timeout": 1000000000
+		}`))
+		req.Header.Set("Content-Type", "application/json")
+
+		rr := httptest.NewRecorder()
+		wrapperHandler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Errorf("handler returned wrong status code: got %v want %v", rr.Code, http.StatusOK)
+		}
+
+		messages := parseMessages(t, rr.Body.String())
+
+		// Should have stdout and exit messages
+		if len(messages) != 2 {
+			t.Errorf("expected 2 messages, got %d", len(messages))
+		}
+
+		// Check stdout message
+		if messages[0].Type != "stdout" || messages[0].Data != "hello" {
+			t.Errorf("unexpected stdout message: %+v", messages[0])
+		}
+
+		// Check exit message
+		if messages[1].Type != "exit" || messages[1].ExitCode != 0 {
+			t.Errorf("unexpected exit message: %+v", messages[1])
+		}
+	})
+
+	t.Run("command with TTY wrapper", func(t *testing.T) {
+		// Create handler with TTY wrapper configuration
+		ttyConfig := &lib.ApplicationConfig{
+			Exec: lib.ExecConfig{
+				WrapperCommand:    []string{"sh", "-c"},
+				TTYWrapperCommand: []string{"sh", "-c"},
+			},
+		}
+		ttyHandler := NewHandler(logger, ttyConfig)
+
+		req := httptest.NewRequest("POST", "/exec", strings.NewReader(`{
+			"command": ["echo tty test"],
+			"timeout": 1000000000,
+			"tty": true
+		}`))
+		req.Header.Set("Content-Type", "application/json")
+
+		rr := httptest.NewRecorder()
+		ttyHandler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Errorf("handler returned wrong status code: got %v want %v", rr.Code, http.StatusOK)
+		}
+
+		messages := parseMessages(t, rr.Body.String())
+
+		// Should have output
+		found := false
+		for _, msg := range messages {
+			if msg.Type == "stdout" && strings.Contains(msg.Data, "tty test") {
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			t.Errorf("expected to find 'tty test' in output, messages: %+v", messages)
 		}
 	})
 }

@@ -138,7 +138,7 @@ func NewApplication(config lib.ApplicationConfig) *Application {
 	// Create API server if listen address is specified
 	var apiServer *api.Server
 	if config.APIListenAddr != "" {
-		apiServer = api.NewServer(config.APIListenAddr, systemState, logger)
+		apiServer = api.NewServer(config.APIListenAddr, systemState, logger, &config)
 	}
 
 	app := &Application{
@@ -205,7 +205,9 @@ func parseCommandLineArgs() (lib.ApplicationConfig, error) {
 	var logJSON bool
 	var gracefulShutdownTimeout time.Duration
 	var listenAddr string
+	var configFile string
 
+	flag.StringVar(&configFile, "config", "", "JSON configuration file path")
 	flag.StringVar(&componentsDir, "components-dir", "", "Directory containing component subdirectories with management scripts")
 	flag.StringVar(&testDir, "test-dir", "", "Test directory containing component subdirectories (alias for -components-dir)")
 	flag.BoolVar(&debug, "debug", false, "Enable debug logging")
@@ -215,120 +217,137 @@ func parseCommandLineArgs() (lib.ApplicationConfig, error) {
 	flag.StringVar(&listenAddr, "listen", "", "HTTP API server listen address (e.g., 0.0.0.0:8090)")
 	flag.Parse()
 
-	// Get supervised process path from remaining arguments
-	args := flag.Args()
-	if len(args) == 0 {
-		return lib.ApplicationConfig{}, fmt.Errorf("supervised process command is required")
+	var config lib.ApplicationConfig
+
+	// If config file is specified, load from it first
+	if configFile != "" {
+		loader := lib.NewConfigLoader()
+		loadedConfig, err := loader.LoadFromFile(configFile)
+		if err != nil {
+			return lib.ApplicationConfig{}, fmt.Errorf("failed to load config file: %w", err)
+		}
+		config = *loadedConfig
+	} else {
+		// Initialize with defaults if no config file
+		config = lib.ApplicationConfig{
+			LogLevel:                       slog.LevelInfo,
+			ProcessRestartMaxRetries:       3,
+			ProcessRestartBackoffMax:       60 * time.Second,
+			ProcessGracefulShutdownTimeout: 30 * time.Second,
+			Components:                     make(map[string]lib.ComponentScripts),
+		}
 	}
 
-	// Handle both -components-dir and -test-dir flags
-	if componentsDir == "" && testDir == "" {
-		return lib.ApplicationConfig{}, fmt.Errorf("either -components-dir or -test-dir is required")
-	}
-
-	// Use testDir if specified, otherwise use componentsDir
-	if testDir != "" {
-		componentsDir = testDir
-	}
-
-	// Determine log level
-	logLevel := slog.LevelInfo
+	// Apply command line overrides (these always take precedence)
 	if debug {
-		logLevel = slog.LevelDebug
+		config.Debug = true
+		config.LogLevel = slog.LevelDebug
+	}
+	if tlaTrace {
+		config.TLATrace = true
+	}
+	if logJSON {
+		config.LogJSON = true
+	}
+	if listenAddr != "" {
+		config.APIListenAddr = listenAddr
+	}
+	if gracefulShutdownTimeout != 30*time.Second {
+		config.ProcessGracefulShutdownTimeout = gracefulShutdownTimeout
 	}
 
-	// Helper function to check and resolve script paths (tries both with and without .sh extension)
-	checkScript := func(componentName, scriptType, componentDir string) []string {
-		// Try script without extension first
-		scriptPathNoExt := filepath.Join(componentDir, scriptType)
-		if absPath, err := filepath.Abs(scriptPathNoExt); err == nil {
-			if _, err := os.Stat(absPath); err == nil {
-				if debug {
-					fmt.Printf("Found %s %s script: %s\n", componentName, scriptType, absPath)
+	// Handle process command from remaining arguments
+	args := flag.Args()
+	if len(args) > 0 {
+		config.ProcessCommand = args
+	}
+
+	// Handle components directory if specified
+	// This allows mixing config file with component discovery
+	if componentsDir != "" || testDir != "" {
+		// Use testDir if specified, otherwise use componentsDir
+		if testDir != "" {
+			componentsDir = testDir
+		}
+
+		// Helper function to check and resolve script paths
+		checkScript := func(componentName, scriptType, componentDir string) []string {
+			// Try script without extension first
+			scriptPathNoExt := filepath.Join(componentDir, scriptType)
+			if absPath, err := filepath.Abs(scriptPathNoExt); err == nil {
+				if _, err := os.Stat(absPath); err == nil {
+					if config.Debug {
+						fmt.Printf("Found %s %s script: %s\n", componentName, scriptType, absPath)
+					}
+					return []string{absPath}
+				} else if config.Debug {
+					fmt.Printf("%s %s script not found: %s\n", componentName, scriptType, absPath)
 				}
-				return []string{absPath}
-			} else if debug {
-				fmt.Printf("%s %s script not found: %s\n", componentName, scriptType, absPath)
+			}
+
+			// Try script with .sh extension as fallback
+			scriptPathWithSh := filepath.Join(componentDir, scriptType+".sh")
+			if absPath, err := filepath.Abs(scriptPathWithSh); err == nil {
+				if _, err := os.Stat(absPath); err == nil {
+					if config.Debug {
+						fmt.Printf("Found %s %s script: %s\n", componentName, scriptType, absPath)
+					}
+					return []string{absPath}
+				} else if config.Debug {
+					fmt.Printf("%s %s script not found: %s\n", componentName, scriptType, absPath)
+				}
+			}
+
+			return nil
+		}
+
+		// Discover component directories
+		entries, err := os.ReadDir(componentsDir)
+		if err != nil {
+			return lib.ApplicationConfig{}, fmt.Errorf("failed to read components directory %s: %w", componentsDir, err)
+		}
+
+		// Initialize components map if nil
+		if config.Components == nil {
+			config.Components = make(map[string]lib.ComponentScripts)
+		}
+
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue // Skip non-directories
+			}
+
+			componentName := entry.Name()
+			componentDir := filepath.Join(componentsDir, componentName)
+
+			// Discover scripts for this component
+			startCommand := checkScript(componentName, "start", componentDir)
+			readyCommand := checkScript(componentName, "ready", componentDir)
+			checkpointCommand := checkScript(componentName, "checkpoint", componentDir)
+			restoreCommand := checkScript(componentName, "restore", componentDir)
+
+			// Validate that required start command exists
+			if len(startCommand) == 0 {
+				return lib.ApplicationConfig{}, fmt.Errorf("%s start script is required but not found at: %s or %s", componentName, filepath.Join(componentDir, "start"), filepath.Join(componentDir, "start.sh"))
+			}
+
+			// Add or override component (CLI discovered components take precedence)
+			config.Components[componentName] = lib.ComponentScripts{
+				StartCommand:      startCommand,
+				ReadyCommand:      readyCommand,
+				CheckpointCommand: checkpointCommand,
+				RestoreCommand:    restoreCommand,
+			}
+
+			if config.Debug {
+				fmt.Printf("Configured component: %s\n", componentName)
 			}
 		}
-
-		// Try script with .sh extension as fallback
-		scriptPathWithSh := filepath.Join(componentDir, scriptType+".sh")
-		if absPath, err := filepath.Abs(scriptPathWithSh); err == nil {
-			if _, err := os.Stat(absPath); err == nil {
-				if debug {
-					fmt.Printf("Found %s %s script: %s\n", componentName, scriptType, absPath)
-				}
-				return []string{absPath}
-			} else if debug {
-				fmt.Printf("%s %s script not found: %s\n", componentName, scriptType, absPath)
-			}
-		}
-
-		return nil
 	}
 
-	// Discover component directories
-	entries, err := os.ReadDir(componentsDir)
-	if err != nil {
-		return lib.ApplicationConfig{}, fmt.Errorf("failed to read components directory %s: %w", componentsDir, err)
-	}
-
-	components := make(map[string]lib.ComponentScripts)
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue // Skip non-directories
-		}
-
-		componentName := entry.Name()
-		componentDir := filepath.Join(componentsDir, componentName)
-
-		// Discover scripts for this component
-		startCommand := checkScript(componentName, "start", componentDir)
-		readyCommand := checkScript(componentName, "ready", componentDir)
-		checkpointCommand := checkScript(componentName, "checkpoint", componentDir)
-		restoreCommand := checkScript(componentName, "restore", componentDir)
-
-		// Validate that required start command exists
-		if len(startCommand) == 0 {
-			return lib.ApplicationConfig{}, fmt.Errorf("%s start script is required but not found at: %s or %s", componentName, filepath.Join(componentDir, "start"), filepath.Join(componentDir, "start.sh"))
-		}
-
-		components[componentName] = lib.ComponentScripts{
-			StartCommand:      startCommand,
-			ReadyCommand:      readyCommand,
-			CheckpointCommand: checkpointCommand,
-			RestoreCommand:    restoreCommand,
-		}
-
-		if debug {
-			fmt.Printf("Configured component: %s\n", componentName)
-		}
-	}
-
-	if len(components) == 0 {
-		return lib.ApplicationConfig{}, fmt.Errorf("no component directories found in %s", componentsDir)
-	}
-
-	// Build configuration
-	config := lib.ApplicationConfig{
-		LogLevel:      logLevel,
-		LogJSON:       logJSON,
-		TLATrace:      tlaTrace,
-		Debug:         debug,
-		APIListenAddr: listenAddr,
-
-		// Dynamic component configurations
-		Components: components,
-
-		// Process configuration
-		ProcessCommand:                 args,
-		ProcessWorkingDir:              "",
-		ProcessEnvironment:             []string{},
-		ProcessRestartMaxRetries:       3,
-		ProcessRestartBackoffMax:       60 * time.Second,
-		ProcessGracefulShutdownTimeout: gracefulShutdownTimeout,
+	// Validate final configuration
+	if len(config.Components) == 0 && len(config.ProcessCommand) == 0 {
+		return lib.ApplicationConfig{}, fmt.Errorf("either components or supervised process command must be specified")
 	}
 
 	return config, nil
@@ -339,7 +358,11 @@ func main() {
 	config, err := parseCommandLineArgs()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		fmt.Fprintf(os.Stderr, "Usage: %s -components-dir <dir> [options] -- <supervised-process-command>\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "\nUsage:\n")
+		fmt.Fprintf(os.Stderr, "  %s -components-dir <dir> [options] -- <supervised-process-command>\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -config <file.json> [options] [-- <supervised-process-command>]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -config <file.json> -components-dir <dir> [options] [-- <supervised-process-command>]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "\nOptions can be mixed: use -config for base settings and override with CLI flags.\n")
 		os.Exit(1)
 	}
 

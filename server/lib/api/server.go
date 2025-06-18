@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"sprite-env/lib"
 	"sprite-env/lib/api/exec"
 	"sprite-env/lib/api/proxy"
 	"sprite-env/lib/api/state"
@@ -21,16 +22,18 @@ type Server struct {
 	execHandler  *exec.Handler
 	stateHandler *state.Handler
 	proxyHandler *proxy.Handler
+	config       *lib.ApplicationConfig
 }
 
 // NewServer creates a new API server
-func NewServer(addr string, systemState state.SystemStateMachine, logger *slog.Logger) *Server {
+func NewServer(addr string, systemState state.SystemStateMachine, logger *slog.Logger, config *lib.ApplicationConfig) *Server {
 	apiServer := &Server{
 		logger:       logger,
 		apiToken:     os.Getenv("SPRITE_HTTP_API_TOKEN"),
-		execHandler:  exec.NewHandler(logger),
+		execHandler:  exec.NewHandler(logger, config),
 		stateHandler: state.NewHandler(systemState, logger),
 		proxyHandler: proxy.NewHandler(logger),
+		config:       config,
 		server: &http.Server{
 			Addr: addr,
 		},
