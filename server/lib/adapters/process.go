@@ -269,6 +269,7 @@ func (p *Process) createCommand(ctx context.Context) *exec.Cmd {
 func (p *Process) broadcastFromPipe(pipe io.ReadCloser, broadcaster *outputBroadcaster) {
 	defer p.broadcastWg.Done()
 	defer pipe.Close()
+	// Don't close subscriber pipes when source ends - let them read any buffered data
 
 	buf := make([]byte, 4096)
 	for {

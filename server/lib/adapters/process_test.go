@@ -2,7 +2,6 @@ package adapters
 
 import (
 	"context"
-	"io"
 	"strings"
 	"sync"
 	"syscall"
@@ -345,19 +344,6 @@ func TestProcessPipes(t *testing.T) {
 	}
 	defer stderr.Close()
 
-	// Start reading stdout in a goroutine before starting the process
-	// This is the standard pattern for using cmd.StdoutPipe()
-	outputChan := make(chan string, 1)
-	go func() {
-		output, err := io.ReadAll(stdout)
-		if err != nil {
-			t.Errorf("Failed to read from stdout: %v", err)
-			outputChan <- ""
-			return
-		}
-		outputChan <- string(output)
-	}()
-
 	// Set up event capture
 	capture := NewEventCapture()
 	ctx := context.Background()
@@ -369,15 +355,43 @@ func TestProcessPipes(t *testing.T) {
 		t.Fatalf("Failed to start process: %v", err)
 	}
 
+	// Channel to synchronize read completion
+	readDone := make(chan bool, 1)
+	var readOutput string
+
+	// Read from stdout
+	go func() {
+		defer stdout.Close()
+		defer func() { readDone <- true }()
+		buf := make([]byte, 1024)
+		var output strings.Builder
+		for {
+			n, err := stdout.Read(buf)
+			if n > 0 {
+				output.Write(buf[:n])
+			}
+			if err != nil {
+				if err.Error() != "EOF" && err.Error() != "io: read/write on closed pipe" {
+					t.Errorf("Failed to read from stdout: %v", err)
+				}
+				break
+			}
+			// Continue reading even if n==0, until we get an error (EOF)
+		}
+		readOutput = strings.TrimSpace(output.String())
+	}()
+
+	// Close stderr since we're not using it
+	stderr.Close()
+
 	// Wait for process to complete
 	if !capture.WaitForEvent(ProcessStoppedEvent, 5*time.Second) && !capture.WaitForEvent(ProcessFailedEvent, 5*time.Second) {
 		t.Fatal("Process never completed")
 	}
 
-	// Get the output from the goroutine
+	// Wait for reading to complete
 	select {
-	case output := <-outputChan:
-		readOutput := strings.TrimSpace(output)
+	case <-readDone:
 		if readOutput != "hello world" {
 			t.Errorf("Expected 'hello world', got '%s'", readOutput)
 		}
