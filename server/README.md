@@ -71,9 +71,9 @@ Sprite-env accepts a JSON config file with environment variable substitution:
   },
   
   "s3": {
-    "access_key": {"$env": "S3_ACCESS_KEY"},
-    "secret_key": {"$env": "S3_SECRET_KEY"},
-    "endpoint": {"$env": "S3_ENDPOINT"}
+    "access_key": {"$env": "SPRITE_S3_ACCESS_KEY"},
+    "secret_key": {"$env": "SPRITE_S3_SECRET_ACCESS_KEY"},
+    "endpoint": {"$env": "SPRITE_S3_ENDPOINT_URL"}
   },
   
   "exec": {

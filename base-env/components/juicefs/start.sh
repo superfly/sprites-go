@@ -17,7 +17,7 @@ export META_URL="sqlite3://${JUICEFS_META_DB}" \
     MOUNT_POINT="${JUICEFS_MOUNT_POINT}" \
     CACHE_DIR="${JUICEFS_CACHE_DIR}"
 
-for var in "S3_ACCESS_KEY" "S3_SECRET_KEY" "S3_ENDPOINT" "BUCKET_NAME"; do
+for var in "SPRITE_S3_ACCESS_KEY" "SPRITE_S3_SECRET_ACCESS_KEY" "SPRITE_S3_ENDPOINT_URL" "SPRITE_S3_BUCKET"; do
     if [ -z "${!var}" ]; then
         missing_vars="$missing_vars $var"
     else
@@ -34,7 +34,7 @@ if [ ! -z "$missing_vars" ]; then
 fi
 
 # Get the configured bucket from environment
-CONFIGURED_BUCKET="${BUCKET_NAME}"
+CONFIGURED_BUCKET="${SPRITE_S3_BUCKET}"
 
 # Get the bucket from the existing metadata (if it exists)
 EXISTING_BUCKET=$(sqlite3 "${JUICEFS_META_DB}" "select json_extract(value, '$.Bucket') from jfs_setting where name='format'" 2>/dev/null || echo "")
@@ -70,9 +70,9 @@ if ! juicefs status "$META_URL" &>/dev/null; then
     # Format JuiceFS with the specified parameters, using correct S3-compatible endpoint format
     juicefs format \
         --storage s3 \
-        --bucket "$S3_ENDPOINT/$BUCKET_NAME" \
-        --access-key "$S3_ACCESS_KEY" \
-        --secret-key "$S3_SECRET_KEY" \
+        --bucket "$SPRITE_S3_ENDPOINT_URL/$SPRITE_S3_BUCKET" \
+        --access-key "$SPRITE_S3_ACCESS_KEY" \
+        --secret-key "$SPRITE_S3_SECRET_ACCESS_KEY" \
         --trash-days 0 \
         "$META_URL" "$JUICEFS_VOLUME_NAME"
 fi
@@ -107,11 +107,11 @@ dbs:
   - path: ${JUICEFS_META_DB}
     replicas:
       - type: s3
-        endpoint: ${S3_ENDPOINT}
-        bucket: ${BUCKET_NAME}
+        endpoint: ${SPRITE_S3_ENDPOINT_URL}
+        bucket: ${SPRITE_S3_BUCKET}
         path: juicefs-metadata
-        access-key-id: ${S3_ACCESS_KEY}
-        secret-access-key: ${S3_SECRET_KEY}
+        access-key-id: ${SPRITE_S3_ACCESS_KEY}
+        secret-access-key: ${SPRITE_S3_SECRET_ACCESS_KEY}
         sync-interval: 1s
 EOF
 
