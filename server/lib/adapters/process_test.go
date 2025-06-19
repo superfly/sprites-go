@@ -324,6 +324,43 @@ func TestProcessFailedCommand(t *testing.T) {
 	}
 }
 
+func TestProcessEnvironmentVariables(t *testing.T) {
+	// Test that process inherits environment variables
+	os.Setenv("TEST_ENV_VAR", "test_value")
+	defer os.Unsetenv("TEST_ENV_VAR")
+
+	p := NewProcess(ProcessConfig{
+		Command:    []string{"bash", "-c", "echo $TEST_ENV_VAR"},
+		MaxRetries: 0,
+	})
+	defer p.Close()
+
+	// Capture stdout
+	stdout, err := p.StdoutPipe()
+	if err != nil {
+		t.Fatalf("Failed to get stdout pipe: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := p.Start(ctx); err != nil {
+		t.Fatalf("Failed to start process: %v", err)
+	}
+
+	// Read output
+	output, err := io.ReadAll(stdout)
+	if err != nil {
+		t.Fatalf("Failed to read stdout: %v", err)
+	}
+
+	// Verify the environment variable was passed through
+	expectedOutput := "test_value\n"
+	if string(output) != expectedOutput {
+		t.Errorf("Expected output %q, got %q", expectedOutput, string(output))
+	}
+}
+
 func TestProcessPipes(t *testing.T) {
 	config := ProcessConfig{
 		Command:                 []string{"echo", "hello world"},

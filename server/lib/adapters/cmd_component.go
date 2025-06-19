@@ -225,6 +225,9 @@ func (c *cmdComponent) startReadyProcess() (chan error, *exec.Cmd, error) {
 	// Create ready command directly (not using process supervisor)
 	readyCmd := exec.CommandContext(c.ctx, c.config.ReadyCommand[0], c.config.ReadyCommand[1:]...)
 
+	// Inherit all system environment variables
+	readyCmd.Env = os.Environ()
+
 	// Get stdin pipe for ready command
 	readyStdin, err := readyCmd.StdinPipe()
 	if err != nil {

@@ -154,6 +154,9 @@ func (p *Process) Signal(sig os.Signal) {
 func (p *Process) createCommand(ctx context.Context) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, p.config.Command[0], p.config.Command[1:]...)
 
+	// Inherit all system environment variables
+	cmd.Env = os.Environ()
+
 	// Set up the process in its own process group for better signal isolation
 	// cmd.SysProcAttr = &syscall.SysProcAttr{
 	// 	Setpgid: true,

@@ -2,6 +2,8 @@ package adapters
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -246,4 +248,74 @@ func TestCmdComponentWithRealTestScripts(t *testing.T) {
 			component.Stop()
 		})
 	}
+}
+
+func TestCmdComponentEnvironmentVariables(t *testing.T) {
+	// Set test environment variable
+	os.Setenv("TEST_COMPONENT_VAR", "component_test_value")
+	defer os.Unsetenv("TEST_COMPONENT_VAR")
+
+	tmpDir := t.TempDir()
+
+	// Create start script that echoes env var
+	startScript := filepath.Join(tmpDir, "start.sh")
+	if err := os.WriteFile(startScript, []byte(`#!/bin/bash
+echo "Start script TEST_COMPONENT_VAR=$TEST_COMPONENT_VAR"
+exec sleep 10
+`), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create ready script that checks env var
+	readyScript := filepath.Join(tmpDir, "ready.sh")
+	if err := os.WriteFile(readyScript, []byte(`#!/bin/bash
+read -t 1 line
+if [ "$TEST_COMPONENT_VAR" = "component_test_value" ]; then
+	echo "Ready script TEST_COMPONENT_VAR is correct"
+	exit 0
+else
+	echo "Ready script TEST_COMPONENT_VAR is wrong: $TEST_COMPONENT_VAR"
+	exit 1
+fi
+`), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	component := NewCmdComponent(CmdComponentConfig{
+		Name:         "test-env-component",
+		StartCommand: []string{startScript},
+		ReadyCommand: []string{readyScript},
+		ReadyTimeout: 2 * time.Second,
+	})
+	defer component.Close()
+
+	ctx := context.Background()
+
+	// Start component
+	err := component.Start(ctx)
+	if err != nil {
+		t.Fatalf("Failed to start component: %v", err)
+	}
+
+	// Wait for ready event
+	events := component.Events()
+	timeout := time.After(3 * time.Second)
+	gotReady := false
+
+	for !gotReady {
+		select {
+		case event := <-events:
+			t.Logf("Received event: %v", event)
+			if event == ComponentReady {
+				gotReady = true
+			} else if event == ComponentFailed {
+				t.Fatal("Component failed instead of becoming ready")
+			}
+		case <-timeout:
+			t.Fatal("Timeout waiting for ready event")
+		}
+	}
+
+	// Stop the component
+	component.Stop()
 }
