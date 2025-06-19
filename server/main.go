@@ -47,7 +47,8 @@ type Application struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	config      lib.ApplicationConfig
-	monitor     lib.StateMonitor // State monitor for TLA tracing
+	monitor     lib.StateMonitor     // State monitor for TLA tracing
+	apiMonitor  *api.APIStateMonitor // API state monitor
 }
 
 // NewApplication creates a new application instance
@@ -77,6 +78,12 @@ func NewApplication(config lib.ApplicationConfig) *Application {
 
 	if config.Debug {
 		logger.Info("Debug logging enabled")
+	}
+
+	// Create API state monitor that will be shared
+	var apiMonitor *api.APIStateMonitor
+	if config.APIListenAddr != "" {
+		apiMonitor = api.NewAPIStateMonitor()
 	}
 
 	// Create components dynamically from configuration
@@ -126,7 +133,7 @@ func NewApplication(config lib.ApplicationConfig) *Application {
 		Process: process,
 	}, processMonitors)
 
-	// Create system state manager with monitor
+	// Create system state manager with monitors (including API monitor)
 	systemConfig := managers.SystemConfig{
 		ProcessState: processStateMachine,
 		Components:   components,
@@ -135,13 +142,19 @@ func NewApplication(config lib.ApplicationConfig) *Application {
 	if monitor != nil {
 		systemMonitors = append(systemMonitors, monitor)
 	}
+	// Don't include API monitor here - it's managed by the API server
+	// and we need to pass it separately to get state transition events
+	if apiMonitor != nil {
+		// We'll pass it to NewSystemState but it won't be auto-closed
+		systemMonitors = append(systemMonitors, apiMonitor)
+	}
 
 	systemState := managers.NewSystemState(systemConfig, systemMonitors)
 
-	// Create API server if listen address is specified
+	// Create API server with the system state
 	var apiServer *api.Server
 	if config.APIListenAddr != "" {
-		apiServer = api.NewServer(config.APIListenAddr, systemState, logger, &config)
+		apiServer = api.NewServerWithMonitor(config.APIListenAddr, systemState, logger, &config, apiMonitor)
 	}
 
 	app := &Application{
@@ -152,6 +165,7 @@ func NewApplication(config lib.ApplicationConfig) *Application {
 		cancel:      cancel,
 		config:      config,
 		monitor:     monitor,
+		apiMonitor:  apiMonitor,
 	}
 
 	return app
@@ -190,6 +204,11 @@ func (app *Application) Stop(ctx context.Context) error {
 		if err := app.apiServer.Stop(ctx); err != nil {
 			app.logger.Error("Failed to shutdown API server", "error", err)
 		}
+	}
+
+	// Close the API monitor if it exists
+	if app.apiMonitor != nil {
+		app.apiMonitor.Close()
 	}
 
 	// Cancel application context

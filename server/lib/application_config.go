@@ -35,7 +35,8 @@ type ApplicationConfig struct {
 	Debug    bool
 
 	// API Server configuration
-	APIListenAddr string
+	APIListenAddr  string
+	APIMaxWaitTime time.Duration // Maximum time to wait for system to be ready (default 30s)
 
 	// Dynamic component configurations (keyed by component name)
 	Components map[string]ComponentScripts

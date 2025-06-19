@@ -16,12 +16,12 @@ type mockSystemState struct {
 		trigger string
 		args    []any
 	}
-	fireError    error
-	currentState interface{}
+	fireError error
+	state     interface{}
 }
 
 func (m *mockSystemState) MustState() interface{} {
-	return m.currentState
+	return m.state
 }
 
 func (m *mockSystemState) Fire(trigger string, args ...any) error {
