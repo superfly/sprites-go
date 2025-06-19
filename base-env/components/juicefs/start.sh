@@ -1,10 +1,21 @@
 #!/bin/bash
 set -e
 
+# Derive JuiceFS paths from SPRITE_WRITE_DIR
+JUICEFS_BASE="${SPRITE_WRITE_DIR}/juicefs"
+JUICEFS_CACHE_DIR="${JUICEFS_BASE}/cache"
+JUICEFS_META_DB="${JUICEFS_BASE}/metadata.db"
+JUICEFS_MOUNT_POINT="${JUICEFS_BASE}/data"
+
+# Create necessary directories
+mkdir -p "${JUICEFS_CACHE_DIR}"
+mkdir -p "$(dirname ${JUICEFS_META_DB})"
+mkdir -p "${JUICEFS_MOUNT_POINT}"
+
 # Set environment variables with default values that can be overridden
-export META_URL="sqlite3://dev/fly_vol/juicefs.db" \
-    MOUNT_POINT="/data" \
-    CACHE_DIR="/dev/fly_vol/cache"
+export META_URL="sqlite3://${JUICEFS_META_DB}" \
+    MOUNT_POINT="${JUICEFS_MOUNT_POINT}" \
+    CACHE_DIR="${JUICEFS_CACHE_DIR}"
 
 for var in "S3_ACCESS_KEY" "S3_SECRET_KEY" "S3_ENDPOINT" "BUCKET_NAME"; do
     if [ -z "${!var}" ]; then
@@ -26,15 +37,15 @@ fi
 CONFIGURED_BUCKET="${BUCKET_NAME}"
 
 # Get the bucket from the existing metadata (if it exists)
-EXISTING_BUCKET=$(sqlite3 /dev/fly_vol/juicefs.db "select json_extract(value, '$.Bucket') from jfs_setting where name='format'" 2>/dev/null || echo "")
+EXISTING_BUCKET=$(sqlite3 "${JUICEFS_META_DB}" "select json_extract(value, '$.Bucket') from jfs_setting where name='format'" 2>/dev/null || echo "")
 
 if [ -n "$EXISTING_BUCKET" ] && [ "$EXISTING_BUCKET" = "$CONFIGURED_BUCKET" ]; then
     echo "Using sqlite db on disk (bucket matches)"
 else
-    rm -f /dev/fly_vol/juicefs.db
+    rm -f "${JUICEFS_META_DB}"
     rm -rf "$CACHE_DIR"
     echo "Restoring juicefs db from $CONFIGURED_BUCKET"
-    litestream restore -if-replica-exists /dev/fly_vol/juicefs.db
+    litestream restore -if-replica-exists "${JUICEFS_META_DB}"
 fi
 
 # Ensure cache directory exists
@@ -89,5 +100,20 @@ if [ -n "$FS_MOUNT_OPTIONS" ]; then
     MOUNT_ARGS="$MOUNT_ARGS $FS_MOUNT_OPTIONS"
 fi
 
+# Create litestream configuration dynamically
+LITESTREAM_CONFIG="/tmp/litestream-juicefs.yml"
+cat > "$LITESTREAM_CONFIG" <<EOF
+dbs:
+  - path: ${JUICEFS_META_DB}
+    replicas:
+      - type: s3
+        endpoint: ${S3_ENDPOINT}
+        bucket: ${BUCKET_NAME}
+        path: juicefs-metadata
+        access-key-id: ${S3_ACCESS_KEY}
+        secret-access-key: ${S3_SECRET_KEY}
+        sync-interval: 1s
+EOF
+
 # Execute the mount command with all parameters
-exec litestream replicate -config /etc/litestream.yml -exec "juicefs mount $MOUNT_ARGS \"$META_URL\" \"$MOUNT_POINT\""
+exec litestream replicate -config "$LITESTREAM_CONFIG" -exec "juicefs mount $MOUNT_ARGS \"$META_URL\" \"$MOUNT_POINT\""

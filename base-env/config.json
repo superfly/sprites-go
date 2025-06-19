@@ -1,0 +1,31 @@
+{
+  "log_level": "info",
+  "log_json": false,
+  "api_listen_addr": ":7778",
+  
+  "process_command": ["/home/sprite/launch.sh"],
+  "process_working_dir": "/dev/fly_vol",
+  "process_restart_max_retries": 3,
+  "process_graceful_shutdown_timeout": "30s",
+  
+  "components": {
+    "juicefs": {
+      "start_command": ["/home/sprite/components/juicefs/start.sh"],
+      "ready_command": ["/home/sprite/components/juicefs/ready.sh"],
+      "checkpoint_command": ["/home/sprite/components/juicefs/checkpoint.sh"],
+      "restore_command": ["/home/sprite/components/juicefs/restore.sh"],
+      "working_dir": "/dev/fly_vol"
+    }
+  },
+  
+  "s3": {
+    "access_key": {"$env": "S3_ACCESS_KEY"},
+    "secret_key": {"$env": "S3_SECRET_KEY"},
+    "endpoint": {"$env": "S3_ENDPOINT"}
+  },
+  
+  "exec": {
+    "wrapper_command": ["/usr/local/bin/crun", "exec", "app"],
+    "tty_wrapper_command": ["/usr/local/bin/crun", "exec", "-t", "app"]
+  }
+} 

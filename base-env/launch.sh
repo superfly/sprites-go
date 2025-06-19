@@ -8,41 +8,41 @@ function debug() {
     fi
 }
 
-# Set default data path and validate
-FLY_USER_DATA_PATH="${FLY_USER_DATA_PATH:-/data}"
-
-# Validate the path
-if [ "$FLY_USER_DATA_PATH" = "/" ]; then
-    echo "Error: FLY_USER_DATA_PATH cannot be /"
-    exit 1
-fi
-
-# Validate the path
-if [[ ! "$FLY_USER_DATA_PATH" =~ ^/ ]]; then
-    echo "Error: FLY_USER_DATA_PATH must start with /"
-    exit 1
-fi
-
 # Check if cgroup2 is mounted, if not mount it
 if ! mountpoint -q /sys/fs/cgroup; then
     mkdir -p /sys/fs/cgroup
     mount -t cgroup2 none /sys/fs/cgroup
 fi
 
-mkdir -p /dev/fly_vol/app-storage
+# Define paths based on SPRITE_WRITE_DIR
+JUICEFS_BASE="${SPRITE_WRITE_DIR}/juicefs"
+JUICEFS_DATA="${JUICEFS_BASE}/data"
+APP_STORAGE_IMG="${JUICEFS_DATA}/active/app-storage.img"
 
-mkdir -p /dev/fly_vol/app-storage/{upper,work}
+# Create sparse image if it doesn't exist
+if [ ! -f "$APP_STORAGE_IMG" ]; then
+    echo "Creating 100GB sparse image at $APP_STORAGE_IMG..."
+    mkdir -p "$(dirname "$APP_STORAGE_IMG")"
+    dd if=/dev/zero of="$APP_STORAGE_IMG" bs=1 count=0 seek=100G
+    mkfs.ext4 "$APP_STORAGE_IMG"
+fi
 
-mkdir -p /dev/fly_vol/app-storage/upper/.pilot
+# Create mount points
+mkdir -p /mnt/app-storage
 
-# Create the directory in upper layer
-mkdir -p "/dev/fly_vol/app-storage/upper${FLY_USER_DATA_PATH}"
+# Mount the sparse image
+mount -o loop "$APP_STORAGE_IMG" /mnt/app-storage
 
-mkdir -p /mnt/app-root
+# Create directories for overlay
+mkdir -p /mnt/app-storage/{upper,work}
 
-mount -t overlay overlay -o lowerdir=/mnt/app-image,upperdir=/dev/fly_vol/app-storage/upper,workdir=/dev/fly_vol/app-storage/work,ro /mnt/app-root
+mkdir -p /mnt/newroot
 
-ls -la /mnt/app-root/.pilot
+# Mount the overlay
+mount -t overlay overlay -o lowerdir=/mnt/app-image,upperdir=/mnt/app-storage/upper,workdir=/mnt/app-storage/work /mnt/newroot
+
+# Verify the overlay mount worked
+ls -la /mnt/newroot/.pilot 2>/dev/null || echo "Warning: .pilot directory not found in overlay"
 
 # Store base config in a variable
 CONFIG_JSON='{
@@ -159,8 +159,8 @@ CONFIG_JSON='{
     "noNewPrivileges": true
   },
   "root": {
-    "path": "/mnt/app-root",
-    "readonly": true
+    "path": "/mnt/newroot",
+    "readonly": false
   },
   "mounts": [
     {
@@ -224,8 +224,19 @@ CONFIG_JSON='{
       "options": ["nosuid", "strictatime", "mode=755", "size=65536k"]
     },
     {
-      "destination": "/.pilot",
-      "source": "/.pilot",
+        "destination": "/data",
+        "type": "bind",
+        "source": "/dev/fly_vol/juicefs/data",
+        "options": ["rbind"]
+    },
+    {
+      "destination": "/.pilot/swapon",
+      "source": "/.pilot/swapon",
+      "options": ["rbind"]
+    },
+    {
+      "destination": "/.pilot/tini",
+      "source": "/.pilot/tini",
       "options": ["rbind"]
     },
     {
@@ -397,8 +408,8 @@ debug "$json_entrypoint_jq" | jq .
 json_cmd_jq=$(echo "$APP_IMAGE_CONFIG" | jq '.Config.Cmd // .config.Cmd // [] | map(select(. != ""))')
 debug "Raw Cmd from JSON:"
 debug "$json_cmd_jq" | jq .
-# Filter APP_RUNNER_* vars from JSON env
-json_env_jq=$(echo "$APP_IMAGE_CONFIG" | jq '.Config.Env // .config.Env // [] | map(select(startswith("APP_RUNNER_") | not))')
+# Filter APP_RUNNER_*, SPRITE_*, and FLY_* vars from JSON env
+json_env_jq=$(echo "$APP_IMAGE_CONFIG" | jq '.Config.Env // .config.Env // [] | map(select(startswith("APP_RUNNER_") or startswith("SPRITE_") or startswith("FLY_") | not))')
 
 # Determine final entrypoint and command
 # Check if the variable is SET (even if empty) using +x parameter expansion
@@ -420,15 +431,7 @@ else
     entrypoint_jq=$json_entrypoint_jq
 fi
 
-# Add the mount to CONFIG_JSON
-CONFIG_JSON=$(echo "$CONFIG_JSON" | jq --arg path "$FLY_USER_DATA_PATH" '
-    .mounts += [{
-        "destination": $path,
-        "type": "bind",
-        "source": "/data",
-        "options": ["rbind"]
-    }]
-')
+# No additional mounts needed - the overlay provides the writable filesystem
 
 # Check if the variable is SET (even if empty) using +x parameter expansion
 if [ -n "${APP_RUNNER_CMD+x}" ]; then
@@ -476,9 +479,9 @@ IFS=':' read -r uid gid <<< "$user_info"
 # Update the config with the user
 CONFIG_JSON=$(echo "$CONFIG_JSON" | jq --argjson uid "$uid" --argjson gid "$gid" '.process.user = {"uid": $uid, "gid": $gid}')
 
-# Prepare current environment variables, filtering APP_RUNNER_* and PATH
+# Prepare current environment variables, filtering APP_RUNNER_*, SPRITE_*, FLY_* and PATH
 # Exclude variables that might interfere with jq processing if they contain newlines or quotes improperly
-current_env_vars=$(env | grep -v '^APP_RUNNER_' | grep -v '^PATH=' | grep -v '^CONFIG_JSON=' | grep -v '^APP_IMAGE_CONFIG=' | grep -v '^_=' | grep -v '^PWD=')
+current_env_vars=$(env | grep -v '^APP_RUNNER_' | grep -v '^SPRITE_' | grep -v '^FLY_' | grep -v '^PATH=' | grep -v '^CONFIG_JSON=' | grep -v '^APP_IMAGE_CONFIG=' | grep -v '^_=' | grep -v '^PWD=')
 
 # Convert current env and json env to objects, merge them (current overrides json), then back to array
 # This jq command builds KEY:VALUE objects from both env sources, merges them,
@@ -505,6 +508,7 @@ if [ -n "${PATH_APP:-}" ]; then
 fi
 
 # Write the final config to file
-echo "$CONFIG_JSON" > tmp/config.json
+mkdir -p "${SPRITE_WRITE_DIR}/tmp"
+echo "$CONFIG_JSON" > "${SPRITE_WRITE_DIR}/tmp/config.json"
 
-exec crun run -f tmp/config.json app
+exec crun run -f "${SPRITE_WRITE_DIR}/tmp/config.json" app
