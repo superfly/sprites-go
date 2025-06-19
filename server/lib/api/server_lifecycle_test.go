@@ -66,7 +66,7 @@ func TestServerShutdown(t *testing.T) {
 
 		// Replace the exec handler with our slow handler for testing
 		mux := http.NewServeMux()
-		mux.Handle("/test", server.authMiddleware(slowHandler, "api"))
+		mux.Handle("/test", server.authMiddleware(slowHandler))
 		server.server.Handler = mux
 
 		// Start a request in a goroutine
@@ -158,7 +158,7 @@ func TestServerShutdown(t *testing.T) {
 
 		// Replace handler
 		mux := http.NewServeMux()
-		mux.Handle("/test", server.authMiddleware(verySlowHandler, "api"))
+		mux.Handle("/test", server.authMiddleware(verySlowHandler))
 		server.server.Handler = mux
 
 		// Start a request

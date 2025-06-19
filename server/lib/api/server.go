@@ -102,16 +102,16 @@ func (s *Server) setupEndpoints() {
 	mux := http.NewServeMux()
 
 	// Exec endpoint - waits for system to be running
-	mux.Handle("/exec", s.waitForRunningMiddleware(s.authMiddleware(s.execHandler, "api")))
+	mux.Handle("/exec", s.waitForRunningMiddleware(s.authMiddleware(s.execHandler)))
 
 	// State management endpoints - don't wait for running state (they might be used during startup)
 	mux.HandleFunc("/checkpoint", s.authMiddleware(
-		http.HandlerFunc(s.stateHandler.HandleCheckpoint), "api").ServeHTTP)
+		http.HandlerFunc(s.stateHandler.HandleCheckpoint)).ServeHTTP)
 	mux.HandleFunc("/restore", s.authMiddleware(
-		http.HandlerFunc(s.stateHandler.HandleRestore), "api").ServeHTTP)
+		http.HandlerFunc(s.stateHandler.HandleRestore)).ServeHTTP)
 
-	// Proxy endpoint - matches all paths - waits for system to be running
-	mux.Handle("/", s.waitForRunningMiddleware(s.authMiddleware(s.proxyHandler, "proxy")))
+	// Proxy endpoint - dedicated CONNECT proxy endpoint - waits for system to be running
+	mux.Handle("/proxy", s.waitForRunningMiddleware(s.authMiddleware(s.proxyHandler)))
 
 	s.server.Handler = mux
 }
@@ -119,7 +119,7 @@ func (s *Server) setupEndpoints() {
 // waitForRunningMiddleware waits for the system to reach "Running" state before processing the request
 func (s *Server) waitForRunningMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Create a context with 30 second timeout
+		// Create a context with timeout
 		ctx, cancel := context.WithTimeout(r.Context(), s.maxWaitTime)
 		defer cancel()
 
@@ -166,106 +166,63 @@ func (s *Server) waitForRunningMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// parseReplayState parses the fly-replay-src header value
-// Format: "key1=value1;key2=value2;state=<mode>:<token>"
-func parseReplayState(headerValue string) (token string, mode string, stateValue string, err error) {
-	// First, parse the semicolon-separated key-value pairs
-	parts := strings.Split(headerValue, ";")
-	stateValue = ""
-
-	for _, part := range parts {
-		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
-		if len(kv) != 2 {
-			continue
-		}
-		key := strings.TrimSpace(kv[0])
-		value := kv[1] // Don't trim the value here to preserve it exactly
-
-		if key == "state" {
-			stateValue = value
-			break
+// extractToken extracts authentication token from either fly-replay-src header or Authorization Bearer header
+func (s *Server) extractToken(r *http.Request) (string, error) {
+	// First, check Authorization header
+	authHeader := r.Header.Get("Authorization")
+	if authHeader != "" {
+		// Expected format: "Bearer <token>"
+		parts := strings.SplitN(authHeader, " ", 2)
+		if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
+			return strings.TrimSpace(parts[1]), nil
 		}
 	}
 
-	if stateValue == "" {
-		return "", "", "", fmt.Errorf("missing state in fly-replay-src header")
-	}
+	// Then check fly-replay-src header
+	replayHeader := r.Header.Get("fly-replay-src")
+	if replayHeader != "" {
+		// Parse the fly-replay-src header for state=api:token format
+		parts := strings.Split(replayHeader, ";")
+		for _, part := range parts {
+			kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+			if len(kv) != 2 {
+				continue
+			}
+			key := strings.TrimSpace(kv[0])
+			value := strings.TrimSpace(kv[1])
 
-	// Parse state value expecting format: "mode:token" or "mode:token:extra"
-	// Trim spaces from state value for parsing
-	trimmedState := strings.TrimSpace(stateValue)
-	stateParts := strings.SplitN(trimmedState, ":", 2)
-	if len(stateParts) != 2 {
-		return "", "", "", fmt.Errorf("invalid state format, expected 'mode:token'")
-	}
-
-	mode = strings.TrimSpace(stateParts[0])
-	token = strings.TrimSpace(stateParts[1])
-
-	if token == "" {
-		return "", "", "", fmt.Errorf("missing token in state")
-	}
-	if mode == "" {
-		return "", "", "", fmt.Errorf("missing mode in state")
-	}
-
-	// For the returned stateValue, reconstruct it without extra spaces
-	stateValue = mode + ":" + token
-
-	return token, mode, stateValue, nil
-}
-
-// authMiddleware checks the fly-replay-src header for authentication
-func (s *Server) authMiddleware(next http.Handler, requiredMode string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		replayHeader := r.Header.Get("fly-replay-src")
-		if replayHeader == "" {
-			http.Error(w, "Missing fly-replay-src header", http.StatusUnauthorized)
-			return
-		}
-
-		token, mode, stateValue, err := parseReplayState(replayHeader)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Invalid replay state: %v", err), http.StatusBadRequest)
-			return
-		}
-
-		// Check authentication token if configured
-		if s.apiToken != "" {
-			// For proxy mode, extract the actual token (format: proxy:token:port)
-			authToken := token
-			if mode == "proxy" {
-				// Split to get just the token part
-				parts := strings.SplitN(token, ":", 2)
-				if len(parts) > 0 {
-					authToken = parts[0]
+			if key == "state" {
+				// Parse state value expecting format: "api:token"
+				stateParts := strings.SplitN(value, ":", 2)
+				if len(stateParts) == 2 && stateParts[0] == "api" {
+					return strings.TrimSpace(stateParts[1]), nil
 				}
 			}
+		}
+	}
 
-			if authToken != s.apiToken {
-				http.Error(w, "Invalid authentication token", http.StatusUnauthorized)
-				return
-			}
+	return "", fmt.Errorf("no valid authentication token found")
+}
+
+// authMiddleware checks for authentication token from either fly-replay-src or Authorization header
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip auth if no token is configured
+		if s.apiToken == "" {
+			next.ServeHTTP(w, r)
+			return
 		}
 
-		// Check if the mode matches what this endpoint expects
-		if requiredMode != "" && mode != requiredMode {
-			if mode == "proxy" && requiredMode != "proxy" {
-				// Proxy mode trying to access non-proxy endpoint
-				http.Error(w, "This endpoint is not available in proxy mode", http.StatusNotFound)
-				return
-			}
-			if mode == "api" && requiredMode == "proxy" {
-				// API mode trying to access proxy endpoint
-				http.Error(w, "Not found", http.StatusNotFound)
-				return
-			}
+		token, err := s.extractToken(r)
+		if err != nil {
+			http.Error(w, "Missing or invalid authentication", http.StatusUnauthorized)
+			return
 		}
 
-		// Pass along state value in context for handlers
-		ctx := context.WithValue(r.Context(), "mode", mode)
-		ctx = context.WithValue(ctx, "stateValue", stateValue)
-		r = r.WithContext(ctx)
+		if token != s.apiToken {
+			http.Error(w, "Invalid authentication token", http.StatusUnauthorized)
+			return
+		}
 
 		next.ServeHTTP(w, r)
 	})

@@ -281,46 +281,68 @@ func TestAPIServerAuthentication(t *testing.T) {
 	authTests := []struct {
 		name         string
 		headerValue  string
+		authHeader   string
 		expectStatus int
 	}{
 		{
-			name:         "Valid authentication",
+			name:         "Valid authentication with fly-replay-src",
 			headerValue:  fmt.Sprintf("state=api:%s", apiToken),
 			expectStatus: http.StatusOK,
 		},
 		{
-			name:         "Wrong token",
+			name:         "Valid authentication with Bearer token",
+			authHeader:   fmt.Sprintf("Bearer %s", apiToken),
+			expectStatus: http.StatusOK,
+		},
+		{
+			name:         "Wrong token in fly-replay-src",
 			headerValue:  "state=api:wrong-token",
 			expectStatus: http.StatusUnauthorized,
 		},
 		{
-			name:         "Missing header",
+			name:         "Wrong Bearer token",
+			authHeader:   "Bearer wrong-token",
+			expectStatus: http.StatusUnauthorized,
+		},
+		{
+			name:         "Missing authentication",
 			headerValue:  "",
 			expectStatus: http.StatusUnauthorized,
 		},
 		{
-			name:         "Invalid header format",
+			name:         "Invalid fly-replay-src format",
 			headerValue:  "invalid-format",
-			expectStatus: http.StatusBadRequest,
+			expectStatus: http.StatusUnauthorized,
 		},
 		{
-			name:         "Proxy mode not implemented",
+			name:         "Proxy mode in fly-replay-src ignored",
 			headerValue:  fmt.Sprintf("state=proxy:%s:8080", apiToken),
-			expectStatus: http.StatusNotFound,
+			expectStatus: http.StatusUnauthorized,
 		},
 		{
-			name:         "Missing state key",
+			name:         "Missing state key in fly-replay-src",
 			headerValue:  "region=ord;app=myapp",
-			expectStatus: http.StatusBadRequest,
+			expectStatus: http.StatusUnauthorized,
 		},
 		{
-			name:         "Malformed state",
+			name:         "Malformed state in fly-replay-src",
 			headerValue:  "state=invalid",
-			expectStatus: http.StatusBadRequest,
+			expectStatus: http.StatusUnauthorized,
 		},
 		{
 			name:         "State with extra fields",
 			headerValue:  fmt.Sprintf("region=ord;state=api:%s;app=myapp", apiToken),
+			expectStatus: http.StatusOK,
+		},
+		{
+			name:         "Basic auth not supported",
+			authHeader:   "Basic dXNlcjpwYXNz",
+			expectStatus: http.StatusUnauthorized,
+		},
+		{
+			name:         "Bearer token takes precedence",
+			authHeader:   fmt.Sprintf("Bearer %s", apiToken),
+			headerValue:  "state=api:wrong-token",
 			expectStatus: http.StatusOK,
 		},
 	}
@@ -333,6 +355,9 @@ func TestAPIServerAuthentication(t *testing.T) {
 
 			if tt.headerValue != "" {
 				req.Header.Set("fly-replay-src", tt.headerValue)
+			}
+			if tt.authHeader != "" {
+				req.Header.Set("Authorization", tt.authHeader)
 			}
 
 			resp, err := http.DefaultClient.Do(req)

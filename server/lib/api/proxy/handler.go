@@ -4,148 +4,135 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
-	"net/http/httputil"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// Handler handles proxy requests
+// Handler handles CONNECT proxy requests
 type Handler struct {
 	logger *slog.Logger
-	client *http.Client
 }
 
 // NewHandler creates a new proxy handler
 func NewHandler(logger *slog.Logger) *Handler {
 	return &Handler{
 		logger: logger,
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-			// Don't follow redirects automatically
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
 	}
 }
 
-// ParseProxyTarget extracts the port from proxy state value
-// Format: "proxy:<key>:<port>"
-func ParseProxyTarget(stateValue string) (port int, err error) {
-	parts := strings.SplitN(stateValue, ":", 3)
-	if len(parts) != 3 {
-		return 0, fmt.Errorf("invalid proxy format, expected 'proxy:key:port'")
+// ServeHTTP handles CONNECT proxy requests
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodConnect {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
 
-	if parts[0] != "proxy" {
-		return 0, fmt.Errorf("not a proxy request")
-	}
-
-	port, err = strconv.Atoi(parts[2])
+	// Parse the target host and port from the request
+	host, portStr, err := net.SplitHostPort(r.Host)
 	if err != nil {
-		return 0, fmt.Errorf("invalid port number: %v", err)
+		// If no port specified, try to parse as just port number
+		if _, err := strconv.Atoi(r.Host); err == nil {
+			portStr = r.Host
+			host = "127.0.0.1"
+		} else {
+			http.Error(w, "Invalid target format", http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Parse port number
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		http.Error(w, "Invalid port number", http.StatusBadRequest)
+		return
 	}
 
 	if port < 1 || port > 65535 {
-		return 0, fmt.Errorf("port number out of range: %d", port)
-	}
-
-	return port, nil
-}
-
-// ServeHTTP handles proxy requests
-func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Get the proxy target from context (set by auth middleware)
-	stateValue, ok := r.Context().Value("stateValue").(string)
-	if !ok {
-		http.Error(w, "Missing proxy configuration", http.StatusInternalServerError)
+		http.Error(w, "Port number out of range", http.StatusBadRequest)
 		return
 	}
 
-	port, err := ParseProxyTarget(stateValue)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Invalid proxy target: %v", err), http.StatusBadRequest)
-		return
-	}
+	// Always connect to localhost regardless of requested hostname
+	targetAddr := fmt.Sprintf("127.0.0.1:%d", port)
 
-	// Build target URL
-	targetURL := &url.URL{
-		Scheme: "http",
-		Host:   fmt.Sprintf("127.0.0.1:%d", port),
-	}
-
-	// Log the proxy request
-	h.logger.Info("Proxying request",
-		"method", r.Method,
-		"path", r.URL.Path,
+	h.logger.Info("CONNECT proxy request",
+		"requested_host", host,
 		"target_port", port,
 		"remote_addr", r.RemoteAddr,
 	)
 
-	// Create a reverse proxy
-	proxy := httputil.NewSingleHostReverseProxy(targetURL)
-
-	// Customize the proxy error handler
-	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		h.logger.Error("Proxy error",
+	// Establish connection to target
+	targetConn, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
+	if err != nil {
+		h.logger.Error("Failed to connect to target",
 			"error", err,
-			"target_port", port,
-			"path", r.URL.Path,
+			"target_addr", targetAddr,
 		)
+		http.Error(w, fmt.Sprintf("Failed to connect to port %d", port), http.StatusServiceUnavailable)
+		return
+	}
+	defer targetConn.Close()
 
-		// Check if we've already started writing the response
-		if w.Header().Get("Content-Type") != "" {
-			// Headers already sent, can't change status
-			return
-		}
+	// Send 200 Connection Established
+	w.WriteHeader(http.StatusOK)
 
-		// Return appropriate error to client
-		if err == io.EOF {
-			http.Error(w, "Target service closed connection", http.StatusBadGateway)
-		} else if strings.Contains(err.Error(), "connection refused") {
-			http.Error(w, fmt.Sprintf("Target service on port %d is not available", port), http.StatusServiceUnavailable)
-		} else if strings.Contains(err.Error(), "timeout") {
-			http.Error(w, "Target service timeout", http.StatusGatewayTimeout)
-		} else {
-			http.Error(w, fmt.Sprintf("Proxy error: %v", err), http.StatusBadGateway)
-		}
+	// Hijack the connection
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
+		return
 	}
 
-	// Modify the request to ensure it goes to the right place
-	proxy.Director = func(req *http.Request) {
-		req.URL.Scheme = targetURL.Scheme
-		req.URL.Host = targetURL.Host
-		req.Host = targetURL.Host
+	clientConn, _, err := hijacker.Hijack()
+	if err != nil {
+		h.logger.Error("Failed to hijack connection", "error", err)
+		return
+	}
+	defer clientConn.Close()
 
-		// Remove the fly-replay-src header so it doesn't confuse the target
-		req.Header.Del("fly-replay-src")
+	// Start proxying data between client and target
+	h.logger.Debug("Starting bidirectional copy",
+		"client_addr", r.RemoteAddr,
+		"target_addr", targetAddr,
+	)
 
-		// Add X-Forwarded headers
-		if clientIP, _, ok := strings.Cut(r.RemoteAddr, ":"); ok {
-			req.Header.Set("X-Forwarded-For", clientIP)
-		}
-		req.Header.Set("X-Forwarded-Proto", "http")
-		req.Header.Set("X-Forwarded-Host", r.Host)
+	// Copy data in both directions
+	errc := make(chan error, 2)
+	go func() {
+		_, err := io.Copy(targetConn, clientConn)
+		errc <- err
+	}()
+	go func() {
+		_, err := io.Copy(clientConn, targetConn)
+		errc <- err
+	}()
+
+	// Wait for either direction to finish
+	err1 := <-errc
+	err2 := <-errc
+
+	if err1 != nil && !isClosedError(err1) {
+		h.logger.Debug("Copy error from client to target", "error", err1)
+	}
+	if err2 != nil && !isClosedError(err2) {
+		h.logger.Debug("Copy error from target to client", "error", err2)
 	}
 
-	// Perform the proxy request
-	proxy.ServeHTTP(w, r)
+	h.logger.Debug("CONNECT proxy session ended",
+		"client_addr", r.RemoteAddr,
+		"target_addr", targetAddr,
+	)
 }
 
-// HealthCheck checks if a target port is responding
-func (h *Handler) HealthCheck(port int) error {
-	resp, err := h.client.Get(fmt.Sprintf("http://127.0.0.1:%d/health", port))
-	if err != nil {
-		return err
+// isClosedError checks if an error is due to a closed connection
+func isClosedError(err error) bool {
+	if err == nil {
+		return false
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 500 {
-		return fmt.Errorf("unhealthy status code: %d", resp.StatusCode)
-	}
-
-	return nil
+	return strings.Contains(err.Error(), "use of closed network connection") ||
+		err == io.EOF ||
+		strings.Contains(err.Error(), "broken pipe")
 }

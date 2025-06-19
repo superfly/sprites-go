@@ -1,7 +1,7 @@
 package proxy
 
 import (
-	"context"
+	"bufio"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,210 +13,218 @@ import (
 	"time"
 )
 
-func TestParseProxyTarget(t *testing.T) {
-	tests := []struct {
-		name        string
-		stateValue  string
-		wantPort    int
-		wantErr     bool
-		errContains string
-	}{
-		{
-			name:       "valid proxy format",
-			stateValue: "proxy:mytoken:8080",
-			wantPort:   8080,
-			wantErr:    false,
-		},
-		{
-			name:       "valid proxy with different port",
-			stateValue: "proxy:abc123:3000",
-			wantPort:   3000,
-			wantErr:    false,
-		},
-		{
-			name:        "invalid format - not proxy",
-			stateValue:  "api:token",
-			wantErr:     true,
-			errContains: "invalid proxy format",
-		},
-		{
-			name:        "invalid format - missing port",
-			stateValue:  "proxy:token",
-			wantErr:     true,
-			errContains: "invalid proxy format",
-		},
-		{
-			name:        "invalid port - not a number",
-			stateValue:  "proxy:token:abc",
-			wantErr:     true,
-			errContains: "invalid port number",
-		},
-		{
-			name:        "invalid port - out of range low",
-			stateValue:  "proxy:token:0",
-			wantErr:     true,
-			errContains: "port number out of range",
-		},
-		{
-			name:        "invalid port - out of range high",
-			stateValue:  "proxy:token:70000",
-			wantErr:     true,
-			errContains: "port number out of range",
-		},
-		{
-			name:        "empty state value",
-			stateValue:  "",
-			wantErr:     true,
-			errContains: "invalid proxy format",
-		},
-	}
+func TestProxyHandler_InvalidMethod(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	handler := NewHandler(logger)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			port, err := ParseProxyTarget(tt.stateValue)
+	// Test non-CONNECT methods
+	methods := []string{"GET", "POST", "PUT", "DELETE", "HEAD"}
+	for _, method := range methods {
+		t.Run(method, func(t *testing.T) {
+			req := httptest.NewRequest(method, "http://example.com:8080", nil)
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
 
-			if tt.wantErr {
-				if err == nil {
-					t.Errorf("ParseProxyTarget() expected error, got nil")
-					return
-				}
-				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
-					t.Errorf("ParseProxyTarget() error = %v, want error containing %v", err, tt.errContains)
-				}
-				return
-			}
-
-			if err != nil {
-				t.Errorf("ParseProxyTarget() unexpected error = %v", err)
-				return
-			}
-
-			if port != tt.wantPort {
-				t.Errorf("ParseProxyTarget() port = %v, want %v", port, tt.wantPort)
+			if rr.Code != http.StatusMethodNotAllowed {
+				t.Errorf("handler returned wrong status code for %s: got %v want %v", 
+					method, rr.Code, http.StatusMethodNotAllowed)
 			}
 		})
 	}
 }
 
-func TestProxyHandler(t *testing.T) {
+func TestProxyHandler_CONNECT(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	handler := NewHandler(logger)
 
-	// Create a test backend server
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Echo back some request info
-		w.Header().Set("X-Backend-Path", r.URL.Path)
-		w.Header().Set("X-Backend-Method", r.Method)
-
-		// Check for X-Forwarded headers
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			w.Header().Set("X-Forwarded-For-Echo", xff)
-		}
-
-		// Check that fly-replay-src was removed
-		if r.Header.Get("fly-replay-src") != "" {
-			w.Header().Set("X-Error", "fly-replay-src should be removed")
-		}
-
-		// Handle different paths
-		switch r.URL.Path {
-		case "/health":
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("healthy"))
-		case "/error":
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte("error"))
-		case "/delay":
-			time.Sleep(100 * time.Millisecond)
-			w.Write([]byte("delayed"))
-		default:
-			w.Write([]byte("proxied response"))
-		}
-	}))
+	// Create a test backend TCP server
+	backend, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to create backend listener: %v", err)
+	}
 	defer backend.Close()
 
-	// Extract port from backend URL
-	backendPort := backend.Listener.Addr().(*net.TCPAddr).Port
+	backendPort := backend.Addr().(*net.TCPAddr).Port
 
-	t.Run("successful proxy", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/test/path", nil)
-		ctx := context.WithValue(req.Context(), "stateValue", fmt.Sprintf("proxy:token:%d", backendPort))
-		req = req.WithContext(ctx)
-
-		rr := httptest.NewRecorder()
-		handler.ServeHTTP(rr, req)
-
-		if rr.Code != http.StatusOK {
-			t.Errorf("handler returned wrong status code: got %v want %v", rr.Code, http.StatusOK)
+	// Handle backend connections
+	go func() {
+		for {
+			conn, err := backend.Accept()
+			if err != nil {
+				return
+			}
+			// Echo server - send back what we receive
+			go func(c net.Conn) {
+				defer c.Close()
+				io.Copy(c, c)
+			}(conn)
 		}
+	}()
 
-		body := rr.Body.String()
-		if body != "proxied response" {
-			t.Errorf("unexpected response body: %v", body)
-		}
+	tests := []struct {
+		name           string
+		host           string
+		expectedStatus int
+		expectedError  string
+	}{
+		{
+			name:           "valid CONNECT with hostname:port",
+			host:           fmt.Sprintf("example.com:%d", backendPort),
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "valid CONNECT with just port",
+			host:           fmt.Sprintf("%d", backendPort),
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "valid CONNECT with localhost",
+			host:           fmt.Sprintf("localhost:%d", backendPort),
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "invalid port format",
+			host:           "example.com:abc",
+			expectedStatus: http.StatusBadRequest,
+			expectedError:  "Invalid port number",
+		},
+		{
+			name:           "port out of range",
+			host:           "example.com:70000",
+			expectedStatus: http.StatusBadRequest,
+			expectedError:  "Port number out of range",
+		},
+		{
+			name:           "connection refused",
+			host:           "example.com:59999",
+			expectedStatus: http.StatusServiceUnavailable,
+			expectedError:  "Failed to connect to port 59999",
+		},
+		{
+			name:           "missing port",
+			host:           "example.com",
+			expectedStatus: http.StatusBadRequest,
+			expectedError:  "Invalid target format",
+		},
+	}
 
-		// Check that backend received correct path
-		if backendPath := rr.Header().Get("X-Backend-Path"); backendPath != "/test/path" {
-			t.Errorf("backend received wrong path: %v", backendPath)
-		}
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create a custom ResponseWriter that supports hijacking
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				r.Method = http.MethodConnect
+				r.Host = tt.host
+				handler.ServeHTTP(w, r)
+			}))
+			defer server.Close()
 
-	t.Run("missing state value", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
-		// Don't set state value in context
+			// For successful CONNECT tests, we need to test the actual proxy functionality
+			if tt.expectedStatus == http.StatusOK {
+				// Make a request to the test server
+				req, err := http.NewRequest("CONNECT", server.URL, nil)
+				if err != nil {
+					t.Fatalf("Failed to create request: %v", err)
+				}
+				req.Host = tt.host
 
-		rr := httptest.NewRecorder()
-		handler.ServeHTTP(rr, req)
+				// Use raw TCP connection to test CONNECT
+				conn, err := net.Dial("tcp", strings.TrimPrefix(server.URL, "http://"))
+				if err != nil {
+					t.Fatalf("Failed to connect: %v", err)
+				}
+				defer conn.Close()
 
-		if rr.Code != http.StatusInternalServerError {
-			t.Errorf("handler returned wrong status code: got %v want %v", rr.Code, http.StatusInternalServerError)
-		}
+				// Send CONNECT request
+				fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", tt.host, tt.host)
 
-		if !strings.Contains(rr.Body.String(), "Missing proxy configuration") {
-			t.Errorf("unexpected error message: %v", rr.Body.String())
-		}
-	})
+				// Read response
+				reader := bufio.NewReader(conn)
+				resp, err := http.ReadResponse(reader, req)
+				if err != nil {
+					t.Fatalf("Failed to read response: %v", err)
+				}
 
-	t.Run("connection refused", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
-		// Use a port that's not listening
-		ctx := context.WithValue(req.Context(), "stateValue", "proxy:token:59999")
-		req = req.WithContext(ctx)
+				if resp.StatusCode != tt.expectedStatus {
+					t.Errorf("Got status %d, want %d", resp.StatusCode, tt.expectedStatus)
+				}
 
-		rr := httptest.NewRecorder()
-		handler.ServeHTTP(rr, req)
+				// For successful CONNECT, test the tunnel
+				if resp.StatusCode == http.StatusOK {
+					// Send test data through the tunnel
+					testData := "Hello, proxy!"
+					conn.Write([]byte(testData))
 
-		if rr.Code != http.StatusServiceUnavailable {
-			t.Errorf("handler returned wrong status code: got %v want %v", rr.Code, http.StatusServiceUnavailable)
-		}
+					// Read echoed data
+					buf := make([]byte, len(testData))
+					conn.SetReadDeadline(time.Now().Add(time.Second))
+					n, err := conn.Read(buf)
+					if err != nil {
+						t.Errorf("Failed to read from tunnel: %v", err)
+					}
+					if string(buf[:n]) != testData {
+						t.Errorf("Got %q, want %q", string(buf[:n]), testData)
+					}
+				}
+			} else {
+				// For error cases, just test the response
+				req := httptest.NewRequest(http.MethodConnect, "/", nil)
+				req.Host = tt.host
+				rr := httptest.NewRecorder()
+				handler.ServeHTTP(rr, req)
 
-		if !strings.Contains(rr.Body.String(), "not available") {
-			t.Errorf("unexpected error message: %v", rr.Body.String())
-		}
-	})
+				if rr.Code != tt.expectedStatus {
+					t.Errorf("handler returned wrong status code: got %v want %v", 
+						rr.Code, tt.expectedStatus)
+				}
 
-	t.Run("health check success", func(t *testing.T) {
-		err := handler.HealthCheck(backendPort)
-		if err != nil {
-			t.Errorf("HealthCheck() unexpected error: %v", err)
-		}
-	})
+				if tt.expectedError != "" && !strings.Contains(rr.Body.String(), tt.expectedError) {
+					t.Errorf("handler returned unexpected error: got %v want containing %v", 
+						rr.Body.String(), tt.expectedError)
+				}
+			}
+		})
+	}
+}
 
-	t.Run("health check failure", func(t *testing.T) {
-		// Create a backend that returns 500 on health check
-		unhealthyBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusInternalServerError)
-		}))
-		defer unhealthyBackend.Close()
+func TestIsClosedError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "nil error",
+			err:      nil,
+			expected: false,
+		},
+		{
+			name:     "EOF error",
+			err:      io.EOF,
+			expected: true,
+		},
+		{
+			name:     "closed connection error",
+			err:      fmt.Errorf("use of closed network connection"),
+			expected: true,
+		},
+		{
+			name:     "broken pipe error",
+			err:      fmt.Errorf("broken pipe"),
+			expected: true,
+		},
+		{
+			name:     "other error",
+			err:      fmt.Errorf("some other error"),
+			expected: false,
+		},
+	}
 
-		unhealthyPort := unhealthyBackend.Listener.Addr().(*net.TCPAddr).Port
-
-		err := handler.HealthCheck(unhealthyPort)
-		if err == nil {
-			t.Error("HealthCheck() expected error for unhealthy backend")
-		}
-		if !strings.Contains(err.Error(), "unhealthy status code") {
-			t.Errorf("unexpected error: %v", err)
-		}
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isClosedError(tt.err)
+			if result != tt.expected {
+				t.Errorf("isClosedError(%v) = %v, want %v", tt.err, result, tt.expected)
+			}
+		})
+	}
 }

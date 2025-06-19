@@ -12,108 +12,138 @@ import (
 	"sprite-env/lib"
 )
 
-func TestParseReplayState(t *testing.T) {
+func TestExtractToken(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mockState := &mockSystemState{}
+	
+	// Create a test config
+	config := &lib.ApplicationConfig{
+		Exec: lib.ExecConfig{
+			WrapperCommand:    []string{},
+			TTYWrapperCommand: []string{},
+		},
+	}
+	
+	server := NewServer(":8080", mockState, logger, config)
+	
 	tests := []struct {
-		name           string
-		headerValue    string
-		wantToken      string
-		wantMode       string
-		wantStateValue string
-		wantErr        bool
-		errContains    string
+		name            string
+		authHeader      string
+		replayHeader    string
+		wantToken       string
+		wantErr         bool
+		errContains     string
 	}{
 		{
-			name:           "valid api mode",
-			headerValue:    "state=api:mysecrettoken",
-			wantToken:      "mysecrettoken",
-			wantMode:       "api",
-			wantStateValue: "api:mysecrettoken",
-			wantErr:        false,
+			name:       "valid Authorization Bearer token",
+			authHeader: "Bearer mysecrettoken",
+			wantToken:  "mysecrettoken",
+			wantErr:    false,
 		},
 		{
-			name:           "valid proxy mode",
-			headerValue:    "state=proxy:token123:8080",
-			wantToken:      "token123:8080",
-			wantMode:       "proxy",
-			wantStateValue: "proxy:token123:8080",
-			wantErr:        false,
+			name:       "valid Authorization Bearer token with extra spaces",
+			authHeader: "Bearer   mysecrettoken  ",
+			wantToken:  "mysecrettoken",
+			wantErr:    false,
 		},
 		{
-			name:           "with other parameters",
-			headerValue:    "region=ord;state=api:token;app=myapp",
-			wantToken:      "token",
-			wantMode:       "api",
-			wantStateValue: "api:token",
-			wantErr:        false,
+			name:       "valid fly-replay-src header",
+			replayHeader: "state=api:token123",
+			wantToken:   "token123",
+			wantErr:     false,
 		},
 		{
-			name:           "spaces around values",
-			headerValue:    "state= api: token123 ",
-			wantToken:      "token123",
-			wantMode:       "api",
-			wantStateValue: "api:token123",
-			wantErr:        false,
+			name:       "fly-replay-src with other parameters",
+			replayHeader: "region=ord;state=api:mytoken;app=myapp",
+			wantToken:   "mytoken",
+			wantErr:     false,
 		},
 		{
-			name:        "missing state key",
-			headerValue: "region=ord;app=myapp",
+			name:       "fly-replay-src with spaces",
+			replayHeader: "state= api: token456 ",
+			wantToken:   "token456",
+			wantErr:     false,
+		},
+		{
+			name:       "Authorization header takes precedence",
+			authHeader: "Bearer bearertoken",
+			replayHeader: "state=api:replaytoken",
+			wantToken:   "bearertoken",
+			wantErr:     false,
+		},
+		{
+			name:       "invalid Authorization format",
+			authHeader: "Basic dXNlcjpwYXNz",
+			wantErr:    true,
+			errContains: "no valid authentication token found",
+		},
+		{
+			name:       "invalid fly-replay-src format - not api mode",
+			replayHeader: "state=proxy:token:8080",
 			wantErr:     true,
-			errContains: "missing state",
+			errContains: "no valid authentication token found",
 		},
 		{
-			name:        "invalid state format - no colon",
-			headerValue: "state=apitoken",
+			name:       "missing state in fly-replay-src",
+			replayHeader: "region=ord;app=myapp",
 			wantErr:     true,
-			errContains: "invalid state format",
+			errContains: "no valid authentication token found",
 		},
 		{
-			name:        "missing token",
-			headerValue: "state=api:",
-			wantErr:     true,
-			errContains: "missing token",
+			name:       "no headers provided",
+			wantErr:    true,
+			errContains: "no valid authentication token found",
 		},
 		{
-			name:        "missing mode",
-			headerValue: "state=:token",
-			wantErr:     true,
-			errContains: "missing mode",
+			name:       "Authorization with wrong format",
+			authHeader: "Bearer",
+			wantErr:    true,
+			errContains: "no valid authentication token found",
 		},
 		{
-			name:        "empty header",
-			headerValue: "",
-			wantErr:     true,
-			errContains: "missing state",
+			name:       "case insensitive Bearer",
+			authHeader: "bearer mysecrettoken",
+			wantToken:  "mysecrettoken",
+			wantErr:    false,
+		},
+		{
+			name:       "BEARER uppercase",
+			authHeader: "BEARER mysecrettoken",
+			wantToken:  "mysecrettoken",
+			wantErr:    false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			token, mode, stateValue, err := parseReplayState(tt.headerValue)
+			req := httptest.NewRequest("GET", "/test", nil)
+			if tt.authHeader != "" {
+				req.Header.Set("Authorization", tt.authHeader)
+			}
+			if tt.replayHeader != "" {
+				req.Header.Set("fly-replay-src", tt.replayHeader)
+			}
+
+			token, err := server.extractToken(req)
 
 			if tt.wantErr {
 				if err == nil {
-					t.Errorf("parseReplayState() expected error, got nil")
+					t.Errorf("extractToken() expected error, got nil")
 					return
 				}
 				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
-					t.Errorf("parseReplayState() error = %v, want error containing %v", err, tt.errContains)
+					t.Errorf("extractToken() error = %v, want error containing %v", err, tt.errContains)
 				}
 				return
 			}
 
 			if err != nil {
-				t.Errorf("parseReplayState() unexpected error = %v", err)
+				t.Errorf("extractToken() unexpected error = %v", err)
 				return
 			}
 
 			if token != tt.wantToken {
-				t.Errorf("parseReplayState() token = %v, want %v", token, tt.wantToken)
-			}
-			if mode != tt.wantMode {
-				t.Errorf("parseReplayState() mode = %v, want %v", mode, tt.wantMode)
-			}
-			if stateValue != tt.wantStateValue {
-				t.Errorf("parseReplayState() stateValue = %v, want %v", stateValue, tt.wantStateValue)
+				t.Errorf("extractToken() token = %v, want %v", token, tt.wantToken)
 			}
 		})
 	}
@@ -130,71 +160,54 @@ func TestAuthMiddleware(t *testing.T) {
 	tests := []struct {
 		name           string
 		apiToken       string
+		authHeader     string
 		replayHeader   string
-		requiredMode   string
 		expectedStatus int
 		expectedBody   string
 	}{
 		{
-			name:           "valid api mode with token",
+			name:           "valid Authorization Bearer token",
 			apiToken:       "secret123",
-			replayHeader:   "state=api:secret123",
-			requiredMode:   "api",
+			authHeader:     "Bearer secret123",
 			expectedStatus: http.StatusOK,
 		},
 		{
-			name:           "invalid token",
+			name:           "valid fly-replay-src token",
 			apiToken:       "secret123",
-			replayHeader:   "state=api:wrongtoken",
-			requiredMode:   "api",
+			replayHeader:   "state=api:secret123",
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "invalid Bearer token",
+			apiToken:       "secret123",
+			authHeader:     "Bearer wrongtoken",
 			expectedStatus: http.StatusUnauthorized,
 			expectedBody:   "Invalid authentication token",
 		},
 		{
-			name:           "missing header",
+			name:           "invalid fly-replay-src token",
 			apiToken:       "secret123",
-			replayHeader:   "",
-			requiredMode:   "api",
+			replayHeader:   "state=api:wrongtoken",
 			expectedStatus: http.StatusUnauthorized,
-			expectedBody:   "Missing fly-replay-src header",
+			expectedBody:   "Invalid authentication token",
 		},
 		{
-			name:           "invalid header format",
+			name:           "missing authentication",
 			apiToken:       "secret123",
-			replayHeader:   "state=invalid",
-			requiredMode:   "api",
-			expectedStatus: http.StatusBadRequest,
-			expectedBody:   "Invalid replay state",
+			expectedStatus: http.StatusUnauthorized,
+			expectedBody:   "Missing or invalid authentication",
 		},
 		{
-			name:           "proxy mode accessing api endpoint",
-			apiToken:       "secret123",
-			replayHeader:   "state=proxy:secret123:8080",
-			requiredMode:   "api",
-			expectedStatus: http.StatusNotFound,
-			expectedBody:   "not available in proxy mode",
-		},
-		{
-			name:           "api mode accessing proxy endpoint",
-			apiToken:       "secret123",
-			replayHeader:   "state=api:secret123",
-			requiredMode:   "proxy",
-			expectedStatus: http.StatusNotFound,
-			expectedBody:   "Not found",
-		},
-		{
-			name:           "valid proxy mode",
-			apiToken:       "secret123",
-			replayHeader:   "state=proxy:secret123:8080",
-			requiredMode:   "proxy",
-			expectedStatus: http.StatusOK,
-		},
-		{
-			name:           "no auth required",
+			name:           "no auth required when token not configured",
 			apiToken:       "",
-			replayHeader:   "state=api:anytoken",
-			requiredMode:   "api",
 			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "fly-replay-src with proxy mode ignored",
+			apiToken:       "secret123",
+			replayHeader:   "state=proxy:secret123:8080",
+			expectedStatus: http.StatusUnauthorized,
+			expectedBody:   "Missing or invalid authentication",
 		},
 	}
 
@@ -217,10 +230,13 @@ func TestAuthMiddleware(t *testing.T) {
 			})
 
 			// Wrap with auth middleware
-			handler := server.authMiddleware(testHandler, tt.requiredMode)
+			handler := server.authMiddleware(testHandler)
 
 			// Create request
 			req := httptest.NewRequest("GET", "/test", nil)
+			if tt.authHeader != "" {
+				req.Header.Set("Authorization", tt.authHeader)
+			}
 			if tt.replayHeader != "" {
 				req.Header.Set("fly-replay-src", tt.replayHeader)
 			}

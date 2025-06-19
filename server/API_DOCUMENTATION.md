@@ -1,176 +1,188 @@
-# Sprite-env HTTP API Documentation
+# Sprite Environment HTTP API Documentation
 
-## Overview
+This document describes the HTTP API endpoints available for managing the Sprite environment.
 
-The sprite-env server now includes an HTTP API server that allows remote command execution with authentication. The API server is activated using the `--listen` flag when starting the sprite-env server.
+## Base URL
 
-## Starting the API Server
-
-To enable the API server, use the `--listen` flag when starting sprite-env:
-
-```bash
-./sprite-env --listen 0.0.0.0:8090 -components-dir /path/to/components -- /path/to/supervised-process
+The API is served on port 8181 by default. All endpoints are relative to:
+```
+http://localhost:8181
 ```
 
 ## Authentication
 
-All API endpoints require authentication via the `fly-replay-src` header. The header must include a `state` key with the format:
+The API requires authentication using the `SPRITE_HTTP_API_TOKEN` environment variable. You can authenticate using either of these methods:
 
-- **API mode**: `state=api:<token>` - Access to checkpoint, restore, and exec endpoints
-- **Proxy mode**: `state=proxy:<token>:<port>` - Proxy requests to internal services
+### Method 1: Authorization Header (Recommended)
+Include a Bearer token in the Authorization header:
+```
+Authorization: Bearer mysecrettoken
+```
 
-The token value must match the `SPRITE_HTTP_API_TOKEN` environment variable. If this environment variable is not set, authentication is disabled (not recommended for production).
-
-### Header Format
+### Method 2: fly-replay-src Header
+Include the token in the `fly-replay-src` header with the format:
+```
+fly-replay-src: state=api:mysecrettoken
+```
 
 The `fly-replay-src` header can contain multiple semicolon-separated key-value pairs:
 ```
 fly-replay-src: region=ord;state=api:mysecrettoken;app=myapp
 ```
 
-Only the `state` key is used for authentication. Other keys are ignored.
+### Example Requests
 
-### Examples
-
-API mode authentication:
+Using Authorization header:
 ```bash
-curl -X POST http://localhost:8090/checkpoint \
+curl -X POST http://localhost:8181/exec \
+  -H "Authorization: Bearer mysecrettoken" \
+  -H "Content-Type: application/json" \
+  -d '{"command": ["ls", "-la"]}'
+```
+
+Using fly-replay-src header:
+```bash
+curl -X POST http://localhost:8181/exec \
   -H "fly-replay-src: state=api:mysecrettoken" \
   -H "Content-Type: application/json" \
-  -d '{"checkpoint_id": "checkpoint-123"}'
+  -d '{"command": ["ls", "-la"]}'
 ```
 
-Proxy mode authentication:
+## Endpoints
+
+### 1. Execute Command - `/exec`
+
+Execute a command within the Sprite environment.
+
+**Method:** `POST`
+
+**Request Body:**
+```json
+{
+  "command": ["ls", "-la"],
+  "env": {
+    "KEY": "value"
+  },
+  "working_dir": "/app",
+  "timeout": 30000000000,
+  "tty": false
+}
+```
+
+**Fields:**
+- `command` (required): Array of command and arguments
+- `env` (optional): Environment variables as key-value pairs
+- `working_dir` (optional): Working directory for the command
+- `timeout` (optional): Command timeout in nanoseconds (default: 30 seconds)
+- `tty` (optional): Whether to allocate a pseudo-TTY (default: false)
+
+**Response:** Server-Sent Events (SSE) stream with the following event types:
+- `stdout`: Standard output data
+- `stderr`: Standard error data
+- `exit`: Command exit status
+- `error`: Execution errors
+
+**Example:**
 ```bash
-# Proxy to service on port 3000
-curl -X GET http://localhost:8090/health \
-  -H "fly-replay-src: state=proxy:mysecrettoken:3000"
-```
-
-## API Endpoints (API Mode)
-
-### POST /checkpoint
-
-Initiates a checkpoint operation.
-
-**Request:**
-```json
-{
-  "checkpoint_id": "string"
-}
-```
-
-**Response:**
-- Status: 202 Accepted
-```json
-{
-  "status": "checkpoint initiated",
-  "checkpoint_id": "string"
-}
-```
-
-### POST /restore
-
-Initiates a restore operation.
-
-**Request:**
-```json
-{
-  "checkpoint_id": "string"  
-}
-```
-
-**Response:**
-- Status: 202 Accepted
-```json
-{
-  "status": "restore initiated",
-  "checkpoint_id": "string"
-}
-```
-
-### POST /exec
-
-Executes a command and streams the output.
-
-**Request:**
-```json
-{
-  "command": ["command", "arg1", "arg2"],
-  "timeout": 30000000000  // nanoseconds, optional (default: 30s)
-}
-```
-
-**Response:**
-- Status: 200 OK
-- Content-Type: application/x-ndjson
-
-The response is a stream of newline-delimited JSON messages:
-
-```json
-{"type":"stdout","data":"output line","time":"2024-01-01T12:00:00Z"}
-{"type":"stderr","data":"error line","time":"2024-01-01T12:00:01Z"}
-{"type":"exit","exit_code":0,"time":"2024-01-01T12:00:02Z"}
-```
-
-## Proxy Mode
-
-When using proxy mode authentication (`state=proxy:<token>:<port>`), all requests are proxied to the specified port on localhost. This allows external access to internal services with authentication.
-
-### How it works
-
-1. Include the target port in the authentication header: `state=proxy:mytoken:3000`
-2. All HTTP requests are forwarded to `http://127.0.0.1:3000`
-3. The original path, query parameters, headers, and body are preserved
-4. Response headers and body are returned to the client
-
-### Examples
-
-```bash
-# Proxy GET request to internal service on port 3000
-curl -X GET http://localhost:8090/api/users \
-  -H "fly-replay-src: state=proxy:mysecrettoken:3000"
-
-# Proxy POST request with body
-curl -X POST http://localhost:8090/api/users \
-  -H "fly-replay-src: state=proxy:mysecrettoken:3000" \
+curl -X POST http://localhost:8181/exec \
+  -H "Authorization: Bearer mysecrettoken" \
   -H "Content-Type: application/json" \
-  -d '{"name": "John Doe"}'
+  -d '{"command": ["echo", "hello world"]}'
 ```
 
-### Headers
+### 2. Request Checkpoint - `/checkpoint`
 
-The proxy automatically:
-- Removes the `fly-replay-src` header before forwarding
-- Adds `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` headers
-- Preserves all other headers from the original request
+Request a checkpoint of the current system state.
 
-### Error Handling
+**Method:** `POST`
 
-- **502 Bad Gateway**: Target service returned an error or closed connection
-- **503 Service Unavailable**: Target service is not running on the specified port
-- **504 Gateway Timeout**: Target service did not respond within timeout period
+**Request Body:**
+```json
+{
+  "checkpoint_id": "checkpoint-123"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "checkpoint requested",
+  "checkpoint_id": "checkpoint-123"
+}
+```
+
+### 3. Request Restore - `/restore`
+
+Request restoration from a checkpoint.
+
+**Method:** `POST`
+
+**Request Body:**
+```json
+{
+  "checkpoint_id": "checkpoint-123"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "restore requested",
+  "checkpoint_id": "checkpoint-123"
+}
+```
+
+### 4. CONNECT Proxy - `/proxy`
+
+A restricted CONNECT proxy that allows tunneling to local ports only.
+
+**Method:** `CONNECT`
+
+**Usage:**
+The proxy endpoint accepts standard HTTP CONNECT requests and establishes a tunnel to the specified port on localhost (127.0.0.1). Regardless of the hostname in the CONNECT request, all connections are made to 127.0.0.1.
+
+**Example using curl:**
+```bash
+# Connect to a local service on port 3000
+curl -x http://localhost:8181/proxy \
+  -H "Authorization: Bearer mysecrettoken" \
+  http://example.com:3000
+```
+
+**Example CONNECT request:**
+```
+CONNECT example.com:3000 HTTP/1.1
+Host: example.com:3000
+Authorization: Bearer mysecrettoken
+```
+
+**Response:**
+```
+HTTP/1.1 200 Connection Established
+```
+
+After receiving a 200 response, the connection becomes a bidirectional tunnel to `127.0.0.1:3000`.
+
+**Notes:**
+- Only the port number from the CONNECT request is used
+- All connections are made to 127.0.0.1 regardless of the requested hostname
+- The proxy respects the API's wait-for-running behavior
+
+## Wait-for-Running Behavior
+
+The `/exec` and `/proxy` endpoints will wait up to 30 seconds (configurable) for the system to reach the "Running" state before processing requests. This ensures commands are not executed before the system is ready.
+
+Other endpoints (`/checkpoint`, `/restore`) do not wait and can be called during system startup.
 
 ## Error Responses
 
 All endpoints return appropriate HTTP status codes:
 
-- **400 Bad Request**: Invalid request format or missing required fields
-- **401 Unauthorized**: Missing or invalid authentication token  
-- **404 Not Found**: Endpoint not available in the current mode
-- **405 Method Not Allowed**: HTTP method not supported
-- **500 Internal Server Error**: Server error during operation
+- `200 OK`: Successful request
+- `202 Accepted`: Request accepted (for checkpoint/restore)
+- `400 Bad Request`: Invalid request format or parameters
+- `401 Unauthorized`: Missing or invalid authentication
+- `405 Method Not Allowed`: Wrong HTTP method
+- `503 Service Unavailable`: System not ready (after timeout)
 
 Error responses include a plain text error message in the response body.
-
-## Notes
-
-- The checkpoint and restore endpoints trigger state transitions but do not wait for completion
-- Operations may take significant time to complete
-- Proxy mode allows only one target port per authentication - use different tokens for different services
-
-## Future Enhancements
-
-- **Proxy mode**: Will allow proxying requests to the supervised process (TODO)
-- Additional endpoints for system management
-- WebSocket support for real-time command execution

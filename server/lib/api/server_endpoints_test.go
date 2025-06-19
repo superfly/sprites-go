@@ -37,15 +37,25 @@ func TestCheckpointEndpoint(t *testing.T) {
 		method          string
 		body            string
 		replayHeader    string
+		authHeader      string
 		expectedStatus  int
 		expectedFire    bool
 		expectedTrigger string
 	}{
 		{
-			name:            "valid checkpoint request",
+			name:            "valid checkpoint request with fly-replay-src",
 			method:          "POST",
 			body:            `{"checkpoint_id": "test-checkpoint"}`,
 			replayHeader:    "state=api:testtoken",
+			expectedStatus:  http.StatusAccepted,
+			expectedFire:    true,
+			expectedTrigger: "CheckpointRequested",
+		},
+		{
+			name:            "valid checkpoint request with Bearer token",
+			method:          "POST",
+			body:            `{"checkpoint_id": "test-checkpoint-2"}`,
+			authHeader:      "Bearer testtoken",
 			expectedStatus:  http.StatusAccepted,
 			expectedFire:    true,
 			expectedTrigger: "CheckpointRequested",
@@ -62,7 +72,7 @@ func TestCheckpointEndpoint(t *testing.T) {
 			name:           "invalid method",
 			method:         "GET",
 			body:           `{"checkpoint_id": "test"}`,
-			replayHeader:   "state=api:testtoken",
+			authHeader:     "Bearer testtoken",
 			expectedStatus: http.StatusMethodNotAllowed,
 			expectedFire:   false,
 		},
@@ -78,7 +88,12 @@ func TestCheckpointEndpoint(t *testing.T) {
 				t.Fatal(err)
 			}
 			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("fly-replay-src", tt.replayHeader)
+			if tt.replayHeader != "" {
+				req.Header.Set("fly-replay-src", tt.replayHeader)
+			}
+			if tt.authHeader != "" {
+				req.Header.Set("Authorization", tt.authHeader)
+			}
 
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
