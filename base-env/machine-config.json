@@ -1,0 +1,124 @@
+{
+  "init": {},
+  "guest": {
+    "cpu_kind": "performance",
+    "cpus": 4,
+    "memory_mb": 8192
+  },
+  "mounts": [
+    {
+      "path": "/dev/fly_vol",
+      "volume": "vol_r1o5520nj709ww04"
+    }
+  ],
+  
+  "containers": [
+    {
+      "name": "storage",
+      "image": "docker.io/flyio/app-storage:latest",
+      "command": [
+        "/usr/local/bin/mount.sh"
+      ],
+      "mounts": [
+        {
+          "name": "shared",
+          "path": "/data"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "FLY_TIGRIS_ACCESS_KEY",
+          "env_var": "S3_ACCESS_KEY"
+        },
+        {
+          "name": "FLY_TIGRIS_SECRET_ACCESS_KEY",
+          "env_var": "S3_SECRET_KEY"
+        },
+        {
+          "name": "FLY_TIGRIS_BUCKET",
+          "env_var": "BUCKET_NAME"
+        },
+        {
+          "name": "FLY_TIGRIS_ENDPOINT_URL",
+          "env_var": "S3_ENDPOINT"
+        },
+        {
+          "name": "FLY_TIGRIS_REGION",
+          "env_var": "S3_REGION"
+        }
+      ],
+      "restart": {
+        "policy": "no"
+      },
+      "healthchecks": [
+        {
+          "type": "http",
+          "http": {
+            "ip": "127.0.0.1",
+            "port": 9567,
+            "method": "head",
+            "path": "/metrics",
+            "scheme": "http"
+          },
+          "failure_threshold": 5,
+          "success_threshold": 1,
+          "interval": 1,
+          "grace_period": 0
+        }
+      ]
+    },
+    {
+      "name": "app",
+      "image": "docker.io/flyio/app-storage:latest",
+      "entrypoint": [
+        "/usr/local/bin/run-app-image.sh"
+      ],
+      "cmd": [
+        "tail",
+        "-f",
+        "/dev/null"
+      ],
+      "files":[],
+      "mounts": [
+        {
+          "name": "shared",
+          "path": "/data"
+        },
+        {
+          "name": "app-image",
+          "path": "/mnt/app-image"
+        }
+      ],
+      "depends_on": [
+        {
+          "name": "storage",
+          "condition": "healthy"
+        }
+      ],
+      "restart": {
+        "policy": "no"
+      }
+    }
+  ],
+  "restart": {
+    "policy": "no",
+    "max_retries": 10
+  },
+  "stop_config": {
+    "timeout": "30s",
+    "signal": "SIGINT"
+  },
+  "volumes": [
+    {
+      "name": "shared",
+      "temp_dir": {
+        "size_mb": 100,
+        "storage_type": "memory"
+      }
+    },
+    {
+      "name": "app-image",
+      "image": "registry-1.docker.io/library/ubuntu:latest"
+    }
+  ]
+}
