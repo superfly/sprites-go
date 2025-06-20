@@ -11,10 +11,10 @@ import (
 	"syscall"
 	"time"
 
-	"sprite-env/lib"
-	"sprite-env/lib/adapters"
-	"sprite-env/lib/api"
-	"sprite-env/lib/managers"
+	"lib"
+	"lib/adapters"
+	"lib/api"
+	"lib/managers"
 )
 
 // version is set at build time via ldflags
@@ -22,13 +22,13 @@ var version = "dev"
 
 // Application holds the main application state
 type Application struct {
-	processState    *managers.ProcessState
-	componentState  *managers.ComponentState
-	apiServer       *api.Server
-	logger          *slog.Logger
-	ctx             context.Context
-	cancel          context.CancelFunc
-	config          lib.ApplicationConfig
+	processState   *managers.ProcessState
+	componentState *managers.ComponentState
+	apiServer      *api.Server
+	logger         *slog.Logger
+	ctx            context.Context
+	cancel         context.CancelFunc
+	config         lib.ApplicationConfig
 }
 
 // NewApplication creates a new application instance
@@ -68,7 +68,7 @@ func NewApplication(config lib.ApplicationConfig) *Application {
 				RestoreCommand:    componentScripts.RestoreCommand,
 			}
 			component := adapters.NewCmdComponent(componentConfig)
-			
+
 			// Create component state manager
 			// The cmdComponent implements ManagedComponent, but we need to assert it
 			managedComponent, ok := component.(managers.ManagedComponent)
@@ -77,11 +77,11 @@ func NewApplication(config lib.ApplicationConfig) *Application {
 				continue
 			}
 			componentState = managers.NewComponentState(componentName+"Component", managedComponent)
-			
+
 			if config.Debug {
 				logger.Info("Created component", "component", componentName)
 			}
-			
+
 			// Only handle the first component for now
 			break
 		}
@@ -148,16 +148,16 @@ func (app *Application) Start(ctx context.Context) error {
 			app.logger.Error("Failed to start component", "error", err)
 			return err
 		}
-		
+
 		// Wait for component to be running
 		// In a real implementation, you might want to poll or use events
 		// For now, we'll check the state after a brief delay
 		time.Sleep(2 * time.Second)
-		
+
 		currentState := app.componentState.MustState().(string)
 		if currentState == "Running" {
 			app.logger.Info("Component is running, starting process...")
-			
+
 			// After component is running, start the process
 			if app.processState != nil {
 				if err := app.processState.Fire("Starting"); err != nil {

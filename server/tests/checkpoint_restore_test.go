@@ -9,8 +9,8 @@ package tests
 import (
 	"context"
 	"os"
-	"sprite-env/lib/adapters"
-	"sprite-env/lib/managers"
+	lib"/adapters"
+	lib"/managers"
 	"testing"
 	"time"
 )

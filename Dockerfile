@@ -4,25 +4,55 @@
 FROM --platform=linux/amd64 golang:1.24-alpine AS builder-amd64
 RUN apk add --no-cache git
 WORKDIR /build
-COPY server/go.mod server/go.sum ./
-RUN go mod download
-COPY server/. .
+
+# Copy go.work files first
+COPY go.work go.work.sum ./
+
+# Copy all go.mod files from each module
+COPY server/go.mod server/go.sum* ./server/
+COPY lib/go.mod lib/go.sum* ./lib/
+COPY client/go.mod client/go.sum* ./client/
+COPY packages/juicefs/go.mod packages/juicefs/go.sum* ./packages/juicefs/
+COPY packages/supervisor/go.mod packages/supervisor/go.sum* ./packages/supervisor/
+
+# Download dependencies for all modules in the workspace
+RUN go mod download -x
+
+# Copy all source code
+COPY . .
+
 ARG VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+RUN cd server && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -ldflags="-w -s -X main.version=${VERSION}" \
-    -o sprite-env .
+    -o ../spritectl .
 
 # Build stage for ARM64
 FROM --platform=linux/arm64 golang:1.24-alpine AS builder-arm64
 RUN apk add --no-cache git
 WORKDIR /build
-COPY server/go.mod server/go.sum ./
-RUN go mod download
-COPY server/. .
+
+# Copy go.work files first
+COPY go.work go.work.sum ./
+
+# Copy all go.mod files from each module
+COPY server/go.mod server/go.sum* ./server/
+COPY lib/go.mod lib/go.sum* ./lib/
+COPY client/go.mod client/go.sum* ./client/
+COPY packages/juicefs/go.mod packages/juicefs/go.sum* ./packages/juicefs/
+COPY packages/supervisor/go.mod packages/supervisor/go.sum* ./packages/supervisor/
+
+# Download dependencies for all modules in the workspace
+RUN go mod download -x
+
+# Copy all source code
+COPY . .
+
 ARG VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
+RUN cd server && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
     -ldflags="-w -s -X main.version=${VERSION}" \
-    -o sprite-env .
+    -o ../spritectl .
 
 # Download crun binary
 FROM alpine:latest AS crun
@@ -54,19 +84,19 @@ COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
 
 # Copy the appropriate binary based on target platform
 ARG TARGETPLATFORM
-COPY --from=builder-amd64 /build/sprite-env /usr/local/bin/sprite-env.amd64
-COPY --from=builder-arm64 /build/sprite-env /usr/local/bin/sprite-env.arm64
+COPY --from=builder-amd64 /build/spritectl /usr/local/bin/spritectl.amd64
+COPY --from=builder-arm64 /build/spritectl /usr/local/bin/spritectl.arm64
 RUN if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
-        mv /usr/local/bin/sprite-env.amd64 /usr/local/bin/sprite-env && rm -f /usr/local/bin/sprite-env.arm64; \
+        mv /usr/local/bin/spritectl.amd64 /usr/local/bin/spritectl && rm -f /usr/local/bin/spritectl.arm64; \
     else \
-        mv /usr/local/bin/sprite-env.arm64 /usr/local/bin/sprite-env && rm -f /usr/local/bin/sprite-env.amd64; \
+        mv /usr/local/bin/spritectl.arm64 /usr/local/bin/spritectl && rm -f /usr/local/bin/spritectl.amd64; \
     fi
 
 # Define environment variables for paths
 ENV SPRITE_WRITE_DIR=/dev/fly_vol \
     SPRITE_HOME=/home/sprite
 
-# Set working directory for sprite-env components
+# Set working directory for spritectl components
 WORKDIR ${SPRITE_HOME}
 
 # Copy all base-env contents into the working directory
@@ -77,6 +107,8 @@ WORKDIR ${SPRITE_WRITE_DIR}
 
 # Expose the API port
 EXPOSE 7778
-# Use sprite-env as entrypoint with config file
-# /usr/local/bin/sprite-env -config /home/sprite/config.json -listen 0.0.0.0:7778
-ENTRYPOINT ["/usr/local/bin/sprite-env", "-config", "/home/sprite/config.json", "-listen", "0.0.0.0:7778"] 
+
+RUN which juicefs
+# Use spritectl as entrypoint with config file
+# /usr/local/bin/spritectl -config /home/sprite/config.json -listen 0.0.0.0:7778
+ENTRYPOINT ["/usr/local/bin/spritectl", "-config", "/home/sprite/config.json", "-listen", "0.0.0.0:7778"] 

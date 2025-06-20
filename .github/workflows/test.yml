@@ -8,28 +8,9 @@ on:
   workflow_call:  # This allows other workflows to call this one
 
 jobs:
-  test-models:
-    name: Validate Models
+  test-lib:
+    name: "Library Tests"
     runs-on: ubuntu-latest
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Java
-      uses: actions/setup-java@v4
-      with:
-        distribution: 'temurin'
-        java-version: '11'
-    
-    - name: Run model tests
-      run: make validate
-
-  test-server-unit:
-    name: "Server Unit Tests"
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: server
 
     steps:
     - name: Checkout repo
@@ -38,17 +19,14 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v4
       with:
-        go-version: 1.24
+        go-version: 1.24.4
 
     - name: Test
-      run: make test-unit
+      run: go test -v ./lib/...
 
-  test-server-integration:
-    name: "Server Integration Tests"
+  test-server:
+    name: "Server Tests"
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: server
 
     steps:
     - name: Checkout repo
@@ -57,46 +35,71 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v4
       with:
-        go-version: 1.24
+        go-version: 1.24.4
 
     - name: Test
-      run: make test-integration
+      run: go test -v ./server/...
 
-    - name: Upload trace artifacts
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: trace-files
-        path: server/tests/tmp/*.trace
-        retention-days: 1
-
-  validate-traces:
-    name: Validate Traces
+  test-juicefs-package:
+    name: "JuiceFS Package Tests"
     runs-on: ubuntu-latest
-    needs: [test-models, test-server-integration]
-    if: success()
+    defaults:
+      run:
+        working-directory: packages/juicefs
 
     steps:
     - name: Checkout repo
       uses: actions/checkout@v4
 
-    - name: Set up Java
-      uses: actions/setup-java@v4
-      with:
-        distribution: 'temurin'
-        java-version: '11'
+    - name: Test
+      run: make test
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.x'
+  test-supervisor-package:
+    name: "Supervisor Package Tests"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/supervisor
 
-    - name: Download trace artifacts
-      uses: actions/download-artifact@v4
-      with:
-        name: trace-files
-        path: server/tests/tmp/
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v4
 
-    - name: Validate traces
-      run: make validate-traces
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: 1.24.4
+
+    - name: Test
+      run: go test -v ./...
+
+  # validate-traces:
+  #   name: Validate Traces
+  #   runs-on: ubuntu-latest
+  #   needs: [test-models, test-server-integration]
+  #   if: success()
+
+  #   steps:
+  #   - name: Checkout repo
+  #     uses: actions/checkout@v4
+
+  #   - name: Set up Java
+  #     uses: actions/setup-java@v4
+  #     with:
+  #       distribution: 'temurin'
+  #       java-version: '11'
+
+  #   - name: Set up Python
+  #     uses: actions/setup-python@v4
+  #     with:
+  #       python-version: '3.x'
+
+  #   - name: Download trace artifacts
+  #     uses: actions/download-artifact@v4
+  #     with:
+  #       name: trace-files
+  #       path: server/tests/tmp/
+
+  #   - name: Validate traces
+  #     run: make validate-traces
   

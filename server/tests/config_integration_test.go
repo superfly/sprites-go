@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"sprite-env/lib"
+	"lib"
 )
 
 func TestConfigLoading(t *testing.T) {

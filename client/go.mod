@@ -1,3 +1,3 @@
-module sprite-client
+module sprite
 
-go 1.21 
+go 1.24.4

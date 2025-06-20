@@ -5,7 +5,7 @@ all: build
 
 # Build the binary
 build:
-	go build -o sprite-client
+	go build -o sprite
 
 # Install to GOPATH/bin or GOBIN
 install:
@@ -13,7 +13,7 @@ install:
 
 # Clean build artifacts
 clean:
-	rm -f sprite-client
+	rm -f sprite
 
 # Run tests (if any)
 test:
@@ -21,12 +21,12 @@ test:
 
 # Build for multiple platforms
 build-all:
-	GOOS=linux GOARCH=amd64 go build -o sprite-client-linux-amd64
-	GOOS=darwin GOARCH=amd64 go build -o sprite-client-darwin-amd64
-	GOOS=darwin GOARCH=arm64 go build -o sprite-client-darwin-arm64
-	GOOS=windows GOARCH=amd64 go build -o sprite-client-windows-amd64.exe
+	GOOS=linux GOARCH=amd64 go build -o sprite-linux-amd64
+	GOOS=darwin GOARCH=amd64 go build -o sprite-darwin-amd64
+	GOOS=darwin GOARCH=arm64 go build -o sprite-darwin-arm64
+	GOOS=windows GOARCH=amd64 go build -o sprite-windows-amd64.exe
 
 # Run with example
 run-example: build
 	@echo "Make sure SPRITE_URL and SPRITE_TOKEN are set!"
-	./sprite-client exec echo "Hello from sprite" 
+	./sprite exec echo "Hello from sprite" 
