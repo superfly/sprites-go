@@ -1,0 +1,707 @@
+
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+		<title>juicefs: Go Coverage Report</title>
+		<style>
+			body {
+				background: black;
+				color: rgb(80, 80, 80);
+			}
+			body, pre, #legend span {
+				font-family: Menlo, monospace;
+				font-weight: bold;
+			}
+			#topbar {
+				background: black;
+				position: fixed;
+				top: 0; left: 0; right: 0;
+				height: 42px;
+				border-bottom: 1px solid rgb(80, 80, 80);
+			}
+			#content {
+				margin-top: 50px;
+			}
+			#nav, #legend {
+				float: left;
+				margin-left: 10px;
+			}
+			#legend {
+				margin-top: 12px;
+			}
+			#nav {
+				margin-top: 10px;
+			}
+			#legend span {
+				margin: 0 5px;
+			}
+			.cov0 { color: rgb(192, 0, 0) }
+.cov1 { color: rgb(128, 128, 128) }
+.cov2 { color: rgb(116, 140, 131) }
+.cov3 { color: rgb(104, 152, 134) }
+.cov4 { color: rgb(92, 164, 137) }
+.cov5 { color: rgb(80, 176, 140) }
+.cov6 { color: rgb(68, 188, 143) }
+.cov7 { color: rgb(56, 200, 146) }
+.cov8 { color: rgb(44, 212, 149) }
+.cov9 { color: rgb(32, 224, 152) }
+.cov10 { color: rgb(20, 236, 155) }
+
+		</style>
+	</head>
+	<body>
+		<div id="topbar">
+			<div id="nav">
+				<select id="files">
+				
+				<option value="file0">github.com/fly-dev-env/sprite-env/server/packages/juicefs/juicefs.go (34.1%)</option>
+				
+				</select>
+			</div>
+			<div id="legend">
+				<span>not tracked</span>
+			
+				<span class="cov0">no coverage</span>
+				<span class="cov1">low coverage</span>
+				<span class="cov2">*</span>
+				<span class="cov3">*</span>
+				<span class="cov4">*</span>
+				<span class="cov5">*</span>
+				<span class="cov6">*</span>
+				<span class="cov7">*</span>
+				<span class="cov8">*</span>
+				<span class="cov9">*</span>
+				<span class="cov10">high coverage</span>
+			
+			</div>
+		</div>
+		<div id="content">
+		
+		<pre class="file" id="file0" style="display: none">package juicefs
+
+import (
+        "bufio"
+        "context"
+        "database/sql"
+        "fmt"
+        "io"
+        "os"
+        "os/exec"
+        "os/signal"
+        "path/filepath"
+        "strconv"
+        "strings"
+        "syscall"
+        "time"
+
+        _ "github.com/mattn/go-sqlite3"
+        "github.com/sprite-env/server/packages/supervisor"
+)
+
+// JuiceFS manages the JuiceFS filesystem and Litestream replication
+type JuiceFS struct {
+        config     Config
+        supervisor *supervisor.Supervisor
+        mountCmd   *exec.Cmd
+        mountReady chan error
+        stopCh     chan struct{}
+        stoppedCh  chan struct{}
+        signalCh   chan os.Signal
+}
+
+// Config holds the configuration for JuiceFS
+type Config struct {
+        // Base directory for JuiceFS (typically ${SPRITE_WRITE_DIR}/juicefs)
+        BaseDir string
+
+        // Local mode - if true, uses local disk instead of S3
+        LocalMode bool
+
+        // S3 configuration (required if LocalMode is false)
+        S3AccessKey       string
+        S3SecretAccessKey string
+        S3EndpointURL     string
+        S3Bucket          string
+
+        // Volume name for the JuiceFS filesystem
+        VolumeName string
+}
+
+// New creates a new JuiceFS instance
+func New(config Config) (*JuiceFS, error) <span class="cov10" title="15">{
+        if config.VolumeName == "" </span><span class="cov9" title="14">{
+                config.VolumeName = "juicefs"
+        }</span>
+
+        // Validate required configuration
+        <span class="cov10" title="15">if config.BaseDir == "" </span><span class="cov1" title="1">{
+                return nil, fmt.Errorf("BaseDir is required")
+        }</span>
+
+        <span class="cov9" title="14">if !config.LocalMode </span><span class="cov8" title="10">{
+                if config.S3AccessKey == "" || config.S3SecretAccessKey == "" ||
+                        config.S3EndpointURL == "" || config.S3Bucket == "" </span><span class="cov1" title="1">{
+                        return nil, fmt.Errorf("S3 configuration is incomplete")
+                }</span>
+        }
+
+        <span class="cov9" title="13">return &amp;JuiceFS{
+                config:     config,
+                mountReady: make(chan error, 1),
+                stopCh:     make(chan struct{}),
+                stoppedCh:  make(chan struct{}),
+                signalCh:   make(chan os.Signal, 1),
+        }, nil</span>
+}
+
+// Start initializes and starts JuiceFS with Litestream replication
+func (j *JuiceFS) Start(ctx context.Context) error <span class="cov1" title="1">{
+        // Create necessary directories
+        cacheDir := filepath.Join(j.config.BaseDir, "cache")
+        metaDB := filepath.Join(j.config.BaseDir, "metadata.db")
+        mountPoint := filepath.Join(j.config.BaseDir, "data")
+
+        dirs := []string{
+                cacheDir,
+                filepath.Dir(metaDB),
+                mountPoint,
+        }
+
+        // Add local-mode specific directories
+        if j.config.LocalMode </span><span class="cov1" title="1">{
+                dirs = append(dirs,
+                        filepath.Join(j.config.BaseDir, "local"),      // JuiceFS local storage
+                        filepath.Join(j.config.BaseDir, "litestream"), // Litestream local backups
+                )
+        }</span>
+
+        <span class="cov1" title="1">for _, dir := range dirs </span><span class="cov6" title="5">{
+                if err := os.MkdirAll(dir, 0755); err != nil </span><span class="cov0" title="0">{
+                        return fmt.Errorf("failed to create directory %s: %w", dir, err)
+                }</span>
+        }
+
+        // Create litestream configuration
+        <span class="cov1" title="1">litestreamConfigPath := filepath.Join(os.TempDir(), "litestream-juicefs.yml")
+        if err := j.createLitestreamConfig(litestreamConfigPath, metaDB); err != nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("failed to create litestream config: %w", err)
+        }</span>
+
+        // Check if we need to restore
+        <span class="cov1" title="1">if j.config.LocalMode </span><span class="cov1" title="1">{
+                // In local mode, check if litestream backup exists
+                backupPath := filepath.Join(j.config.BaseDir, "litestream", "generations")
+                if _, err := os.Stat(backupPath); err == nil </span><span class="cov0" title="0">{
+                        fmt.Println("Restoring from local litestream backup")
+                        restoreCmd := exec.CommandContext(ctx, "litestream", "restore",
+                                "-config", litestreamConfigPath,
+                                "-if-replica-exists",
+                                metaDB)
+
+                        if output, err := restoreCmd.CombinedOutput(); err != nil </span><span class="cov0" title="0">{
+                                fmt.Printf("Litestream restore output: %s\n", string(output))
+                        }</span>
+                }
+        } else<span class="cov0" title="0"> {
+                // S3 mode - original logic
+                if existingBucket, err := j.getExistingBucket(metaDB); err == nil &amp;&amp; existingBucket == j.config.S3Bucket </span><span class="cov0" title="0">{
+                        fmt.Println("Using sqlite db on disk (bucket matches)")
+                }</span> else<span class="cov0" title="0"> {
+                        // Remove existing metadata and cache
+                        os.Remove(metaDB)
+                        os.RemoveAll(cacheDir)
+
+                        fmt.Printf("Restoring juicefs db from %s\n", j.config.S3Bucket)
+                        // Restore from S3 using litestream
+                        restoreCmd := exec.CommandContext(ctx, "litestream", "restore",
+                                "-config", litestreamConfigPath,
+                                "-if-replica-exists",
+                                metaDB)
+
+                        restoreCmd.Env = append(os.Environ(),
+                                fmt.Sprintf("JUICEFS_META_DB=%s", metaDB),
+                                fmt.Sprintf("SPRITE_S3_ACCESS_KEY=%s", j.config.S3AccessKey),
+                                fmt.Sprintf("SPRITE_S3_SECRET_ACCESS_KEY=%s", j.config.S3SecretAccessKey),
+                                fmt.Sprintf("SPRITE_S3_ENDPOINT_URL=%s", j.config.S3EndpointURL),
+                                fmt.Sprintf("SPRITE_S3_BUCKET=%s", j.config.S3Bucket),
+                        )
+
+                        if output, err := restoreCmd.CombinedOutput(); err != nil </span><span class="cov0" title="0">{
+                                // If restore fails, it's okay - we'll format a new filesystem
+                                fmt.Printf("Litestream restore output: %s\n", string(output))
+                        }</span>
+                }
+        }
+
+        // Ensure cache directory exists (might have been removed)
+        <span class="cov1" title="1">os.MkdirAll(cacheDir, 0755)
+
+        // Format JuiceFS if needed
+        metaURL := fmt.Sprintf("sqlite3://%s", metaDB)
+        if !j.isFormatted(metaURL) </span><span class="cov1" title="1">{
+                if err := j.formatJuiceFS(ctx, metaURL); err != nil </span><span class="cov0" title="0">{
+                        return fmt.Errorf("failed to format JuiceFS: %w", err)
+                }</span>
+        }
+
+        // Calculate cache and buffer sizes
+        <span class="cov1" title="1">cacheSize := j.calculateCacheSize(cacheDir)
+        bufferSize := j.calculateBufferSize()
+
+        // Start litestream replication in parallel
+        litestreamSupervisorConfig := supervisor.Config{
+                Command: "litestream",
+                Args:    []string{"replicate", "-config", litestreamConfigPath},
+        }
+
+        // Only set environment variables for S3 mode
+        if !j.config.LocalMode </span><span class="cov0" title="0">{
+                litestreamSupervisorConfig.Env = append(os.Environ(),
+                        fmt.Sprintf("JUICEFS_META_DB=%s", metaDB),
+                        fmt.Sprintf("SPRITE_S3_ACCESS_KEY=%s", j.config.S3AccessKey),
+                        fmt.Sprintf("SPRITE_S3_SECRET_ACCESS_KEY=%s", j.config.S3SecretAccessKey),
+                        fmt.Sprintf("SPRITE_S3_ENDPOINT_URL=%s", j.config.S3EndpointURL),
+                        fmt.Sprintf("SPRITE_S3_BUCKET=%s", j.config.S3Bucket),
+                )
+        }</span>
+
+        <span class="cov1" title="1">litestreamSupervisor, err := supervisor.New(litestreamSupervisorConfig)
+        if err != nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("failed to create litestream supervisor: %w", err)
+        }</span>
+
+        <span class="cov1" title="1">if _, err := litestreamSupervisor.Start(); err != nil </span><span class="cov1" title="1">{
+                return fmt.Errorf("failed to start litestream: %w", err)
+        }</span>
+        <span class="cov0" title="0">j.supervisor = litestreamSupervisor
+
+        // Mount JuiceFS
+        j.mountCmd = exec.CommandContext(ctx, "juicefs", "mount",
+                "-o", "writeback_cache",
+                "--writeback",
+                "--upload-delay=1m",
+                fmt.Sprintf("--cache-dir=%s", cacheDir),
+                fmt.Sprintf("--cache-size=%d", cacheSize),
+                fmt.Sprintf("--buffer-size=%d", bufferSize),
+                metaURL,
+                mountPoint,
+        )
+
+        // Set up stderr pipe to watch for ready message
+        stderrPipe, err := j.mountCmd.StderrPipe()
+        if err != nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("failed to create stderr pipe: %w", err)
+        }</span>
+
+        // Start watching for ready message
+        <span class="cov0" title="0">go j.watchForReady(stderrPipe, mountPoint)
+
+        // Start the mount command
+        if err := j.mountCmd.Start(); err != nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("failed to start JuiceFS mount: %w", err)
+        }</span>
+
+        // Set up signal handling
+        <span class="cov0" title="0">signal.Notify(j.signalCh, syscall.SIGTERM, syscall.SIGINT)
+        go j.handleSignals()
+
+        // Start the process monitor
+        go j.monitorProcess()
+
+        // Wait for mount to be ready or timeout
+        select </span>{
+        case err := &lt;-j.mountReady:<span class="cov0" title="0">
+                if err != nil </span><span class="cov0" title="0">{
+                        // Kill mount process if it's still running
+                        j.mountCmd.Process.Kill()
+                        j.mountCmd.Wait()
+                        return err
+                }</span>
+                <span class="cov0" title="0">return nil</span>
+        case &lt;-ctx.Done():<span class="cov0" title="0">
+                // Kill mount process
+                j.mountCmd.Process.Kill()
+                j.mountCmd.Wait()
+                return ctx.Err()</span>
+        case &lt;-time.After(30 * time.Second):<span class="cov0" title="0">
+                // Kill mount process
+                j.mountCmd.Process.Kill()
+                j.mountCmd.Wait()
+                return fmt.Errorf("timeout waiting for JuiceFS to be ready")</span>
+        }
+}
+
+// Stop cleanly shuts down JuiceFS and Litestream
+func (j *JuiceFS) Stop(ctx context.Context) error <span class="cov0" title="0">{
+        // Stop signal handling
+        signal.Stop(j.signalCh)
+
+        // Signal stop
+        select </span>{
+        case &lt;-j.stopCh:<span class="cov0" title="0"></span>
+                // Already stopping
+        default:<span class="cov0" title="0">
+                close(j.stopCh)</span>
+        }
+
+        // Wait for stopped signal or timeout
+        <span class="cov0" title="0">select </span>{
+        case &lt;-j.stoppedCh:<span class="cov0" title="0">
+                return nil</span>
+        case &lt;-ctx.Done():<span class="cov0" title="0">
+                return ctx.Err()</span>
+        case &lt;-time.After(10 * time.Second):<span class="cov0" title="0">
+                return fmt.Errorf("timeout waiting for JuiceFS to stop")</span>
+        }
+}
+
+// monitorProcess handles the lifecycle of the mount process
+func (j *JuiceFS) monitorProcess() <span class="cov0" title="0">{
+        defer close(j.stoppedCh)
+
+        mountPoint := filepath.Join(j.config.BaseDir, "data")
+
+        // Wait for either stop signal or mount process to exit
+        processDone := make(chan error, 1)
+        go func() </span><span class="cov0" title="0">{
+                if j.mountCmd != nil </span><span class="cov0" title="0">{
+                        processDone &lt;- j.mountCmd.Wait()
+                }</span> else<span class="cov0" title="0"> {
+                        processDone &lt;- nil
+                }</span>
+        }()
+
+        <span class="cov0" title="0">select </span>{
+        case &lt;-j.stopCh:<span class="cov0" title="0">
+                // Stop requested, unmount JuiceFS
+                unmountCmd := exec.Command("juicefs", "unmount", mountPoint)
+                if err := unmountCmd.Run(); err != nil </span><span class="cov0" title="0">{
+                        // Log but don't fail on unmount errors
+                        fmt.Printf("Warning: failed to unmount JuiceFS: %v\n", err)
+                }</span>
+
+                // Wait for mount process to exit
+                <span class="cov0" title="0">&lt;-processDone
+
+                // Stop litestream
+                if j.supervisor != nil </span><span class="cov0" title="0">{
+                        j.supervisor.Stop()
+                }</span>
+
+        case err := &lt;-processDone:<span class="cov0" title="0">
+                // Mount process exited unexpectedly
+                if err != nil </span><span class="cov0" title="0">{
+                        fmt.Printf("JuiceFS mount process exited with error: %v\n", err)
+                }</span>
+
+                // Stop litestream
+                <span class="cov0" title="0">if j.supervisor != nil </span><span class="cov0" title="0">{
+                        j.supervisor.Stop()
+                }</span>
+        }
+}
+
+// Checkpoint creates a checkpoint of the active directory
+func (j *JuiceFS) Checkpoint(ctx context.Context, checkpointID string) error <span class="cov1" title="1">{
+        if checkpointID == "" </span><span class="cov1" title="1">{
+                return fmt.Errorf("checkpoint ID is required")
+        }</span>
+
+        <span class="cov0" title="0">mountPoint := filepath.Join(j.config.BaseDir, "data")
+        activeDir := filepath.Join(mountPoint, "active")
+        checkpointsDir := filepath.Join(mountPoint, "checkpoints")
+        checkpointPath := filepath.Join(checkpointsDir, checkpointID)
+
+        // Ensure checkpoints directory exists
+        if err := os.MkdirAll(checkpointsDir, 0755); err != nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("failed to create checkpoints directory: %w", err)
+        }</span>
+
+        // Check if active directory exists
+        <span class="cov0" title="0">if _, err := os.Stat(activeDir); os.IsNotExist(err) </span><span class="cov0" title="0">{
+                return fmt.Errorf("active directory does not exist at %s", activeDir)
+        }</span>
+
+        // Check if checkpoint already exists
+        <span class="cov0" title="0">if _, err := os.Stat(checkpointPath); err == nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("checkpoint %s already exists at %s", checkpointID, checkpointPath)
+        }</span>
+
+        // Clone active directory to checkpoint
+        <span class="cov0" title="0">fmt.Printf("Creating checkpoint %s...\n", checkpointID)
+        cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", activeDir, checkpointPath)
+        if output, err := cloneCmd.CombinedOutput(); err != nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("failed to create checkpoint: %w, output: %s", err, string(output))
+        }</span>
+
+        <span class="cov0" title="0">fmt.Printf("Checkpoint created successfully at %s\n", checkpointPath)
+        return nil</span>
+}
+
+// Restore restores from a checkpoint
+func (j *JuiceFS) Restore(ctx context.Context, checkpointID string) error <span class="cov1" title="1">{
+        if checkpointID == "" </span><span class="cov1" title="1">{
+                return fmt.Errorf("checkpoint ID is required")
+        }</span>
+
+        <span class="cov0" title="0">mountPoint := filepath.Join(j.config.BaseDir, "data")
+        activeDir := filepath.Join(mountPoint, "active")
+        checkpointsDir := filepath.Join(mountPoint, "checkpoints")
+        checkpointPath := filepath.Join(checkpointsDir, checkpointID)
+
+        // Check if checkpoint exists
+        if _, err := os.Stat(checkpointPath); os.IsNotExist(err) </span><span class="cov0" title="0">{
+                return fmt.Errorf("checkpoint %s does not exist at %s", checkpointID, checkpointPath)
+        }</span>
+
+        // If active directory exists, back it up
+        <span class="cov0" title="0">if _, err := os.Stat(activeDir); err == nil </span><span class="cov0" title="0">{
+                timestamp := time.Now().Unix()
+                backupName := fmt.Sprintf("pre-restore-%s-%d", checkpointID, timestamp)
+                backupPath := filepath.Join(checkpointsDir, backupName)
+
+                fmt.Printf("Backing up current active directory to %s...\n", backupPath)
+                if err := os.Rename(activeDir, backupPath); err != nil </span><span class="cov0" title="0">{
+                        return fmt.Errorf("failed to backup active directory: %w", err)
+                }</span>
+                <span class="cov0" title="0">fmt.Println("Backup completed")</span>
+        }
+
+        // Clone checkpoint to active directory
+        <span class="cov0" title="0">fmt.Printf("Restoring from checkpoint %s...\n", checkpointID)
+        cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", checkpointPath, activeDir)
+        if output, err := cloneCmd.CombinedOutput(); err != nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("failed to restore from checkpoint: %w, output: %s", err, string(output))
+        }</span>
+
+        <span class="cov0" title="0">fmt.Printf("Restore completed successfully from %s to %s\n", checkpointPath, activeDir)
+        return nil</span>
+}
+
+// Helper functions
+
+func (j *JuiceFS) createLitestreamConfig(configPath, metaDB string) error <span class="cov4" title="3">{
+        var config string
+
+        if j.config.LocalMode </span><span class="cov3" title="2">{
+                // Local file-based replication
+                localBackupPath := filepath.Join(j.config.BaseDir, "litestream")
+                config = fmt.Sprintf(`logging:
+  level: warn
+dbs:
+  - path: %s
+    replicas:
+      - type: file
+        path: %s
+        retention: 24h
+        snapshot-interval: 1m
+        sync-interval: 1s
+`, metaDB, localBackupPath)
+        }</span> else<span class="cov1" title="1"> {
+                // S3-based replication
+                config = `logging:
+  level: warn
+dbs:
+  - path: ${JUICEFS_META_DB}
+    replicas:
+      - type: s3
+        endpoint: ${SPRITE_S3_ENDPOINT_URL}
+        bucket: ${SPRITE_S3_BUCKET}
+        path: juicefs-metadata
+        access-key-id: ${SPRITE_S3_ACCESS_KEY}
+        secret-access-key: ${SPRITE_S3_SECRET_ACCESS_KEY}
+        sync-interval: 1s
+`
+        }</span>
+
+        <span class="cov4" title="3">return os.WriteFile(configPath, []byte(config), 0644)</span>
+}
+
+func (j *JuiceFS) getExistingBucket(metaDB string) (string, error) <span class="cov0" title="0">{
+        db, err := sql.Open("sqlite3", metaDB)
+        if err != nil </span><span class="cov0" title="0">{
+                return "", err
+        }</span>
+        <span class="cov0" title="0">defer db.Close()
+
+        var bucket string
+        err = db.QueryRow("SELECT value FROM setting WHERE name = 'bucket'").Scan(&amp;bucket)
+        if err != nil </span><span class="cov0" title="0">{
+                return "", err
+        }</span>
+
+        // Extract bucket name from the stored value (format: endpoint/bucket)
+        <span class="cov0" title="0">parts := strings.Split(bucket, "/")
+        if len(parts) &gt; 0 </span><span class="cov0" title="0">{
+                return parts[len(parts)-1], nil
+        }</span>
+        <span class="cov0" title="0">return bucket, nil</span>
+}
+
+func (j *JuiceFS) isFormatted(metaURL string) bool <span class="cov1" title="1">{
+        cmd := exec.Command("juicefs", "status", metaURL)
+        return cmd.Run() == nil
+}</span>
+
+func (j *JuiceFS) formatJuiceFS(ctx context.Context, metaURL string) error <span class="cov1" title="1">{
+        var cmd *exec.Cmd
+
+        if j.config.LocalMode </span><span class="cov1" title="1">{
+                // Local storage mode
+                localStoragePath := filepath.Join(j.config.BaseDir, "local")
+                cmd = exec.CommandContext(ctx, "juicefs", "format",
+                        "--storage", "file",
+                        "--bucket", localStoragePath,
+                        "--trash-days", "0",
+                        metaURL,
+                        j.config.VolumeName,
+                )
+        }</span> else<span class="cov0" title="0"> {
+                // S3 storage mode
+                bucketURL := fmt.Sprintf("%s/%s", j.config.S3EndpointURL, j.config.S3Bucket)
+                cmd = exec.CommandContext(ctx, "juicefs", "format",
+                        "--storage", "s3",
+                        "--bucket", bucketURL,
+                        "--access-key", j.config.S3AccessKey,
+                        "--secret-key", j.config.S3SecretAccessKey,
+                        "--trash-days", "0",
+                        metaURL,
+                        j.config.VolumeName,
+                )
+        }</span>
+
+        <span class="cov1" title="1">output, err := cmd.CombinedOutput()
+        if err != nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("format failed: %w, output: %s", err, string(output))
+        }</span>
+        <span class="cov1" title="1">return nil</span>
+}
+
+func (j *JuiceFS) calculateCacheSize(cacheDir string) int <span class="cov3" title="2">{
+        // Get filesystem info using df command
+        cmd := exec.Command("df", "-k", cacheDir)
+        output, err := cmd.Output()
+        if err != nil </span><span class="cov0" title="0">{
+                // Default to 1GB if we can't determine
+                return 1024
+        }</span>
+
+        <span class="cov3" title="2">lines := strings.Split(string(output), "\n")
+        if len(lines) &lt; 2 </span><span class="cov0" title="0">{
+                return 1024
+        }</span>
+
+        <span class="cov3" title="2">fields := strings.Fields(lines[1])
+        if len(fields) &lt; 2 </span><span class="cov0" title="0">{
+                return 1024
+        }</span>
+
+        <span class="cov3" title="2">totalKB, err := strconv.Atoi(fields[1])
+        if err != nil </span><span class="cov0" title="0">{
+                return 1024
+        }</span>
+
+        // Calculate 80% of total size in MB
+        <span class="cov3" title="2">return (totalKB / 1024) * 80 / 100</span>
+}
+
+func (j *JuiceFS) calculateBufferSize() int <span class="cov3" title="2">{
+        // Read total memory from /proc/meminfo
+        file, err := os.Open("/proc/meminfo")
+        if err != nil </span><span class="cov3" title="2">{
+                // Default to 1GB if we can't read meminfo
+                return 1024
+        }</span>
+        <span class="cov0" title="0">defer file.Close()
+
+        scanner := bufio.NewScanner(file)
+        for scanner.Scan() </span><span class="cov0" title="0">{
+                line := scanner.Text()
+                if strings.HasPrefix(line, "MemTotal:") </span><span class="cov0" title="0">{
+                        fields := strings.Fields(line)
+                        if len(fields) &gt;= 2 </span><span class="cov0" title="0">{
+                                memKB, err := strconv.Atoi(fields[1])
+                                if err == nil </span><span class="cov0" title="0">{
+                                        // Calculate 20% of memory or 1GB, whichever is smaller
+                                        twentyPercent := (memKB * 20 / 100) / 1024 // Convert to MB
+                                        if twentyPercent &lt; 1024 </span><span class="cov0" title="0">{
+                                                return twentyPercent
+                                        }</span>
+                                        <span class="cov0" title="0">return 1024</span>
+                                }
+                        }
+                }
+        }
+
+        <span class="cov0" title="0">return 1024</span> // Default to 1GB
+}
+
+func (j *JuiceFS) watchForReady(stderr io.Reader, mountPoint string) <span class="cov1" title="1">{
+        scanner := bufio.NewScanner(stderr)
+        for scanner.Scan() </span><span class="cov3" title="2">{
+                line := scanner.Text()
+                fmt.Println(line) // Echo the line for transparency
+
+                if strings.Contains(line, "juicefs is ready") </span><span class="cov1" title="1">{
+                        // Create the active directory
+                        activeDir := filepath.Join(mountPoint, "active", "fs")
+                        if err := os.MkdirAll(activeDir, 0755); err != nil </span><span class="cov0" title="0">{
+                                j.mountReady &lt;- fmt.Errorf("failed to create active directory: %w", err)
+                                return
+                        }</span>
+                        <span class="cov1" title="1">fmt.Printf("JuiceFS ready: created active directory at %s\n", filepath.Dir(activeDir))
+                        j.mountReady &lt;- nil
+                        return</span>
+                }
+        }
+
+        // If we get here, we didn't see the ready message
+        <span class="cov0" title="0">j.mountReady &lt;- fmt.Errorf("did not receive 'juicefs is ready' message")</span>
+}
+
+func (j *JuiceFS) handleSignals() <span class="cov0" title="0">{
+        select </span>{
+        case sig := &lt;-j.signalCh:<span class="cov0" title="0">
+                fmt.Printf("Received signal %v, stopping JuiceFS...\n", sig)
+                ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+                defer cancel()
+                j.Stop(ctx)</span>
+        case &lt;-j.stoppedCh:<span class="cov0" title="0">
+                // Already stopped, clean up signal handler
+                signal.Stop(j.signalCh)
+                return</span>
+        }
+}
+</pre>
+		
+		</div>
+	</body>
+	<script>
+	(function() {
+		var files = document.getElementById('files');
+		var visible;
+		files.addEventListener('change', onChange, false);
+		function select(part) {
+			if (visible)
+				visible.style.display = 'none';
+			visible = document.getElementById(part);
+			if (!visible)
+				return;
+			files.value = part;
+			visible.style.display = 'block';
+			location.hash = part;
+		}
+		function onChange() {
+			select(files.value);
+			window.scrollTo(0, 0);
+		}
+		if (location.hash != "") {
+			select(location.hash.substr(1));
+		}
+		if (!visible) {
+			select("file0");
+		}
+	})();
+	</script>
+</html>

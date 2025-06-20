@@ -7,7 +7,7 @@ build:
 # Run all tests (unit first, then integration)
 test: test-packages test-unit test-integration
 
-test-packages: test-supervisor
+test-packages: test-supervisor test-docker
 
 # Run integration tests
 test-integration: build
@@ -20,6 +20,9 @@ test-unit:
 # Run supervisor package tests specifically
 test-supervisor:
 	cd packages/supervisor && go test -v -failfast ./...
+
+test-juicefs:
+	cd packages/juicefs && make test-docker
 
 # Clean build artifacts
 clean:
