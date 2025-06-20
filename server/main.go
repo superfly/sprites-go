@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -21,34 +20,15 @@ import (
 // version is set at build time via ldflags
 var version = "dev"
 
-// outputTrace outputs a single trace event
-func outputTrace(transition lib.StateTransition) {
-	// Create a simple flat trace with just the transition info
-	trace := map[string]interface{}{
-		"source":  transition.Name,
-		"from":    transition.From,
-		"to":      transition.To,
-		"trigger": transition.Trigger,
-	}
-
-	now := time.Now()
-	fmt.Fprintf(os.Stdout, "TLA+ trace: %v %s\n", trace, now.Format("2006-01-02 15:04:05.000000000 MST"))
-	// Output JSON to stderr
-	if jsonBytes, err := json.Marshal(trace); err == nil {
-		fmt.Fprintf(os.Stderr, "%s\n", jsonBytes)
-	}
-}
-
 // Application holds the main application state
 type Application struct {
-	systemState *managers.SystemState
-	apiServer   *api.Server
-	logger      *slog.Logger
-	ctx         context.Context
-	cancel      context.CancelFunc
-	config      lib.ApplicationConfig
-	monitor     lib.StateMonitor     // State monitor for TLA tracing
-	apiMonitor  *api.APIStateMonitor // API state monitor
+	processState    *managers.ProcessState
+	componentState  *managers.ComponentState
+	apiServer       *api.Server
+	logger          *slog.Logger
+	ctx             context.Context
+	cancel          context.CancelFunc
+	config          lib.ApplicationConfig
 }
 
 // NewApplication creates a new application instance
@@ -69,103 +49,75 @@ func NewApplication(config lib.ApplicationConfig) *Application {
 	// Create context for the application
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Create TLA monitor if tracing is enabled
-	var monitor lib.StateMonitor
-	if config.TLATrace {
-		logger.Info("TLA+ trace logging enabled")
-		monitor = lib.NewStateMonitor(outputTrace)
-	}
-
 	if config.Debug {
 		logger.Info("Debug logging enabled")
 	}
 
-	// Create API state monitor that will be shared
-	var apiMonitor *api.APIStateMonitor
-	if config.APIListenAddr != "" {
-		apiMonitor = api.NewAPIStateMonitor()
-	}
-
-	// Create components dynamically from configuration
-	components := make([]managers.ManagedComponent, 0, len(config.Components))
-
-	for componentName, componentScripts := range config.Components {
-		// Create concrete CmdComponent with configuration
-		componentConfig := adapters.CmdComponentConfig{
-			Name:              componentName,
-			StartCommand:      componentScripts.StartCommand,
-			ReadyCommand:      componentScripts.ReadyCommand,
-			CheckpointCommand: componentScripts.CheckpointCommand,
-			RestoreCommand:    componentScripts.RestoreCommand,
-		}
-		component := adapters.NewCmdComponent(componentConfig)
-		// Cast adapters.Component to managers.ManagedComponent (interfaces are compatible)
-		components = append(components, component)
-
-		if config.Debug {
-			logger.Info("Created component", "component", componentName)
+	// Create exactly one component (if configured)
+	var componentState *managers.ComponentState
+	if len(config.Components) > 0 {
+		// For simplicity, we'll use the first component configured
+		// In a real scenario, you might want to handle multiple components differently
+		for componentName, componentScripts := range config.Components {
+			// Create concrete CmdComponent with configuration
+			componentConfig := adapters.CmdComponentConfig{
+				Name:              componentName,
+				StartCommand:      componentScripts.StartCommand,
+				ReadyCommand:      componentScripts.ReadyCommand,
+				CheckpointCommand: componentScripts.CheckpointCommand,
+				RestoreCommand:    componentScripts.RestoreCommand,
+			}
+			component := adapters.NewCmdComponent(componentConfig)
+			
+			// Create component state manager
+			componentState = managers.NewComponentState(componentName+"Component", component)
+			
+			if config.Debug {
+				logger.Info("Created component", "component", componentName)
+			}
+			
+			// Only handle the first component for now
+			break
 		}
 	}
 
 	// Create process state manager for the supervised process
-	processConfig := adapters.ProcessConfig{
-		Command:                 config.ProcessCommand,
-		MaxRetries:              config.ProcessRestartMaxRetries,
-		RestartDelay:            time.Second, // Start with 1 second delay
-		GracefulShutdownTimeout: config.ProcessGracefulShutdownTimeout,
-	}
-	// TODO: Handle ProcessWorkingDir and ProcessEnvironment - not currently supported in ProcessConfig
-	if config.ProcessWorkingDir != "" {
-		logger.Info("Process working directory configuration not yet supported", "workingDir", config.ProcessWorkingDir)
-	}
-	if len(config.ProcessEnvironment) > 0 {
-		logger.Info("Process environment configuration not yet supported", "env", config.ProcessEnvironment)
+	var processState *managers.ProcessState
+	if len(config.ProcessCommand) > 0 {
+		processConfig := adapters.ProcessConfig{
+			Command:                 config.ProcessCommand,
+			MaxRetries:              config.ProcessRestartMaxRetries,
+			RestartDelay:            time.Second, // Start with 1 second delay
+			GracefulShutdownTimeout: config.ProcessGracefulShutdownTimeout,
+		}
+		// TODO: Handle ProcessWorkingDir and ProcessEnvironment - not currently supported in ProcessConfig
+		if config.ProcessWorkingDir != "" {
+			logger.Info("Process working directory configuration not yet supported", "workingDir", config.ProcessWorkingDir)
+		}
+		if len(config.ProcessEnvironment) > 0 {
+			logger.Info("Process environment configuration not yet supported", "env", config.ProcessEnvironment)
+		}
+
+		process := adapters.NewProcess(processConfig)
+		processState = managers.NewProcessState(managers.ProcessStateConfig{
+			Process: process,
+		})
 	}
 
-	process := adapters.NewProcess(processConfig)
-
-	// Create process state manager with monitor
-	var processMonitors []lib.StateMonitor
-	if monitor != nil {
-		processMonitors = []lib.StateMonitor{monitor}
-	}
-	processStateMachine := managers.NewProcessState(managers.ProcessStateConfig{
-		Process: process,
-	}, processMonitors)
-
-	// Create system state manager with monitors (including API monitor)
-	systemConfig := managers.SystemConfig{
-		ProcessState: processStateMachine,
-		Components:   components,
-	}
-	var systemMonitors []lib.StateMonitor
-	if monitor != nil {
-		systemMonitors = append(systemMonitors, monitor)
-	}
-	// Don't include API monitor here - it's managed by the API server
-	// and we need to pass it separately to get state transition events
-	if apiMonitor != nil {
-		// We'll pass it to NewSystemState but it won't be auto-closed
-		systemMonitors = append(systemMonitors, apiMonitor)
-	}
-
-	systemState := managers.NewSystemState(systemConfig, systemMonitors)
-
-	// Create API server with the system state
+	// Create API server with the process state
 	var apiServer *api.Server
 	if config.APIListenAddr != "" {
-		apiServer = api.NewServerWithMonitor(config.APIListenAddr, systemState, logger, &config, apiMonitor)
+		apiServer = api.NewServer(config.APIListenAddr, processState, componentState, logger, &config)
 	}
 
 	app := &Application{
-		systemState: systemState,
-		apiServer:   apiServer,
-		logger:      logger,
-		ctx:         ctx,
-		cancel:      cancel,
-		config:      config,
-		monitor:     monitor,
-		apiMonitor:  apiMonitor,
+		processState:   processState,
+		componentState: componentState,
+		apiServer:      apiServer,
+		logger:         logger,
+		ctx:            ctx,
+		cancel:         cancel,
+		config:         config,
 	}
 
 	return app
@@ -183,11 +135,43 @@ func (app *Application) Start(ctx context.Context) error {
 		}
 	}
 
-	// Trigger the initial system startup sequence
-	app.logger.Info("Starting system state machine...")
-	app.systemState.Fire("SystemStarting")
+	// Start component state manager first (if configured)
+	if app.componentState != nil {
+		app.logger.Info("Starting component state machine...")
+		if err := app.componentState.Fire("Starting"); err != nil {
+			app.logger.Error("Failed to start component", "error", err)
+			return err
+		}
+		
+		// Wait for component to be running
+		// In a real implementation, you might want to poll or use events
+		// For now, we'll check the state after a brief delay
+		time.Sleep(2 * time.Second)
+		
+		currentState := app.componentState.MustState().(string)
+		if currentState == "Running" {
+			app.logger.Info("Component is running, starting process...")
+			
+			// After component is running, start the process
+			if app.processState != nil {
+				if err := app.processState.Fire("Starting"); err != nil {
+					app.logger.Error("Failed to start process", "error", err)
+					return err
+				}
+			}
+		} else {
+			app.logger.Error("Component failed to reach running state", "state", currentState)
+			return fmt.Errorf("component failed to start, current state: %s", currentState)
+		}
+	} else if app.processState != nil {
+		// No component configured, just start the process
+		app.logger.Info("Starting process state machine...")
+		if err := app.processState.Fire("Starting"); err != nil {
+			app.logger.Error("Failed to start process", "error", err)
+			return err
+		}
+	}
 
-	app.logger.Info("System state machine started, awaiting component readiness...")
 	app.logger.Info("Application started successfully")
 	return nil
 }
@@ -196,19 +180,25 @@ func (app *Application) Start(ctx context.Context) error {
 func (app *Application) Stop(ctx context.Context) error {
 	app.logger.Info("Stopping sprite-env application")
 
-	// Request system shutdown using the trigger-based API
-	app.systemState.Fire("ShutdownRequested")
+	// Stop process first
+	if app.processState != nil {
+		if err := app.processState.Fire("Stopping"); err != nil {
+			app.logger.Error("Failed to stop process", "error", err)
+		}
+	}
+
+	// Then stop component
+	if app.componentState != nil {
+		if err := app.componentState.Fire("Stopping"); err != nil {
+			app.logger.Error("Failed to stop component", "error", err)
+		}
+	}
 
 	// Stop API server if running
 	if app.apiServer != nil {
 		if err := app.apiServer.Stop(ctx); err != nil {
 			app.logger.Error("Failed to shutdown API server", "error", err)
 		}
-	}
-
-	// Close the API monitor if it exists
-	if app.apiMonitor != nil {
-		app.apiMonitor.Close()
 	}
 
 	// Cancel application context
@@ -223,7 +213,6 @@ func parseCommandLineArgs() (lib.ApplicationConfig, error) {
 	var componentsDir string
 	var testDir string
 	var debug bool
-	var tlaTrace bool
 	var logJSON bool
 	var gracefulShutdownTimeout time.Duration
 	var listenAddr string
@@ -234,7 +223,6 @@ func parseCommandLineArgs() (lib.ApplicationConfig, error) {
 	flag.StringVar(&componentsDir, "components-dir", "", "Directory containing component subdirectories with management scripts")
 	flag.StringVar(&testDir, "test-dir", "", "Test directory containing component subdirectories (alias for -components-dir)")
 	flag.BoolVar(&debug, "debug", false, "Enable debug logging")
-	flag.BoolVar(&tlaTrace, "tla-trace", false, "Enable TLA+ state change tracing")
 	flag.BoolVar(&logJSON, "log-json", false, "Output logs in JSON format")
 	flag.DurationVar(&gracefulShutdownTimeout, "graceful-shutdown-timeout", 30*time.Second, "Timeout for graceful process shutdown before SIGKILL")
 	flag.StringVar(&listenAddr, "listen", "", "HTTP API server listen address (e.g., 0.0.0.0:8090)")
@@ -272,9 +260,6 @@ func parseCommandLineArgs() (lib.ApplicationConfig, error) {
 	if debug {
 		config.Debug = true
 		config.LogLevel = slog.LevelDebug
-	}
-	if tlaTrace {
-		config.TLATrace = true
 	}
 	if logJSON {
 		config.LogJSON = true
@@ -412,15 +397,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Wait for either signal or system to reach terminal state
-	exitCode := 0
-
-	// Create a channel to receive exit codes from the system state machine
-	systemExitChan := make(chan int, 1)
-
-	// Set up the system state machine to send exit codes to our channel
-	app.systemState.SetExitChannel(systemExitChan)
-
+	// Wait for signal
 	select {
 	case sig := <-sigChan:
 		app.logger.Info("Received signal, shutting down", "signal", sig)
@@ -436,20 +413,17 @@ func main() {
 		}
 
 		// Set exit code based on signal
+		exitCode := 0
 		if sig == syscall.SIGTERM {
 			exitCode = 143 // 128 + 15
 		} else if sig == syscall.SIGINT {
 			exitCode = 130 // 128 + 2
 		}
+		app.logger.Info("Application exited", "exitCode", exitCode)
+		os.Exit(exitCode)
 
 	case <-ctx.Done():
 		app.logger.Info("Context cancelled, shutting down")
-
-	case exitCode = <-systemExitChan:
-		app.logger.Info("System reached terminal state", "exitCode", exitCode)
-		cancel()
-
-		// Perform cleanup when system reaches terminal state
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutdownCancel()
 
@@ -457,7 +431,4 @@ func main() {
 			app.logger.Error("Error during cleanup", "error", err)
 		}
 	}
-
-	app.logger.Info("Application exited", "exitCode", exitCode)
-	os.Exit(exitCode)
 }

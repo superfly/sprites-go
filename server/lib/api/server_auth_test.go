@@ -10,11 +10,31 @@ import (
 	"testing"
 
 	"sprite-env/lib"
+	"sprite-env/lib/managers"
 )
+
+// mockProcessState implements enough of ProcessState for testing
+type mockProcessState struct {
+	state string
+}
+
+func (m *mockProcessState) MustState() interface{} {
+	if m.state == "" {
+		return "Initializing"
+	}
+	return m.state
+}
+
+func (m *mockProcessState) Fire(trigger string, args ...any) error {
+	return nil
+}
+
+func (m *mockProcessState) SetSystemState(systemState interface{}) {}
+func (m *mockProcessState) Close() {}
+func (m *mockProcessState) GetProcess() managers.ManagedProcess { return nil }
 
 func TestExtractToken(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	mockState := &mockSystemState{}
 	
 	// Create a test config
 	config := &lib.ApplicationConfig{
@@ -24,7 +44,8 @@ func TestExtractToken(t *testing.T) {
 		},
 	}
 	
-	server := NewServer(":8080", mockState, logger, config)
+	server := NewServer(":8080", (*managers.ProcessState)(nil), (*managers.ComponentState)(nil), logger, config)
+	server.processState = (*managers.ProcessState)(nil) // Use nil for this test since we're only testing token extraction
 	
 	tests := []struct {
 		name            string
@@ -155,7 +176,6 @@ func TestAuthMiddleware(t *testing.T) {
 	defer os.Setenv("SPRITE_HTTP_API_TOKEN", oldToken)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	mockState := &mockSystemState{}
 
 	tests := []struct {
 		name           string
@@ -221,7 +241,7 @@ func TestAuthMiddleware(t *testing.T) {
 					TTYWrapperCommand: []string{},
 				},
 			}
-			server := NewServer(":8080", mockState, logger, config)
+			server := NewServer(":8080", (*managers.ProcessState)(nil), (*managers.ComponentState)(nil), logger, config)
 
 			// Create a simple test handler
 			testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

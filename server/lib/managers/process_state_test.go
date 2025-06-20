@@ -57,6 +57,11 @@ func (tmp *testManagedProcess) Events() <-chan adapters.ProcessEventType {
 	return tmp.eventsCh
 }
 
+func (tmp *testManagedProcess) GetState() string {
+	// Simple implementation for testing
+	return "stopped"
+}
+
 // Helper methods for testing
 func (tmp *testManagedProcess) getStartCalls() int {
 	return tmp.startCalls
@@ -99,19 +104,18 @@ func TestProcessStateManager_ValidSequences(t *testing.T) {
 		// Basic functionality
 		{"Initial state", []string{}, "Initializing", true, ""},
 		{"Normal startup sequence", []string{"Starting"}, "Starting", true, ""}, // Stays in Starting without ProcessStartedEvent
-		{"Direct to Error", []string{"Error"}, "Error", true, ""},
-		{"Partial shutdown sequence", []string{"Starting", "Running", "Stopping"}, "Stopping", true, ""}, // Stays in Stopping without ProcessStoppedEvent
-		{"Stopping from Initializing goes to Stopped", []string{"Stopping"}, "Stopped", true, ""},        // New test for coordination fix
+		{"Direct to Error", []string{"ProcessError"}, "Error", true, ""},
+		{"Partial shutdown sequence", []string{"Starting", "ProcessRunning", "Stopping"}, "Stopped", true, ""}, // Automatically goes to Stopped because test process returns "stopped"
 
 		// Custom initial states
-		{"From Starting state", []string{"Running"}, "Running", true, "Starting"},
-		{"From Ready state", []string{}, "Ready", true, "Ready"},
+		{"From Starting state", []string{"ProcessRunning"}, "Running", true, "Starting"},
 
 		// Invalid transitions
-		{"Skip Starting phase", []string{"Running"}, "Initializing", false, ""},
-		{"Direct to Stopped from init", []string{"Stopped"}, "Initializing", false, ""},
+		{"Skip Starting phase", []string{"ProcessRunning"}, "Initializing", false, ""},
+		{"Direct to Stopped from init", []string{"ProcessStopped"}, "Initializing", false, ""},
+		{"Stopping from Initializing", []string{"Stopping"}, "Initializing", false, ""},
 		{"Backwards transition", []string{"Starting", "Initializing"}, "Starting", false, ""},
-		{"Terminal state escape", []string{"Error", "Running"}, "Error", false, ""},
+		{"Terminal state escape", []string{"ProcessError", "ProcessRunning"}, "Error", false, ""},
 	}
 
 	for _, tt := range tests {
@@ -124,7 +128,7 @@ func TestProcessStateManager_ValidSequences(t *testing.T) {
 			if tt.initialState != "" {
 				config.InitialState = tt.initialState
 			}
-			psm = NewProcessState(config, nil)
+			psm = NewProcessState(config)
 			defer psm.Close()
 
 			var lastError error

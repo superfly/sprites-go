@@ -31,7 +31,6 @@ type ApplicationConfig struct {
 	// Logging configuration
 	LogLevel slog.Level
 	LogJSON  bool
-	TLATrace bool
 	Debug    bool
 
 	// API Server configuration

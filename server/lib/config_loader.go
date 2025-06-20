@@ -89,7 +89,6 @@ type JSONConfig struct {
 	// Logging configuration
 	LogLevel string `json:"log_level,omitempty"`
 	LogJSON  bool   `json:"log_json,omitempty"`
-	TLATrace bool   `json:"tla_trace,omitempty"`
 	Debug    bool   `json:"debug,omitempty"`
 
 	// API Server configuration
@@ -125,7 +124,6 @@ type JSONComponentScripts struct {
 func (jc *JSONConfig) ToApplicationConfig() (*ApplicationConfig, error) {
 	config := &ApplicationConfig{
 		LogJSON:                  jc.LogJSON,
-		TLATrace:                 jc.TLATrace,
 		Debug:                    jc.Debug,
 		APIListenAddr:            jc.APIListenAddr,
 		ProcessCommand:           jc.ProcessCommand,

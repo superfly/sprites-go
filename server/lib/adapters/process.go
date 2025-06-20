@@ -362,3 +362,31 @@ func (p *Process) Close() error {
 	}
 	return nil
 }
+
+// GetState returns the current state of the process (ManagedProcess interface)
+func (p *Process) GetState() string {
+	if p.cmd == nil {
+		return "stopped"
+	}
+	
+	if p.cmd.Process == nil {
+		return "stopped"
+	}
+	
+	if p.cmd.ProcessState != nil {
+		if p.cmd.ProcessState.Exited() {
+			exitCode := p.cmd.ProcessState.ExitCode()
+			if exitCode == 0 {
+				return "stopped"
+			} else if exitCode == -1 {
+				// Process was killed
+				return "killed"
+			} else {
+				return "error"
+			}
+		}
+	}
+	
+	// Process is running
+	return "running"
+}

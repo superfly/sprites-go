@@ -13,6 +13,7 @@ import (
 	"sprite-env/lib/api/exec"
 	"sprite-env/lib/api/proxy"
 	"sprite-env/lib/api/state"
+	"sprite-env/lib/managers"
 )
 
 // Server provides the HTTP API with authentication
@@ -24,33 +25,32 @@ type Server struct {
 	stateHandler *state.Handler
 	proxyHandler *proxy.Handler
 	config       *lib.ApplicationConfig
-	systemState  state.SystemStateMachine
-	stateMonitor *APIStateMonitor
+	processState *managers.ProcessState
 	maxWaitTime  time.Duration
 }
 
 // NewServer creates a new API server
-func NewServer(addr string, systemState state.SystemStateMachine, logger *slog.Logger, config *lib.ApplicationConfig) *Server {
-	return NewServerWithMonitor(addr, systemState, logger, config, NewAPIStateMonitor())
-}
-
-// NewServerWithMonitor creates a new API server with a provided state monitor
-func NewServerWithMonitor(addr string, systemState state.SystemStateMachine, logger *slog.Logger, config *lib.ApplicationConfig, stateMonitor *APIStateMonitor) *Server {
+func NewServer(addr string, processState *managers.ProcessState, componentState *managers.ComponentState, logger *slog.Logger, config *lib.ApplicationConfig) *Server {
 	// Use configured wait time or default to 30 seconds
 	maxWaitTime := 30 * time.Second
 	if config != nil && config.APIMaxWaitTime > 0 {
 		maxWaitTime = config.APIMaxWaitTime
 	}
 
+	// Create state handler and set component state
+	stateHandler := state.NewHandler(processState, logger)
+	if componentState != nil {
+		stateHandler.SetComponentState(componentState)
+	}
+
 	apiServer := &Server{
 		logger:       logger,
 		apiToken:     os.Getenv("SPRITE_HTTP_API_TOKEN"),
 		execHandler:  exec.NewHandler(logger, config),
-		stateHandler: state.NewHandler(systemState, logger),
+		stateHandler: stateHandler,
 		proxyHandler: proxy.NewHandler(logger),
 		config:       config,
-		systemState:  systemState,
-		stateMonitor: stateMonitor,
+		processState: processState,
 		maxWaitTime:  maxWaitTime,
 		server: &http.Server{
 			Addr: addr,
@@ -61,11 +61,6 @@ func NewServerWithMonitor(addr string, systemState state.SystemStateMachine, log
 	apiServer.setupEndpoints()
 
 	return apiServer
-}
-
-// GetStateMonitor returns the state monitor for use in system state creation
-func (s *Server) GetStateMonitor() lib.StateMonitor {
-	return s.stateMonitor
 }
 
 // Start starts the API server in a background goroutine
@@ -88,12 +83,6 @@ func (s *Server) Start() error {
 // Stop stops the API server gracefully
 func (s *Server) Stop(ctx context.Context) error {
 	s.logger.Info("Stopping API server")
-
-	// Close the state monitor
-	if s.stateMonitor != nil {
-		s.stateMonitor.Close()
-	}
-
 	return s.server.Shutdown(ctx)
 }
 
@@ -101,7 +90,7 @@ func (s *Server) Stop(ctx context.Context) error {
 func (s *Server) setupEndpoints() {
 	mux := http.NewServeMux()
 
-	// Exec endpoint - waits for system to be running
+	// Exec endpoint - waits for process to be running
 	mux.Handle("/exec", s.waitForRunningMiddleware(s.authMiddleware(s.execHandler)))
 
 	// State management endpoints - don't wait for running state (they might be used during startup)
@@ -110,13 +99,13 @@ func (s *Server) setupEndpoints() {
 	mux.HandleFunc("/restore", s.authMiddleware(
 		http.HandlerFunc(s.stateHandler.HandleRestore)).ServeHTTP)
 
-	// Proxy endpoint - dedicated CONNECT proxy endpoint - waits for system to be running
+	// Proxy endpoint - dedicated CONNECT proxy endpoint - waits for process to be running
 	mux.Handle("/proxy", s.waitForRunningMiddleware(s.authMiddleware(s.proxyHandler)))
 
 	s.server.Handler = mux
 }
 
-// waitForRunningMiddleware waits for the system to reach "Running" state before processing the request
+// waitForRunningMiddleware waits for the process to reach "Running" state before processing the request
 func (s *Server) waitForRunningMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Create a context with timeout
@@ -124,45 +113,58 @@ func (s *Server) waitForRunningMiddleware(next http.Handler) http.Handler {
 		defer cancel()
 
 		// Get current state for logging
-		currentState := s.systemState.MustState().(string)
+		currentState := ""
+		if s.processState != nil {
+			currentState = s.processState.MustState().(string)
+		}
 
 		s.logger.Debug("Request received",
 			"currentState", currentState,
 			"requestPath", r.URL.Path)
 
-		// Wait for system to be ready
+		// Wait for process to be running
 		startTime := time.Now()
-		err := s.stateMonitor.WaitForReady(ctx)
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
 
-		if err != nil {
-			// Context was cancelled or timed out
-			currentState = s.systemState.MustState().(string)
+		for {
+			select {
+			case <-ctx.Done():
+				// Context was cancelled or timed out
+				if s.processState != nil {
+					currentState = s.processState.MustState().(string)
+				}
 
-			if err == context.DeadlineExceeded {
-				s.logger.Warn("Request timeout waiting for system to be ready",
-					"currentState", currentState,
-					"requestPath", r.URL.Path,
-					"waitTime", time.Since(startTime))
-				http.Error(w, fmt.Sprintf("System not ready (current state: %s)", currentState), http.StatusServiceUnavailable)
-			} else {
-				// Request was cancelled
-				s.logger.Info("Request cancelled while waiting for system",
-					"currentState", currentState,
-					"requestPath", r.URL.Path,
-					"waitTime", time.Since(startTime))
+				if ctx.Err() == context.DeadlineExceeded {
+					s.logger.Warn("Request timeout waiting for process to be running",
+						"currentState", currentState,
+						"requestPath", r.URL.Path,
+						"waitTime", time.Since(startTime))
+					http.Error(w, fmt.Sprintf("Process not ready (current state: %s)", currentState), http.StatusServiceUnavailable)
+				} else {
+					// Request was cancelled
+					s.logger.Info("Request cancelled while waiting for process",
+						"currentState", currentState,
+						"requestPath", r.URL.Path,
+						"waitTime", time.Since(startTime))
+				}
+				return
+
+			case <-ticker.C:
+				// Check if process is running
+				if s.processState != nil && s.processState.MustState().(string) == "Running" {
+					// Process is running, process the request
+					waitTime := time.Since(startTime)
+					if waitTime > 100*time.Millisecond {
+						s.logger.Info("Process became ready, processing request",
+							"requestPath", r.URL.Path,
+							"waitTime", waitTime)
+					}
+					next.ServeHTTP(w, r)
+					return
+				}
 			}
-			return
 		}
-
-		// System is ready, process the request
-		waitTime := time.Since(startTime)
-		if waitTime > 100*time.Millisecond {
-			s.logger.Info("System became ready, processing request",
-				"requestPath", r.URL.Path,
-				"waitTime", waitTime)
-		}
-
-		next.ServeHTTP(w, r)
 	})
 }
 
@@ -228,7 +230,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// SetMaxWaitTime sets the maximum time to wait for the system to be ready
+// SetMaxWaitTime sets the maximum time to wait for the process to be ready
 func (s *Server) SetMaxWaitTime(duration time.Duration) {
 	s.maxWaitTime = duration
 }

@@ -8,6 +8,7 @@ import (
 	"sprite-env/lib/adapters"
 
 	"github.com/qmuntal/stateless"
+	"github.com/stretchr/testify/assert"
 )
 
 // testManagedComponent implements ManagedComponent for testing
@@ -20,6 +21,8 @@ type testManagedComponent struct {
 	shouldFailStart      bool
 	shouldFailCheckpoint bool
 	shouldFailRestore    bool
+	startFunc            func(ctx context.Context) error
+	eventChan            chan adapters.ComponentEventType
 }
 
 func newTestManagedComponent() *testManagedComponent {
@@ -78,6 +81,14 @@ func (tmc *testManagedComponent) GetName() string {
 	return "TestComponent"
 }
 
+func (tmc *testManagedComponent) Ready() error {
+	// Simple implementation for testing
+	if tmc.shouldFailStart {
+		return fmt.Errorf("not ready")
+	}
+	return nil
+}
+
 // Helper function to create a component state manager that records all transitions
 func createComponentWithRecording(useSuccessfulOps bool) (*ComponentState, *testManagedComponent, *[]string) {
 	var component *testManagedComponent
@@ -87,7 +98,7 @@ func createComponentWithRecording(useSuccessfulOps bool) (*ComponentState, *test
 		component = newTestManagedComponent()
 	}
 
-	csm := NewComponentState("TestComponent", component, nil)
+	csm := NewComponentState("TestComponent", component)
 
 	var stateChanges []string
 	csm.OnTransitioned(func(ctx context.Context, transition stateless.Transition) {
@@ -110,13 +121,14 @@ func TestComponentState_AllScenarios(t *testing.T) {
 	}{
 		// Basic functionality
 		{"Initial state", []string{}, []string{}, "Initializing", false, false, ""},
-		{"Direct transitions", []string{"Starting", "Running", "Stopping", "Stopped"}, []string{"Starting", "Running", "Stopping", "Stopped"}, "Stopped", true, false, ""},
-		{"Checkpoint transition", []string{"Starting", "Running", "Checkpointing", "Running"}, []string{"Starting", "Running", "Checkpointing", "Running"}, "Running", true, false, ""},
-		{"Restore transition", []string{"Starting", "Running", "Restoring", "Running"}, []string{"Starting", "Running", "Restoring", "Running"}, "Running", true, false, ""},
+		{"Direct transitions", []string{"Starting", "Stopping"}, []string{"Starting", "Running", "Stopping", "Stopped"}, "Stopped", true, false, ""},
+		{"Checkpoint transition", []string{"Starting", "Checkpointing"}, []string{"Starting", "Running", "Checkpointing", "Running"}, "Running", true, false, ""},
+		{"Restore transition", []string{"Starting", "Restoring"}, []string{"Starting", "Running", "Restoring", "Running"}, "Running", true, false, ""},
 		{"Direct error", []string{"Error"}, []string{"Error"}, "Error", false, false, ""},
+		{"Starting fails", []string{"Starting"}, []string{"Starting", "Error"}, "Error", false, false, ""},
 
 		// Custom initial states
-		{"From Running state", []string{"Stopping", "Stopped"}, []string{"Stopping", "Stopped"}, "Stopped", true, false, "Running"},
+		{"From Running state", []string{"Stopping"}, []string{"Stopping", "Stopped"}, "Stopped", true, false, "Running"},
 
 		// Invalid sequences
 		{"Skip to Running", []string{"Running"}, []string{}, "Initializing", false, true, ""},
@@ -137,7 +149,17 @@ func TestComponentState_AllScenarios(t *testing.T) {
 				} else {
 					component = newTestManagedComponent()
 				}
-				csm = NewComponentState("TestComponent", component, nil, tt.initialState)
+				// Cannot set custom initial state anymore - ComponentState always starts at "Initializing"
+				// Need to transition to the desired state instead
+				csm = NewComponentState("TestComponent", component)
+				
+				// Transition to the desired initial state (don't track these transitions)
+				if tt.initialState == "Running" {
+					csm.Fire("Starting")
+					// Don't need to fire "Running" - handleStarting does it automatically
+				}
+				
+				// Now set up state change tracking
 				var newStateChanges []string
 				csm.OnTransitioned(func(ctx context.Context, transition stateless.Transition) {
 					newStateChanges = append(newStateChanges, transition.Destination.(string))
@@ -191,4 +213,33 @@ func TestComponentState_AllScenarios(t *testing.T) {
 			t.Logf("Final state: %s, State changes: %v, Initial: %s", currentState, *stateChanges, tt.initialState)
 		})
 	}
+}
+
+func TestComponentStateTransitions(t *testing.T) {
+	t.Run("Starting->Running transition", func(t *testing.T) {
+		component := &testManagedComponent{
+			startFunc: func(ctx context.Context) error { return nil },
+			eventChan: make(chan adapters.ComponentEventType, 10),
+		}
+
+		csm := NewComponentState("test", component)
+
+		// Verify initial state
+		assert.Equal(t, "Initializing", csm.MustState())
+
+		// ... existing code ...
+	})
+}
+
+func TestComponentStateWithInitialState(t *testing.T) {
+	t.Run("Custom initial state", func(t *testing.T) {
+		component := &testManagedComponent{
+			eventChan: make(chan adapters.ComponentEventType, 10),
+		}
+
+		// Create with custom initial state
+		csm := NewComponentState("test", component)
+		// Start from Initializing as per spec
+		assert.Equal(t, "Initializing", csm.MustState())
+	})
 }

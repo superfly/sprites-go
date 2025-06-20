@@ -277,3 +277,17 @@ func (c *cmdComponent) startReadyProcess() (chan error, *exec.Cmd, error) {
 
 	return readyDone, readyCmd, nil
 }
+
+// Ready checks if the component is ready (ManagedComponent interface)
+func (c *cmdComponent) Ready() error {
+	// If no ready command configured, assume ready
+	if len(c.config.ReadyCommand) == 0 {
+		return nil
+	}
+	
+	// Run ready command synchronously
+	cmd := exec.CommandContext(c.ctx, c.config.ReadyCommand[0], c.config.ReadyCommand[1:]...)
+	cmd.Env = os.Environ()
+	
+	return cmd.Run()
+}
