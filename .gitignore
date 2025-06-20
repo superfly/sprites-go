@@ -15,3 +15,4 @@ spec/trace_*.tla
 spec/trace_*.cfg
 __pycache__
 reference
+fly.toml

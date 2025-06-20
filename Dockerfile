@@ -77,7 +77,6 @@ WORKDIR ${SPRITE_WRITE_DIR}
 
 # Expose the API port
 EXPOSE 7778
-
 # Use sprite-env as entrypoint with config file
 # /usr/local/bin/sprite-env -config /home/sprite/config.json -listen 0.0.0.0:7778
 ENTRYPOINT ["/usr/local/bin/sprite-env", "-config", "/home/sprite/config.json", "-listen", "0.0.0.0:7778"] 

@@ -27,22 +27,11 @@ if [ ! -f "$APP_STORAGE_IMG" ]; then
     mkfs.ext4 "$APP_STORAGE_IMG"
 fi
 
-# Create mount points
-mkdir -p /mnt/app-storage
-
-# Mount the sparse image
-mount -o loop "$APP_STORAGE_IMG" /mnt/app-storage
-
-# Create directories for overlay
-mkdir -p /mnt/app-storage/{upper,work}
-
-mkdir -p /mnt/newroot
-
-# Mount the overlay
-mount -t overlay overlay -o lowerdir=/mnt/app-image,upperdir=/mnt/app-storage/upper,workdir=/mnt/app-storage/work /mnt/newroot
-
-# Verify the overlay mount worked
-ls -la /mnt/newroot/.pilot 2>/dev/null || echo "Warning: .pilot directory not found in overlay"
+# This is a prerun script to do the overlay + loopback inside the namespace
+# Only copy mounts.sh if /mnt/newroot isn't already an overlayfs
+if ! mount | grep -q "^overlay on /mnt/newroot type overlay"; then
+    /home/sprite/mounts.sh
+fi
 
 # Store base config in a variable
 CONFIG_JSON='{
@@ -226,7 +215,7 @@ CONFIG_JSON='{
     {
         "destination": "/data",
         "type": "bind",
-        "source": "/dev/fly_vol/juicefs/data",
+        "source": "/dev/fly_vol/juicefs/data/active/fs",
         "options": ["rbind"]
     },
     {
@@ -458,11 +447,11 @@ combined_args_jq=$(jq -n --argjson entrypoint "$entrypoint_jq" --argjson cmd "$c
 # Prepend tini to the arguments
 # final_args_jq=$(jq -n --argjson combined_args "$combined_args_jq" '[ "/.pilot/tini", "--" ] + $combined_args')
 
-debug "Final arguments for tini:"
-debug "$final_args_jq" | jq .
+# debug "Final arguments for tini:"
+# debug "$final_args_jq" | jq .
 
 # Update the config with final args
-CONFIG_JSON=$(echo "$CONFIG_JSON" | jq --argjson new_args "$final_args_jq" '.process.args = $new_args')
+CONFIG_JSON=$(echo "$CONFIG_JSON" | jq --argjson new_args "$combined_args_jq" '.process.args = $new_args')
 
 # Extract WorkingDir from config, providing a default
 working_dir=$(echo "$APP_IMAGE_CONFIG" | jq -r '.Config.WorkingDir // .config.WorkingDir // "/"')
@@ -511,4 +500,15 @@ fi
 mkdir -p "${SPRITE_WRITE_DIR}/tmp"
 echo "$CONFIG_JSON" > "${SPRITE_WRITE_DIR}/tmp/config.json"
 
-exec crun run -f "${SPRITE_WRITE_DIR}/tmp/config.json" app
+crun run -f "${SPRITE_WRITE_DIR}/tmp/config.json" app &
+pid=$!
+
+# Trap SIGTERM and SIGINT to handle clean unmount
+cleanup() {
+  kill $pid 2>/dev/null
+  umount /mnt/newroot
+  umount /mnt/app-storage
+  exit 0
+}
+
+trap cleanup SIGTERM SIGINT

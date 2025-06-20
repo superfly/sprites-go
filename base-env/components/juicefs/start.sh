@@ -37,6 +37,8 @@ fi
 # Using environment variable references that Litestream will expand
 LITESTREAM_CONFIG="/tmp/litestream-juicefs.yml"
 cat > "$LITESTREAM_CONFIG" <<'EOF'
+logging:
+  level: warn
 dbs:
   - path: ${JUICEFS_META_DB}
     replicas:
@@ -56,7 +58,7 @@ export JUICEFS_META_DB
 CONFIGURED_BUCKET="${SPRITE_S3_BUCKET}"
 
 # Get the bucket from the existing metadata (if it exists)
-EXISTING_BUCKET=$(sqlite3 "${JUICEFS_META_DB}" "select json_extract(value, '$.Bucket') from jfs_setting where name='format'" 2>/dev/null || echo "")
+EXISTING_BUCKET=$(sqlite3 "${JUICEFS_META_DB}" s 2>/dev/null || echo "")
 
 if [ -n "$EXISTING_BUCKET" ] && [ "$EXISTING_BUCKET" = "$CONFIGURED_BUCKET" ]; then
     echo "Using sqlite db on disk (bucket matches)"
@@ -110,14 +112,25 @@ fi
 # Convert KB to MB for JuiceFS
 BUFFER_SIZE_MB=$((BUFFER_SIZE / 1024))
 
-echo "Using buffer size of $BUFFER_SIZE_MB MB"
+juicefs mount -o writeback_cache \
+    --writeback \
+    --upload-delay=1m \
+    --cache-dir=$CACHE_DIR \
+    --cache-size=$CACHE_SIZE_MB \
+    --buffer-size=$BUFFER_SIZE_MB \
+    "$META_URL" "$MOUNT_POINT" &
 
-# Set up command arguments
-MOUNT_ARGS="--cache-dir=$CACHE_DIR --cache-size=$CACHE_SIZE_MB --buffer-size=$BUFFER_SIZE_MB"
+JUICEFS_PID=$!
 
-if [ -n "$FS_MOUNT_OPTIONS" ]; then
-    MOUNT_ARGS="$MOUNT_ARGS $FS_MOUNT_OPTIONS"
-fi
+# Trap SIGTERM and SIGINT to handle clean unmount
+cleanup() {
+  echo "Unmounting JuiceFS..."
+  juicefs unmount "$JUICEFS_MOUNT_POINT" 2>/dev/null || true
+  wait $JUICEFS_PID 2>/dev/null
+  exit 0
+}
 
-# Execute the mount command with all parameters
-exec litestream replicate -config "$LITESTREAM_CONFIG" -exec "juicefs mount $MOUNT_ARGS \"$META_URL\" \"$MOUNT_POINT\""
+litestream replicate -config "$LITESTREAM_CONFIG"
+wait $JUICEFS_PID
+
+trap cleanup SIGTERM SIGINT

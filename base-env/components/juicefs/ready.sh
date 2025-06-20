@@ -10,7 +10,7 @@ while IFS= read -r line; do
     echo "$line"  # Echo the line for transparency
     if [[ "$line" == *"juicefs is ready"* ]]; then
         # JuiceFS is ready, create the active directory
-        mkdir -p "${JUICEFS_MOUNT_POINT}/active"
+        mkdir -p "${JUICEFS_MOUNT_POINT}/active/fs" # the /data dir in container
         echo "JuiceFS ready: created active directory at ${JUICEFS_MOUNT_POINT}/active"
         exit 0
     fi

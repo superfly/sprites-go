@@ -70,11 +70,6 @@ func (c *cmdComponent) Close() error {
 	// First stop the component
 	c.Stop()
 
-	// Close the underlying process
-	if c.startProcess != nil {
-		c.startProcess.Close()
-	}
-
 	// Cancel the context to stop all goroutines
 	if c.cancel != nil {
 		c.cancel()
