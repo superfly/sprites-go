@@ -70,7 +70,13 @@ func NewApplication(config lib.ApplicationConfig) *Application {
 			component := adapters.NewCmdComponent(componentConfig)
 			
 			// Create component state manager
-			componentState = managers.NewComponentState(componentName+"Component", component)
+			// The cmdComponent implements ManagedComponent, but we need to assert it
+			managedComponent, ok := component.(managers.ManagedComponent)
+			if !ok {
+				logger.Error("Component does not implement ManagedComponent interface", "component", componentName)
+				continue
+			}
+			componentState = managers.NewComponentState(componentName+"Component", managedComponent)
 			
 			if config.Debug {
 				logger.Info("Created component", "component", componentName)
