@@ -1,4 +1,4 @@
-package sprite
+package main
 
 import (
 	"bytes"

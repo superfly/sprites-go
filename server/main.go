@@ -45,6 +45,10 @@ type Config struct {
 	S3SecretAccessKey string
 	S3EndpointURL     string
 	S3Bucket          string
+
+	// Exec
+	ExecWrapperCommand    []string
+	ExecTTYWrapperCommand []string
 }
 
 // Application manages the sprite-env components and implements api.ProcessManager
@@ -118,9 +122,11 @@ func NewApplication(config Config) (*Application, error) {
 	// Set up API server if configured
 	if config.APIListenAddr != "" {
 		apiConfig := api.Config{
-			ListenAddr:  config.APIListenAddr,
-			APIToken:    config.APIToken,
-			MaxWaitTime: 30 * time.Second,
+			ListenAddr:            config.APIListenAddr,
+			APIToken:              config.APIToken,
+			MaxWaitTime:           30 * time.Second,
+			ExecWrapperCommand:    config.ExecWrapperCommand,
+			ExecTTYWrapperCommand: config.ExecTTYWrapperCommand,
 		}
 
 		apiServer, err := api.NewServer(apiConfig, app.commandCh, app, logger)
@@ -358,10 +364,9 @@ func (app *Application) performRestore(checkpointID string) {
 			app.logger.Error("Failed to stop process", "error", err)
 			return
 		}
-
-		// Wait for process to actually stop
-		<-app.processDoneCh
+		// supervisor.Stop() blocks until the process has exited
 		app.processRunning = false
+		app.logger.Info("Process stopped successfully")
 	}
 
 	// Perform JuiceFS restore
@@ -463,12 +468,14 @@ func parseCommandLine() (Config, error) {
 		}
 
 		var fileConfig struct {
-			LogLevel   string   `json:"log_level"`
-			LogJSON    bool     `json:"log_json"`
-			APIListen  string   `json:"api_listen_addr"`
-			ProcessCmd []string `json:"process_command"`
-			ProcessDir string   `json:"process_working_dir"`
-			ProcessEnv []string `json:"process_environment"`
+			LogLevel              string   `json:"log_level"`
+			LogJSON               bool     `json:"log_json"`
+			APIListen             string   `json:"api_listen_addr"`
+			ProcessCmd            []string `json:"process_command"`
+			ProcessDir            string   `json:"process_working_dir"`
+			ProcessEnv            []string `json:"process_environment"`
+			ExecWrapperCommand    []string `json:"exec_wrapper_command"`
+			ExecTTYWrapperCommand []string `json:"exec_tty_wrapper_command"`
 		}
 
 		if err := json.Unmarshal(data, &fileConfig); err != nil {
@@ -493,6 +500,8 @@ func parseCommandLine() (Config, error) {
 		config.ProcessCommand = fileConfig.ProcessCmd
 		config.ProcessWorkingDir = fileConfig.ProcessDir
 		config.ProcessEnvironment = fileConfig.ProcessEnv
+		config.ExecWrapperCommand = fileConfig.ExecWrapperCommand
+		config.ExecTTYWrapperCommand = fileConfig.ExecTTYWrapperCommand
 	}
 
 	// Apply command-line overrides

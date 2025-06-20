@@ -189,22 +189,15 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	// Mount JuiceFS
 	mountArgs := []string{
 		"mount",
-		metaURL,
-		mountPath,
+		"-o", "writeback_cache",
+		"--writeback",
+		"--upload-delay=1m",
 		"--cache-dir", cacheDir,
 		"--cache-size", fmt.Sprintf("%d", cacheSizeMB),
 		"--buffer-size", fmt.Sprintf("%d", bufferSizeMB),
 		"--no-syslog",
-	}
-
-	// Only add S3 options if not in local mode
-	if !j.config.LocalMode {
-		mountArgs = append(mountArgs,
-			"--access-key", j.config.S3AccessKey,
-			"--secret-key", j.config.S3SecretAccessKey,
-			"--bucket", j.config.S3Bucket,
-			"--storage", "s3",
-		)
+		metaURL,
+		mountPath,
 	}
 
 	j.mountCmd = exec.CommandContext(ctx, "juicefs", mountArgs...)
@@ -530,11 +523,14 @@ func (j *JuiceFS) formatJuiceFS(ctx context.Context, metaURL string) error {
 		cmd = exec.CommandContext(ctx, "juicefs", "format",
 			"--storage", "s3",
 			"--bucket", bucketURL,
-			"--access-key", j.config.S3AccessKey,
-			"--secret-key", j.config.S3SecretAccessKey,
 			"--trash-days", "0",
 			metaURL,
 			j.config.VolumeName,
+		)
+		// Pass credentials via environment variables for security
+		cmd.Env = append(os.Environ(),
+			fmt.Sprintf("ACCESS_KEY=%s", j.config.S3AccessKey),
+			fmt.Sprintf("SECRET_KEY=%s", j.config.S3SecretAccessKey),
 		)
 	}
 
