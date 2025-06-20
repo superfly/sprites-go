@@ -31,6 +31,37 @@ RUN echo '#!/bin/sh\necho "This system uses s6-overlay for services, not systemd
     ln -sf /usr/local/bin/systemd-redirect /bin/systemctl || true && \
     ln -sf /usr/local/bin/systemd-redirect /sbin/systemctl || true
 
+# Create deb-systemd-helper wrapper to handle package installations gracefully
+RUN if [ -f /usr/bin/deb-systemd-helper ]; then \
+        mv /usr/bin/deb-systemd-helper /usr/bin/deb-systemd-helper.real && \
+        echo '#!/bin/bash\n\
+# Wrapper for deb-systemd-helper to handle systemd operations gracefully\n\
+if [[ "$*" == *"systemctl"* ]] || [[ "$*" == *".service"* ]] || [[ "$*" == *".socket"* ]]; then\n\
+    # For systemd operations, print info if verbose, otherwise silent success\n\
+    if [[ "${DEBIAN_FRONTEND}" != "noninteractive" ]] && [[ "${DEBCONF_NONINTERACTIVE_SEEN}" != "true" ]]; then\n\
+        echo "Note: Skipping systemd service setup (using s6-overlay instead). See /llm.txt" >&2\n\
+    fi\n\
+    exit 0\n\
+else\n\
+    # Pass through to the real helper for non-systemd operations\n\
+    exec /usr/bin/deb-systemd-helper.real "$@"\n\
+fi' > /usr/bin/deb-systemd-helper && \
+        chmod +x /usr/bin/deb-systemd-helper; \
+    fi
+
+# Create invoke-rc.d wrapper to handle service operations gracefully
+RUN if [ -f /usr/sbin/invoke-rc.d ]; then \
+        mv /usr/sbin/invoke-rc.d /usr/sbin/invoke-rc.d.real && \
+        echo '#!/bin/bash\n\
+# Wrapper for invoke-rc.d to handle init script operations gracefully\n\
+# Since we use s6-overlay, skip traditional init script operations\n\
+if [[ "${DEBIAN_FRONTEND}" != "noninteractive" ]] && [[ "${DEBCONF_NONINTERACTIVE_SEEN}" != "true" ]]; then\n\
+    echo "Note: Skipping init script $2 (using s6-overlay instead). See /llm.txt" >&2\n\
+fi\n\
+exit 0' > /usr/sbin/invoke-rc.d && \
+        chmod +x /usr/sbin/invoke-rc.d; \
+    fi
+
 # Copy documentation
 COPY llm.txt /llm.txt
 COPY docs /docs

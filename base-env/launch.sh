@@ -370,7 +370,6 @@ CONFIG_JSON='{
       "/proc/bus",
       "/proc/fs",
       "/proc/irq",
-      "/proc/sys",
       "/proc/sysrq-trigger"
     ]
   }

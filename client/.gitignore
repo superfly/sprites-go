@@ -1,0 +1,15 @@
+# Built binaries
+sprite-client
+sprite-client-*
+
+# Go build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binaries
+*.test
+
+# Output of go coverage
+*.out 

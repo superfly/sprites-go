@@ -1,6 +1,9 @@
-# Sprite Deploy Utility
+# Sprite Deploy Utilities
 
-A hacky deployment utility for deploying Docker images to Fly.io with volume and machine management.
+A collection of utilities for managing Sprite environments on Fly.io:
+- `deploy.go` - Deploy Docker images with volume and machine management
+- `show.go` - Display machine information and configuration
+- `exec.go` - Execute commands remotely via the Sprite API
 
 ## Prerequisites
 

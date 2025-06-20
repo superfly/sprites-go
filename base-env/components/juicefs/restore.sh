@@ -1,9 +1,6 @@
 #!/bin/bash
 set -e
 
-# Get checkpoint ID from first argument or environment variable
-CHECKPOINT_ID="${1:-${SPRITE_RESTORE_ID}}"
-
 if [ -z "$CHECKPOINT_ID" ]; then
     echo "ERROR: No checkpoint ID provided"
     echo "Usage: $0 <checkpoint-id>"
