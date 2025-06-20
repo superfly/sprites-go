@@ -1,5 +1,4 @@
 {
-  "init": {},
   "guest": {
     "cpu_kind": "shared",
     "cpus": 4,
@@ -11,11 +10,13 @@
       "path": "/dev/fly_vol"
     }
   ],
-  "image": "docker.io/jrei/systemd-ubuntu:25.04", 
+  "image": "registry.fly.io/sprite-env-prime:ubuntu-s6-2", 
   "containers": [
     {
       "name": "sprite",
       "image": "<image_ref>",
+      "entrypoint": ["tail", "-f", "/dev/null"],
+      "command": ["/bin/bash"],
       "env": {},
       "secrets": [
         {
@@ -41,7 +42,7 @@
       ],
       "files":[{
         "guest_path": "/etc/app-image.json",
-        "image_config": "docker.io/jrei/systemd-ubuntu:25.04"
+        "image_config": "registry.fly.io/sprite-env-prime:ubuntu-s6-2"
       }],
       "mounts": [
         {
@@ -53,14 +54,8 @@
           "path": "/mnt/app-image"
         }
       ],
-      "depends_on": [
-        {
-          "name": "storage",
-          "condition": "healthy"
-        }
-      ],
       "restart": {
-        "policy": "always"
+        "policy": "no"
       }
     }
   ],
@@ -87,8 +82,7 @@
     }
   ],
   "restart": {
-    "policy": "no",
-    "max_retries": 10
+    "policy": "no"
   },
   "stop_config": {
     "timeout": "30s",
@@ -104,7 +98,7 @@
     },
     {
       "name": "app-image",
-      "image": "docker.io/jrei/systemd-ubuntu:25.04"
+      "image": "registry.fly.io/sprite-env-prime:ubuntu-s6-2"
     }
   ]
 }

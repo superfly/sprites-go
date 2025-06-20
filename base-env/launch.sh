@@ -456,7 +456,7 @@ fi
 combined_args_jq=$(jq -n --argjson entrypoint "$entrypoint_jq" --argjson cmd "$cmd_jq" '$entrypoint + $cmd | map(select(. != ""))')
 
 # Prepend tini to the arguments
-final_args_jq=$(jq -n --argjson combined_args "$combined_args_jq" '[ "/.pilot/tini", "--" ] + $combined_args')
+# final_args_jq=$(jq -n --argjson combined_args "$combined_args_jq" '[ "/.pilot/tini", "--" ] + $combined_args')
 
 debug "Final arguments for tini:"
 debug "$final_args_jq" | jq .

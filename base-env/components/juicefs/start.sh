@@ -33,6 +33,25 @@ if [ ! -z "$missing_vars" ]; then
     exit 1
 fi
 
+# Create litestream configuration dynamically (before we need it)
+# Using environment variable references that Litestream will expand
+LITESTREAM_CONFIG="/tmp/litestream-juicefs.yml"
+cat > "$LITESTREAM_CONFIG" <<'EOF'
+dbs:
+  - path: ${JUICEFS_META_DB}
+    replicas:
+      - type: s3
+        endpoint: ${SPRITE_S3_ENDPOINT_URL}
+        bucket: ${SPRITE_S3_BUCKET}
+        path: juicefs-metadata
+        access-key-id: ${SPRITE_S3_ACCESS_KEY}
+        secret-access-key: ${SPRITE_S3_SECRET_ACCESS_KEY}
+        sync-interval: 1s
+EOF
+
+# Export JUICEFS_META_DB for litestream config to use
+export JUICEFS_META_DB
+
 # Get the configured bucket from environment
 CONFIGURED_BUCKET="${SPRITE_S3_BUCKET}"
 
@@ -45,7 +64,7 @@ else
     rm -f "${JUICEFS_META_DB}"
     rm -rf "$CACHE_DIR"
     echo "Restoring juicefs db from $CONFIGURED_BUCKET"
-    litestream restore -if-replica-exists "${JUICEFS_META_DB}"
+    litestream restore -config "$LITESTREAM_CONFIG" -if-replica-exists "${JUICEFS_META_DB}"
 fi
 
 # Ensure cache directory exists
@@ -99,21 +118,6 @@ MOUNT_ARGS="--cache-dir=$CACHE_DIR --cache-size=$CACHE_SIZE_MB --buffer-size=$BU
 if [ -n "$FS_MOUNT_OPTIONS" ]; then
     MOUNT_ARGS="$MOUNT_ARGS $FS_MOUNT_OPTIONS"
 fi
-
-# Create litestream configuration dynamically
-LITESTREAM_CONFIG="/tmp/litestream-juicefs.yml"
-cat > "$LITESTREAM_CONFIG" <<EOF
-dbs:
-  - path: ${JUICEFS_META_DB}
-    replicas:
-      - type: s3
-        endpoint: ${SPRITE_S3_ENDPOINT_URL}
-        bucket: ${SPRITE_S3_BUCKET}
-        path: juicefs-metadata
-        access-key-id: ${SPRITE_S3_ACCESS_KEY}
-        secret-access-key: ${SPRITE_S3_SECRET_ACCESS_KEY}
-        sync-interval: 1s
-EOF
 
 # Execute the mount command with all parameters
 exec litestream replicate -config "$LITESTREAM_CONFIG" -exec "juicefs mount $MOUNT_ARGS \"$META_URL\" \"$MOUNT_POINT\""

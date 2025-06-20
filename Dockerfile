@@ -1,23 +1,26 @@
 # syntax=docker/dockerfile:1
 
-# Build stage
-FROM golang:1.24-alpine AS builder
-
-# Install build dependencies
+# Build stage for AMD64
+FROM --platform=linux/amd64 golang:1.24-alpine AS builder-amd64
 RUN apk add --no-cache git
-
 WORKDIR /build
-
-# Copy go mod files
 COPY server/go.mod server/go.sum ./
 RUN go mod download
-
-# Copy source code
 COPY server/. .
-
-# Build the binary with version from build arg
 ARG VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux go build \
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -ldflags="-w -s -X main.version=${VERSION}" \
+    -o sprite-env .
+
+# Build stage for ARM64
+FROM --platform=linux/arm64 golang:1.24-alpine AS builder-arm64
+RUN apk add --no-cache git
+WORKDIR /build
+COPY server/go.mod server/go.sum ./
+RUN go mod download
+COPY server/. .
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
     -ldflags="-w -s -X main.version=${VERSION}" \
     -o sprite-env .
 
@@ -47,8 +50,17 @@ RUN apt-get update && \
 
 # Copy binaries from other stages
 COPY --from=crun /crun /usr/local/bin/crun
-COPY --from=builder /build/sprite-env /usr/local/bin/sprite-env
 COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
+
+# Copy the appropriate binary based on target platform
+ARG TARGETPLATFORM
+COPY --from=builder-amd64 /build/sprite-env /usr/local/bin/sprite-env.amd64
+COPY --from=builder-arm64 /build/sprite-env /usr/local/bin/sprite-env.arm64
+RUN if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
+        mv /usr/local/bin/sprite-env.amd64 /usr/local/bin/sprite-env && rm -f /usr/local/bin/sprite-env.arm64; \
+    else \
+        mv /usr/local/bin/sprite-env.arm64 /usr/local/bin/sprite-env && rm -f /usr/local/bin/sprite-env.amd64; \
+    fi
 
 # Define environment variables for paths
 ENV SPRITE_WRITE_DIR=/dev/fly_vol \
@@ -67,4 +79,5 @@ WORKDIR ${SPRITE_WRITE_DIR}
 EXPOSE 7778
 
 # Use sprite-env as entrypoint with config file
+# /usr/local/bin/sprite-env -config /home/sprite/config.json -listen 0.0.0.0:7778
 ENTRYPOINT ["/usr/local/bin/sprite-env", "-config", "/home/sprite/config.json", "-listen", "0.0.0.0:7778"] 

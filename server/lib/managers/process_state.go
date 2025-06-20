@@ -81,7 +81,8 @@ func NewProcessState(config ProcessStateConfig, monitors []lib.StateMonitor) *Pr
 		Permit("Error", "Error").
 		Permit("Exited", "Exited").
 		Permit("Crashed", "Crashed").
-		Permit("Killed", "Killed")
+		Permit("Killed", "Killed").
+		Ignore("Starting")
 
 	// Stopping - graceful stop process
 	sm.Configure("Stopping").

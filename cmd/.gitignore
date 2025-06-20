@@ -1,0 +1,6 @@
+# Built binary
+deploy
+
+# Temporary files
+*.tmp
+machine-config-*.json

@@ -1,0 +1,148 @@
+=======================================================
+s6-overlay Service Management Guide
+=======================================================
+
+This container uses s6-overlay instead of systemd for process supervision.
+s6-overlay is a lightweight init system designed specifically for containers.
+
+QUICK START - Creating a Service
+================================
+
+1. Create a service directory:
+   mkdir -p /etc/services.d/myservice
+
+2. Create a run script:
+   cat > /etc/services.d/myservice/run << 'EOF'
+   #!/usr/bin/with-contenv sh
+   exec myprogram --with-options
+   EOF
+
+3. Make it executable:
+   chmod +x /etc/services.d/myservice/run
+
+That's it! Your service will start automatically when the container starts.
+
+DETAILED GUIDE
+==============
+
+Service Structure
+-----------------
+Services live in /etc/services.d/ with this structure:
+/etc/services.d/
+└── servicename/
+    ├── run          (required: the main service script)
+    ├── finish       (optional: cleanup script)
+    └── down         (optional: if exists, service won't auto-start)
+
+The Run Script
+--------------
+The run script should:
+- Be executable (chmod +x)
+- Start with #!/usr/bin/with-contenv sh (or bash)
+- Use 'exec' to run your program (important for signal handling)
+- Not fork/background the process
+
+Example run script:
+#!/usr/bin/with-contenv sh
+exec nginx -g "daemon off;"
+
+Optional Finish Script
+----------------------
+Runs when the service stops. Useful for cleanup:
+#!/usr/bin/with-contenv sh
+echo "Service ${1} stopped with exit code ${2}"
+
+Service Dependencies
+--------------------
+Create dependencies using the s6-rc format:
+1. Create /etc/s6-overlay/s6-rc.d/myservice/type with content: "longrun"
+2. Create /etc/s6-overlay/s6-rc.d/myservice/run (your service script)
+3. Create /etc/s6-overlay/s6-rc.d/myservice/dependencies.d/ directory
+4. Touch files named after services this depends on
+
+Environment Variables
+---------------------
+- Place files in /etc/cont-env.d/ to set container-wide environment variables
+- Variables are available to all services via 'with-contenv'
+
+Initialization Scripts
+----------------------
+For one-time setup, use /etc/cont-init.d/:
+- Scripts run once at container start
+- Run in lexicographic order
+- Must be executable
+
+Example:
+/etc/cont-init.d/01-setup
+#!/usr/bin/with-contenv sh
+mkdir -p /var/log/myapp
+chown myuser:mygroup /var/log/myapp
+
+Logging
+-------
+- Service stdout/stderr are automatically captured
+- Logs available in /run/s6-rc:s6-log-daemon/current
+- For custom logging, pipe to s6-log
+
+Common Commands
+---------------
+# Check service status
+s6-svstat /run/service/myservice
+
+# Stop a service
+s6-svc -d /run/service/myservice
+
+# Start a service
+s6-svc -u /run/service/myservice
+
+# Send a signal to a service
+s6-svc -h /run/service/myservice  # SIGHUP
+
+Setting Container Exit Code
+---------------------------
+To make the container exit when your main service exits:
+1. Create /etc/services.d/myservice/finish
+2. Add: s6-svscanctl -t /var/run/s6/services
+
+EXAMPLES
+========
+
+Example 1: Simple Web Server
+----------------------------
+/etc/services.d/webapp/run:
+#!/usr/bin/with-contenv sh
+cd /app
+exec python -m http.server 8080
+
+Example 2: Service with Environment
+-----------------------------------
+/etc/cont-env.d/webapp:
+APP_PORT=3000
+APP_ENV=production
+
+/etc/services.d/webapp/run:
+#!/usr/bin/with-contenv sh
+exec node /app/server.js
+
+Example 3: Service with Dependencies
+------------------------------------
+/etc/s6-overlay/s6-rc.d/webapp/type:
+longrun
+
+/etc/s6-overlay/s6-rc.d/webapp/dependencies.d/database:
+(empty file - just needs to exist)
+
+/etc/s6-overlay/s6-rc.d/webapp/run:
+#!/usr/bin/with-contenv sh
+exec /app/webapp
+
+MORE INFORMATION
+================
+Full documentation: https://github.com/just-containers/s6-overlay
+s6 documentation: https://skarnet.org/software/s6/
+
+Key differences from systemd:
+- No systemctl - use s6-svc commands instead
+- Services are defined by directories, not unit files
+- Lighter weight and designed for containers
+- Services supervised by default (auto-restart on crash) 

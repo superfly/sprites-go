@@ -1,0 +1,54 @@
+=======================================================
+Language Runtimes Management with mise
+=======================================================
+
+This container includes mise (formerly rtx) for managing programming language runtimes.
+mise is a polyglot runtime manager that replaces tools like nvm, rbenv, pyenv, etc.
+
+AVAILABLE LANGUAGES
+===================
+The following language runtimes are pre-installed globally:
+- Bun
+- Deno  
+- Elixir
+- Erlang
+- Go
+- Java
+- Node.js
+- Python
+- Ruby
+- Rust
+- Zig
+
+Note: Availability may vary by platform/architecture.
+
+FOR DETAILED HELP
+=================
+Run this command to read mise help:
+  mise --help
+
+Or for help on specific commands:
+  mise help install
+  mise help use
+  mise help list
+
+QUICK EXAMPLE
+=============
+
+Here's how to install and use a specific Node.js version:
+
+1. Install Node.js 20:
+   mise install node@20
+
+2. Use it in current directory:
+   mise use node@20
+
+3. Or set it globally:
+   mise use -g node@20
+
+That's it! The same pattern works for all supported languages.
+
+MORE INFORMATION
+================
+Official documentation: https://mise.jdx.dev/
+GitHub: https://github.com/jdx/mise 
