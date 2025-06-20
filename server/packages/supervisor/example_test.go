@@ -13,7 +13,7 @@ func ExampleSupervisor() {
 	// Create a supervisor for a simple echo command
 	s, err := supervisor.New(supervisor.Config{
 		Command:     "echo",
-		Args:        []string{"Hello, World!"},
+		Args:        []string{"-n", "test"},
 		GracePeriod: 5 * time.Second,
 	})
 	if err != nil {
@@ -21,7 +21,8 @@ func ExampleSupervisor() {
 	}
 
 	// Start the process
-	if err := s.Start(); err != nil {
+	_, err = s.Start()
+	if err != nil {
 		log.Fatal(err)
 	}
 
@@ -31,6 +32,7 @@ func ExampleSupervisor() {
 	}
 
 	// Output:
+	// test
 }
 
 func ExampleSupervisor_longRunning() {
@@ -45,12 +47,12 @@ func ExampleSupervisor_longRunning() {
 	}
 
 	// Start the process
-	if err := s.Start(); err != nil {
+	pid, err := s.Start()
+	if err != nil {
 		log.Fatal(err)
 	}
 
-	// Get the process ID
-	pid, _ := s.Pid()
+	// Show the process ID
 	fmt.Printf("Started process with PID: %d\n", pid)
 
 	// Run for a while
@@ -76,7 +78,8 @@ func ExampleSupervisor_signalForwarding() {
 	}
 
 	// Start the process
-	if err := s.Start(); err != nil {
+	_, err = s.Start()
+	if err != nil {
 		log.Fatal(err)
 	}
 

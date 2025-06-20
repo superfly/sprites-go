@@ -1,11 +1,13 @@
-.PHONY: build test test-integration test-unit clean docker-build-test release-all release-linux-amd64 release-linux-arm64 release-darwin-amd64 release-darwin-arm64
+.PHONY: build test test-integration test-unit test-supervisor clean docker-build-test release-all release-linux-amd64 release-linux-arm64 release-darwin-amd64 release-darwin-arm64
 
 # Build the server
 build:
 	go build -o tmp/sprite-env .
 
 # Run all tests (unit first, then integration)
-test: test-unit test-integration
+test: test-packages test-unit test-integration
+
+test-packages: test-supervisor
 
 # Run integration tests
 test-integration: build
@@ -14,6 +16,10 @@ test-integration: build
 # Run unit tests
 test-unit:
 	go test -v -failfast ./lib/...
+
+# Run supervisor package tests specifically
+test-supervisor:
+	cd packages/supervisor && go test -v -failfast ./...
 
 # Clean build artifacts
 clean:

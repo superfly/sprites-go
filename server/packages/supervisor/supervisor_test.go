@@ -3,9 +3,11 @@ package supervisor
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -69,21 +71,26 @@ func TestStartStop(t *testing.T) {
 	}
 
 	// Test start
-	if err := s.Start(); err != nil {
+	pid, err := s.Start()
+	if err != nil {
 		t.Fatalf("Failed to start process: %v", err)
+	}
+	if pid <= 0 {
+		t.Errorf("Invalid PID returned from Start: %d", pid)
 	}
 
 	// Verify process is running
-	pid, err := s.Pid()
+	pidFromGetter, err := s.Pid()
 	if err != nil {
 		t.Fatalf("Failed to get PID: %v", err)
 	}
-	if pid <= 0 {
-		t.Errorf("Invalid PID: %d", pid)
+	if pidFromGetter != pid {
+		t.Errorf("PID mismatch: Start returned %d, Pid() returned %d", pid, pidFromGetter)
 	}
 
 	// Test double start
-	if err := s.Start(); err == nil {
+	_, err = s.Start()
+	if err == nil {
 		t.Error("Expected error on double start")
 	}
 
@@ -119,7 +126,8 @@ while true; do sleep 0.1; done
 		t.Fatalf("Failed to create supervisor: %v", err)
 	}
 
-	if err := s.Start(); err != nil {
+	_, err = s.Start()
+	if err != nil {
 		t.Fatalf("Failed to start process: %v", err)
 	}
 
@@ -164,7 +172,8 @@ while true; do sleep 0.1; done
 		t.Fatalf("Failed to create supervisor: %v", err)
 	}
 
-	if err := s.Start(); err != nil {
+	_, err = s.Start()
+	if err != nil {
 		t.Fatalf("Failed to start process: %v", err)
 	}
 
@@ -187,7 +196,7 @@ while true; do sleep 0.1; done
 	if err == nil {
 		t.Error("Expected error from force kill")
 	}
-	
+
 	// Check that the error message contains "process killed after grace period"
 	if err != nil && !strings.Contains(err.Error(), "process killed after grace period") {
 		t.Errorf("Expected error about process killed after grace period, got: %v", err)
@@ -217,7 +226,8 @@ while true; do sleep 0.1; done
 		t.Fatalf("Failed to create supervisor: %v", err)
 	}
 
-	if err := s.Start(); err != nil {
+	_, err = s.Start()
+	if err != nil {
 		t.Fatalf("Failed to start process: %v", err)
 	}
 
@@ -248,7 +258,8 @@ func TestProcessExit(t *testing.T) {
 		t.Fatalf("Failed to create supervisor: %v", err)
 	}
 
-	if err := s.Start(); err != nil {
+	_, err = s.Start()
+	if err != nil {
 		t.Fatalf("Failed to start process: %v", err)
 	}
 
@@ -303,7 +314,8 @@ func TestConcurrentOperations(t *testing.T) {
 		t.Fatalf("Failed to create supervisor: %v", err)
 	}
 
-	if err := s.Start(); err != nil {
+	_, err = s.Start()
+	if err != nil {
 		t.Fatalf("Failed to start process: %v", err)
 	}
 
@@ -362,15 +374,14 @@ while true; do sleep 0.1; done
 		t.Fatalf("Failed to create supervisor: %v", err)
 	}
 
-	if err := s.Start(); err != nil {
+	pid, err := s.Start()
+	if err != nil {
 		t.Fatalf("Failed to start process: %v", err)
 	}
 
 	// Give time for child processes to spawn
 	time.Sleep(200 * time.Millisecond)
 
-	pid, _ := s.Pid()
-	
 	// Count processes in the group before stopping
 	beforeCount := countProcessGroup(pid)
 	if beforeCount < 4 { // parent + 3 children
@@ -434,12 +445,215 @@ func TestEnvironmentAndDirectory(t *testing.T) {
 		t.Fatalf("Failed to create supervisor: %v", err)
 	}
 
-	if err := s.Start(); err != nil {
+	_, err = s.Start()
+	if err != nil {
 		t.Fatalf("Failed to start process: %v", err)
 	}
 
 	// Process should exit quickly
 	if err := s.Wait(); err != nil {
 		t.Errorf("Process exited with error: %v", err)
+	}
+}
+
+func TestStdoutPipe(t *testing.T) {
+	s, err := New(Config{
+		Command: "bash",
+		Args:    []string{"-c", "echo 'Hello stdout'; sleep 0.1; echo 'Second line'"},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create supervisor: %v", err)
+	}
+
+	// Get stdout pipe before starting
+	stdoutPipe, err := s.StdoutPipe()
+	if err != nil {
+		t.Fatalf("Failed to get stdout pipe: %v", err)
+	}
+	defer stdoutPipe.Close()
+
+	_, err = s.Start()
+	if err != nil {
+		t.Fatalf("Failed to start process: %v", err)
+	}
+
+	// Read output
+	var output []byte
+	buf := make([]byte, 1024)
+	for {
+		n, err := stdoutPipe.Read(buf)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Failed to read from stdout pipe: %v", err)
+		}
+		output = append(output, buf[:n]...)
+	}
+
+	expectedOutput := "Hello stdout\nSecond line\n"
+	if string(output) != expectedOutput {
+		t.Errorf("Expected output %q, got %q", expectedOutput, string(output))
+	}
+
+	// Wait for process to finish
+	if err := s.Wait(); err != nil {
+		t.Errorf("Process exited with error: %v", err)
+	}
+}
+
+func TestStderrPipe(t *testing.T) {
+	s, err := New(Config{
+		Command: "bash",
+		Args:    []string{"-c", "echo 'Error message' >&2; sleep 0.1; echo 'Another error' >&2"},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create supervisor: %v", err)
+	}
+
+	// Get stderr pipe before starting
+	stderrPipe, err := s.StderrPipe()
+	if err != nil {
+		t.Fatalf("Failed to get stderr pipe: %v", err)
+	}
+	defer stderrPipe.Close()
+
+	_, err = s.Start()
+	if err != nil {
+		t.Fatalf("Failed to start process: %v", err)
+	}
+
+	// Read error output
+	var output []byte
+	buf := make([]byte, 1024)
+	for {
+		n, err := stderrPipe.Read(buf)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Failed to read from stderr pipe: %v", err)
+		}
+		output = append(output, buf[:n]...)
+	}
+
+	expectedOutput := "Error message\nAnother error\n"
+	if string(output) != expectedOutput {
+		t.Errorf("Expected stderr output %q, got %q", expectedOutput, string(output))
+	}
+
+	// Wait for process to finish
+	if err := s.Wait(); err != nil {
+		t.Errorf("Process exited with error: %v", err)
+	}
+}
+
+func TestMultipleStdoutReaders(t *testing.T) {
+	s, err := New(Config{
+		Command: "bash",
+		Args:    []string{"-c", "for i in {1..5}; do echo \"Line $i\"; sleep 0.05; done"},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create supervisor: %v", err)
+	}
+
+	// Create multiple stdout readers
+	reader1, err := s.StdoutPipe()
+	if err != nil {
+		t.Fatalf("Failed to get stdout pipe 1: %v", err)
+	}
+	defer reader1.Close()
+
+	reader2, err := s.StdoutPipe()
+	if err != nil {
+		t.Fatalf("Failed to get stdout pipe 2: %v", err)
+	}
+	defer reader2.Close()
+
+	_, err = s.Start()
+	if err != nil {
+		t.Fatalf("Failed to start process: %v", err)
+	}
+
+	// Read from both readers concurrently
+	var wg sync.WaitGroup
+	output1 := make(chan string, 1)
+	output2 := make(chan string, 1)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		data, _ := io.ReadAll(reader1)
+		output1 <- string(data)
+	}()
+
+	go func() {
+		defer wg.Done()
+		data, _ := io.ReadAll(reader2)
+		output2 <- string(data)
+	}()
+
+	// Wait for process and readers to finish
+	s.Wait()
+	wg.Wait()
+
+	// Both readers should have received the same output
+	out1 := <-output1
+	out2 := <-output2
+
+	if out1 != out2 {
+		t.Errorf("Readers got different output:\nReader1: %q\nReader2: %q", out1, out2)
+	}
+
+	expectedLines := 5
+	actualLines := strings.Count(out1, "\n")
+	if actualLines != expectedLines {
+		t.Errorf("Expected %d lines, got %d", expectedLines, actualLines)
+	}
+}
+
+func TestPipesWithProcessRestart(t *testing.T) {
+	// Test that pipes continue to work even if we stop and can't restart the process
+	s, err := New(Config{
+		Command:     "bash",
+		Args:        []string{"-c", "echo 'Before stop'; sleep 10"},
+		GracePeriod: 100 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create supervisor: %v", err)
+	}
+
+	stdoutPipe, err := s.StdoutPipe()
+	if err != nil {
+		t.Fatalf("Failed to get stdout pipe: %v", err)
+	}
+	defer stdoutPipe.Close()
+
+	_, err = s.Start()
+	if err != nil {
+		t.Fatalf("Failed to start process: %v", err)
+	}
+
+	// Read initial output
+	buf := make([]byte, 1024)
+	n, err := stdoutPipe.Read(buf)
+	if err != nil {
+		t.Fatalf("Failed to read from stdout: %v", err)
+	}
+
+	output := string(buf[:n])
+	if !strings.Contains(output, "Before stop") {
+		t.Errorf("Expected output to contain 'Before stop', got %q", output)
+	}
+
+	// Stop the process
+	if err := s.Stop(); err != nil {
+		t.Fatalf("Failed to stop process: %v", err)
+	}
+
+	// Reading from pipe after stop should return EOF
+	_, err = stdoutPipe.Read(buf)
+	if err != io.EOF {
+		t.Errorf("Expected EOF after process stop, got %v", err)
 	}
 }
