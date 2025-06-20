@@ -5,32 +5,6 @@
   
   "process_command": ["/app/myservice", "--port", "3000"],
   "process_working_dir": "/app",
-  "process_restart_max_retries": 3,
-  "process_graceful_shutdown_timeout": "30s",
-  
-  "components": {
-    "db": {
-      "start_command": ["/scripts/db/start.sh"],
-      "ready_command": ["/scripts/db/ready.sh"],
-      "checkpoint_command": ["/scripts/db/checkpoint.sh"],
-      "restore_command": ["/scripts/db/restore.sh"]
-    },
-    "fs": {
-      "start_command": ["/scripts/fs/start.sh"],
-      "ready_command": ["/scripts/fs/ready.sh"],
-      "checkpoint_command": ["/scripts/fs/checkpoint.sh"],
-      "restore_command": ["/scripts/fs/restore.sh"]
-    }
-  },
-  
-  "s3": {
-    "access_key": {"$env": "SPRITE_S3_ACCESS_KEY"},
-    "secret_key": {"$env": "SPRITE_S3_SECRET_ACCESS_KEY"},
-    "endpoint": {"$env": "SPRITE_S3_ENDPOINT_URL"}
-  },
-  
-  "exec": {
-    "wrapper_command": ["crun", "exec", "app"],
-    "tty_wrapper_command": ["crun", "exec", "-t", "app"]
-  }
+  "process_environment": ["ENV_VAR=value"],
+  "process_graceful_shutdown_timeout": "30s"
 }

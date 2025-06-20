@@ -16,3 +16,5 @@ spec/trace_*.cfg
 __pycache__
 reference
 fly.toml
+sprite
+**/.envrc
