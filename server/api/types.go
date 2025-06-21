@@ -33,11 +33,13 @@ type CommandResponse struct {
 // RestoreData contains data for restore command
 type RestoreData struct {
 	CheckpointID string
+	StreamCh     chan<- StreamMessage // Channel for streaming progress
 }
 
 // CheckpointData contains data for checkpoint command
 type CheckpointData struct {
 	CheckpointID string
+	StreamCh     chan<- StreamMessage // Channel for streaming progress
 }
 
 // ExecData contains data for exec command
@@ -100,4 +102,12 @@ type ExecMessage struct {
 	ExitCode int       `json:"exit_code"`
 	Error    string    `json:"error,omitempty"`
 	Time     time.Time `json:"time"`
+}
+
+// StreamMessage represents a streaming message (similar to ExecMessage)
+type StreamMessage struct {
+	Type  string    `json:"type"` // "info", "stdout", "stderr", "error", "complete"
+	Data  string    `json:"data,omitempty"`
+	Error string    `json:"error,omitempty"`
+	Time  time.Time `json:"time"`
 }

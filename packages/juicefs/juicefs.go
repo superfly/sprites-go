@@ -435,7 +435,7 @@ func (j *JuiceFS) Restore(ctx context.Context, checkpointID string) error {
 		return fmt.Errorf("failed to restore from checkpoint: %w, output: %s", err, string(output))
 	}
 
-	fmt.Printf("Restore completed successfully from %s to %s\n", checkpointPath, activeDir)
+	fmt.Printf("Restore from %s complete\n", checkpointID)
 	return nil
 }
 

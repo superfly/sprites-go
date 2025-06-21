@@ -32,28 +32,57 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Send checkpoint command
+	// Set up streaming response
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+
+	// Create encoder for JSON output
+	encoder := json.NewEncoder(w)
+
+	// Create streaming channel
+	streamCh := make(chan StreamMessage, 10)
+	done := make(chan struct{})
+
+	// Stream messages to client
+	go func() {
+		defer close(done)
+		for msg := range streamCh {
+			if err := encoder.Encode(&msg); err != nil {
+				s.logger.Error("Failed to encode checkpoint message", "error", err)
+				return
+			}
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+	}()
+
+	// Send checkpoint command with stream channel
 	responseCh := make(chan CommandResponse)
 	s.commandCh <- Command{
 		Type:     CommandCheckpoint,
 		Response: responseCh,
-		Data:     CheckpointData{CheckpointID: req.CheckpointID},
+		Data: CheckpointData{
+			CheckpointID: req.CheckpointID,
+			StreamCh:     streamCh,
+		},
 	}
 
 	// Wait for response
 	resp := <-responseCh
-	if !resp.Success {
+
+	// Log the result but don't send to channel - streamingCheckpoint handles all messaging
+	if resp.Success {
+		s.logger.Info("Checkpoint created via API", "checkpointID", req.CheckpointID)
+	} else {
 		s.logger.Error("Failed to create checkpoint", "error", resp.Error, "checkpointID", req.CheckpointID)
-		http.Error(w, fmt.Sprintf("Failed to create checkpoint: %v", resp.Error), http.StatusInternalServerError)
-		return
 	}
 
-	s.logger.Info("Checkpoint created via API", "checkpointID", req.CheckpointID)
-	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(map[string]string{
-		"status":        "checkpoint created",
-		"checkpoint_id": req.CheckpointID,
-	})
+	// Wait for writer to finish - streamingCheckpoint will close the channel
+	<-done
 }
 
 // handleRestore handles the /restore endpoint
@@ -77,28 +106,71 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Send restore command
+	// Set up streaming response
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+
+	// Create encoder for JSON output
+	encoder := json.NewEncoder(w)
+
+	// Create streaming channel
+	streamCh := make(chan StreamMessage, 10)
+	done := make(chan struct{})
+
+	// Stream messages to client
+	go func() {
+		defer close(done)
+		for msg := range streamCh {
+			if err := encoder.Encode(&msg); err != nil {
+				s.logger.Error("Failed to encode restore message", "error", err)
+				return
+			}
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+	}()
+
+	// Send initial message
+	streamCh <- StreamMessage{
+		Type: "info",
+		Data: fmt.Sprintf("Starting restore from checkpoint %s", req.CheckpointID),
+		Time: time.Now(),
+	}
+
+	// Send restore command with stream channel
 	responseCh := make(chan CommandResponse)
 	s.commandCh <- Command{
 		Type:     CommandRestore,
 		Response: responseCh,
-		Data:     RestoreData{CheckpointID: req.CheckpointID},
+		Data: RestoreData{
+			CheckpointID: req.CheckpointID,
+			StreamCh:     streamCh,
+		},
 	}
 
-	// Wait for response (this just confirms the restore was initiated)
+	// Wait for response (this confirms the restore was initiated)
 	resp := <-responseCh
 	if !resp.Success {
+		streamCh <- StreamMessage{
+			Type:  "error",
+			Error: fmt.Sprintf("Failed to initiate restore: %v", resp.Error),
+			Time:  time.Now(),
+		}
 		s.logger.Error("Failed to initiate restore", "error", resp.Error, "checkpointID", req.CheckpointID)
-		http.Error(w, fmt.Sprintf("Failed to initiate restore: %v", resp.Error), http.StatusInternalServerError)
+		close(streamCh)
+		<-done
 		return
 	}
 
 	s.logger.Info("Restore initiated via API", "checkpointID", req.CheckpointID)
-	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(map[string]string{
-		"status":        "restore initiated",
-		"checkpoint_id": req.CheckpointID,
-	})
+
+	// Wait for streaming to complete
+	// The restore process will close the channel when done
+	<-done
 }
 
 // handleExec handles the /exec endpoint

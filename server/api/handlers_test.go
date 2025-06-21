@@ -25,6 +25,8 @@ func TestHandleCheckpoint(t *testing.T) {
 		commandResponse      CommandResponse
 		expectedStatus       int
 		expectedBodyContains string
+		expectStream         bool
+		expectedMessages     []string
 	}{
 		{
 			name:   "successful checkpoint",
@@ -33,8 +35,11 @@ func TestHandleCheckpoint(t *testing.T) {
 			commandResponse: CommandResponse{
 				Success: true,
 			},
-			expectedStatus:       http.StatusAccepted,
-			expectedBodyContains: "checkpoint created",
+			expectedStatus: http.StatusOK,
+			expectStream:   true,
+			expectedMessages: []string{
+				"Checkpoint test-checkpoint created successfully",
+			},
 		},
 		{
 			name:                 "wrong method",
@@ -64,8 +69,11 @@ func TestHandleCheckpoint(t *testing.T) {
 				Success: false,
 				Error:   errors.New("checkpoint failed"),
 			},
-			expectedStatus:       http.StatusInternalServerError,
-			expectedBodyContains: "Failed to create checkpoint",
+			expectedStatus: http.StatusOK,
+			expectStream:   true,
+			expectedMessages: []string{
+				"Failed to create checkpoint: checkpoint failed",
+			},
 		},
 	}
 
@@ -86,6 +94,45 @@ func TestHandleCheckpoint(t *testing.T) {
 				select {
 				case cmd := <-commandCh:
 					if cmd.Type == CommandCheckpoint {
+						// Simulate the streamingCheckpoint function behavior
+						if data, ok := cmd.Data.(CheckpointData); ok && data.StreamCh != nil {
+							ch := data.StreamCh
+							checkpointID := data.CheckpointID
+							if tt.commandResponse.Success {
+								go func() {
+									// Send initial message
+									ch <- StreamMessage{
+										Type: "info",
+										Data: fmt.Sprintf("Creating checkpoint %s...", checkpointID),
+										Time: time.Now(),
+									}
+									// Simulate some work
+									time.Sleep(10 * time.Millisecond)
+									// Send completion messages
+									ch <- StreamMessage{
+										Type: "info",
+										Data: fmt.Sprintf("Checkpoint created successfully at /path/to/%s", checkpointID),
+										Time: time.Now(),
+									}
+									ch <- StreamMessage{
+										Type: "complete",
+										Data: fmt.Sprintf("Checkpoint %s created successfully", checkpointID),
+										Time: time.Now(),
+									}
+									close(ch)
+								}()
+							} else {
+								// For failure cases, simulate the error message that would be sent by main.go
+								go func() {
+									ch <- StreamMessage{
+										Type:  "error",
+										Error: fmt.Sprintf("Failed to create checkpoint: %v", tt.commandResponse.Error),
+										Time:  time.Now(),
+									}
+									close(ch)
+								}()
+							}
+						}
 						cmd.Response <- tt.commandResponse
 					}
 				case <-time.After(time.Second):
@@ -108,7 +155,22 @@ func TestHandleCheckpoint(t *testing.T) {
 			}
 
 			// Check body
-			if tt.expectedBodyContains != "" && !strings.Contains(rr.Body.String(), tt.expectedBodyContains) {
+			if tt.expectStream {
+				// Parse streaming messages
+				messages := parseStreamMessages(t, rr.Body.String())
+				for _, expected := range tt.expectedMessages {
+					found := false
+					for _, msg := range messages {
+						if strings.Contains(msg.Data, expected) || strings.Contains(msg.Error, expected) {
+							found = true
+							break
+						}
+					}
+					if !found {
+						t.Errorf("Expected message not found: %s\nGot messages: %+v", expected, messages)
+					}
+				}
+			} else if tt.expectedBodyContains != "" && !strings.Contains(rr.Body.String(), tt.expectedBodyContains) {
 				t.Errorf("handler returned unexpected body: got %v want containing %v", rr.Body.String(), tt.expectedBodyContains)
 			}
 		})
@@ -125,6 +187,8 @@ func TestHandleRestore(t *testing.T) {
 		commandResponse      CommandResponse
 		expectedStatus       int
 		expectedBodyContains string
+		expectStream         bool
+		expectedMessages     []string
 	}{
 		{
 			name:   "successful restore initiation",
@@ -133,8 +197,11 @@ func TestHandleRestore(t *testing.T) {
 			commandResponse: CommandResponse{
 				Success: true,
 			},
-			expectedStatus:       http.StatusAccepted,
-			expectedBodyContains: "restore initiated",
+			expectedStatus: http.StatusOK,
+			expectStream:   true,
+			expectedMessages: []string{
+				"Starting restore from checkpoint test-checkpoint",
+			},
 		},
 		{
 			name:                 "wrong method",
@@ -164,8 +231,11 @@ func TestHandleRestore(t *testing.T) {
 				Success: false,
 				Error:   errors.New("restore failed to start"),
 			},
-			expectedStatus:       http.StatusInternalServerError,
-			expectedBodyContains: "Failed to initiate restore",
+			expectedStatus: http.StatusOK,
+			expectStream:   true,
+			expectedMessages: []string{
+				"Failed to initiate restore: restore failed to start",
+			},
 		},
 	}
 
@@ -186,6 +256,23 @@ func TestHandleRestore(t *testing.T) {
 				select {
 				case cmd := <-commandCh:
 					if cmd.Type == CommandRestore {
+						// In a real scenario, performRestore would close the channel
+						// For the test, we need to simulate this
+						if data, ok := cmd.Data.(RestoreData); ok && data.StreamCh != nil {
+							// Simulate performRestore closing the channel after some work
+							// Use a channel to ensure safe closure
+							ch := data.StreamCh
+							go func() {
+								time.Sleep(10 * time.Millisecond)
+								// Ensure we don't panic on double close
+								defer func() {
+									if r := recover(); r != nil {
+										// Channel was already closed, ignore
+									}
+								}()
+								close(ch)
+							}()
+						}
 						cmd.Response <- tt.commandResponse
 					}
 				case <-time.After(time.Second):
@@ -208,7 +295,22 @@ func TestHandleRestore(t *testing.T) {
 			}
 
 			// Check body
-			if tt.expectedBodyContains != "" && !strings.Contains(rr.Body.String(), tt.expectedBodyContains) {
+			if tt.expectStream {
+				// Parse streaming messages
+				messages := parseStreamMessages(t, rr.Body.String())
+				for _, expected := range tt.expectedMessages {
+					found := false
+					for _, msg := range messages {
+						if strings.Contains(msg.Data, expected) || strings.Contains(msg.Error, expected) {
+							found = true
+							break
+						}
+					}
+					if !found {
+						t.Errorf("Expected message not found: %s\nGot messages: %+v", expected, messages)
+					}
+				}
+			} else if tt.expectedBodyContains != "" && !strings.Contains(rr.Body.String(), tt.expectedBodyContains) {
 				t.Errorf("handler returned unexpected body: got %v want containing %v", rr.Body.String(), tt.expectedBodyContains)
 			}
 		})
@@ -310,8 +412,37 @@ func TestEndpointIntegration(t *testing.T) {
 		for cmd := range commandCh {
 			switch cmd.Type {
 			case CommandCheckpoint:
+				// Simulate the streamingCheckpoint function behavior
+				if data, ok := cmd.Data.(CheckpointData); ok && data.StreamCh != nil {
+					ch := data.StreamCh
+					checkpointID := data.CheckpointID
+					go func() {
+						// Send initial message
+						ch <- StreamMessage{
+							Type: "info",
+							Data: fmt.Sprintf("Creating checkpoint %s...", checkpointID),
+							Time: time.Now(),
+						}
+						// Simulate some work
+						time.Sleep(10 * time.Millisecond)
+						// Send completion messages
+						ch <- StreamMessage{
+							Type: "info",
+							Data: fmt.Sprintf("Checkpoint created successfully at /path/to/%s", checkpointID),
+							Time: time.Now(),
+						}
+						ch <- StreamMessage{
+							Type: "complete",
+							Data: fmt.Sprintf("Checkpoint %s created successfully", checkpointID),
+							Time: time.Now(),
+						}
+						close(ch)
+					}()
+				}
 				cmd.Response <- CommandResponse{Success: true}
 			case CommandRestore:
+				// Don't close the channel here - the actual server implementation
+				// (performRestore) will close it
 				cmd.Response <- CommandResponse{Success: true}
 			}
 		}
@@ -330,14 +461,29 @@ func TestEndpointIntegration(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		if resp.StatusCode != http.StatusAccepted {
-			t.Errorf("Expected status %d, got %d", http.StatusAccepted, resp.StatusCode)
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("Expected status %d, got %d", http.StatusOK, resp.StatusCode)
 		}
 
-		var result map[string]string
-		json.NewDecoder(resp.Body).Decode(&result)
-		if result["checkpoint_id"] != "test-123" {
-			t.Errorf("Expected checkpoint_id test-123, got %s", result["checkpoint_id"])
+		// Parse streaming response
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		messages := parseStreamMessages(t, string(bodyBytes))
+
+		// Should have at least one message
+		if len(messages) == 0 {
+			t.Error("Expected at least one streaming message")
+		}
+
+		// Check for success message
+		foundSuccess := false
+		for _, msg := range messages {
+			if strings.Contains(msg.Data, "Checkpoint test-123 created successfully") {
+				foundSuccess = true
+				break
+			}
+		}
+		if !foundSuccess {
+			t.Errorf("Expected success message for checkpoint test-123, got messages: %+v", messages)
 		}
 	})
 
@@ -962,4 +1108,24 @@ func TestExecHandlerProcessNotRunning(t *testing.T) {
 	if elapsed < 150*time.Millisecond || elapsed > 300*time.Millisecond {
 		t.Errorf("expected wait time around 200ms, got %v", elapsed)
 	}
+}
+
+// Helper function to parse NDJSON stream messages
+func parseStreamMessages(t *testing.T, body string) []StreamMessage {
+	var messages []StreamMessage
+	lines := strings.Split(strings.TrimSpace(body), "\n")
+
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+
+		var msg StreamMessage
+		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+			t.Fatalf("failed to parse stream message: %v, line: %s", err, line)
+		}
+		messages = append(messages, msg)
+	}
+
+	return messages
 }

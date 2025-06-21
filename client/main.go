@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 // CheckpointRequest represents the checkpoint API request
@@ -25,6 +27,14 @@ type APIResponse struct {
 	Status       string `json:"status,omitempty"`
 	CheckpointID string `json:"checkpoint_id,omitempty"`
 	Error        string `json:"error,omitempty"`
+}
+
+// StreamMessage represents a streaming message from checkpoint/restore endpoints
+type StreamMessage struct {
+	Type  string    `json:"type"`
+	Data  string    `json:"data,omitempty"`
+	Error string    `json:"error,omitempty"`
+	Time  time.Time `json:"time"`
 }
 
 func main() {
@@ -132,7 +142,10 @@ func checkpointCommand(baseURL, token string, args []string) {
 	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
+	// Use client with no timeout for streaming
+	client := &http.Client{
+		Timeout: 0,
+	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to make request: %v\n", err)
@@ -140,26 +153,15 @@ func checkpointCommand(baseURL, token string, args []string) {
 	}
 	defer resp.Body.Close()
 
-	// Read response
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to read response: %v\n", err)
-		os.Exit(1)
-	}
-
-	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
 		fmt.Fprintf(os.Stderr, "Error: API returned status %d: %s\n", resp.StatusCode, string(body))
 		os.Exit(1)
 	}
 
-	// Parse and display response
-	var apiResp APIResponse
-	if err := json.Unmarshal(body, &apiResp); err != nil {
-		fmt.Printf("Checkpoint requested (ID: %s)\n", checkpointID)
-	} else {
-		fmt.Printf("Status: %s\n", apiResp.Status)
-		fmt.Printf("Checkpoint ID: %s\n", apiResp.CheckpointID)
-	}
+	// Process streaming response
+	exitCode := processStreamingResponse(resp.Body)
+	os.Exit(exitCode)
 }
 
 func restoreCommand(baseURL, token string, args []string) {
@@ -193,7 +195,10 @@ func restoreCommand(baseURL, token string, args []string) {
 	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
+	// Use client with no timeout for streaming
+	client := &http.Client{
+		Timeout: 0,
+	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to make request: %v\n", err)
@@ -201,24 +206,63 @@ func restoreCommand(baseURL, token string, args []string) {
 	}
 	defer resp.Body.Close()
 
-	// Read response
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to read response: %v\n", err)
-		os.Exit(1)
-	}
-
-	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
 		fmt.Fprintf(os.Stderr, "Error: API returned status %d: %s\n", resp.StatusCode, string(body))
 		os.Exit(1)
 	}
 
-	// Parse and display response
-	var apiResp APIResponse
-	if err := json.Unmarshal(body, &apiResp); err != nil {
-		fmt.Printf("Restore requested (ID: %s)\n", checkpointID)
-	} else {
-		fmt.Printf("Status: %s\n", apiResp.Status)
-		fmt.Printf("Checkpoint ID: %s\n", apiResp.CheckpointID)
+	// Process streaming response
+	exitCode := processStreamingResponse(resp.Body)
+	os.Exit(exitCode)
+}
+
+// processStreamingResponse processes NDJSON streaming responses
+func processStreamingResponse(reader io.Reader) int {
+	scanner := bufio.NewScanner(reader)
+	exitCode := 0
+	hasError := false
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+
+		var msg StreamMessage
+		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: Failed to parse message: %v\n", err)
+			continue
+		}
+
+		switch msg.Type {
+		case "info":
+			fmt.Println(msg.Data)
+		case "stdout":
+			fmt.Println(msg.Data)
+		case "stderr":
+			fmt.Fprintln(os.Stderr, msg.Data)
+		case "error":
+			fmt.Fprintf(os.Stderr, "Error: %s\n", msg.Error)
+			hasError = true
+			if exitCode == 0 {
+				exitCode = 1
+			}
+		case "complete":
+			fmt.Println(msg.Data)
+		}
 	}
+
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to read stream: %v\n", err)
+		if exitCode == 0 {
+			exitCode = 1
+		}
+	}
+
+	if hasError && exitCode == 0 {
+		exitCode = 1
+	}
+
+	return exitCode
 }

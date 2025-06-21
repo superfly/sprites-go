@@ -1,14 +1,17 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -324,15 +327,28 @@ func (app *Application) handleCommand(cmd api.Command) {
 	case api.CommandCheckpoint:
 		data := cmd.Data.(api.CheckpointData)
 		if app.juicefs != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			err := app.juicefs.Checkpoint(ctx, data.CheckpointID)
-			cancel()
+			go func() {
+				defer close(data.StreamCh)
 
-			cmd.Response <- api.CommandResponse{
-				Success: err == nil,
-				Error:   err,
-			}
+				ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+				defer cancel()
+
+				// Stream the checkpoint operation
+				err := app.streamingCheckpoint(ctx, data.CheckpointID, data.StreamCh)
+
+				cmd.Response <- api.CommandResponse{
+					Success: err == nil,
+					Error:   err,
+				}
+			}()
 		} else {
+			// Send error message before closing channel
+			data.StreamCh <- api.StreamMessage{
+				Type:  "error",
+				Error: "JuiceFS not configured",
+				Time:  time.Now(),
+			}
+			close(data.StreamCh)
 			cmd.Response <- api.CommandResponse{
 				Success: false,
 				Error:   fmt.Errorf("JuiceFS not configured"),
@@ -341,8 +357,8 @@ func (app *Application) handleCommand(cmd api.Command) {
 
 	case api.CommandRestore:
 		data := cmd.Data.(api.RestoreData)
-		// Start restore process asynchronously
-		go app.performRestore(data.CheckpointID)
+		// Start restore process asynchronously with streaming
+		go app.performRestore(data.CheckpointID, data.StreamCh)
 
 		// Immediately respond that restore was initiated
 		cmd.Response <- api.CommandResponse{
@@ -351,45 +367,329 @@ func (app *Application) handleCommand(cmd api.Command) {
 	}
 }
 
-// performRestore performs the restore sequence
-func (app *Application) performRestore(checkpointID string) {
+// performRestore performs the restore sequence with streaming progress
+func (app *Application) performRestore(checkpointID string, streamCh chan<- api.StreamMessage) {
+	defer close(streamCh)
+
 	app.logger.Info("Starting restore sequence", "checkpointID", checkpointID)
 	app.restoringNow = true
 	defer func() { app.restoringNow = false }()
 
+	// Track the previous state checkpoint ID
+	var previousStateID string
+
 	// Stop process if running
 	if app.processRunning && app.supervisor != nil {
+		streamCh <- api.StreamMessage{
+			Type: "info",
+			Data: "Stopping process for restore...",
+			Time: time.Now(),
+		}
 		app.logger.Info("Stopping process for restore")
 		if err := app.supervisor.Stop(); err != nil {
 			app.logger.Error("Failed to stop process", "error", err)
+			streamCh <- api.StreamMessage{
+				Type:  "error",
+				Error: fmt.Sprintf("Failed to stop process: %v", err),
+				Time:  time.Now(),
+			}
 			return
 		}
 		// supervisor.Stop() blocks until the process has exited
 		app.processRunning = false
 		app.logger.Info("Process stopped successfully")
+		streamCh <- api.StreamMessage{
+			Type: "info",
+			Data: "Process stopped successfully",
+			Time: time.Now(),
+		}
 	}
 
-	// Perform JuiceFS restore
+	// Perform JuiceFS restore with streaming
 	if app.juicefs != nil {
+		streamCh <- api.StreamMessage{
+			Type: "info",
+			Data: fmt.Sprintf("Restoring from checkpoint %s...", checkpointID),
+			Time: time.Now(),
+		}
 		app.logger.Info("Restoring from checkpoint", "checkpointID", checkpointID)
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
-		if err := app.juicefs.Restore(ctx, checkpointID); err != nil {
+		previousStateID, err := app.streamingRestore(ctx, checkpointID, streamCh)
+		if err != nil {
 			app.logger.Error("Failed to restore checkpoint", "error", err)
+			streamCh <- api.StreamMessage{
+				Type:  "error",
+				Error: fmt.Sprintf("Failed to restore checkpoint: %v", err),
+				Time:  time.Now(),
+			}
 			return
 		}
-		app.logger.Info("Checkpoint restored successfully")
+		app.logger.Info("Checkpoint restored successfully", "previousStateID", previousStateID)
+		// Don't send a message here - streamingRestore already sent the completion message
 	}
 
 	// Restart process
+	streamCh <- api.StreamMessage{
+		Type: "info",
+		Data: "Starting process after restore...",
+		Time: time.Now(),
+	}
 	app.logger.Info("Starting process after restore")
 	if err := app.startProcess(); err != nil {
 		app.logger.Error("Failed to start process after restore", "error", err)
+		streamCh <- api.StreamMessage{
+			Type:  "error",
+			Error: fmt.Sprintf("Failed to start process after restore: %v", err),
+			Time:  time.Now(),
+		}
 		return
 	}
 
 	app.logger.Info("Restore sequence completed")
+	// Update the final message to include the previous state info if available
+	completeMessage := fmt.Sprintf("Restore from %s complete", checkpointID)
+	if previousStateID != "" {
+		completeMessage += fmt.Sprintf(", previous state checkpoint id: %s", previousStateID)
+	}
+	streamCh <- api.StreamMessage{
+		Type: "complete",
+		Data: completeMessage,
+		Time: time.Now(),
+	}
+}
+
+// streamingCheckpoint performs checkpoint with streaming output
+func (app *Application) streamingCheckpoint(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) error {
+	if checkpointID == "" {
+		return fmt.Errorf("checkpoint ID is required")
+	}
+
+	mountPath := filepath.Join(app.config.JuiceFSBaseDir, "data")
+	activeDir := filepath.Join(mountPath, "active")
+	checkpointsDir := filepath.Join(mountPath, "checkpoints")
+	checkpointPath := filepath.Join(checkpointsDir, checkpointID)
+
+	// Ensure checkpoints directory exists
+	if err := os.MkdirAll(checkpointsDir, 0755); err != nil {
+		return fmt.Errorf("failed to create checkpoints directory: %w", err)
+	}
+
+	// Check if active directory exists
+	if _, err := os.Stat(activeDir); os.IsNotExist(err) {
+		return fmt.Errorf("active directory does not exist at %s", activeDir)
+	}
+
+	// Check if checkpoint already exists
+	if _, err := os.Stat(checkpointPath); err == nil {
+		return fmt.Errorf("checkpoint %s already exists at %s", checkpointID, checkpointPath)
+	}
+
+	// Send initial message
+	streamCh <- api.StreamMessage{
+		Type: "info",
+		Data: fmt.Sprintf("Creating checkpoint %s...", checkpointID),
+		Time: time.Now(),
+	}
+
+	// Create and run the juicefs clone command
+	cmd := exec.CommandContext(ctx, "juicefs", "clone", activeDir, checkpointPath)
+
+	// Capture stdout and stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stdout pipe: %w", err)
+	}
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stderr pipe: %w", err)
+	}
+
+	// Start the command
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start juicefs clone: %w", err)
+	}
+
+	// Stream output
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Stream stdout
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			streamCh <- api.StreamMessage{
+				Type: "stdout",
+				Data: scanner.Text(),
+				Time: time.Now(),
+			}
+		}
+	}()
+
+	// Stream stderr
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			streamCh <- api.StreamMessage{
+				Type: "stderr",
+				Data: scanner.Text(),
+				Time: time.Now(),
+			}
+		}
+	}()
+
+	// Wait for command to complete
+	wg.Wait()
+	err = cmd.Wait()
+
+	if err != nil {
+		streamCh <- api.StreamMessage{
+			Type:  "error",
+			Error: fmt.Sprintf("juicefs clone failed: %v", err),
+			Time:  time.Now(),
+		}
+		return fmt.Errorf("juicefs clone failed: %w", err)
+	}
+
+	streamCh <- api.StreamMessage{
+		Type: "info",
+		Data: fmt.Sprintf("Checkpoint created successfully at %s", checkpointPath),
+		Time: time.Now(),
+	}
+
+	// Send final completion message
+	streamCh <- api.StreamMessage{
+		Type: "complete",
+		Data: fmt.Sprintf("Checkpoint %s created successfully", checkpointID),
+		Time: time.Now(),
+	}
+
+	return nil
+}
+
+// streamingRestore performs restore with streaming output
+func (app *Application) streamingRestore(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) (string, error) {
+	if checkpointID == "" {
+		return "", fmt.Errorf("checkpoint ID is required")
+	}
+
+	mountPath := filepath.Join(app.config.JuiceFSBaseDir, "data")
+	activeDir := filepath.Join(mountPath, "active")
+	checkpointsDir := filepath.Join(mountPath, "checkpoints")
+	checkpointPath := filepath.Join(checkpointsDir, checkpointID)
+
+	// Check if checkpoint exists
+	if _, err := os.Stat(checkpointPath); os.IsNotExist(err) {
+		return "", fmt.Errorf("checkpoint %s does not exist at %s", checkpointID, checkpointPath)
+	}
+
+	// Track the backup name for the previous state
+	var previousStateID string
+
+	// If active directory exists, back it up
+	if _, err := os.Stat(activeDir); err == nil {
+		timestamp := time.Now().Unix()
+		backupName := fmt.Sprintf("pre-restore-%s-%d", checkpointID, timestamp)
+		backupPath := filepath.Join(checkpointsDir, backupName)
+		previousStateID = backupName
+
+		streamCh <- api.StreamMessage{
+			Type: "info",
+			Data: fmt.Sprintf("Backing up current active directory to %s...", backupName),
+			Time: time.Now(),
+		}
+
+		if err := os.Rename(activeDir, backupPath); err != nil {
+			return "", fmt.Errorf("failed to backup active directory: %w", err)
+		}
+
+		streamCh <- api.StreamMessage{
+			Type: "info",
+			Data: "Backup completed",
+			Time: time.Now(),
+		}
+	}
+
+	// Clone checkpoint to active directory
+	streamCh <- api.StreamMessage{
+		Type: "info",
+		Data: fmt.Sprintf("Cloning checkpoint %s to active directory...", checkpointID),
+		Time: time.Now(),
+	}
+
+	cmd := exec.CommandContext(ctx, "juicefs", "clone", checkpointPath, activeDir)
+
+	// Capture stdout and stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("failed to create stdout pipe: %w", err)
+	}
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return "", fmt.Errorf("failed to create stderr pipe: %w", err)
+	}
+
+	// Start the command
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("failed to start juicefs clone: %w", err)
+	}
+
+	// Stream output
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Stream stdout
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			streamCh <- api.StreamMessage{
+				Type: "stdout",
+				Data: scanner.Text(),
+				Time: time.Now(),
+			}
+		}
+	}()
+
+	// Stream stderr
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			streamCh <- api.StreamMessage{
+				Type: "stderr",
+				Data: scanner.Text(),
+				Time: time.Now(),
+			}
+		}
+	}()
+
+	// Wait for command to complete
+	wg.Wait()
+	err = cmd.Wait()
+
+	if err != nil {
+		return "", fmt.Errorf("juicefs clone failed: %w", err)
+	}
+
+	// Send completion message with the format requested by the user
+	message := fmt.Sprintf("Restore from %s complete", checkpointID)
+	if previousStateID != "" {
+		message += fmt.Sprintf(", previous state checkpoint id: %s", previousStateID)
+	}
+
+	streamCh <- api.StreamMessage{
+		Type: "info",
+		Data: message,
+		Time: time.Now(),
+	}
+
+	return previousStateID, nil
 }
 
 // shutdown performs graceful shutdown
