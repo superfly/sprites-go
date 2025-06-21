@@ -18,3 +18,4 @@ reference
 fly.toml
 sprite
 **/.envrc
+.envrc
