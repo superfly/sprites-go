@@ -19,6 +19,16 @@ import (
 )
 
 // JuiceFS manages the JuiceFS filesystem and Litestream replication
+//
+// During graceful shutdown, JuiceFS will:
+// 1. Find and unmount all dependent mounts (bind mounts, loopback mounts, submounts)
+//   - Syncs each mount before unmounting to flush pending writes
+//
+// 2. Sync and unmount the main JuiceFS mount
+//   - First attempts graceful unmount to allow JuiceFS cache flushing
+//   - Falls back to force unmount if graceful fails
+//
+// 3. Stop the Litestream replication process
 type JuiceFS struct {
 	config        Config
 	litestreamCmd *exec.Cmd
@@ -247,7 +257,11 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 }
 
 // Stop cleanly shuts down JuiceFS and Litestream
+// The context timeout should be set appropriately (recommended: 5+ minutes) to allow
+// for flushing all cached writes to the backend storage.
 func (j *JuiceFS) Stop(ctx context.Context) error {
+	startTime := time.Now()
+
 	// Stop signal handling
 	signal.Stop(j.signalCh)
 
@@ -259,14 +273,15 @@ func (j *JuiceFS) Stop(ctx context.Context) error {
 		close(j.stopCh)
 	}
 
-	// Wait for stopped signal or timeout
+	// Wait for stopped signal
+	// Note: We rely on the context timeout instead of a hard-coded timeout
+	// to allow for proper flushing of all writes
 	select {
 	case <-j.stoppedCh:
+		fmt.Printf("JuiceFS shutdown completed in %v\n", time.Since(startTime))
 		return nil
 	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(10 * time.Second):
-		return fmt.Errorf("timeout waiting for JuiceFS to stop")
+		return fmt.Errorf("shutdown timed out after %v: %w", time.Since(startTime), ctx.Err())
 	}
 }
 
@@ -288,16 +303,56 @@ func (j *JuiceFS) monitorProcess() {
 
 	select {
 	case <-j.stopCh:
-		// Stop requested, unmount JuiceFS
-		unmountCmd := exec.Command("juicefs", "umount", "--force", mountPath)
+		// Stop requested, first unmount dependent mounts
+		fmt.Println("Looking for dependent mounts to unmount...")
+		if err := j.findAndUnmountDependentMounts(mountPath); err != nil {
+			fmt.Printf("Warning: error finding/unmounting dependent mounts: %v\n", err)
+		}
+
+		// Sync the JuiceFS filesystem to flush pending writes
+		fmt.Println("Syncing JuiceFS filesystem...")
+		syncStart := time.Now()
+		syncCmd := exec.Command("sync", "-f", mountPath)
+		if err := syncCmd.Run(); err != nil {
+			fmt.Printf("Warning: sync failed for JuiceFS mount: %v\n", err)
+		} else {
+			fmt.Printf("Sync completed in %v\n", time.Since(syncStart))
+		}
+
+		// First try graceful unmount without --force to allow JuiceFS to flush its cache
+		// JuiceFS may need time to:
+		// - Flush write-back cache
+		// - Complete pending uploads (up to --upload-delay=1m)
+		// - Close file handles properly
+		fmt.Println("Attempting graceful JuiceFS unmount (this may take several minutes)...")
+		unmountStart := time.Now()
+
+		// Create a context with a generous timeout for graceful unmount
+		// We use 3 minutes to account for the 1-minute upload delay plus overhead
+		gracefulCtx, gracefulCancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer gracefulCancel()
+
+		unmountCmd := exec.CommandContext(gracefulCtx, "juicefs", "umount", mountPath)
 		if output, err := unmountCmd.CombinedOutput(); err != nil {
-			// Check if it's exit status 3 (not mounted) - this is OK
-			if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 3 {
-				fmt.Printf("JuiceFS already unmounted at %s\n", mountPath)
+			fmt.Printf("Graceful unmount failed after %v: %v\n", time.Since(unmountStart), err)
+
+			// If graceful unmount fails or times out, try with --force
+			fmt.Println("Attempting force unmount...")
+			forceCmd := exec.Command("juicefs", "umount", "--force", mountPath)
+			if output2, err2 := forceCmd.CombinedOutput(); err2 != nil {
+				// Check if it's exit status 3 (not mounted) - this is OK
+				if exitErr, ok := err2.(*exec.ExitError); ok && exitErr.ExitCode() == 3 {
+					fmt.Printf("JuiceFS already unmounted at %s\n", mountPath)
+				} else {
+					// Log but don't fail on other unmount errors
+					fmt.Printf("Warning: failed to unmount JuiceFS: %v (graceful output: %s, force output: %s)\n",
+						err2, string(output), string(output2))
+				}
 			} else {
-				// Log but don't fail on other unmount errors
-				fmt.Printf("Warning: failed to unmount JuiceFS: %v (output: %s)\n", err, string(output))
+				fmt.Printf("Force unmount succeeded after %v\n", time.Since(unmountStart))
 			}
+		} else {
+			fmt.Printf("Graceful unmount succeeded after %v\n", time.Since(unmountStart))
 		}
 
 		// Wait for mount process to exit
@@ -636,4 +691,141 @@ func (j *JuiceFS) handleSignals() {
 		signal.Stop(j.signalCh)
 		return
 	}
+}
+
+// findAndUnmountDependentMounts finds and unmounts all mounts that depend on the JuiceFS mount
+func (j *JuiceFS) findAndUnmountDependentMounts(juicefsMountPath string) error {
+	// Read /proc/mounts to find all current mounts
+	mountsData, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		return fmt.Errorf("failed to read /proc/mounts: %w", err)
+	}
+
+	type mountInfo struct {
+		device     string
+		mountPoint string
+		fsType     string
+		options    string
+	}
+
+	var mounts []mountInfo
+	lines := strings.Split(string(mountsData), "\n")
+
+	// Parse mount entries
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+
+		mount := mountInfo{
+			device:     fields[0],
+			mountPoint: fields[1],
+			fsType:     fields[2],
+			options:    fields[3],
+		}
+
+		// Check if this mount is dependent on JuiceFS
+		// This includes:
+		// 1. Bind mounts where device is a path under JuiceFS mount
+		// 2. Any mount point that is under the JuiceFS mount path
+		// 3. Loopback mounts where the loop device file is on JuiceFS
+		isDependentMount := false
+
+		// Check if device is a path under JuiceFS (bind mount)
+		if strings.HasPrefix(mount.device, juicefsMountPath+"/") {
+			isDependentMount = true
+		}
+
+		// Check if mount point is under JuiceFS (submount)
+		if mount.mountPoint != juicefsMountPath && strings.HasPrefix(mount.mountPoint, juicefsMountPath+"/") {
+			isDependentMount = true
+		}
+
+		// Check for loopback mounts where the backing file is on JuiceFS
+		if strings.HasPrefix(mount.device, "/dev/loop") {
+			// Try to find the backing file for this loop device
+			loopNum := strings.TrimPrefix(mount.device, "/dev/loop")
+			backingFilePath := fmt.Sprintf("/sys/block/loop%s/loop/backing_file", loopNum)
+			if backingData, err := os.ReadFile(backingFilePath); err == nil {
+				backingFile := strings.TrimSpace(string(backingData))
+				if strings.HasPrefix(backingFile, juicefsMountPath+"/") {
+					isDependentMount = true
+				}
+			}
+		}
+
+		if isDependentMount {
+			mounts = append(mounts, mount)
+		}
+	}
+
+	// Sort mounts by mount point depth (deepest first) to ensure proper unmount order
+	for i := 0; i < len(mounts); i++ {
+		for j := i + 1; j < len(mounts); j++ {
+			// Count path separators to determine depth
+			depthI := strings.Count(mounts[i].mountPoint, "/")
+			depthJ := strings.Count(mounts[j].mountPoint, "/")
+
+			// Also check if one is a parent of another
+			isParentJ := strings.HasPrefix(mounts[i].mountPoint, mounts[j].mountPoint+"/")
+
+			// Swap if j should come before i (j is deeper or i is parent of j)
+			if depthJ > depthI || isParentJ {
+				mounts[i], mounts[j] = mounts[j], mounts[i]
+			}
+		}
+	}
+
+	// Unmount each dependent mount
+	for _, mount := range mounts {
+		fmt.Printf("Unmounting dependent mount: %s (device: %s, type: %s)\n",
+			mount.mountPoint, mount.device, mount.fsType)
+
+		// First, try to sync the filesystem to flush any pending writes
+		syncStart := time.Now()
+		syncCtx, syncCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		syncCmd := exec.CommandContext(syncCtx, "sync", "-f", mount.mountPoint)
+		syncErr := syncCmd.Run()
+		syncCancel()
+
+		if syncErr != nil {
+			// sync might fail for some mount types, but we should still try to unmount
+			fmt.Printf("  Warning: sync failed for %s after %v: %v\n",
+				mount.mountPoint, time.Since(syncStart), syncErr)
+		} else {
+			fmt.Printf("  Sync completed in %v\n", time.Since(syncStart))
+		}
+
+		// First try normal unmount
+		unmountStart := time.Now()
+		cmd := exec.Command("umount", mount.mountPoint)
+		if _, err := cmd.CombinedOutput(); err != nil {
+			// If normal unmount fails, try with --force
+			fmt.Printf("  Normal unmount failed, trying force unmount...\n")
+			cmd = exec.Command("umount", "--force", mount.mountPoint)
+			if output2, err2 := cmd.CombinedOutput(); err2 != nil {
+				// Try lazy unmount as last resort
+				fmt.Printf("  Force unmount failed, trying lazy unmount...\n")
+				cmd = exec.Command("umount", "--lazy", mount.mountPoint)
+				if output3, err3 := cmd.CombinedOutput(); err3 != nil {
+					fmt.Printf("  Warning: all unmount attempts failed for %s after %v\n    Normal: %v\n    Force: %v (output: %s)\n    Lazy: %v (output: %s)\n",
+						mount.mountPoint, time.Since(unmountStart), err, err2, string(output2), err3, string(output3))
+				} else {
+					fmt.Printf("  Lazy unmount succeeded after %v\n", time.Since(unmountStart))
+				}
+			} else {
+				fmt.Printf("  Force unmount succeeded after %v\n", time.Since(unmountStart))
+			}
+		} else {
+			fmt.Printf("  Unmounted successfully in %v\n", time.Since(unmountStart))
+		}
+	}
+
+	return nil
 }

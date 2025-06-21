@@ -85,7 +85,7 @@
     "policy": "no"
   },
   "stop_config": {
-    "timeout": "30s",
+    "timeout": "300s",
     "signal": "SIGINT"
   },
   "volumes": [

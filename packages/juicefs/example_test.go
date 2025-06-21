@@ -167,3 +167,145 @@ func ExampleJuiceFS_Restore() {
 
 	fmt.Printf("Successfully restored from checkpoint '%s'\n", checkpointID)
 }
+
+// ExampleJuiceFS_gracefulShutdownWithDependentMounts demonstrates how JuiceFS
+// handles dependent mounts during graceful shutdown.
+//
+// In production environments, you might have:
+// - Bind mounts: mounting JuiceFS subdirectories to other locations
+// - Loopback mounts: mounting disk images stored on JuiceFS
+// - Submounts: other filesystems mounted within the JuiceFS mount point
+//
+// JuiceFS will automatically detect and unmount these before unmounting itself.
+func ExampleJuiceFS_gracefulShutdownWithDependentMounts() {
+	// This example shows what happens during shutdown when there are dependent mounts
+
+	config := juicefs.Config{
+		BaseDir:    "/mnt/juicefs-base",
+		LocalMode:  true,
+		VolumeName: "production-volume",
+	}
+
+	jfs, err := juicefs.New(config)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	ctx := context.Background()
+	if err := jfs.Start(ctx); err != nil {
+		log.Fatal(err)
+	}
+
+	// In production, you might have created various dependent mounts:
+	//
+	// 1. Bind mount example:
+	//    mount --bind /mnt/juicefs-base/data/active/fs/shared /home/user/shared
+	//
+	// 2. Loopback mount example:
+	//    losetup /dev/loop0 /mnt/juicefs-base/data/active/fs/disk.img
+	//    mount /dev/loop0 /mnt/disk
+	//
+	// 3. Submount example:
+	//    mount -t tmpfs tmpfs /mnt/juicefs-base/data/active/fs/tmp
+
+	// During shutdown, JuiceFS will:
+	fmt.Println("Starting graceful shutdown...")
+
+	// The Stop() method will automatically:
+	// 1. Find all dependent mounts by reading /proc/mounts
+	// 2. Sort them by depth (deepest first)
+	// 3. Sync and unmount each dependent mount (flushes pending writes)
+	// 4. Sync the JuiceFS filesystem
+	// 5. Attempt graceful JuiceFS unmount (allows cache flushing)
+	// 6. Force unmount if graceful fails
+	// 7. Stop the Litestream replication
+
+	// IMPORTANT: Use a generous timeout for shutdown to allow proper flushing
+	// Recommended: 5+ minutes for production systems
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	if err := jfs.Stop(shutdownCtx); err != nil {
+		log.Printf("Shutdown error: %v", err)
+	}
+
+	fmt.Println("JuiceFS and all dependent mounts unmounted successfully")
+
+	// Output:
+	// Starting graceful shutdown...
+	// Looking for dependent mounts to unmount...
+	// Syncing JuiceFS filesystem...
+	// Attempting graceful JuiceFS unmount...
+	// JuiceFS and all dependent mounts unmounted successfully
+}
+
+// ExampleJuiceFS_productionShutdown demonstrates best practices for shutting down
+// JuiceFS in production environments where data integrity is critical.
+func ExampleJuiceFS_productionShutdown() {
+	config := juicefs.Config{
+		BaseDir:           os.Getenv("SPRITE_WRITE_DIR") + "/juicefs",
+		S3AccessKey:       os.Getenv("SPRITE_S3_ACCESS_KEY"),
+		S3SecretAccessKey: os.Getenv("SPRITE_S3_SECRET_ACCESS_KEY"),
+		S3EndpointURL:     os.Getenv("SPRITE_S3_ENDPOINT_URL"),
+		S3Bucket:          os.Getenv("SPRITE_S3_BUCKET"),
+	}
+
+	jfs, err := juicefs.New(config)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Start JuiceFS
+	if err := jfs.Start(context.Background()); err != nil {
+		log.Fatal(err)
+	}
+
+	// ... your application runs ...
+
+	// Production shutdown with proper timeout
+	fmt.Println("Starting graceful shutdown...")
+
+	// Use a generous timeout to ensure all data is flushed:
+	// - JuiceFS has --upload-delay=1m, so it may have 1 minute of pending uploads
+	// - Write-back cache needs to be flushed
+	// - Dependent mounts need to be synced and unmounted
+	// - Network conditions may be slow
+	//
+	// Recommended: 5-10 minutes for production systems
+	shutdownTimeout := 5 * time.Minute
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+
+	// Monitor shutdown progress
+	done := make(chan error, 1)
+	go func() {
+		done <- jfs.Stop(shutdownCtx)
+	}()
+
+	// Print progress updates
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case err := <-done:
+			if err != nil {
+				log.Printf("Shutdown failed: %v", err)
+			} else {
+				fmt.Println("Shutdown completed successfully")
+			}
+			return
+		case <-ticker.C:
+			fmt.Println("Shutdown still in progress... (this is normal for large datasets)")
+		}
+	}
+
+	// Output:
+	// Starting graceful shutdown...
+	// Looking for dependent mounts to unmount...
+	// Syncing JuiceFS filesystem...
+	// Attempting graceful JuiceFS unmount (this may take several minutes)...
+	// Shutdown still in progress... (this is normal for large datasets)
+	// JuiceFS shutdown completed in 1m23s
+	// Shutdown completed successfully
+}

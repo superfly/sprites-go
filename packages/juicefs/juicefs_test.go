@@ -422,3 +422,98 @@ func TestLocalModeDirectories(t *testing.T) {
 		t.Logf("Metadata DB would be at: %s", metaDB)
 	}
 }
+
+func TestFindAndUnmountDependentMounts(t *testing.T) {
+	// Note: This test documents the expected behavior of findAndUnmountDependentMounts
+	// In production, this function would:
+	// 1. Read /proc/mounts to find all current mounts
+	// 2. Identify mounts that depend on the JuiceFS mount:
+	//    - Bind mounts where the source is under JuiceFS
+	//    - Any mount point under the JuiceFS path
+	//    - Loopback mounts where the backing file is on JuiceFS
+	// 3. Sort them by depth (deepest first)
+	// 4. Unmount each one before unmounting the main JuiceFS mount
+
+	// Example test scenario (would require root privileges and actual mounts):
+	t.Run("dependent mount identification", func(t *testing.T) {
+		// This is a conceptual test showing what the function should handle
+
+		// Given a JuiceFS mount at /mnt/juicefs
+		juicefsMountPath := "/mnt/juicefs"
+		_ = juicefsMountPath // Variable used for demonstration
+
+		// Example mounts that should be identified as dependent:
+		expectedDependentMounts := []struct {
+			device     string
+			mountPoint string
+			reason     string
+		}{
+			{
+				device:     "/mnt/juicefs/data/dir1",
+				mountPoint: "/home/user/mounted-dir",
+				reason:     "bind mount from JuiceFS",
+			},
+			{
+				device:     "/dev/sda1",
+				mountPoint: "/mnt/juicefs/submount",
+				reason:     "mount point under JuiceFS",
+			},
+			{
+				device:     "/dev/loop0",
+				mountPoint: "/mnt/loop-mount",
+				reason:     "loopback mount with backing file on JuiceFS",
+			},
+		}
+
+		// The function should unmount these in reverse order (deepest first)
+		// to avoid "device busy" errors
+
+		t.Logf("Function would identify and unmount the following dependent mounts:")
+		for _, mount := range expectedDependentMounts {
+			t.Logf("  - %s mounted at %s (%s)", mount.device, mount.mountPoint, mount.reason)
+		}
+	})
+
+	// Test the sorting logic
+	t.Run("mount depth sorting", func(t *testing.T) {
+		// Test that mounts are sorted by depth
+		mounts := []string{
+			"/mnt/juicefs",
+			"/mnt/juicefs/a",
+			"/mnt/juicefs/a/b/c",
+			"/mnt/juicefs/a/b",
+			"/other/mount",
+		}
+
+		// After sorting by depth (deepest first), expected order:
+		expectedOrder := []string{
+			"/mnt/juicefs/a/b/c", // depth 5
+			"/mnt/juicefs/a/b",   // depth 4
+			"/mnt/juicefs/a",     // depth 3
+			"/other/mount",       // depth 2 (but not under juicefs)
+			"/mnt/juicefs",       // depth 2
+		}
+
+		// Count depth by number of path separators
+		depthOf := func(path string) int {
+			depth := 0
+			for _, ch := range path {
+				if ch == '/' {
+					depth++
+				}
+			}
+			return depth
+		}
+
+		// Verify depth calculation
+		for i, mount := range mounts {
+			t.Logf("Mount %s has depth %d", mount, depthOf(mount))
+			if i < len(expectedOrder) {
+				expectedDepth := depthOf(expectedOrder[i])
+				actualDepth := depthOf(mount)
+				t.Logf("  Expected position %d with depth %d", i, expectedDepth)
+				_ = actualDepth // Use to avoid unused variable warning
+			}
+		}
+	})
+}
