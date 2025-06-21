@@ -1,0 +1,11 @@
+# Test artifacts
+../dist/
+dist/
+
+# Test outputs
+*.test
+*.out
+
+# Coverage files
+*.coverprofile
+coverage.html 

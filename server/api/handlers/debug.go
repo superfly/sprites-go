@@ -17,32 +17,89 @@ func (h *Handlers) HandleDebugCreateZombie(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Create a simple command that will fork and exit, leaving a zombie
-	cmd := exec.Command("sh", "-c", "sleep 0.1 & exit")
+	// Create a zombie by having a parent that forks a child and doesn't wait for it
+	// The parent stays alive (sleep 3600) so the child remains a zombie
+	cmd := exec.Command("sh", "-c", `
+		# Create a C program that creates a zombie
+		cat > /tmp/create_zombie.c << 'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
 
-	// Start the command
+int main() {
+    pid_t pid = fork();
+    
+    if (pid == 0) {
+        // Child process - exit immediately
+        exit(0);
+    } else if (pid > 0) {
+        // Parent process - print child PID and sleep without waiting
+        printf("%d\n", pid);
+        fflush(stdout);
+        sleep(3600); // Sleep for an hour to keep the zombie
+    }
+    
+    return 0;
+}
+EOF
+		
+		# Compile and run it
+		gcc -o /tmp/create_zombie /tmp/create_zombie.c 2>/dev/null || {
+			# Fallback if no gcc - use a simpler approach
+			sh -c 'sleep 0.1 && exit 0' &
+			CHILD=$!
+			echo $CHILD
+			# Keep this shell alive to maintain the zombie
+			sleep 3600
+		} &
+		
+		# Run the compiled program if it exists
+		if [ -x /tmp/create_zombie ]; then
+			/tmp/create_zombie &
+		fi
+		
+		# Wait a bit for output
+		sleep 0.1
+	`)
+
+	// Start the command in background
 	if err := cmd.Start(); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to start zombie creator: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("Failed to create zombie: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	// Get the PID of the shell process
-	pid := cmd.Process.Pid
+	// Get the output quickly before detaching
+	go func() {
+		cmd.Wait()
+	}()
 
-	// Don't wait for it - let it become a zombie
-	// The shell will exit, and its child (sleep) will be orphaned and adopted by PID 1
+	// Alternative simpler approach - use a known pattern that creates zombies
+	zombieCmd := exec.Command("sh", "-c", "(sleep 0.1 && exit 0) & echo $!")
+	output, err := zombieCmd.Output()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to create zombie: %v", err), http.StatusInternalServerError)
+		return
+	}
 
-	// Give it a moment to create the zombie
-	time.Sleep(200 * time.Millisecond)
+	pidStr := strings.TrimSpace(string(output))
+	var pid int
+	if _, err := fmt.Sscanf(pidStr, "%d", &pid); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to parse zombie PID: %v", err), http.StatusInternalServerError)
+		return
+	}
 
-	h.logger.Info("Created zombie process for testing", "parent_pid", pid)
+	// Give it a moment to ensure the process exits and becomes zombie
+	time.Sleep(500 * time.Millisecond)
+
+	h.logger.Info("Created zombie process for testing", "zombie_pid", pid)
 
 	// Return the PID
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"message": "Zombie process created",
 		"pid":     pid,
-		"note":    "The sleep child process should be adopted by PID 1 and become a zombie when it exits",
+		"note":    "This process should be in zombie state until reaped by init",
 	})
 }
 

@@ -53,6 +53,9 @@ type Config struct {
 	// Exec
 	ExecWrapperCommand    []string
 	ExecTTYWrapperCommand []string
+
+	// Debug
+	KeepAliveOnError bool // Keep server running when process fails
 }
 
 // Application manages the sprite-env components and implements handlers.ProcessManager
@@ -174,6 +177,11 @@ func (app *Application) IsProcessRunning() bool {
 func (app *Application) Start(ctx context.Context) error {
 	app.logger.Info("Starting sprite-env application", "version", version)
 
+	// Log debug settings
+	if app.config.KeepAliveOnError {
+		app.logger.Info("Keep-alive mode enabled - server will continue running if process fails")
+	}
+
 	// Start zombie reaper if running as PID 1
 	app.startReaper()
 
@@ -282,9 +290,15 @@ func (app *Application) eventLoop() {
 
 			// If not restoring and process exited on its own, stop JuiceFS and exit
 			if !app.restoringNow {
-				app.logger.Info("Process exited, stopping application...")
-				app.shutdown(0)
-				return
+				if app.config.KeepAliveOnError {
+					app.logger.Info("Process exited, but keeping server alive (SPRITE_KEEP_ALIVE_ON_ERROR=true)")
+					app.logger.Info("Server is still running and accepting API requests")
+					// Continue the event loop instead of shutting down
+				} else {
+					app.logger.Info("Process exited, stopping application...")
+					app.shutdown(0)
+					return
+				}
 			}
 
 		case err := <-app.httpDoneCh:
@@ -912,6 +926,11 @@ func parseCommandLine() (Config, error) {
 		config.S3SecretAccessKey = os.Getenv("SPRITE_S3_SECRET_ACCESS_KEY")
 		config.S3EndpointURL = os.Getenv("SPRITE_S3_ENDPOINT_URL")
 		config.S3Bucket = os.Getenv("SPRITE_S3_BUCKET")
+	}
+
+	// Debug configuration
+	if os.Getenv("SPRITE_KEEP_ALIVE_ON_ERROR") == "true" {
+		config.KeepAliveOnError = true
 	}
 
 	// Validate - now API token is required if API server is configured

@@ -16,7 +16,8 @@
       "name": "sprite",
       "image": "<image_ref>",
       "env": {
-        "SPRITE_HTTP_API_TOKEN": "f0e4c2f76c58916ec258f246851bea091d14d4247a2fc3e18694461b1816e13b"
+        "SPRITE_HTTP_API_TOKEN": "f0e4c2f76c58916ec258f246851bea091d14d4247a2fc3e18694461b1816e13b",
+        "SPRITE_KEEP_ALIVE_ON_ERROR": "true"
       },
       "secrets": [
         {

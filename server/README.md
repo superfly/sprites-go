@@ -160,3 +160,122 @@ The test will:
 4. Check process status using the debug endpoint
 
 These debug endpoints are only intended for testing and should not be exposed in production environments. 
+
+# Sprite Control Server (spritectl)
+
+The Sprite Control Server provides a REST API and process management capabilities for the Sprite environment.
+
+## Features
+
+- Process supervision with graceful shutdown
+- JuiceFS integration for persistent storage
+- HTTP API for remote command execution
+- Checkpoint and restore functionality
+- Automatic zombie process reaping when running as PID 1
+- S3-backed or local storage options
+
+## Environment Variables
+
+### Required
+- `SPRITE_HTTP_API_TOKEN` - Authentication token for the HTTP API (required when API server is enabled)
+- `SPRITE_WRITE_DIR` - Base directory for writable data (usually `/dev/fly_vol`)
+
+### S3 Storage (when not using local mode)
+- `SPRITE_S3_ACCESS_KEY` - S3 access key
+- `SPRITE_S3_SECRET_ACCESS_KEY` - S3 secret access key
+- `SPRITE_S3_ENDPOINT_URL` - S3 endpoint URL
+- `SPRITE_S3_BUCKET` - S3 bucket name
+- `SPRITE_S3_REGION` - S3 region (optional, defaults to "us-east-1")
+
+### Optional
+- `SPRITE_LOCAL_MODE` - Set to "true" to use local storage instead of S3
+- `SPRITE_KEEP_ALIVE_ON_ERROR` - Set to "true" to keep the server running when the supervised process fails (useful for debugging)
+
+## Command Line Options
+
+```bash
+spritectl [options] [-- command args...]
+```
+
+### Options
+- `-config <file>` - JSON configuration file
+- `-debug` - Enable debug logging
+- `-log-json` - Output logs in JSON format
+- `-listen <addr>` - API server listen address (default from config)
+- `-graceful-shutdown-timeout <duration>` - Process graceful shutdown timeout (default: 30s)
+- `-juicefs-dir <path>` - JuiceFS base directory (overrides SPRITE_WRITE_DIR)
+- `-version` - Show version and exit
+
+### Examples
+
+```bash
+# Run with a Node.js application
+spritectl -- node app.js
+
+# Run with custom API port
+spritectl -listen :8080 -- python server.py
+
+# Run with debug logging
+spritectl -debug -- ./my-app
+
+# Use local storage mode
+SPRITE_LOCAL_MODE=true spritectl -- ./my-app
+
+# Keep server running on process failure (for debugging)
+SPRITE_KEEP_ALIVE_ON_ERROR=true spritectl -- ./problematic-app
+```
+
+## API Endpoints
+
+### POST /exec
+Execute a command in the container environment.
+
+### POST /checkpoint
+Create a checkpoint of the current state.
+
+### POST /restore
+Restore from a checkpoint.
+
+### GET /debug/create-zombie
+Create a zombie process for testing (debug endpoint).
+
+### GET /debug/check-process
+Check if a process exists and its status.
+
+## Process Management
+
+The server supervises a single main process and handles:
+- Graceful shutdown with configurable timeout
+- Signal forwarding (SIGTERM, SIGINT, etc.)
+- Automatic restart on restore operations
+- Zombie process reaping when running as PID 1
+
+## Configuration File
+
+The `-config` option accepts a JSON file with the following structure:
+
+```json
+{
+  "log_level": "info",
+  "log_json": false,
+  "api_listen_addr": "0.0.0.0:7778",
+  "process_command": ["/app/start.sh"],
+  "process_working_dir": "/app",
+  "process_environment": ["NODE_ENV=production"],
+  "exec_wrapper_command": ["crun", "exec", "app"],
+  "exec_tty_wrapper_command": ["crun", "exec", "-t", "app"]
+}
+```
+
+## Building
+
+```bash
+cd server
+go build -o spritectl .
+```
+
+## Testing
+
+```bash
+make test
+``` 

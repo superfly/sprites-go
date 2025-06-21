@@ -16,6 +16,49 @@ import (
 	"github.com/superfly/fly-go/tokens"
 )
 
+// waitForMachineStarted waits for a machine to reach "started" state
+// Returns an error if the machine is in "creating" or "updating" state
+func waitForMachineStarted(ctx context.Context, client *flaps.Client, machineID string, timeout time.Duration) error {
+	start := time.Now()
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			machine, err := client.Get(ctx, machineID)
+			if err != nil {
+				return fmt.Errorf("failed to get machine status: %w", err)
+			}
+
+			log.Printf("Machine %s is in state: %s", machineID, machine.State)
+
+			// Check for bad states
+			if machine.State == "creating" || machine.State == "updating" {
+				return fmt.Errorf("machine is stuck in %s state", machine.State)
+			}
+
+			// Check for success
+			if machine.State == "started" {
+				log.Printf("Machine %s successfully started", machineID)
+				return nil
+			}
+
+			// Check for other terminal states
+			if machine.State == "stopped" || machine.State == "destroyed" {
+				return fmt.Errorf("machine entered unexpected state: %s", machine.State)
+			}
+
+			// Check timeout
+			if time.Since(start) > timeout {
+				return fmt.Errorf("timeout waiting for machine to start (current state: %s)", machine.State)
+			}
+		}
+	}
+}
+
 func main() {
 	var appName string
 	var skipBuild bool
@@ -198,6 +241,21 @@ func main() {
 
 		log.Printf("Created machine: %s\n", machine.ID)
 		machineID = machine.ID
+	}
+
+	// Wait for machine to be started
+	log.Printf("Waiting for machine to start...")
+	if err := waitForMachineStarted(ctx, flapsClient, machineID, 10*time.Second); err != nil {
+		// If machine is stuck in creating/updating, force delete it
+		if strings.Contains(err.Error(), "stuck in") {
+			log.Printf("Machine is stuck, attempting to force delete...")
+			if delErr := flapsClient.Destroy(ctx, fly.RemoveMachineInput{
+				ID: machineID,
+			}, ""); delErr != nil {
+				log.Printf("Failed to force delete machine: %v", delErr)
+			}
+		}
+		log.Fatalf("Failed to wait for machine to start: %v", err)
 	}
 
 	log.Printf("\nDeployment complete!")
