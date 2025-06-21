@@ -264,6 +264,16 @@ func TestWatchForReady(t *testing.T) {
 		t.Fatalf("Failed to create JuiceFS: %v", err)
 	}
 
+	// Ensure cleanup of overlay mount
+	defer func() {
+		if jfs.overlayMgr != nil {
+			ctx := context.Background()
+			if err := jfs.overlayMgr.Unmount(ctx); err != nil {
+				t.Logf("Failed to unmount overlay during cleanup: %v", err)
+			}
+		}
+	}()
+
 	// Create a pipe to simulate stderr
 	r, w, err := os.Pipe()
 	if err != nil {

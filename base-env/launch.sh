@@ -17,20 +17,22 @@ fi
 # Define paths based on SPRITE_WRITE_DIR
 JUICEFS_BASE="${SPRITE_WRITE_DIR}/juicefs"
 JUICEFS_DATA="${JUICEFS_BASE}/data"
-APP_STORAGE_IMG="${JUICEFS_DATA}/active/app-storage.img"
+ROOT_OVERLAY_IMG="${JUICEFS_DATA}/active/root-overlay.img"
+ROOT_OVERLAY_MOUNT="${JUICEFS_DATA}/root-overlay"
 
-# Create sparse image if it doesn't exist
-if [ ! -f "$APP_STORAGE_IMG" ]; then
-    echo "Creating 100GB sparse image at $APP_STORAGE_IMG..."
-    mkdir -p "$(dirname "$APP_STORAGE_IMG")"
-    dd if=/dev/zero of="$APP_STORAGE_IMG" bs=1 count=0 seek=100G
-    mkfs.ext4 "$APP_STORAGE_IMG"
-fi
 
 # This is a prerun script to do the overlay + loopback inside the namespace
 # Only copy mounts.sh if /mnt/newroot isn't already an overlayfs
 if ! mount | grep -q "^overlay on /mnt/newroot type overlay"; then
-    /home/sprite/mounts.sh
+    # Create directories for overlay
+  mkdir -p ${ROOT_OVERLAY_MOUNT}/{upper,work}
+
+  mkdir -p /mnt/newroot
+
+  # Mount the overlay
+  mount -t overlay overlay \
+    -o lowerdir=/mnt/app-image,upperdir=${ROOT_OVERLAY_MOUNT}/upper,workdir=${ROOT_OVERLAY_MOUNT}/work \
+    /mnt/newroot
 fi
 
 # Store base config in a variable

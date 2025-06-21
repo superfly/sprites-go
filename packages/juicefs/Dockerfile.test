@@ -10,7 +10,9 @@ RUN apk add --no-cache \
     fuse3-dev \
     fuse3 \
     bash \
-    ca-certificates
+    ca-certificates \
+    e2fsprogs \
+    util-linux
 
 # Install JuiceFS
 RUN wget -q https://github.com/juicedata/juicefs/releases/download/v1.1.2/juicefs-1.1.2-linux-amd64.tar.gz && \

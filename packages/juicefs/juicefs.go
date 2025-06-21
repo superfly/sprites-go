@@ -37,6 +37,7 @@ type JuiceFS struct {
 	stopCh        chan struct{}
 	stoppedCh     chan struct{}
 	signalCh      chan os.Signal
+	overlayMgr    *OverlayManager
 }
 
 // Config holds the configuration for JuiceFS
@@ -75,13 +76,23 @@ func New(config Config) (*JuiceFS, error) {
 		}
 	}
 
-	return &JuiceFS{
+	j := &JuiceFS{
 		config:     config,
 		mountReady: make(chan error, 1),
 		stopCh:     make(chan struct{}),
 		stoppedCh:  make(chan struct{}),
 		signalCh:   make(chan os.Signal, 1),
-	}, nil
+	}
+
+	// Initialize the overlay manager
+	j.overlayMgr = NewOverlay(j)
+
+	return j, nil
+}
+
+// GetOverlay returns the overlay manager instance
+func (j *JuiceFS) GetOverlay() *OverlayManager {
+	return j.overlayMgr
 }
 
 // Start initializes and starts JuiceFS with Litestream replication
@@ -303,7 +314,16 @@ func (j *JuiceFS) monitorProcess() {
 
 	select {
 	case <-j.stopCh:
-		// Stop requested, first unmount dependent mounts
+		// Stop requested, first unmount the overlay
+		if j.overlayMgr != nil {
+			fmt.Println("Unmounting root overlay...")
+			ctx := context.Background()
+			if err := j.overlayMgr.Unmount(ctx); err != nil {
+				fmt.Printf("Warning: error unmounting overlay: %v\n", err)
+			}
+		}
+
+		// Then unmount dependent mounts
 		fmt.Println("Looking for dependent mounts to unmount...")
 		if err := j.findAndUnmountDependentMounts(mountPath); err != nil {
 			fmt.Printf("Warning: error finding/unmounting dependent mounts: %v\n", err)
@@ -443,6 +463,20 @@ func (j *JuiceFS) Checkpoint(ctx context.Context, checkpointID string) error {
 		return fmt.Errorf("checkpoint %s already exists at %s", checkpointID, checkpointPath)
 	}
 
+	// Prepare overlay for checkpoint (sync and freeze)
+	if j.overlayMgr != nil {
+		if err := j.overlayMgr.PrepareForCheckpoint(ctx); err != nil {
+			return fmt.Errorf("failed to prepare overlay for checkpoint: %w", err)
+		}
+
+		// Ensure we unfreeze the overlay even if the clone fails
+		defer func() {
+			if unfreezeErr := j.overlayMgr.UnfreezeAfterCheckpoint(ctx); unfreezeErr != nil {
+				fmt.Printf("Warning: failed to unfreeze overlay: %v\n", unfreezeErr)
+			}
+		}()
+	}
+
 	// Clone active directory to checkpoint
 	fmt.Printf("Creating checkpoint %s...\n", checkpointID)
 	cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", activeDir, checkpointPath)
@@ -470,6 +504,25 @@ func (j *JuiceFS) Restore(ctx context.Context, checkpointID string) error {
 		return fmt.Errorf("checkpoint %s does not exist at %s", checkpointID, checkpointPath)
 	}
 
+	// Handle overlay if present
+	if j.overlayMgr != nil {
+		// First sync and freeze the overlay (same as checkpoint)
+		if err := j.overlayMgr.PrepareForCheckpoint(ctx); err != nil {
+			// If prepare fails, it might be because overlay is not mounted, which is ok
+			fmt.Printf("Note: could not prepare overlay for restore: %v\n", err)
+		} else {
+			// Unfreeze after sync
+			if err := j.overlayMgr.UnfreezeAfterCheckpoint(ctx); err != nil {
+				fmt.Printf("Warning: failed to unfreeze overlay: %v\n", err)
+			}
+		}
+
+		// Unmount the overlay before restore
+		if err := j.overlayMgr.Unmount(ctx); err != nil {
+			fmt.Printf("Warning: failed to unmount overlay: %v\n", err)
+		}
+	}
+
 	// If active directory exists, back it up
 	if _, err := os.Stat(activeDir); err == nil {
 		timestamp := time.Now().Unix()
@@ -488,6 +541,18 @@ func (j *JuiceFS) Restore(ctx context.Context, checkpointID string) error {
 	cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", checkpointPath, activeDir)
 	if output, err := cloneCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to restore from checkpoint: %w, output: %s", err, string(output))
+	}
+
+	// Mount the overlay from the restored active directory
+	if j.overlayMgr != nil {
+		// Update the image path to point to the restored active directory
+		j.overlayMgr.UpdateImagePath()
+
+		// Mount the overlay
+		if err := j.overlayMgr.Mount(ctx); err != nil {
+			// Log error but don't fail the restore
+			fmt.Printf("Warning: failed to mount overlay after restore: %v\n", err)
+		}
 	}
 
 	fmt.Printf("Restore from %s complete\n", checkpointID)
@@ -670,6 +735,16 @@ func (j *JuiceFS) watchForReady(stderr io.Reader, mountPath string) {
 				return
 			}
 			fmt.Printf("JuiceFS ready: created active directory at %s\n", filepath.Dir(activeDir))
+
+			// Mount the overlay
+			if j.overlayMgr != nil {
+				ctx := context.Background()
+				if err := j.overlayMgr.Mount(ctx); err != nil {
+					j.mountReady <- fmt.Errorf("failed to mount overlay: %w", err)
+					return
+				}
+			}
+
 			j.mountReady <- nil
 			return
 		}
