@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"spritectl/api/handlers"
 )
 
 func TestHandleCheckpoint(t *testing.T) {
@@ -22,7 +24,7 @@ func TestHandleCheckpoint(t *testing.T) {
 		name                 string
 		method               string
 		body                 string
-		commandResponse      CommandResponse
+		commandResponse      handlers.CommandResponse
 		expectedStatus       int
 		expectedBodyContains string
 		expectStream         bool
@@ -32,7 +34,7 @@ func TestHandleCheckpoint(t *testing.T) {
 			name:   "successful checkpoint",
 			method: http.MethodPost,
 			body:   `{"checkpoint_id": "test-checkpoint"}`,
-			commandResponse: CommandResponse{
+			commandResponse: handlers.CommandResponse{
 				Success: true,
 			},
 			expectedStatus: http.StatusOK,
@@ -65,7 +67,7 @@ func TestHandleCheckpoint(t *testing.T) {
 			name:   "checkpoint failure",
 			method: http.MethodPost,
 			body:   `{"checkpoint_id": "test-checkpoint"}`,
-			commandResponse: CommandResponse{
+			commandResponse: handlers.CommandResponse{
 				Success: false,
 				Error:   errors.New("checkpoint failed"),
 			},
@@ -79,7 +81,7 @@ func TestHandleCheckpoint(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			commandCh := make(chan Command, 1)
+			commandCh := make(chan handlers.Command, 1)
 			processManager := newMockProcessManager()
 
 			config := Config{
@@ -93,15 +95,15 @@ func TestHandleCheckpoint(t *testing.T) {
 			go func() {
 				select {
 				case cmd := <-commandCh:
-					if cmd.Type == CommandCheckpoint {
+					if cmd.Type == handlers.CommandCheckpoint {
 						// Simulate the streamingCheckpoint function behavior
-						if data, ok := cmd.Data.(CheckpointData); ok && data.StreamCh != nil {
+						if data, ok := cmd.Data.(handlers.CheckpointData); ok && data.StreamCh != nil {
 							ch := data.StreamCh
 							checkpointID := data.CheckpointID
 							if tt.commandResponse.Success {
 								go func() {
 									// Send initial message
-									ch <- StreamMessage{
+									ch <- handlers.StreamMessage{
 										Type: "info",
 										Data: fmt.Sprintf("Creating checkpoint %s...", checkpointID),
 										Time: time.Now(),
@@ -109,12 +111,12 @@ func TestHandleCheckpoint(t *testing.T) {
 									// Simulate some work
 									time.Sleep(10 * time.Millisecond)
 									// Send completion messages
-									ch <- StreamMessage{
+									ch <- handlers.StreamMessage{
 										Type: "info",
 										Data: fmt.Sprintf("Checkpoint created successfully at /path/to/%s", checkpointID),
 										Time: time.Now(),
 									}
-									ch <- StreamMessage{
+									ch <- handlers.StreamMessage{
 										Type: "complete",
 										Data: fmt.Sprintf("Checkpoint %s created successfully", checkpointID),
 										Time: time.Now(),
@@ -124,7 +126,7 @@ func TestHandleCheckpoint(t *testing.T) {
 							} else {
 								// For failure cases, simulate the error message that would be sent by main.go
 								go func() {
-									ch <- StreamMessage{
+									ch <- handlers.StreamMessage{
 										Type:  "error",
 										Error: fmt.Sprintf("Failed to create checkpoint: %v", tt.commandResponse.Error),
 										Time:  time.Now(),
@@ -147,7 +149,7 @@ func TestHandleCheckpoint(t *testing.T) {
 
 			// Execute request
 			rr := httptest.NewRecorder()
-			server.handleCheckpoint(rr, req)
+			server.handlers.HandleCheckpoint(rr, req)
 
 			// Check status
 			if rr.Code != tt.expectedStatus {
@@ -184,7 +186,7 @@ func TestHandleRestore(t *testing.T) {
 		name                 string
 		method               string
 		body                 string
-		commandResponse      CommandResponse
+		commandResponse      handlers.CommandResponse
 		expectedStatus       int
 		expectedBodyContains string
 		expectStream         bool
@@ -194,7 +196,7 @@ func TestHandleRestore(t *testing.T) {
 			name:   "successful restore initiation",
 			method: http.MethodPost,
 			body:   `{"checkpoint_id": "test-checkpoint"}`,
-			commandResponse: CommandResponse{
+			commandResponse: handlers.CommandResponse{
 				Success: true,
 			},
 			expectedStatus: http.StatusOK,
@@ -227,7 +229,7 @@ func TestHandleRestore(t *testing.T) {
 			name:   "restore initiation failure",
 			method: http.MethodPost,
 			body:   `{"checkpoint_id": "test-checkpoint"}`,
-			commandResponse: CommandResponse{
+			commandResponse: handlers.CommandResponse{
 				Success: false,
 				Error:   errors.New("restore failed to start"),
 			},
@@ -241,7 +243,7 @@ func TestHandleRestore(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			commandCh := make(chan Command, 1)
+			commandCh := make(chan handlers.Command, 1)
 			processManager := newMockProcessManager()
 
 			config := Config{
@@ -255,10 +257,10 @@ func TestHandleRestore(t *testing.T) {
 			go func() {
 				select {
 				case cmd := <-commandCh:
-					if cmd.Type == CommandRestore {
+					if cmd.Type == handlers.CommandRestore {
 						// In a real scenario, performRestore would close the channel
 						// For the test, we need to simulate this
-						if data, ok := cmd.Data.(RestoreData); ok && data.StreamCh != nil {
+						if data, ok := cmd.Data.(handlers.RestoreData); ok && data.StreamCh != nil {
 							// Simulate performRestore closing the channel after some work
 							// Use a channel to ensure safe closure
 							ch := data.StreamCh
@@ -287,7 +289,7 @@ func TestHandleRestore(t *testing.T) {
 
 			// Execute request
 			rr := httptest.NewRecorder()
-			server.handleRestore(rr, req)
+			server.handlers.HandleRestore(rr, req)
 
 			// Check status
 			if rr.Code != tt.expectedStatus {
@@ -319,7 +321,7 @@ func TestHandleRestore(t *testing.T) {
 
 func TestWaitForRunningMiddleware(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	commandCh := make(chan Command)
+	commandCh := make(chan handlers.Command)
 
 	tests := []struct {
 		name           string
@@ -390,7 +392,7 @@ func TestWaitForRunningMiddleware(t *testing.T) {
 
 func TestEndpointIntegration(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	commandCh := make(chan Command, 10)
+	commandCh := make(chan handlers.Command, 10)
 	processManager := newMockProcessManager()
 	processManager.setProcessRunning(true)
 
@@ -411,14 +413,14 @@ func TestEndpointIntegration(t *testing.T) {
 	go func() {
 		for cmd := range commandCh {
 			switch cmd.Type {
-			case CommandCheckpoint:
+			case handlers.CommandCheckpoint:
 				// Simulate the streamingCheckpoint function behavior
-				if data, ok := cmd.Data.(CheckpointData); ok && data.StreamCh != nil {
+				if data, ok := cmd.Data.(handlers.CheckpointData); ok && data.StreamCh != nil {
 					ch := data.StreamCh
 					checkpointID := data.CheckpointID
 					go func() {
 						// Send initial message
-						ch <- StreamMessage{
+						ch <- handlers.StreamMessage{
 							Type: "info",
 							Data: fmt.Sprintf("Creating checkpoint %s...", checkpointID),
 							Time: time.Now(),
@@ -426,12 +428,12 @@ func TestEndpointIntegration(t *testing.T) {
 						// Simulate some work
 						time.Sleep(10 * time.Millisecond)
 						// Send completion messages
-						ch <- StreamMessage{
+						ch <- handlers.StreamMessage{
 							Type: "info",
 							Data: fmt.Sprintf("Checkpoint created successfully at /path/to/%s", checkpointID),
 							Time: time.Now(),
 						}
-						ch <- StreamMessage{
+						ch <- handlers.StreamMessage{
 							Type: "complete",
 							Data: fmt.Sprintf("Checkpoint %s created successfully", checkpointID),
 							Time: time.Now(),
@@ -439,11 +441,11 @@ func TestEndpointIntegration(t *testing.T) {
 						close(ch)
 					}()
 				}
-				cmd.Response <- CommandResponse{Success: true}
-			case CommandRestore:
+				cmd.Response <- handlers.CommandResponse{Success: true}
+			case handlers.CommandRestore:
 				// Don't close the channel here - the actual server implementation
 				// (performRestore) will close it
-				cmd.Response <- CommandResponse{Success: true}
+				cmd.Response <- handlers.CommandResponse{Success: true}
 			}
 		}
 	}()
@@ -512,7 +514,7 @@ func TestExecHandler(t *testing.T) {
 	}
 
 	t.Run("successful command with stdout", func(t *testing.T) {
-		commandCh := make(chan Command, 1)
+		commandCh := make(chan handlers.Command, 1)
 		mockPM := newMockProcessManager()
 		mockPM.setProcessRunning(true)
 
@@ -529,7 +531,7 @@ func TestExecHandler(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer test-token")
 
 		rr := httptest.NewRecorder()
-		server.handleExec(rr, req)
+		server.handlers.HandleExec(rr, req)
 
 		if rr.Code != http.StatusOK {
 			t.Errorf("handler returned wrong status code: got %v want %v", rr.Code, http.StatusOK)
@@ -555,7 +557,7 @@ func TestExecHandler(t *testing.T) {
 	})
 
 	t.Run("command with stderr output", func(t *testing.T) {
-		commandCh := make(chan Command, 1)
+		commandCh := make(chan handlers.Command, 1)
 		mockPM := newMockProcessManager()
 		mockPM.setProcessRunning(true)
 
@@ -569,7 +571,7 @@ func TestExecHandler(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer test-token")
 
 		rr := httptest.NewRecorder()
-		server.handleExec(rr, req)
+		server.handlers.HandleExec(rr, req)
 
 		messages := parseExecMessages(t, rr.Body.String())
 
@@ -590,7 +592,7 @@ func TestExecHandler(t *testing.T) {
 	})
 
 	t.Run("command with both stdout and stderr", func(t *testing.T) {
-		commandCh := make(chan Command, 1)
+		commandCh := make(chan handlers.Command, 1)
 		mockPM := newMockProcessManager()
 		mockPM.setProcessRunning(true)
 
@@ -604,7 +606,7 @@ func TestExecHandler(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer test-token")
 
 		rr := httptest.NewRecorder()
-		server.handleExec(rr, req)
+		server.handlers.HandleExec(rr, req)
 
 		messages := parseExecMessages(t, rr.Body.String())
 
@@ -638,7 +640,7 @@ func TestExecHandler(t *testing.T) {
 	})
 
 	t.Run("command that exits with non-zero code", func(t *testing.T) {
-		commandCh := make(chan Command, 1)
+		commandCh := make(chan handlers.Command, 1)
 		mockPM := newMockProcessManager()
 		mockPM.setProcessRunning(true)
 
@@ -652,7 +654,7 @@ func TestExecHandler(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer test-token")
 
 		rr := httptest.NewRecorder()
-		server.handleExec(rr, req)
+		server.handlers.HandleExec(rr, req)
 
 		messages := parseExecMessages(t, rr.Body.String())
 
@@ -668,7 +670,7 @@ func TestExecHandler(t *testing.T) {
 	})
 
 	t.Run("command that times out", func(t *testing.T) {
-		commandCh := make(chan Command, 1)
+		commandCh := make(chan handlers.Command, 1)
 		mockPM := newMockProcessManager()
 		mockPM.setProcessRunning(true)
 
@@ -682,7 +684,7 @@ func TestExecHandler(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer test-token")
 
 		rr := httptest.NewRecorder()
-		server.handleExec(rr, req)
+		server.handlers.HandleExec(rr, req)
 
 		messages := parseExecMessages(t, rr.Body.String())
 
@@ -704,7 +706,7 @@ func TestExecHandler(t *testing.T) {
 	})
 
 	t.Run("non-existent command", func(t *testing.T) {
-		commandCh := make(chan Command, 1)
+		commandCh := make(chan handlers.Command, 1)
 		mockPM := newMockProcessManager()
 		mockPM.setProcessRunning(true)
 
@@ -718,7 +720,7 @@ func TestExecHandler(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer test-token")
 
 		rr := httptest.NewRecorder()
-		server.handleExec(rr, req)
+		server.handlers.HandleExec(rr, req)
 
 		// Should fail to start and return error before streaming
 		if rr.Code != http.StatusInternalServerError {
@@ -731,7 +733,7 @@ func TestExecHandler(t *testing.T) {
 	})
 
 	t.Run("empty command array", func(t *testing.T) {
-		commandCh := make(chan Command, 1)
+		commandCh := make(chan handlers.Command, 1)
 		mockPM := newMockProcessManager()
 		mockPM.setProcessRunning(true)
 
@@ -745,7 +747,7 @@ func TestExecHandler(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer test-token")
 
 		rr := httptest.NewRecorder()
-		server.handleExec(rr, req)
+		server.handlers.HandleExec(rr, req)
 
 		if rr.Code != http.StatusBadRequest {
 			t.Errorf("expected status 400 for empty command, got %d", rr.Code)
@@ -757,7 +759,7 @@ func TestExecHandler(t *testing.T) {
 	})
 
 	t.Run("invalid JSON request", func(t *testing.T) {
-		commandCh := make(chan Command, 1)
+		commandCh := make(chan handlers.Command, 1)
 		mockPM := newMockProcessManager()
 		mockPM.setProcessRunning(true)
 
@@ -768,7 +770,7 @@ func TestExecHandler(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer test-token")
 
 		rr := httptest.NewRecorder()
-		server.handleExec(rr, req)
+		server.handlers.HandleExec(rr, req)
 
 		if rr.Code != http.StatusBadRequest {
 			t.Errorf("expected status 400 for invalid JSON, got %d", rr.Code)
@@ -780,7 +782,7 @@ func TestExecHandler(t *testing.T) {
 	})
 
 	t.Run("GET method not allowed", func(t *testing.T) {
-		commandCh := make(chan Command, 1)
+		commandCh := make(chan handlers.Command, 1)
 		mockPM := newMockProcessManager()
 		mockPM.setProcessRunning(true)
 
@@ -790,7 +792,7 @@ func TestExecHandler(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer test-token")
 
 		rr := httptest.NewRecorder()
-		server.handleExec(rr, req)
+		server.handlers.HandleExec(rr, req)
 
 		if rr.Code != http.StatusMethodNotAllowed {
 			t.Errorf("expected status 405 for GET method, got %d", rr.Code)
@@ -798,7 +800,7 @@ func TestExecHandler(t *testing.T) {
 	})
 
 	t.Run("default timeout applied", func(t *testing.T) {
-		commandCh := make(chan Command, 1)
+		commandCh := make(chan handlers.Command, 1)
 		mockPM := newMockProcessManager()
 		mockPM.setProcessRunning(true)
 
@@ -811,7 +813,7 @@ func TestExecHandler(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer test-token")
 
 		rr := httptest.NewRecorder()
-		server.handleExec(rr, req)
+		server.handlers.HandleExec(rr, req)
 
 		// Should succeed (default timeout is 30s)
 		if rr.Code != http.StatusOK {
@@ -825,7 +827,7 @@ func TestExecHandler(t *testing.T) {
 	})
 
 	t.Run("command with large output", func(t *testing.T) {
-		commandCh := make(chan Command, 1)
+		commandCh := make(chan handlers.Command, 1)
 		mockPM := newMockProcessManager()
 		mockPM.setProcessRunning(true)
 
@@ -840,7 +842,7 @@ func TestExecHandler(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer test-token")
 
 		rr := httptest.NewRecorder()
-		server.handleExec(rr, req)
+		server.handlers.HandleExec(rr, req)
 
 		messages := parseExecMessages(t, rr.Body.String())
 
@@ -864,7 +866,7 @@ func TestExecHandler(t *testing.T) {
 	})
 
 	t.Run("context cancellation during execution", func(t *testing.T) {
-		commandCh := make(chan Command, 1)
+		commandCh := make(chan handlers.Command, 1)
 		mockPM := newMockProcessManager()
 		mockPM.setProcessRunning(true)
 
@@ -886,7 +888,7 @@ func TestExecHandler(t *testing.T) {
 		// Start the handler in a goroutine
 		done := make(chan bool)
 		go func() {
-			server.handleExec(rr, req)
+			server.handlers.HandleExec(rr, req)
 			done <- true
 		}()
 
@@ -926,7 +928,7 @@ func TestExecHandler(t *testing.T) {
 			ExecWrapperCommand: []string{"sh", "-c"},
 		}
 
-		commandCh := make(chan Command, 1)
+		commandCh := make(chan handlers.Command, 1)
 		mockPM := newMockProcessManager()
 		mockPM.setProcessRunning(true)
 
@@ -940,7 +942,7 @@ func TestExecHandler(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer test-token")
 
 		rr := httptest.NewRecorder()
-		server.handleExec(rr, req)
+		server.handlers.HandleExec(rr, req)
 
 		if rr.Code != http.StatusOK {
 			t.Errorf("handler returned wrong status code: got %v want %v", rr.Code, http.StatusOK)
@@ -972,7 +974,7 @@ func TestExecHandler(t *testing.T) {
 			ExecTTYWrapperCommand: []string{"sh", "-c"},
 		}
 
-		commandCh := make(chan Command, 1)
+		commandCh := make(chan handlers.Command, 1)
 		mockPM := newMockProcessManager()
 		mockPM.setProcessRunning(true)
 
@@ -987,7 +989,7 @@ func TestExecHandler(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer test-token")
 
 		rr := httptest.NewRecorder()
-		server.handleExec(rr, req)
+		server.handlers.HandleExec(rr, req)
 
 		if rr.Code != http.StatusOK {
 			t.Errorf("handler returned wrong status code: got %v want %v", rr.Code, http.StatusOK)
@@ -1011,8 +1013,8 @@ func TestExecHandler(t *testing.T) {
 }
 
 // Helper function to parse NDJSON messages
-func parseExecMessages(t *testing.T, body string) []ExecMessage {
-	var messages []ExecMessage
+func parseExecMessages(t *testing.T, body string) []handlers.ExecMessage {
+	var messages []handlers.ExecMessage
 	lines := strings.Split(strings.TrimSpace(body), "\n")
 
 	for _, line := range lines {
@@ -1020,7 +1022,7 @@ func parseExecMessages(t *testing.T, body string) []ExecMessage {
 			continue
 		}
 
-		var msg ExecMessage
+		var msg handlers.ExecMessage
 		if err := json.Unmarshal([]byte(line), &msg); err != nil {
 			t.Fatalf("failed to parse message: %v, line: %s", err, line)
 		}
@@ -1033,7 +1035,7 @@ func parseExecMessages(t *testing.T, body string) []ExecMessage {
 func TestExecHandlerWithAuth(t *testing.T) {
 	// Test that exec endpoint requires authentication
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	commandCh := make(chan Command, 1)
+	commandCh := make(chan handlers.Command, 1)
 	mockPM := newMockProcessManager()
 	mockPM.setProcessRunning(true)
 
@@ -1067,7 +1069,7 @@ func TestExecHandlerWithAuth(t *testing.T) {
 func TestExecHandlerProcessNotRunning(t *testing.T) {
 	// Test that exec waits for process to be running
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	commandCh := make(chan Command, 1)
+	commandCh := make(chan handlers.Command, 1)
 	mockPM := newMockProcessManager()
 	mockPM.setProcessRunning(false)
 
@@ -1111,8 +1113,8 @@ func TestExecHandlerProcessNotRunning(t *testing.T) {
 }
 
 // Helper function to parse NDJSON stream messages
-func parseStreamMessages(t *testing.T, body string) []StreamMessage {
-	var messages []StreamMessage
+func parseStreamMessages(t *testing.T, body string) []handlers.StreamMessage {
+	var messages []handlers.StreamMessage
 	lines := strings.Split(strings.TrimSpace(body), "\n")
 
 	for _, line := range lines {
@@ -1120,7 +1122,7 @@ func parseStreamMessages(t *testing.T, body string) []StreamMessage {
 			continue
 		}
 
-		var msg StreamMessage
+		var msg handlers.StreamMessage
 		if err := json.Unmarshal([]byte(line), &msg); err != nil {
 			t.Fatalf("failed to parse stream message: %v, line: %s", err, line)
 		}

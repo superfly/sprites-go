@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"spritectl/api"
+	"spritectl/api/handlers"
 
 	"github.com/fly-dev-env/sprite-env/server/packages/juicefs"
 	"github.com/sprite-env/server/packages/supervisor"
@@ -54,7 +55,7 @@ type Config struct {
 	ExecTTYWrapperCommand []string
 }
 
-// Application manages the sprite-env components and implements api.ProcessManager
+// Application manages the sprite-env components and implements handlers.ProcessManager
 type Application struct {
 	config     Config
 	logger     *slog.Logger
@@ -65,7 +66,7 @@ type Application struct {
 	cancel     context.CancelFunc
 
 	// Channels for component communication
-	commandCh     chan api.Command
+	commandCh     chan handlers.Command
 	processDoneCh chan error
 	httpDoneCh    chan error
 	signalCh      chan os.Signal
@@ -73,6 +74,9 @@ type Application struct {
 	// State
 	processRunning bool
 	restoringNow   bool
+
+	// Background task management
+	reaperDone chan struct{}
 }
 
 // NewApplication creates a new application instance
@@ -97,10 +101,11 @@ func NewApplication(config Config) (*Application, error) {
 		logger:        logger,
 		ctx:           ctx,
 		cancel:        cancel,
-		commandCh:     make(chan api.Command, 10),
+		commandCh:     make(chan handlers.Command, 10),
 		processDoneCh: make(chan error, 1),
 		httpDoneCh:    make(chan error, 1),
 		signalCh:      make(chan os.Signal, 1),
+		reaperDone:    make(chan struct{}),
 	}
 
 	// Set up JuiceFS if base directory is configured
@@ -144,23 +149,23 @@ func NewApplication(config Config) (*Application, error) {
 
 // ProcessManager interface implementation
 
-// SendCommand implements api.ProcessManager
-func (app *Application) SendCommand(cmd api.Command) api.CommandResponse {
+// SendCommand implements handlers.ProcessManager
+func (app *Application) SendCommand(cmd handlers.Command) handlers.CommandResponse {
 	// This is called by the API server, but we handle commands in the event loop
 	// So we just forward the command and wait for response
 	select {
 	case app.commandCh <- cmd:
 		// Command sent successfully
-		return api.CommandResponse{Success: true}
+		return handlers.CommandResponse{Success: true}
 	case <-time.After(time.Second):
-		return api.CommandResponse{
+		return handlers.CommandResponse{
 			Success: false,
 			Error:   fmt.Errorf("timeout sending command"),
 		}
 	}
 }
 
-// IsProcessRunning implements api.ProcessManager
+// IsProcessRunning implements handlers.ProcessManager
 func (app *Application) IsProcessRunning() bool {
 	return app.processRunning
 }
@@ -168,6 +173,9 @@ func (app *Application) IsProcessRunning() bool {
 // Start starts the application components
 func (app *Application) Start(ctx context.Context) error {
 	app.logger.Info("Starting sprite-env application", "version", version)
+
+	// Start zombie reaper if running as PID 1
+	app.startReaper()
 
 	// Start JuiceFS if configured
 	if app.juicefs != nil {
@@ -204,6 +212,7 @@ func (app *Application) Start(ctx context.Context) error {
 
 	// Set up signal handling
 	signal.Notify(app.signalCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+	// Note: SIGCHLD is handled separately by startReaper() when running as PID 1
 
 	// Start the main event loop
 	go app.eventLoop()
@@ -316,16 +325,16 @@ func (app *Application) eventLoop() {
 }
 
 // handleCommand processes commands from the API server
-func (app *Application) handleCommand(cmd api.Command) {
+func (app *Application) handleCommand(cmd handlers.Command) {
 	switch cmd.Type {
-	case api.CommandGetStatus:
-		cmd.Response <- api.CommandResponse{
+	case handlers.CommandGetStatus:
+		cmd.Response <- handlers.CommandResponse{
 			Success: true,
 			Data:    app.processRunning,
 		}
 
-	case api.CommandCheckpoint:
-		data := cmd.Data.(api.CheckpointData)
+	case handlers.CommandCheckpoint:
+		data := cmd.Data.(handlers.CheckpointData)
 		if app.juicefs != nil {
 			go func() {
 				defer close(data.StreamCh)
@@ -336,39 +345,39 @@ func (app *Application) handleCommand(cmd api.Command) {
 				// Stream the checkpoint operation
 				err := app.streamingCheckpoint(ctx, data.CheckpointID, data.StreamCh)
 
-				cmd.Response <- api.CommandResponse{
+				cmd.Response <- handlers.CommandResponse{
 					Success: err == nil,
 					Error:   err,
 				}
 			}()
 		} else {
 			// Send error message before closing channel
-			data.StreamCh <- api.StreamMessage{
+			data.StreamCh <- handlers.StreamMessage{
 				Type:  "error",
 				Error: "JuiceFS not configured",
 				Time:  time.Now(),
 			}
 			close(data.StreamCh)
-			cmd.Response <- api.CommandResponse{
+			cmd.Response <- handlers.CommandResponse{
 				Success: false,
 				Error:   fmt.Errorf("JuiceFS not configured"),
 			}
 		}
 
-	case api.CommandRestore:
-		data := cmd.Data.(api.RestoreData)
+	case handlers.CommandRestore:
+		data := cmd.Data.(handlers.RestoreData)
 		// Start restore process asynchronously with streaming
 		go app.performRestore(data.CheckpointID, data.StreamCh)
 
 		// Immediately respond that restore was initiated
-		cmd.Response <- api.CommandResponse{
+		cmd.Response <- handlers.CommandResponse{
 			Success: true,
 		}
 	}
 }
 
 // performRestore performs the restore sequence with streaming progress
-func (app *Application) performRestore(checkpointID string, streamCh chan<- api.StreamMessage) {
+func (app *Application) performRestore(checkpointID string, streamCh chan<- handlers.StreamMessage) {
 	defer close(streamCh)
 
 	app.logger.Info("Starting restore sequence", "checkpointID", checkpointID)
@@ -380,7 +389,7 @@ func (app *Application) performRestore(checkpointID string, streamCh chan<- api.
 
 	// Stop process if running
 	if app.processRunning && app.supervisor != nil {
-		streamCh <- api.StreamMessage{
+		streamCh <- handlers.StreamMessage{
 			Type: "info",
 			Data: "Stopping process for restore...",
 			Time: time.Now(),
@@ -388,7 +397,7 @@ func (app *Application) performRestore(checkpointID string, streamCh chan<- api.
 		app.logger.Info("Stopping process for restore")
 		if err := app.supervisor.Stop(); err != nil {
 			app.logger.Error("Failed to stop process", "error", err)
-			streamCh <- api.StreamMessage{
+			streamCh <- handlers.StreamMessage{
 				Type:  "error",
 				Error: fmt.Sprintf("Failed to stop process: %v", err),
 				Time:  time.Now(),
@@ -398,7 +407,7 @@ func (app *Application) performRestore(checkpointID string, streamCh chan<- api.
 		// supervisor.Stop() blocks until the process has exited
 		app.processRunning = false
 		app.logger.Info("Process stopped successfully")
-		streamCh <- api.StreamMessage{
+		streamCh <- handlers.StreamMessage{
 			Type: "info",
 			Data: "Process stopped successfully",
 			Time: time.Now(),
@@ -407,7 +416,7 @@ func (app *Application) performRestore(checkpointID string, streamCh chan<- api.
 
 	// Perform JuiceFS restore with streaming
 	if app.juicefs != nil {
-		streamCh <- api.StreamMessage{
+		streamCh <- handlers.StreamMessage{
 			Type: "info",
 			Data: fmt.Sprintf("Restoring from checkpoint %s...", checkpointID),
 			Time: time.Now(),
@@ -419,7 +428,7 @@ func (app *Application) performRestore(checkpointID string, streamCh chan<- api.
 		previousStateID, err := app.streamingRestore(ctx, checkpointID, streamCh)
 		if err != nil {
 			app.logger.Error("Failed to restore checkpoint", "error", err)
-			streamCh <- api.StreamMessage{
+			streamCh <- handlers.StreamMessage{
 				Type:  "error",
 				Error: fmt.Sprintf("Failed to restore checkpoint: %v", err),
 				Time:  time.Now(),
@@ -431,7 +440,7 @@ func (app *Application) performRestore(checkpointID string, streamCh chan<- api.
 	}
 
 	// Restart process
-	streamCh <- api.StreamMessage{
+	streamCh <- handlers.StreamMessage{
 		Type: "info",
 		Data: "Starting process after restore...",
 		Time: time.Now(),
@@ -439,7 +448,7 @@ func (app *Application) performRestore(checkpointID string, streamCh chan<- api.
 	app.logger.Info("Starting process after restore")
 	if err := app.startProcess(); err != nil {
 		app.logger.Error("Failed to start process after restore", "error", err)
-		streamCh <- api.StreamMessage{
+		streamCh <- handlers.StreamMessage{
 			Type:  "error",
 			Error: fmt.Sprintf("Failed to start process after restore: %v", err),
 			Time:  time.Now(),
@@ -453,7 +462,7 @@ func (app *Application) performRestore(checkpointID string, streamCh chan<- api.
 	if previousStateID != "" {
 		completeMessage += fmt.Sprintf(", previous state checkpoint id: %s", previousStateID)
 	}
-	streamCh <- api.StreamMessage{
+	streamCh <- handlers.StreamMessage{
 		Type: "complete",
 		Data: completeMessage,
 		Time: time.Now(),
@@ -461,7 +470,7 @@ func (app *Application) performRestore(checkpointID string, streamCh chan<- api.
 }
 
 // streamingCheckpoint performs checkpoint with streaming output
-func (app *Application) streamingCheckpoint(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) error {
+func (app *Application) streamingCheckpoint(ctx context.Context, checkpointID string, streamCh chan<- handlers.StreamMessage) error {
 	if checkpointID == "" {
 		return fmt.Errorf("checkpoint ID is required")
 	}
@@ -487,7 +496,7 @@ func (app *Application) streamingCheckpoint(ctx context.Context, checkpointID st
 	}
 
 	// Send initial message
-	streamCh <- api.StreamMessage{
+	streamCh <- handlers.StreamMessage{
 		Type: "info",
 		Data: fmt.Sprintf("Creating checkpoint %s...", checkpointID),
 		Time: time.Now(),
@@ -521,7 +530,7 @@ func (app *Application) streamingCheckpoint(ctx context.Context, checkpointID st
 		defer wg.Done()
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
-			streamCh <- api.StreamMessage{
+			streamCh <- handlers.StreamMessage{
 				Type: "stdout",
 				Data: scanner.Text(),
 				Time: time.Now(),
@@ -534,7 +543,7 @@ func (app *Application) streamingCheckpoint(ctx context.Context, checkpointID st
 		defer wg.Done()
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
-			streamCh <- api.StreamMessage{
+			streamCh <- handlers.StreamMessage{
 				Type: "stderr",
 				Data: scanner.Text(),
 				Time: time.Now(),
@@ -547,7 +556,7 @@ func (app *Application) streamingCheckpoint(ctx context.Context, checkpointID st
 	err = cmd.Wait()
 
 	if err != nil {
-		streamCh <- api.StreamMessage{
+		streamCh <- handlers.StreamMessage{
 			Type:  "error",
 			Error: fmt.Sprintf("juicefs clone failed: %v", err),
 			Time:  time.Now(),
@@ -555,14 +564,14 @@ func (app *Application) streamingCheckpoint(ctx context.Context, checkpointID st
 		return fmt.Errorf("juicefs clone failed: %w", err)
 	}
 
-	streamCh <- api.StreamMessage{
+	streamCh <- handlers.StreamMessage{
 		Type: "info",
 		Data: fmt.Sprintf("Checkpoint created successfully at %s", checkpointPath),
 		Time: time.Now(),
 	}
 
 	// Send final completion message
-	streamCh <- api.StreamMessage{
+	streamCh <- handlers.StreamMessage{
 		Type: "complete",
 		Data: fmt.Sprintf("Checkpoint %s created successfully", checkpointID),
 		Time: time.Now(),
@@ -572,7 +581,7 @@ func (app *Application) streamingCheckpoint(ctx context.Context, checkpointID st
 }
 
 // streamingRestore performs restore with streaming output
-func (app *Application) streamingRestore(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) (string, error) {
+func (app *Application) streamingRestore(ctx context.Context, checkpointID string, streamCh chan<- handlers.StreamMessage) (string, error) {
 	if checkpointID == "" {
 		return "", fmt.Errorf("checkpoint ID is required")
 	}
@@ -597,7 +606,7 @@ func (app *Application) streamingRestore(ctx context.Context, checkpointID strin
 		backupPath := filepath.Join(checkpointsDir, backupName)
 		previousStateID = backupName
 
-		streamCh <- api.StreamMessage{
+		streamCh <- handlers.StreamMessage{
 			Type: "info",
 			Data: fmt.Sprintf("Backing up current active directory to %s...", backupName),
 			Time: time.Now(),
@@ -607,7 +616,7 @@ func (app *Application) streamingRestore(ctx context.Context, checkpointID strin
 			return "", fmt.Errorf("failed to backup active directory: %w", err)
 		}
 
-		streamCh <- api.StreamMessage{
+		streamCh <- handlers.StreamMessage{
 			Type: "info",
 			Data: "Backup completed",
 			Time: time.Now(),
@@ -615,7 +624,7 @@ func (app *Application) streamingRestore(ctx context.Context, checkpointID strin
 	}
 
 	// Clone checkpoint to active directory
-	streamCh <- api.StreamMessage{
+	streamCh <- handlers.StreamMessage{
 		Type: "info",
 		Data: fmt.Sprintf("Cloning checkpoint %s to active directory...", checkpointID),
 		Time: time.Now(),
@@ -648,7 +657,7 @@ func (app *Application) streamingRestore(ctx context.Context, checkpointID strin
 		defer wg.Done()
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
-			streamCh <- api.StreamMessage{
+			streamCh <- handlers.StreamMessage{
 				Type: "stdout",
 				Data: scanner.Text(),
 				Time: time.Now(),
@@ -661,7 +670,7 @@ func (app *Application) streamingRestore(ctx context.Context, checkpointID strin
 		defer wg.Done()
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
-			streamCh <- api.StreamMessage{
+			streamCh <- handlers.StreamMessage{
 				Type: "stderr",
 				Data: scanner.Text(),
 				Time: time.Now(),
@@ -683,7 +692,7 @@ func (app *Application) streamingRestore(ctx context.Context, checkpointID strin
 		message += fmt.Sprintf(", previous state checkpoint id: %s", previousStateID)
 	}
 
-	streamCh <- api.StreamMessage{
+	streamCh <- handlers.StreamMessage{
 		Type: "info",
 		Data: message,
 		Time: time.Now(),
@@ -726,8 +735,67 @@ func (app *Application) shutdown(exitCode int) {
 		cancel()
 	}
 
+	// Wait for zombie reaper to finish with a timeout
+	select {
+	case <-app.reaperDone:
+		app.logger.Debug("Zombie reaper stopped cleanly")
+	case <-time.After(1 * time.Second):
+		app.logger.Warn("Zombie reaper did not stop within timeout")
+	}
+
 	app.logger.Info("Application stopped", "exitCode", exitCode)
 	os.Exit(exitCode)
+}
+
+// startReaper starts a goroutine to reap zombie processes when running as PID 1
+//
+// Safety guarantees:
+// - syscall.Wait4 uses WNOHANG flag, so it never blocks
+// - The goroutine listens for context cancellation and exits cleanly
+// - Signal handler is properly cleaned up with signal.Stop()
+// - The shutdown() function waits (with timeout) for this goroutine to finish
+func (app *Application) startReaper() {
+	// Only start reaper if we're PID 1
+	if os.Getpid() != 1 {
+		close(app.reaperDone) // Signal immediately that reaper is "done" since it never started
+		return
+	}
+
+	app.logger.Info("Running as PID 1, starting zombie reaper")
+
+	// Create a separate signal channel for SIGCHLD
+	sigchldCh := make(chan os.Signal, 10)
+	signal.Notify(sigchldCh, syscall.SIGCHLD)
+
+	go func() {
+		defer close(app.reaperDone)
+		defer signal.Stop(sigchldCh)
+
+		for {
+			select {
+			case <-app.ctx.Done():
+				return
+			case <-sigchldCh:
+				// Reap all available zombie processes
+				for {
+					var status syscall.WaitStatus
+					pid, err := syscall.Wait4(-1, &status, syscall.WNOHANG, nil)
+					if err != nil {
+						// ECHILD is expected when there are no child processes
+						if err != syscall.ECHILD {
+							app.logger.Debug("Error during wait4", "error", err)
+						}
+						break
+					}
+					if pid <= 0 {
+						// No more zombies to reap
+						break
+					}
+					app.logger.Debug("Reaped zombie process", "pid", pid, "status", status)
+				}
+			}
+		}
+	}()
 }
 
 // Command-line parsing and main

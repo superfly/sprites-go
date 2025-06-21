@@ -7,11 +7,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"spritectl/api/handlers"
 )
 
 func TestNewServerRequiresAuth(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	commandCh := make(chan Command)
+	commandCh := make(chan handlers.Command)
 	processManager := newMockProcessManager()
 
 	// Test that server creation fails without API token
@@ -42,7 +44,7 @@ func TestNewServerRequiresAuth(t *testing.T) {
 
 func TestExtractToken(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	commandCh := make(chan Command)
+	commandCh := make(chan handlers.Command)
 	processManager := newMockProcessManager()
 
 	config := Config{
@@ -177,7 +179,7 @@ func TestExtractToken(t *testing.T) {
 
 func TestAuthMiddleware(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	commandCh := make(chan Command)
+	commandCh := make(chan handlers.Command)
 	processManager := newMockProcessManager()
 
 	tests := []struct {

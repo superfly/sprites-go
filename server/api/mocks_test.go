@@ -1,32 +1,13 @@
 package api
 
 import (
-	"context"
 	"errors"
 	"io"
 	"os"
 	"sync"
+
+	"spritectl/api/handlers"
 )
-
-// mockJuiceFS implements JuiceFS interface for testing
-type mockJuiceFS struct {
-	checkpointFunc func(ctx context.Context, checkpointID string) error
-	restoreFunc    func(ctx context.Context, checkpointID string) error
-}
-
-func (m *mockJuiceFS) Checkpoint(ctx context.Context, checkpointID string) error {
-	if m.checkpointFunc != nil {
-		return m.checkpointFunc(ctx, checkpointID)
-	}
-	return nil
-}
-
-func (m *mockJuiceFS) Restore(ctx context.Context, checkpointID string) error {
-	if m.restoreFunc != nil {
-		return m.restoreFunc(ctx, checkpointID)
-	}
-	return nil
-}
 
 // mockSupervisor implements Supervisor interface for testing
 type mockSupervisor struct {
@@ -37,6 +18,10 @@ type mockSupervisor struct {
 	stopFunc   func() error
 	signalFunc func(sig os.Signal) error
 	waitFunc   func() error
+	startErr   error
+	stopErr    error
+	signalErr  error
+	waitErr    error
 }
 
 func (m *mockSupervisor) Start() (int, error) {
@@ -45,6 +30,9 @@ func (m *mockSupervisor) Start() (int, error) {
 
 	if m.startFunc != nil {
 		return m.startFunc()
+	}
+	if m.startErr != nil {
+		return 0, m.startErr
 	}
 	m.running = true
 	m.pid = 12345
@@ -58,6 +46,9 @@ func (m *mockSupervisor) Stop() error {
 	if m.stopFunc != nil {
 		return m.stopFunc()
 	}
+	if m.stopErr != nil {
+		return m.stopErr
+	}
 	m.running = false
 	return nil
 }
@@ -66,6 +57,9 @@ func (m *mockSupervisor) Signal(sig os.Signal) error {
 	if m.signalFunc != nil {
 		return m.signalFunc(sig)
 	}
+	if m.signalErr != nil {
+		return m.signalErr
+	}
 	return nil
 }
 
@@ -73,6 +67,10 @@ func (m *mockSupervisor) Wait() error {
 	if m.waitFunc != nil {
 		return m.waitFunc()
 	}
+	if m.waitErr != nil {
+		return m.waitErr
+	}
+	m.running = false
 	return nil
 }
 
@@ -98,18 +96,23 @@ func (m *mockSupervisor) StderrPipe() (io.ReadCloser, error) {
 type mockProcessManager struct {
 	mu               sync.Mutex
 	processRunning   bool
-	commandResponses map[CommandType]CommandResponse
+	commands         []handlers.Command
+	commandResponses map[handlers.CommandType]handlers.CommandResponse
 }
 
 func newMockProcessManager() *mockProcessManager {
 	return &mockProcessManager{
-		commandResponses: make(map[CommandType]CommandResponse),
+		processRunning:   false,
+		commands:         make([]handlers.Command, 0),
+		commandResponses: make(map[handlers.CommandType]handlers.CommandResponse),
 	}
 }
 
-func (m *mockProcessManager) SendCommand(cmd Command) CommandResponse {
+func (m *mockProcessManager) SendCommand(cmd handlers.Command) handlers.CommandResponse {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	m.commands = append(m.commands, cmd)
 
 	// Send response based on command type
 	if resp, ok := m.commandResponses[cmd.Type]; ok {
@@ -118,21 +121,21 @@ func (m *mockProcessManager) SendCommand(cmd Command) CommandResponse {
 
 	// Default responses
 	switch cmd.Type {
-	case CommandGetStatus:
-		return CommandResponse{
+	case handlers.CommandGetStatus:
+		return handlers.CommandResponse{
 			Success: true,
 			Data:    m.processRunning,
 		}
-	case CommandCheckpoint:
-		return CommandResponse{
+	case handlers.CommandCheckpoint:
+		return handlers.CommandResponse{
 			Success: true,
 		}
-	case CommandRestore:
-		return CommandResponse{
+	case handlers.CommandRestore:
+		return handlers.CommandResponse{
 			Success: true,
 		}
 	default:
-		return CommandResponse{
+		return handlers.CommandResponse{
 			Success: false,
 			Error:   errors.New("unknown command"),
 		}
@@ -151,8 +154,38 @@ func (m *mockProcessManager) setProcessRunning(running bool) {
 	m.processRunning = running
 }
 
-func (m *mockProcessManager) setCommandResponse(cmdType CommandType, resp CommandResponse) {
+func (m *mockProcessManager) setCommandResponse(cmdType handlers.CommandType, resp handlers.CommandResponse) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.commandResponses[cmdType] = resp
+}
+
+// Mock command handler for testing
+type mockCommandHandler struct {
+	receivedCommands []handlers.Command
+	responses        map[handlers.CommandType]handlers.CommandResponse
+}
+
+func newMockCommandHandler() *mockCommandHandler {
+	return &mockCommandHandler{
+		receivedCommands: make([]handlers.Command, 0),
+		responses:        make(map[handlers.CommandType]handlers.CommandResponse),
+	}
+}
+
+func (h *mockCommandHandler) setResponse(cmdType handlers.CommandType, resp handlers.CommandResponse) {
+	h.responses[cmdType] = resp
+}
+
+func (h *mockCommandHandler) handleCommand(cmd handlers.Command) {
+	h.receivedCommands = append(h.receivedCommands, cmd)
+
+	if resp, ok := h.responses[cmd.Type]; ok {
+		cmd.Response <- resp
+	} else {
+		cmd.Response <- handlers.CommandResponse{
+			Success: false,
+			Error:   errors.New("no response configured"),
+		}
+	}
 }

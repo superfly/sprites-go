@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"spritectl/api/handlers"
 )
 
 // Server provides the HTTP API with authentication
@@ -15,12 +17,12 @@ type Server struct {
 	server         *http.Server
 	logger         *slog.Logger
 	config         Config
-	commandCh      chan<- Command
-	processManager ProcessManager
+	handlers       *handlers.Handlers
+	processManager handlers.ProcessManager
 }
 
 // NewServer creates a new API server
-func NewServer(config Config, commandCh chan<- Command, processManager ProcessManager, logger *slog.Logger) (*Server, error) {
+func NewServer(config Config, commandCh chan<- handlers.Command, processManager handlers.ProcessManager, logger *slog.Logger) (*Server, error) {
 	// Enforce authentication requirement
 	if config.APIToken == "" {
 		return nil, errors.New("API token must be set - server cannot run without authentication")
@@ -31,10 +33,20 @@ func NewServer(config Config, commandCh chan<- Command, processManager ProcessMa
 		config.MaxWaitTime = 30 * time.Second
 	}
 
+	// Create handlers config
+	handlersConfig := handlers.Config{
+		MaxWaitTime:           config.MaxWaitTime,
+		ExecWrapperCommand:    config.ExecWrapperCommand,
+		ExecTTYWrapperCommand: config.ExecTTYWrapperCommand,
+	}
+
+	// Create handlers
+	h := handlers.NewHandlers(logger, commandCh, handlersConfig, processManager)
+
 	s := &Server{
 		logger:         logger,
 		config:         config,
-		commandCh:      commandCh,
+		handlers:       h,
 		processManager: processManager,
 	}
 
@@ -55,14 +67,18 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 	// All endpoints require authentication
 
 	// Exec endpoint - waits for process to be running
-	mux.HandleFunc("/exec", s.authMiddleware(s.waitForRunningMiddleware(s.handleExec)))
+	mux.HandleFunc("/exec", s.authMiddleware(s.waitForRunningMiddleware(s.handlers.HandleExec)))
 
 	// State management endpoints - don't wait for running state
-	mux.HandleFunc("/checkpoint", s.authMiddleware(s.handleCheckpoint))
-	mux.HandleFunc("/restore", s.authMiddleware(s.handleRestore))
+	mux.HandleFunc("/checkpoint", s.authMiddleware(s.handlers.HandleCheckpoint))
+	mux.HandleFunc("/restore", s.authMiddleware(s.handlers.HandleRestore))
 
 	// Proxy endpoint - waits for process to be running
-	mux.HandleFunc("/proxy", s.authMiddleware(s.waitForRunningMiddleware(s.handleProxy)))
+	mux.HandleFunc("/proxy", s.authMiddleware(s.waitForRunningMiddleware(s.handlers.HandleProxy)))
+
+	// Debug endpoints - require auth but don't wait for process
+	mux.HandleFunc("/debug/create-zombie", s.authMiddleware(s.handlers.HandleDebugCreateZombie))
+	mux.HandleFunc("/debug/check-process", s.authMiddleware(s.handlers.HandleDebugCheckProcess))
 }
 
 // Start starts the API server
