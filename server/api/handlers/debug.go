@@ -18,8 +18,8 @@ func (h *Handlers) HandleDebugCreateZombie(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Subscribe to reap events before creating the process
-	reapCh := h.processManager.SubscribeToReapEvents()
-	defer h.processManager.UnsubscribeFromReapEvents(reapCh)
+	reapCh := h.system.SubscribeToReapEvents()
+	defer h.system.UnsubscribeFromReapEvents(reapCh)
 
 	// Create a simple process that will become a zombie
 	// We use a shell command that exits immediately
@@ -59,7 +59,7 @@ func (h *Handlers) HandleDebugCreateZombie(w http.ResponseWriter, r *http.Reques
 	var reapDuration time.Duration
 
 	// First check if it was already reaped (in case we missed the event)
-	if wasReaped, reapTime := h.processManager.WasProcessReaped(pid); wasReaped {
+	if wasReaped, reapTime := h.system.WasProcessReaped(pid); wasReaped {
 		reaped = true
 		reapDuration = reapTime.Sub(reapStartTime)
 	} else {
@@ -74,7 +74,7 @@ func (h *Handlers) HandleDebugCreateZombie(w http.ResponseWriter, r *http.Reques
 				}
 			case <-timeout:
 				// Timeout - check one more time in case we missed it
-				if wasReaped, reapTime := h.processManager.WasProcessReaped(pid); wasReaped {
+				if wasReaped, reapTime := h.system.WasProcessReaped(pid); wasReaped {
 					reaped = true
 					reapDuration = reapTime.Sub(reapStartTime)
 				} else {

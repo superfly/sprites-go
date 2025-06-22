@@ -1,21 +1,106 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"io"
+	"lib/api"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
+	"time"
 )
+
+// mockSystemManager implements SystemManager for testing
+type mockSystemManager struct {
+	isRunning       bool
+	hasJuiceFS      bool
+	reapedProcesses map[int]time.Time
+	reapListeners   []chan int
+}
+
+func newMockSystemManager() *mockSystemManager {
+	return &mockSystemManager{
+		isRunning:       true,
+		hasJuiceFS:      true,
+		reapedProcesses: make(map[int]time.Time),
+		reapListeners:   make([]chan int, 0),
+	}
+}
+
+func (m *mockSystemManager) IsProcessRunning() bool {
+	return m.isRunning
+}
+
+func (m *mockSystemManager) StartProcess() error {
+	m.isRunning = true
+	return nil
+}
+
+func (m *mockSystemManager) StopProcess() error {
+	m.isRunning = false
+	return nil
+}
+
+func (m *mockSystemManager) ForwardSignal(sig os.Signal) error {
+	return nil
+}
+
+func (m *mockSystemManager) HasJuiceFS() bool {
+	return m.hasJuiceFS
+}
+
+func (m *mockSystemManager) CheckpointWithStream(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) error {
+	defer close(streamCh)
+	streamCh <- api.StreamMessage{
+		Type: "info",
+		Data: "Mock checkpoint created",
+		Time: time.Now(),
+	}
+	return nil
+}
+
+func (m *mockSystemManager) RestoreWithStream(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) error {
+	defer close(streamCh)
+	streamCh <- api.StreamMessage{
+		Type: "info",
+		Data: "Mock restore completed",
+		Time: time.Now(),
+	}
+	return nil
+}
+
+func (m *mockSystemManager) SubscribeToReapEvents() <-chan int {
+	ch := make(chan int, 10)
+	m.reapListeners = append(m.reapListeners, ch)
+	return ch
+}
+
+func (m *mockSystemManager) UnsubscribeFromReapEvents(ch <-chan int) {
+	for i, listener := range m.reapListeners {
+		if listener == ch {
+			close(listener)
+			m.reapListeners = append(m.reapListeners[:i], m.reapListeners[i+1:]...)
+			break
+		}
+	}
+}
+
+func (m *mockSystemManager) WasProcessReaped(pid int) (bool, time.Time) {
+	if reapTime, ok := m.reapedProcesses[pid]; ok {
+		return true, reapTime
+	}
+	return false, time.Time{}
+}
 
 // TestHandleDebugCreateZombie tests the debug zombie creation handler
 func TestHandleDebugCreateZombie(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	commandCh := make(chan Command, 1)
 	config := Config{}
-	mockPM := &mockProcessManager{}
-	h := NewHandlers(logger, commandCh, config, mockPM)
+	mockSys := newMockSystemManager()
+	h := NewHandlers(logger, mockSys, config)
 
 	tests := []struct {
 		name           string
@@ -67,10 +152,9 @@ func TestHandleDebugCreateZombie(t *testing.T) {
 // TestHandleDebugCheckProcess tests the debug process check handler
 func TestHandleDebugCheckProcess(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	commandCh := make(chan Command, 1)
 	config := Config{}
-	mockPM := &mockProcessManager{}
-	h := NewHandlers(logger, commandCh, config, mockPM)
+	mockSys := newMockSystemManager()
+	h := NewHandlers(logger, mockSys, config)
 
 	tests := []struct {
 		name           string

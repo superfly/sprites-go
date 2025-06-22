@@ -8,9 +8,8 @@ import (
 
 // Handlers contains all HTTP handlers
 type Handlers struct {
-	logger         *slog.Logger
-	commandCh      chan<- Command
-	processManager ProcessManager
+	logger *slog.Logger
+	system SystemManager
 
 	// Config fields
 	maxWaitTime           time.Duration
@@ -30,11 +29,10 @@ type Config struct {
 }
 
 // NewHandlers creates a new Handlers instance
-func NewHandlers(logger *slog.Logger, commandCh chan<- Command, config Config, processManager ProcessManager) *Handlers {
+func NewHandlers(logger *slog.Logger, system SystemManager, config Config) *Handlers {
 	return &Handlers{
 		logger:                logger,
-		commandCh:             commandCh,
-		processManager:        processManager,
+		system:                system,
 		maxWaitTime:           config.MaxWaitTime,
 		execWrapperCommand:    config.ExecWrapperCommand,
 		execTTYWrapperCommand: config.ExecTTYWrapperCommand,

@@ -5,19 +5,13 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"lib/api"
 	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
 	serverapi "spritectl/api"
-	"spritectl/api/handlers"
-	"sync"
 	"syscall"
 	"time"
-
-	"github.com/fly-dev-env/sprite-env/server/packages/juicefs"
-	"github.com/sprite-env/server/packages/supervisor"
 )
 
 // version is set at build time via ldflags
@@ -65,31 +59,16 @@ type Config struct {
 
 // Application represents the main application
 type Application struct {
-	config     Config
-	logger     *slog.Logger
-	juicefs    *juicefs.JuiceFS
-	supervisor *supervisor.Supervisor
-	apiServer  *serverapi.Server
-	ctx        context.Context
-	cancel     context.CancelFunc
-
-	// Channels for component communication
-	commandCh     chan handlers.Command
-	processDoneCh chan error
-	httpDoneCh    chan error
-	signalCh      chan os.Signal
+	config    Config
+	logger    *slog.Logger
+	system    *System
+	reaper    *Reaper
+	apiServer *serverapi.Server
+	ctx       context.Context
+	cancel    context.CancelFunc
 
 	// State
-	processRunning bool
-	restoringNow   bool
-
-	// Background task management
-	reaperDone chan struct{}
-
-	// Reap event tracking
-	reapEventsMu  sync.RWMutex
-	reapEvents    map[int]time.Time // Map of PID to reap time
-	reapListeners []chan int        // Channels listening for reap events
+	keepAliveOnError bool
 }
 
 // NewApplication creates a new application instance
@@ -110,42 +89,40 @@ func NewApplication(config Config) (*Application, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	app := &Application{
-		config:        config,
-		logger:        logger,
-		ctx:           ctx,
-		cancel:        cancel,
-		commandCh:     make(chan handlers.Command, 10),
-		processDoneCh: make(chan error, 1),
-		httpDoneCh:    make(chan error, 1),
-		signalCh:      make(chan os.Signal, 1),
-		reaperDone:    make(chan struct{}),
-		reapEvents:    make(map[int]time.Time),
+		config:           config,
+		logger:           logger,
+		ctx:              ctx,
+		cancel:           cancel,
+		keepAliveOnError: config.KeepAliveOnError,
 	}
 
-	// Set up JuiceFS if base directory is configured
-	if config.JuiceFSBaseDir != "" {
-		juicefsConfig := juicefs.Config{
-			BaseDir:           config.JuiceFSBaseDir,
-			LocalMode:         config.JuiceFSLocalMode,
-			S3AccessKey:       config.S3AccessKey,
-			S3SecretAccessKey: config.S3SecretAccessKey,
-			S3EndpointURL:     config.S3EndpointURL,
-			S3Bucket:          config.S3Bucket,
-			VolumeName:        "sprite-juicefs",
-			// Overlay configuration
-			OverlayEnabled:       config.OverlayEnabled,
-			OverlayImageSize:     config.OverlayImageSize,
-			OverlayLowerPath:     config.OverlayLowerPath,
-			OverlayTargetPath:    config.OverlayTargetPath,
-			OverlaySkipOverlayFS: config.OverlaySkipOverlayFS,
-		}
+	// Create Reaper instance
+	app.reaper = NewReaper(logger)
 
-		jfs, err := juicefs.New(juicefsConfig)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create JuiceFS instance: %w", err)
-		}
-		app.juicefs = jfs
+	// Create System instance
+	systemConfig := SystemConfig{
+		ProcessCommand:                 config.ProcessCommand,
+		ProcessWorkingDir:              config.ProcessWorkingDir,
+		ProcessEnvironment:             config.ProcessEnvironment,
+		ProcessGracefulShutdownTimeout: config.ProcessGracefulShutdownTimeout,
+		JuiceFSBaseDir:                 config.JuiceFSBaseDir,
+		JuiceFSLocalMode:               config.JuiceFSLocalMode,
+		S3AccessKey:                    config.S3AccessKey,
+		S3SecretAccessKey:              config.S3SecretAccessKey,
+		S3EndpointURL:                  config.S3EndpointURL,
+		S3Bucket:                       config.S3Bucket,
+		OverlayEnabled:                 config.OverlayEnabled,
+		OverlayImageSize:               config.OverlayImageSize,
+		OverlayLowerPath:               config.OverlayLowerPath,
+		OverlayTargetPath:              config.OverlayTargetPath,
+		OverlaySkipOverlayFS:           config.OverlaySkipOverlayFS,
 	}
+
+	system, err := NewSystem(systemConfig, logger, app.reaper)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create system: %w", err)
+	}
+	app.system = system
 
 	// Set up API server if configured
 	if config.APIListenAddr != "" {
@@ -157,7 +134,7 @@ func NewApplication(config Config) (*Application, error) {
 			ExecTTYWrapperCommand: config.ExecTTYWrapperCommand,
 		}
 
-		apiServer, err := serverapi.NewServer(apiConfig, app.commandCh, app, logger)
+		apiServer, err := serverapi.NewServer(apiConfig, app.system, logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create API server: %w", err)
 		}
@@ -167,99 +144,8 @@ func NewApplication(config Config) (*Application, error) {
 	return app, nil
 }
 
-// ProcessManager interface implementation
-
-// SendCommand implements handlers.ProcessManager
-func (app *Application) SendCommand(cmd handlers.Command) handlers.CommandResponse {
-	// This is called by the API server, but we handle commands in the event loop
-	// So we just forward the command and wait for response
-	select {
-	case app.commandCh <- cmd:
-		// Command sent successfully
-		return handlers.CommandResponse{Success: true}
-	case <-time.After(time.Second):
-		return handlers.CommandResponse{
-			Success: false,
-			Error:   fmt.Errorf("timeout sending command"),
-		}
-	}
-}
-
-// IsProcessRunning implements handlers.ProcessManager
-func (app *Application) IsProcessRunning() bool {
-	return app.processRunning
-}
-
-// SubscribeToReapEvents creates a channel that receives PIDs when processes are reaped
-func (app *Application) SubscribeToReapEvents() <-chan int {
-	app.reapEventsMu.Lock()
-	defer app.reapEventsMu.Unlock()
-
-	ch := make(chan int, 10)
-	app.reapListeners = append(app.reapListeners, ch)
-	return ch
-}
-
-// UnsubscribeFromReapEvents removes a reap event listener
-func (app *Application) UnsubscribeFromReapEvents(ch <-chan int) {
-	app.reapEventsMu.Lock()
-	defer app.reapEventsMu.Unlock()
-
-	for i, listener := range app.reapListeners {
-		if listener == ch {
-			// Remove the listener and close it
-			close(listener)
-			app.reapListeners = append(app.reapListeners[:i], app.reapListeners[i+1:]...)
-			break
-		}
-	}
-}
-
-// WasProcessReaped checks if a process with the given PID was reaped
-func (app *Application) WasProcessReaped(pid int) (bool, time.Time) {
-	app.reapEventsMu.RLock()
-	defer app.reapEventsMu.RUnlock()
-
-	reapTime, found := app.reapEvents[pid]
-	return found, reapTime
-}
-
-// emitReapEvent notifies all listeners that a process was reaped
-func (app *Application) emitReapEvent(pid int) {
-	app.reapEventsMu.Lock()
-	defer app.reapEventsMu.Unlock()
-
-	// Record the reap event
-	app.reapEvents[pid] = time.Now()
-
-	// Clean up old events if map gets too large (keep last 1000)
-	if len(app.reapEvents) > 1000 {
-		// Find oldest events to remove
-		var oldestPIDs []int
-		for p := range app.reapEvents {
-			oldestPIDs = append(oldestPIDs, p)
-			if len(oldestPIDs) > 100 { // Remove 100 oldest
-				break
-			}
-		}
-		for _, p := range oldestPIDs {
-			delete(app.reapEvents, p)
-		}
-	}
-
-	// Notify all listeners
-	for _, ch := range app.reapListeners {
-		select {
-		case ch <- pid:
-			// Sent successfully
-		default:
-			// Channel is full, skip
-		}
-	}
-}
-
-// Start starts the application components
-func (app *Application) Start(ctx context.Context) error {
+// Run starts and runs the application
+func (app *Application) Run() error {
 	app.logger.Info("Starting sprite-env application", "version", version)
 
 	// Log debug settings
@@ -267,134 +153,79 @@ func (app *Application) Start(ctx context.Context) error {
 		app.logger.Info("Keep-alive mode enabled - server will continue running if process fails")
 	}
 
-	// Start zombie reaper if running as PID 1
-	app.startReaper()
+	// Start zombie reaper
+	app.reaper.Start()
 
-	// Start JuiceFS if configured
-	if app.juicefs != nil {
-		app.logger.Info("Starting JuiceFS...")
-		if err := app.juicefs.Start(ctx); err != nil {
-			return fmt.Errorf("failed to start JuiceFS: %w", err)
-		}
-		app.logger.Info("JuiceFS started successfully")
+	// Start system boot sequence
+	if err := app.system.Boot(app.ctx); err != nil {
+		return fmt.Errorf("failed to boot system: %w", err)
 	}
 
 	// Start API server if configured
 	if app.apiServer != nil {
 		go func() {
-			err := app.apiServer.Start()
-			if err != nil {
-				app.httpDoneCh <- err
+			if err := app.apiServer.Start(); err != nil {
+				app.logger.Error("API server error", "error", err)
+				// Trigger shutdown if API server fails
+				app.cancel()
 			}
 		}()
 	}
 
-	// Start supervised process
-	if len(app.config.ProcessCommand) > 0 {
-		app.logger.Info("Starting supervised process...")
-		if err := app.startProcess(); err != nil {
-			// If process fails to start, stop JuiceFS
-			if app.juicefs != nil {
-				stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				app.juicefs.Stop(stopCtx)
-			}
-			return fmt.Errorf("failed to start process: %w", err)
-		}
-	}
-
 	// Set up signal handling
-	signal.Notify(app.signalCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
-	// Note: SIGCHLD is handled separately by startReaper() when running as PID 1
+	signalCh := make(chan os.Signal, 1)
+	signal.Notify(signalCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 
-	// Start the main event loop
-	go app.eventLoop()
-
-	app.logger.Info("Application started successfully")
-	return nil
-}
-
-// startProcess starts the supervised process
-func (app *Application) startProcess() error {
-	if len(app.config.ProcessCommand) == 0 {
-		return fmt.Errorf("no process command configured")
-	}
-
-	// Set up process working directory
-	workingDir := app.config.ProcessWorkingDir
-	if app.juicefs != nil && workingDir == "" {
-		// Default to JuiceFS active directory if available
-		workingDir = filepath.Join(app.config.JuiceFSBaseDir, "data", "active", "fs")
-	}
-
-	supervisorConfig := supervisor.Config{
-		Command:     app.config.ProcessCommand[0],
-		Args:        app.config.ProcessCommand[1:],
-		GracePeriod: app.config.ProcessGracefulShutdownTimeout,
-		Env:         append(os.Environ(), app.config.ProcessEnvironment...),
-		Dir:         workingDir,
-	}
-
-	sup, err := supervisor.New(supervisorConfig)
-	if err != nil {
-		return fmt.Errorf("failed to create supervisor: %w", err)
-	}
-
-	pid, err := sup.Start()
-	if err != nil {
-		return fmt.Errorf("failed to start process: %w", err)
-	}
-
-	app.supervisor = sup
-	app.processRunning = true
-
-	app.logger.Info("Process started", "pid", pid, "command", app.config.ProcessCommand)
-
-	// Monitor process in background
+	// Set up process monitoring
+	processDoneCh := make(chan error, 1)
 	go func() {
-		err := app.supervisor.Wait()
-		app.processDoneCh <- err
+		err := app.system.Wait()
+		processDoneCh <- err
 	}()
 
-	return nil
-}
-
-// eventLoop is the main event loop that monitors all components
-func (app *Application) eventLoop() {
+	// Wait for shutdown trigger
 	for {
 		select {
-		case err := <-app.processDoneCh:
-			// Process exited
-			app.processRunning = false
+		case <-app.ctx.Done():
+			// Context cancelled, shutdown
+			app.logger.Info("Context cancelled, shutting down")
+			return app.shutdown(1)
 
+		case err := <-processDoneCh:
+			// Process exited
 			if err != nil {
 				app.logger.Error("Process exited with error", "error", err)
 			} else {
 				app.logger.Info("Process exited normally")
 			}
 
-			// If not restoring and process exited on its own, stop JuiceFS and exit
-			if !app.restoringNow {
-				if app.config.KeepAliveOnError {
+			// Decide what to do based on keepAliveOnError setting
+			if !app.system.IsRestoring() {
+				if app.keepAliveOnError {
 					app.logger.Info("Process exited, but keeping server alive (SPRITE_KEEP_ALIVE_ON_ERROR=true)")
 					app.logger.Info("Server is still running and accepting API requests")
-					// Continue the event loop instead of shutting down
+					// Only restart monitoring if a process is actually running
+					if app.system.IsProcessRunning() {
+						go func() {
+							err := app.system.Wait()
+							processDoneCh <- err
+						}()
+					}
 				} else {
 					app.logger.Info("Process exited, stopping application...")
-					app.shutdown(0)
-					return
+					return app.shutdown(0)
+				}
+			} else {
+				// If restoring, only restart monitoring if a process is running
+				if app.system.IsProcessRunning() {
+					go func() {
+						err := app.system.Wait()
+						processDoneCh <- err
+					}()
 				}
 			}
 
-		case err := <-app.httpDoneCh:
-			// HTTP server stopped
-			if err != nil {
-				app.logger.Error("HTTP server error", "error", err)
-			}
-			app.shutdown(1)
-			return
-
-		case sig := <-app.signalCh:
+		case sig := <-signalCh:
 			switch sig {
 			case syscall.SIGTERM, syscall.SIGINT:
 				app.logger.Info("Received shutdown signal", "signal", sig)
@@ -404,253 +235,20 @@ func (app *Application) eventLoop() {
 				} else if sig == syscall.SIGINT {
 					exitCode = 130 // 128 + 2
 				}
-				app.shutdown(exitCode)
-				return
+				return app.shutdown(exitCode)
 
 			default:
-				// Forward other signals to process
-				if app.processRunning && app.supervisor != nil {
-					if err := app.supervisor.Signal(sig); err != nil {
-						app.logger.Warn("Failed to forward signal", "signal", sig, "error", err)
-					}
+				// Forward other signals to system
+				if err := app.system.ForwardSignal(sig); err != nil {
+					app.logger.Warn("Failed to forward signal", "signal", sig, "error", err)
 				}
 			}
-
-		case cmd := <-app.commandCh:
-			// Handle commands from API server
-			app.handleCommand(cmd)
 		}
 	}
-}
-
-// handleCommand processes commands from the API server
-func (app *Application) handleCommand(cmd handlers.Command) {
-	switch cmd.Type {
-	case handlers.CommandGetStatus:
-		cmd.Response <- handlers.CommandResponse{
-			Success: true,
-			Data:    app.processRunning,
-		}
-
-	case handlers.CommandCheckpoint:
-		data := cmd.Data.(handlers.CheckpointData)
-		if app.juicefs != nil {
-			go func() {
-				defer close(data.StreamCh)
-
-				ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-				defer cancel()
-
-				// Stream the checkpoint operation
-				err := app.streamingCheckpoint(ctx, data.CheckpointID, data.StreamCh)
-
-				cmd.Response <- handlers.CommandResponse{
-					Success: err == nil,
-					Error:   err,
-				}
-			}()
-		} else {
-			// Send error message before closing channel
-			data.StreamCh <- api.StreamMessage{
-				Type:  "error",
-				Error: "JuiceFS not configured",
-				Time:  time.Now(),
-			}
-			close(data.StreamCh)
-			cmd.Response <- handlers.CommandResponse{
-				Success: false,
-				Error:   fmt.Errorf("JuiceFS not configured"),
-			}
-		}
-
-	case handlers.CommandRestore:
-		data := cmd.Data.(handlers.RestoreData)
-		// Start restore process asynchronously with streaming
-		go app.performRestore(data.CheckpointID, data.StreamCh)
-
-		// Immediately respond that restore was initiated
-		cmd.Response <- handlers.CommandResponse{
-			Success: true,
-		}
-	}
-}
-
-// performRestore handles the restore operation after the supervisor state change
-func (app *Application) performRestore(checkpointID string, streamCh chan<- api.StreamMessage) {
-	defer close(streamCh)
-
-	app.logger.Info("Starting restore sequence", "checkpointID", checkpointID)
-	app.restoringNow = true
-	defer func() { app.restoringNow = false }()
-
-	// Track the previous state checkpoint ID
-	var previousStateID string
-
-	// Stop process if running
-	if app.processRunning && app.supervisor != nil {
-		streamCh <- api.StreamMessage{
-			Type: "info",
-			Data: "Stopping process for restore...",
-			Time: time.Now(),
-		}
-		app.logger.Info("Stopping process for restore")
-		if err := app.supervisor.Stop(); err != nil {
-			app.logger.Error("Failed to stop process", "error", err)
-			streamCh <- api.StreamMessage{
-				Type:  "error",
-				Error: fmt.Sprintf("Failed to stop process: %v", err),
-				Time:  time.Now(),
-			}
-			return
-		}
-		// supervisor.Stop() blocks until the process has exited
-		app.processRunning = false
-		app.logger.Info("Process stopped successfully")
-		streamCh <- api.StreamMessage{
-			Type: "info",
-			Data: "Process stopped successfully",
-			Time: time.Now(),
-		}
-	}
-
-	// Perform JuiceFS restore with streaming
-	if app.juicefs != nil {
-		streamCh <- api.StreamMessage{
-			Type: "info",
-			Data: fmt.Sprintf("Restoring from checkpoint %s...", checkpointID),
-			Time: time.Now(),
-		}
-		app.logger.Info("Restoring from checkpoint", "checkpointID", checkpointID)
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-
-		previousStateID, err := app.streamingRestore(ctx, checkpointID, streamCh)
-		if err != nil {
-			app.logger.Error("Failed to restore checkpoint", "error", err)
-			streamCh <- api.StreamMessage{
-				Type:  "error",
-				Error: fmt.Sprintf("Failed to restore checkpoint: %v", err),
-				Time:  time.Now(),
-			}
-			return
-		}
-		app.logger.Info("Checkpoint restored successfully", "previousStateID", previousStateID)
-		// Don't send a message here - streamingRestore already sent the completion message
-	}
-
-	// Restart process
-	streamCh <- api.StreamMessage{
-		Type: "info",
-		Data: "Starting process after restore...",
-		Time: time.Now(),
-	}
-	app.logger.Info("Starting process after restore")
-	if err := app.startProcess(); err != nil {
-		app.logger.Error("Failed to start process after restore", "error", err)
-		streamCh <- api.StreamMessage{
-			Type:  "error",
-			Error: fmt.Sprintf("Failed to start process after restore: %v", err),
-			Time:  time.Now(),
-		}
-		return
-	}
-
-	app.logger.Info("Restore sequence completed")
-	// Update the final message to include the previous state info if available
-	completeMessage := fmt.Sprintf("Restore from %s complete", checkpointID)
-	if previousStateID != "" {
-		completeMessage += fmt.Sprintf(", previous state checkpoint id: %s", previousStateID)
-	}
-	streamCh <- api.StreamMessage{
-		Type: "complete",
-		Data: completeMessage,
-		Time: time.Now(),
-	}
-}
-
-// streamingCheckpoint performs checkpoint with streaming output
-func (app *Application) streamingCheckpoint(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) error {
-	if checkpointID == "" {
-		return fmt.Errorf("checkpoint ID is required")
-	}
-
-	// Send initial message
-	streamCh <- api.StreamMessage{
-		Type: "info",
-		Data: fmt.Sprintf("Creating checkpoint %s...", checkpointID),
-		Time: time.Now(),
-	}
-
-	// Use the proper JuiceFS checkpoint method that handles overlay
-	if err := app.juicefs.Checkpoint(ctx, checkpointID); err != nil {
-		streamCh <- api.StreamMessage{
-			Type:  "error",
-			Error: fmt.Sprintf("Failed to create checkpoint: %v", err),
-			Time:  time.Now(),
-		}
-		return err
-	}
-
-	streamCh <- api.StreamMessage{
-		Type: "info",
-		Data: fmt.Sprintf("Checkpoint created successfully at checkpoints/%s", checkpointID),
-		Time: time.Now(),
-	}
-
-	// Send final completion message
-	streamCh <- api.StreamMessage{
-		Type: "complete",
-		Data: fmt.Sprintf("Checkpoint %s created successfully", checkpointID),
-		Time: time.Now(),
-	}
-
-	return nil
-}
-
-// streamingRestore performs restore with streaming output
-func (app *Application) streamingRestore(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) (string, error) {
-	if checkpointID == "" {
-		return "", fmt.Errorf("checkpoint ID is required")
-	}
-
-	// Send initial message
-	streamCh <- api.StreamMessage{
-		Type: "info",
-		Data: fmt.Sprintf("Restoring from checkpoint %s...", checkpointID),
-		Time: time.Now(),
-	}
-
-	// Use the proper JuiceFS restore method that handles overlay
-	if err := app.juicefs.Restore(ctx, checkpointID); err != nil {
-		streamCh <- api.StreamMessage{
-			Type:  "error",
-			Error: fmt.Sprintf("Failed to restore checkpoint: %v", err),
-			Time:  time.Now(),
-		}
-		return "", err
-	}
-
-	// For now, we don't track the previous state ID in the JuiceFS package
-	// This would need to be enhanced if we want to return it
-	previousStateID := ""
-
-	// Send completion message
-	message := fmt.Sprintf("Restore from %s complete", checkpointID)
-	if previousStateID != "" {
-		message += fmt.Sprintf(", previous state checkpoint id: %s", previousStateID)
-	}
-
-	streamCh <- api.StreamMessage{
-		Type: "info",
-		Data: message,
-		Time: time.Now(),
-	}
-
-	return previousStateID, nil
 }
 
 // shutdown performs graceful shutdown
-func (app *Application) shutdown(exitCode int) {
+func (app *Application) shutdown(exitCode int) error {
 	app.logger.Info("Shutting down application")
 
 	// Cancel context to signal shutdown
@@ -665,88 +263,21 @@ func (app *Application) shutdown(exitCode int) {
 		cancel()
 	}
 
-	// Stop supervised process
-	if app.processRunning && app.supervisor != nil {
-		app.logger.Info("Stopping supervised process...")
-		if err := app.supervisor.Stop(); err != nil {
-			app.logger.Error("Failed to stop process", "error", err)
-		}
+	// Shutdown system (stops process and JuiceFS)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := app.system.Shutdown(ctx); err != nil {
+		app.logger.Error("Failed to shutdown system", "error", err)
 	}
+	cancel()
 
-	// Stop JuiceFS
-	if app.juicefs != nil {
-		app.logger.Info("Stopping JuiceFS...")
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if err := app.juicefs.Stop(ctx); err != nil {
-			app.logger.Error("Failed to stop JuiceFS", "error", err)
-		}
-		cancel()
-	}
-
-	// Wait for zombie reaper to finish with a timeout
-	select {
-	case <-app.reaperDone:
-		app.logger.Debug("Zombie reaper stopped cleanly")
-	case <-time.After(1 * time.Second):
-		app.logger.Warn("Zombie reaper did not stop within timeout")
+	// Stop zombie reaper
+	if err := app.reaper.Stop(1 * time.Second); err != nil {
+		app.logger.Warn("Failed to stop reaper", "error", err)
 	}
 
 	app.logger.Info("Application stopped", "exitCode", exitCode)
 	os.Exit(exitCode)
-}
-
-// startReaper starts a goroutine to reap zombie processes when running as PID 1
-//
-// Safety guarantees:
-// - syscall.Wait4 uses WNOHANG flag, so it never blocks
-// - The goroutine listens for context cancellation and exits cleanly
-// - Signal handler is properly cleaned up with signal.Stop()
-// - The shutdown() function waits (with timeout) for this goroutine to finish
-func (app *Application) startReaper() {
-	// Only start reaper if we're PID 1
-	if os.Getpid() != 1 {
-		close(app.reaperDone) // Signal immediately that reaper is "done" since it never started
-		return
-	}
-
-	app.logger.Info("Running as PID 1, starting zombie reaper")
-
-	// Create a separate signal channel for SIGCHLD
-	sigchldCh := make(chan os.Signal, 10)
-	signal.Notify(sigchldCh, syscall.SIGCHLD)
-
-	go func() {
-		defer close(app.reaperDone)
-		defer signal.Stop(sigchldCh)
-
-		for {
-			select {
-			case <-app.ctx.Done():
-				return
-			case <-sigchldCh:
-				// Reap all available zombie processes
-				for {
-					var status syscall.WaitStatus
-					pid, err := syscall.Wait4(-1, &status, syscall.WNOHANG, nil)
-					if err != nil {
-						// ECHILD is expected when there are no child processes
-						if err != syscall.ECHILD {
-							app.logger.Debug("Error during wait4", "error", err)
-						}
-						break
-					}
-					if pid <= 0 {
-						// No more zombies to reap
-						break
-					}
-					app.logger.Debug("Reaped zombie process", "pid", pid, "status", status)
-
-					// Emit reap event
-					app.emitReapEvent(pid)
-				}
-			}
-		}
-	}()
+	return nil
 }
 
 // Command-line parsing and main
@@ -951,13 +482,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Start application
-	ctx := context.Background()
-	if err := app.Start(ctx); err != nil {
-		app.logger.Error("Failed to start application", "error", err)
+	// Run the application
+	if err := app.Run(); err != nil {
+		// Error already logged, just exit
 		os.Exit(1)
 	}
-
-	// Block forever - the event loop handles everything
-	select {}
 }

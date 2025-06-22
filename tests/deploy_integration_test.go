@@ -40,26 +40,13 @@ func TestDeployAndFunctionality(t *testing.T) {
 
 	// Step 2: Build the sprite client
 	t.Run("BuildClient", func(t *testing.T) {
-		// Create dist directory
-		distDir := "../dist"
-		if err := os.MkdirAll(distDir, 0755); err != nil {
-			t.Fatalf("Failed to create dist directory: %v", err)
+		// The sprite client should already be built by `make build`
+		// Just verify the binary exists
+		spritePath := "../dist/sprite"
+		if _, err := os.Stat(spritePath); err != nil {
+			t.Fatalf("Sprite binary not found at %s. Make sure to run 'make build' first: %v", spritePath, err)
 		}
-
-		// Build the client
-		cmd := exec.Command("go", "build", "-o", "../dist/sprite", ".")
-		cmd.Dir = "../client"
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("Failed to build client: %v", err)
-		}
-
-		// Verify the binary exists
-		if _, err := os.Stat(filepath.Join(distDir, "sprite")); err != nil {
-			t.Fatalf("Built sprite binary not found: %v", err)
-		}
+		t.Logf("Found sprite binary at %s", spritePath)
 	})
 
 	// Get sprite URL from flyctl

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"lib/api"
@@ -32,31 +33,19 @@ func (h *Handlers) HandleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("Checkpoint request", "checkpoint_id", req.CheckpointID)
 
 	// Check if checkpoint process is supported
-	if !h.processManager.IsProcessRunning() {
+	if !h.system.IsProcessRunning() {
 		http.Error(w, "No process is running to checkpoint", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Check if JuiceFS is configured
+	if !h.system.HasJuiceFS() {
+		http.Error(w, "JuiceFS not configured", http.StatusServiceUnavailable)
 		return
 	}
 
 	// Create channel for streaming messages
 	streamCh := make(chan api.StreamMessage, 10)
-
-	// Send checkpoint command
-	responseCh := make(chan CommandResponse)
-	h.commandCh <- Command{
-		Type:     CommandCheckpoint,
-		Response: responseCh,
-		Data: CheckpointData{
-			CheckpointID: req.CheckpointID,
-			StreamCh:     streamCh,
-		},
-	}
-
-	// Check if command was accepted
-	cmdResp := <-responseCh
-	if !cmdResp.Success {
-		http.Error(w, fmt.Sprintf("Failed to initiate checkpoint: %v", cmdResp.Error), http.StatusInternalServerError)
-		return
-	}
 
 	// Set up streaming response
 	w.Header().Set("Content-Type", "application/x-ndjson")
@@ -72,6 +61,18 @@ func (h *Handlers) HandleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	}
 
 	encoder := json.NewEncoder(w)
+
+	// Start checkpoint operation in background
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		// Perform checkpoint with streaming
+		err := h.system.CheckpointWithStream(ctx, req.CheckpointID, streamCh)
+		if err != nil {
+			h.logger.Error("Checkpoint failed", "error", err)
+		}
+	}()
 
 	// Stream messages
 	for msg := range streamCh {
@@ -106,39 +107,14 @@ func (h *Handlers) HandleRestore(w http.ResponseWriter, r *http.Request) {
 
 	h.logger.Info("Restore request", "checkpoint_id", req.CheckpointID)
 
-	// Check if process is already running
-	if h.processManager.IsProcessRunning() {
-		h.logger.Warn("Process is already running, cannot restore")
-		http.Error(w, "Process is already running", http.StatusConflict)
+	// Check if JuiceFS is configured
+	if !h.system.HasJuiceFS() {
+		http.Error(w, "JuiceFS not configured", http.StatusServiceUnavailable)
 		return
 	}
 
 	// Create channel for streaming messages
 	streamCh := make(chan api.StreamMessage, 10)
-
-	// Send restore command
-	responseCh := make(chan CommandResponse)
-	h.commandCh <- Command{
-		Type:     CommandRestore,
-		Response: responseCh,
-		Data: RestoreData{
-			CheckpointID: req.CheckpointID,
-			StreamCh:     streamCh,
-		},
-	}
-
-	// Check if command was accepted
-	cmdResp := <-responseCh
-	if !cmdResp.Success {
-		h.logger.Error("Failed to initiate restore", "error", cmdResp.Error)
-		// Send error message to stream
-		streamCh <- api.StreamMessage{
-			Type:  "error",
-			Error: cmdResp.Error.Error(),
-			Time:  time.Now(),
-		}
-		close(streamCh)
-	}
 
 	// Set up streaming response
 	w.Header().Set("Content-Type", "application/x-ndjson")
@@ -160,6 +136,18 @@ func (h *Handlers) HandleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	encoder := json.NewEncoder(w)
+
+	// Start restore operation in background
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		// Perform restore with streaming
+		err := h.system.RestoreWithStream(ctx, req.CheckpointID, streamCh)
+		if err != nil {
+			h.logger.Error("Restore failed", "error", err)
+		}
+	}()
 
 	// Stream messages
 	for msg := range streamCh {

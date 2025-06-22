@@ -7,14 +7,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"spritectl/api/handlers"
 )
 
 func TestNewServerRequiresAuth(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	commandCh := make(chan handlers.Command)
-	processManager := newMockProcessManager()
+	systemManager := newMockSystemManager()
 
 	// Test that server creation fails without API token
 	config := Config{
@@ -22,7 +19,7 @@ func TestNewServerRequiresAuth(t *testing.T) {
 		APIToken:   "", // No token
 	}
 
-	_, err := NewServer(config, commandCh, processManager, logger)
+	_, err := NewServer(config, systemManager, logger)
 	if err == nil {
 		t.Fatal("Expected error when creating server without API token, got nil")
 	}
@@ -33,7 +30,7 @@ func TestNewServerRequiresAuth(t *testing.T) {
 
 	// Test that server creation succeeds with API token
 	config.APIToken = "test-token"
-	server, err := NewServer(config, commandCh, processManager, logger)
+	server, err := NewServer(config, systemManager, logger)
 	if err != nil {
 		t.Fatalf("Expected no error when creating server with API token, got: %v", err)
 	}
@@ -44,15 +41,14 @@ func TestNewServerRequiresAuth(t *testing.T) {
 
 func TestExtractToken(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	commandCh := make(chan handlers.Command)
-	processManager := newMockProcessManager()
+	systemManager := newMockSystemManager()
 
 	config := Config{
 		ListenAddr: ":8080",
 		APIToken:   "test-token",
 	}
 
-	server, _ := NewServer(config, commandCh, processManager, logger)
+	server, _ := NewServer(config, systemManager, logger)
 
 	tests := []struct {
 		name         string
@@ -179,8 +175,7 @@ func TestExtractToken(t *testing.T) {
 
 func TestAuthMiddleware(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	commandCh := make(chan handlers.Command)
-	processManager := newMockProcessManager()
+	systemManager := newMockSystemManager()
 
 	tests := []struct {
 		name           string
@@ -237,7 +232,7 @@ func TestAuthMiddleware(t *testing.T) {
 				ListenAddr: ":8080",
 				APIToken:   tt.apiToken,
 			}
-			server, _ := NewServer(config, commandCh, processManager, logger)
+			server, _ := NewServer(config, systemManager, logger)
 
 			// Create a simple test handler
 			testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -1,17 +1,27 @@
 package handlers
 
-import "time"
+import (
+	"context"
+	"lib/api"
+	"os"
+	"time"
+)
 
-// ProcessManager interface for managing process lifecycle through channels
-type ProcessManager interface {
-	// SendCommand sends a command to the process manager and waits for response
-	SendCommand(cmd Command) CommandResponse
-	// IsProcessRunning returns whether the process is currently running
+// SystemManager interface provides methods for managing the system (process + storage)
+type SystemManager interface {
+	// Process management
 	IsProcessRunning() bool
-	// SubscribeToReapEvents creates a channel that receives PIDs when processes are reaped
+	StartProcess() error
+	StopProcess() error
+	ForwardSignal(sig os.Signal) error
+
+	// Storage management
+	HasJuiceFS() bool
+	CheckpointWithStream(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) error
+	RestoreWithStream(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) error
+
+	// Reaper integration
 	SubscribeToReapEvents() <-chan int
-	// UnsubscribeFromReapEvents removes a reap event listener
 	UnsubscribeFromReapEvents(ch <-chan int)
-	// WasProcessReaped checks if a process with the given PID was reaped
 	WasProcessReaped(pid int) (bool, time.Time)
 }

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -103,10 +105,9 @@ func TestDockerMultiplexedFormat(t *testing.T) {
 func TestDockerExecCreate(t *testing.T) {
 	// Create handlers
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	commandCh := make(chan Command, 1)
-	mockPM := &testProcessManager{running: true}
+	mockSys := &testSystemManager{running: true}
 	config := Config{}
-	h := NewHandlers(logger, commandCh, config, mockPM)
+	h := NewHandlers(logger, mockSys, config)
 
 	// Test request
 	req := api.DockerExecCreateRequest{
@@ -155,10 +156,9 @@ func TestDockerExecCreate(t *testing.T) {
 func TestDockerExecInspect(t *testing.T) {
 	// Create handlers
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	commandCh := make(chan Command, 1)
-	mockPM := &testProcessManager{running: true}
+	mockSys := &testSystemManager{running: true}
 	config := Config{}
-	h := NewHandlers(logger, commandCh, config, mockPM)
+	h := NewHandlers(logger, mockSys, config)
 
 	// Create an exec instance
 	instance := &ExecInstance{
@@ -220,10 +220,9 @@ func TestDockerExecStart(t *testing.T) {
 
 	// Create handlers
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	commandCh := make(chan Command, 1)
-	mockPM := &testProcessManager{running: true}
+	mockSys := &testSystemManager{running: true}
 	config := Config{}
-	h := NewHandlers(logger, commandCh, config, mockPM)
+	h := NewHandlers(logger, mockSys, config)
 
 	// Test with non-existent exec ID
 	req := api.DockerExecStartRequest{
@@ -304,29 +303,66 @@ func readWithTimeout(r io.Reader, timeout time.Duration) ([]byte, error) {
 	}
 }
 
-// testProcessManager for testing that implements the full ProcessManager interface
-type testProcessManager struct {
+// testSystemManager for testing that implements the SystemManager interface
+type testSystemManager struct {
 	running       bool
-	commands      []Command
+	hasJuiceFS    bool
 	reapedPIDs    map[int]time.Time
 	reapListeners []chan int
 	mu            sync.Mutex
 }
 
-func (m *testProcessManager) SendCommand(cmd Command) CommandResponse {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.commands = append(m.commands, cmd)
-	return CommandResponse{Success: true}
-}
-
-func (m *testProcessManager) IsProcessRunning() bool {
+func (m *testSystemManager) IsProcessRunning() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.running
 }
 
-func (m *testProcessManager) SubscribeToReapEvents() <-chan int {
+func (m *testSystemManager) StartProcess() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.running = true
+	return nil
+}
+
+func (m *testSystemManager) StopProcess() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.running = false
+	return nil
+}
+
+func (m *testSystemManager) ForwardSignal(sig os.Signal) error {
+	return nil
+}
+
+func (m *testSystemManager) HasJuiceFS() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.hasJuiceFS
+}
+
+func (m *testSystemManager) CheckpointWithStream(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) error {
+	defer close(streamCh)
+	streamCh <- api.StreamMessage{
+		Type: "info",
+		Data: "Mock checkpoint created",
+		Time: time.Now(),
+	}
+	return nil
+}
+
+func (m *testSystemManager) RestoreWithStream(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) error {
+	defer close(streamCh)
+	streamCh <- api.StreamMessage{
+		Type: "info",
+		Data: "Mock restore completed",
+		Time: time.Now(),
+	}
+	return nil
+}
+
+func (m *testSystemManager) SubscribeToReapEvents() <-chan int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	ch := make(chan int, 10)
@@ -334,7 +370,7 @@ func (m *testProcessManager) SubscribeToReapEvents() <-chan int {
 	return ch
 }
 
-func (m *testProcessManager) UnsubscribeFromReapEvents(ch <-chan int) {
+func (m *testSystemManager) UnsubscribeFromReapEvents(ch <-chan int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	// Find and remove the channel
@@ -348,7 +384,7 @@ func (m *testProcessManager) UnsubscribeFromReapEvents(ch <-chan int) {
 	}
 }
 
-func (m *testProcessManager) WasProcessReaped(pid int) (bool, time.Time) {
+func (m *testSystemManager) WasProcessReaped(pid int) (bool, time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.reapedPIDs == nil {

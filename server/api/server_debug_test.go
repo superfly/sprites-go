@@ -8,23 +8,20 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"spritectl/api/handlers"
 )
 
 // TestDebugCreateZombie tests the debug zombie creation endpoint
 func TestDebugCreateZombie(t *testing.T) {
 	// Create test dependencies
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	commandCh := make(chan handlers.Command, 1)
-	mockPM := newMockProcessManager()
+	mockSys := newMockSystemManager()
 
 	config := Config{
 		APIToken: "test-token",
 	}
 
 	// Create server
-	server, err := NewServer(config, commandCh, mockPM, logger)
+	server, err := NewServer(config, mockSys, logger)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -74,15 +71,14 @@ func TestDebugCreateZombie(t *testing.T) {
 func TestDebugCheckProcess(t *testing.T) {
 	// Create test dependencies
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	commandCh := make(chan handlers.Command, 1)
-	mockPM := newMockProcessManager()
+	mockSys := newMockSystemManager()
 
 	config := Config{
 		APIToken: "test-token",
 	}
 
 	// Create server
-	server, err := NewServer(config, commandCh, mockPM, logger)
+	server, err := NewServer(config, mockSys, logger)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}

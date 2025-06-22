@@ -14,15 +14,15 @@ import (
 
 // Server provides the HTTP API with authentication
 type Server struct {
-	server         *http.Server
-	logger         *slog.Logger
-	config         Config
-	handlers       *handlers.Handlers
-	processManager handlers.ProcessManager
+	server   *http.Server
+	logger   *slog.Logger
+	config   Config
+	handlers *handlers.Handlers
+	system   handlers.SystemManager
 }
 
 // NewServer creates a new API server
-func NewServer(config Config, commandCh chan<- handlers.Command, processManager handlers.ProcessManager, logger *slog.Logger) (*Server, error) {
+func NewServer(config Config, system handlers.SystemManager, logger *slog.Logger) (*Server, error) {
 	// Enforce authentication requirement
 	if config.APIToken == "" {
 		return nil, errors.New("API token must be set - server cannot run without authentication")
@@ -41,13 +41,13 @@ func NewServer(config Config, commandCh chan<- handlers.Command, processManager 
 	}
 
 	// Create handlers
-	h := handlers.NewHandlers(logger, commandCh, handlersConfig, processManager)
+	h := handlers.NewHandlers(logger, system, handlersConfig)
 
 	s := &Server{
-		logger:         logger,
-		config:         config,
-		handlers:       h,
-		processManager: processManager,
+		logger:   logger,
+		config:   config,
+		handlers: h,
+		system:   system,
 	}
 
 	// Set up server
@@ -162,7 +162,7 @@ func (s *Server) waitForRunningMiddleware(next http.HandlerFunc) http.HandlerFun
 				return
 
 			case <-ticker.C:
-				if s.processManager.IsProcessRunning() {
+				if s.system.IsProcessRunning() {
 					waitTime := time.Since(startTime)
 					if waitTime > 100*time.Millisecond {
 						s.logger.Info("Process became ready, processing request",
