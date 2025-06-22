@@ -110,3 +110,88 @@ func TestOverlayManager(t *testing.T) {
 		om.Unmount(ctx)
 	})
 }
+
+func TestOverlayConfiguration(t *testing.T) {
+	// Create a temporary directory for testing
+	tmpDir, err := os.MkdirTemp("", "juicefs-overlay-config-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Test with overlay configuration
+	config := Config{
+		BaseDir:              tmpDir,
+		LocalMode:            true,
+		VolumeName:           "test",
+		OverlayEnabled:       true,
+		OverlayImageSize:     "50G",
+		OverlayLowerPath:     "/custom/lower/path",
+		OverlayTargetPath:    "/custom/target/path",
+		OverlaySkipOverlayFS: true,
+	}
+
+	j, err := New(config)
+	if err != nil {
+		t.Fatalf("Failed to create JuiceFS instance: %v", err)
+	}
+
+	om := j.GetOverlay()
+	if om == nil {
+		t.Fatal("Overlay manager should be created when OverlayEnabled is true")
+	}
+
+	// Test that configuration was applied
+	if om.imageSize != "50G" {
+		t.Errorf("Expected image size 50G, got %s", om.imageSize)
+	}
+
+	if om.GetLowerPath() != "/custom/lower/path" {
+		t.Errorf("Expected lower path /custom/lower/path, got %s", om.GetLowerPath())
+	}
+
+	if om.GetOverlayTargetPath() != "/custom/target/path" {
+		t.Errorf("Expected target path /custom/target/path, got %s", om.GetOverlayTargetPath())
+	}
+
+	if !om.skipOverlayFS {
+		t.Error("Expected skipOverlayFS to be true")
+	}
+
+	// Test backward compatibility methods
+	om.SetAppImagePath("/new/app/path")
+	if om.GetLowerPath() != "/new/app/path" {
+		t.Errorf("SetAppImagePath should update lower path, got %s", om.GetLowerPath())
+	}
+
+	if om.GetAppImagePath() != "/new/app/path" {
+		t.Errorf("GetAppImagePath should return lower path, got %s", om.GetAppImagePath())
+	}
+}
+
+func TestOverlayDisabled(t *testing.T) {
+	// Create a temporary directory for testing
+	tmpDir, err := os.MkdirTemp("", "juicefs-overlay-disabled-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Test with overlay disabled
+	config := Config{
+		BaseDir:        tmpDir,
+		LocalMode:      true,
+		VolumeName:     "test",
+		OverlayEnabled: false, // Explicitly disabled
+	}
+
+	j, err := New(config)
+	if err != nil {
+		t.Fatalf("Failed to create JuiceFS instance: %v", err)
+	}
+
+	om := j.GetOverlay()
+	if om != nil {
+		t.Fatal("Overlay manager should not be created when OverlayEnabled is false")
+	}
+}

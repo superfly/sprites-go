@@ -14,25 +14,11 @@ if ! mountpoint -q /sys/fs/cgroup; then
     mount -t cgroup2 none /sys/fs/cgroup
 fi
 
-# Define paths based on SPRITE_WRITE_DIR
-JUICEFS_BASE="${SPRITE_WRITE_DIR}/juicefs"
-JUICEFS_DATA="${JUICEFS_BASE}/data"
-ROOT_OVERLAY_IMG="${JUICEFS_DATA}/active/root-overlay.img"
-ROOT_OVERLAY_MOUNT="${JUICEFS_DATA}/root-overlay"
-
-
 # This is a prerun script to do the overlay + loopback inside the namespace
 # Only copy mounts.sh if /mnt/newroot isn't already an overlayfs
 if ! mount | grep -q "^overlay on /mnt/newroot type overlay"; then
-    # Create directories for overlay
-  mkdir -p ${ROOT_OVERLAY_MOUNT}/{upper,work}
-
-  mkdir -p /mnt/newroot
-
-  # Mount the overlay
-  mount -t overlay overlay \
-    -o lowerdir=/mnt/app-image,upperdir=${ROOT_OVERLAY_MOUNT}/upper,workdir=${ROOT_OVERLAY_MOUNT}/work \
-    /mnt/newroot
+  echo "Overlay is not mounted, skipping"
+  exit 1
 fi
 
 # Store base config in a variable

@@ -64,9 +64,7 @@ RUN curl -L https://github.com/containers/crun/releases/download/1.21/crun-1.21-
 FROM litestream/litestream:latest AS litestream
 
 # Final stage - based on juicedata/mount which includes juicefs
-FROM juicedata/mount:latest as juicefs
-
-FROM ubuntu:25.04
+FROM juicedata/mount:latest
 
 RUN apt-get update && \
     apt-get install -y sqlite3 bash e2fsprogs fio jq nano coreutils \
@@ -81,7 +79,6 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy binaries from other stages
-COPY --from=juicefs /usr/local/bin/juicefs /usr/local/bin/juicefs
 COPY --from=crun /crun /usr/local/bin/crun
 COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
 

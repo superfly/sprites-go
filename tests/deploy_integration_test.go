@@ -90,34 +90,75 @@ func TestDeployAndFunctionality(t *testing.T) {
 
 	// Step 4: Test zombie cleanup
 	t.Run("ZombieCleanup", func(t *testing.T) {
-		t.Skip("Skipping zombie test - zombie creation in containers is complex and sprite should auto-reap as PID 1")
+		// Test that sprite properly reaps zombie processes as PID 1
+		client := &http.Client{Timeout: 10 * time.Second}
 
-		// Note: In a real container environment, the sprite process runs as PID 1 (init)
-		// and automatically reaps any orphaned child processes. Creating a persistent
-		// zombie for testing is difficult because:
-		// 1. When a parent exits, its children are adopted by init and immediately reaped
-		// 2. To create a zombie, we need a parent that stays alive but doesn't wait()
-		// 3. This is hard to orchestrate remotely through the API
+		req, err := http.NewRequest("POST", fmt.Sprintf("%s/debug/create-zombie", spriteURL), nil)
+		if err != nil {
+			t.Fatalf("Failed to create request: %v", err)
+		}
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", spriteToken))
 
-		// The sprite's init functionality is better tested through integration
-		// with real workloads that may create orphaned processes.
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("Failed to call zombie endpoint: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("Failed to test zombie reaping: status %d, body: %s", resp.StatusCode, string(body))
+		}
+
+		var result struct {
+			Message      string `json:"message"`
+			PID          int    `json:"pid"`
+			WasZombie    bool   `json:"was_zombie"`
+			WasReaped    bool   `json:"was_reaped"`
+			ReapDuration string `json:"reap_duration"`
+			Success      string `json:"success,omitempty"`
+			Error        string `json:"error,omitempty"`
+			Warning      string `json:"warning,omitempty"`
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			t.Fatalf("Failed to decode response: %v", err)
+		}
+
+		t.Logf("Zombie reaping test result: PID=%d, WasZombie=%v, WasReaped=%v, Duration=%s",
+			result.PID, result.WasZombie, result.WasReaped, result.ReapDuration)
+
+		// The process should have been reaped
+		if !result.WasReaped {
+			t.Errorf("Zombie process was not reaped: %s", result.Error)
+		}
+
+		// Log success message if present
+		if result.Success != "" {
+			t.Logf("Success: %s", result.Success)
+		}
+
+		// Log warning if we couldn't observe zombie state (this is OK)
+		if result.Warning != "" {
+			t.Logf("Warning: %s", result.Warning)
+		}
 	})
 
 	// Step 5: Test checkpoint and restore
 	t.Run("CheckpointRestore", func(t *testing.T) {
-		// Create a unique file in the JuiceFS active directory
-		// The default working directory for processes is /dev/fly_vol/juicefs/data/active/fs
-		randomFile := fmt.Sprintf("checkpoint_test_%d.txt", rand.Int())
-		content := fmt.Sprintf("test content %d", time.Now().Unix())
+		// Test checkpoint/restore by writing files that should persist
+		// The /data mount is accessible from containers and should be included in checkpoints
+		testFile := fmt.Sprintf("/data/checkpoint_test_%d.txt", time.Now().Unix())
+		originalContent := fmt.Sprintf("original content %d", time.Now().Unix())
 
-		// Create the file in the working directory (which is inside the checkpoint scope)
+		// Create a test file
 		runSpriteCommand(t, spriteURL, spriteToken, "exec", "sh", "-c",
-			fmt.Sprintf("echo '%s' > %s", content, randomFile))
+			fmt.Sprintf("echo '%s' > %s", originalContent, testFile))
 
-		// Verify file exists
-		output := runSpriteCommand(t, spriteURL, spriteToken, "exec", "cat", randomFile)
-		if !strings.Contains(output, content) {
-			t.Fatalf("File content mismatch: expected %s, got %s", content, output)
+		// Verify file exists with original content
+		output := runSpriteCommand(t, spriteURL, spriteToken, "exec", "cat", testFile)
+		if !strings.Contains(output, originalContent) {
+			t.Fatalf("File content mismatch: expected %s, got %s", originalContent, output)
 		}
 
 		// Create a checkpoint
@@ -130,14 +171,27 @@ func TestDeployAndFunctionality(t *testing.T) {
 		time.Sleep(5 * time.Second)
 
 		// Modify the file
-		newContent := "modified content"
+		modifiedContent := fmt.Sprintf("modified content %d", time.Now().Unix())
 		runSpriteCommand(t, spriteURL, spriteToken, "exec", "sh", "-c",
-			fmt.Sprintf("echo '%s' > %s", newContent, randomFile))
+			fmt.Sprintf("echo '%s' > %s", modifiedContent, testFile))
 
-		// Verify modification
-		output = runSpriteCommand(t, spriteURL, spriteToken, "exec", "cat", randomFile)
-		if !strings.Contains(output, newContent) {
-			t.Fatalf("File should be modified: %s", output)
+		// Verify file was modified
+		output = runSpriteCommand(t, spriteURL, spriteToken, "exec", "cat", testFile)
+		if !strings.Contains(output, modifiedContent) {
+			t.Fatalf("File should be modified: expected %s, got %s", modifiedContent, output)
+		}
+
+		// Delete the file entirely to make the test more robust
+		runSpriteCommand(t, spriteURL, spriteToken, "exec", "rm", "-f", testFile)
+
+		// Verify file is gone
+		cmd := exec.Command("../dist/sprite", "exec", "ls", testFile)
+		cmd.Env = append(os.Environ(),
+			fmt.Sprintf("SPRITE_URL=%s", spriteURL),
+			fmt.Sprintf("SPRITE_TOKEN=%s", spriteToken),
+		)
+		if _, err := cmd.CombinedOutput(); err == nil {
+			t.Fatal("File should have been deleted")
 		}
 
 		// Restore from checkpoint
@@ -145,18 +199,18 @@ func TestDeployAndFunctionality(t *testing.T) {
 		t.Log("Restored from checkpoint")
 		t.Logf("Restore output: %s", output)
 
-		// Wait a bit for restore to complete
-		time.Sleep(15 * time.Second)
+		// Wait for restore to complete and process to restart
+		time.Sleep(20 * time.Second)
 
-		// Verify file is back to original content
-		output = runSpriteCommand(t, spriteURL, spriteToken, "exec", "cat", randomFile)
+		// Verify file is back with original content
+		output = runSpriteCommand(t, spriteURL, spriteToken, "exec", "cat", testFile)
 		t.Logf("File content after restore: %s", output)
-		if !strings.Contains(output, content) {
-			t.Fatalf("File not restored correctly: expected %s, got %s", content, output)
+		if !strings.Contains(output, originalContent) {
+			t.Fatalf("File not restored correctly: expected %s, got %s", originalContent, output)
 		}
 
 		// Clean up
-		runSpriteCommand(t, spriteURL, spriteToken, "exec", "rm", "-f", randomFile)
+		runSpriteCommand(t, spriteURL, spriteToken, "exec", "rm", "-f", testFile)
 	})
 }
 
@@ -197,75 +251,6 @@ func runSpriteCommand(t *testing.T, url, token string, args ...string) string {
 	}
 
 	return string(output)
-}
-
-// Helper function to create a zombie process using the debug endpoint
-func createZombie(t *testing.T, url, token string) int {
-	client := &http.Client{Timeout: 10 * time.Second}
-
-	req, err := http.NewRequest("POST", fmt.Sprintf("%s/debug/create-zombie", url), nil)
-	if err != nil {
-		t.Fatalf("Failed to create request: %v", err)
-	}
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("Failed to create zombie: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("Failed to create zombie: status %d, body: %s", resp.StatusCode, string(body))
-	}
-
-	var result struct {
-		PID int `json:"pid"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		t.Fatalf("Failed to decode response: %v", err)
-	}
-
-	return result.PID
-}
-
-// ProcessStatus represents the status of a process
-type ProcessStatus struct {
-	PID        int    `json:"pid"`
-	Exists     bool   `json:"exists"`
-	IsZombie   bool   `json:"is_zombie"`
-	ProcStatus string `json:"proc_status,omitempty"`
-	PSStatus   string `json:"ps_status,omitempty"`
-}
-
-// Helper function to check process status using the debug endpoint
-func checkProcess(t *testing.T, url, token string, pid int) ProcessStatus {
-	client := &http.Client{Timeout: 10 * time.Second}
-
-	req, err := http.NewRequest("GET", fmt.Sprintf("%s/debug/check-process?pid=%d", url, pid), nil)
-	if err != nil {
-		t.Fatalf("Failed to create request: %v", err)
-	}
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("Failed to check process: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("Failed to check process: status %d, body: %s", resp.StatusCode, string(body))
-	}
-
-	var status ProcessStatus
-	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-		t.Fatalf("Failed to decode response: %v", err)
-	}
-
-	return status
 }
 
 // Helper function to clean up after tests

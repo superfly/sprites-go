@@ -17,90 +17,107 @@ func (h *Handlers) HandleDebugCreateZombie(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Create a zombie by having a parent that forks a child and doesn't wait for it
-	// The parent stays alive (sleep 3600) so the child remains a zombie
-	cmd := exec.Command("sh", "-c", `
-		# Create a C program that creates a zombie
-		cat > /tmp/create_zombie.c << 'EOF'
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <sys/types.h>
+	// Subscribe to reap events before creating the process
+	reapCh := h.processManager.SubscribeToReapEvents()
+	defer h.processManager.UnsubscribeFromReapEvents(reapCh)
 
-int main() {
-    pid_t pid = fork();
-    
-    if (pid == 0) {
-        // Child process - exit immediately
-        exit(0);
-    } else if (pid > 0) {
-        // Parent process - print child PID and sleep without waiting
-        printf("%d\n", pid);
-        fflush(stdout);
-        sleep(3600); // Sleep for an hour to keep the zombie
-    }
-    
-    return 0;
-}
-EOF
-		
-		# Compile and run it
-		gcc -o /tmp/create_zombie /tmp/create_zombie.c 2>/dev/null || {
-			# Fallback if no gcc - use a simpler approach
-			sh -c 'sleep 0.1 && exit 0' &
-			CHILD=$!
-			echo $CHILD
-			# Keep this shell alive to maintain the zombie
-			sleep 3600
-		} &
-		
-		# Run the compiled program if it exists
-		if [ -x /tmp/create_zombie ]; then
-			/tmp/create_zombie &
-		fi
-		
-		# Wait a bit for output
-		sleep 0.1
-	`)
+	// Create a simple process that will become a zombie
+	// We use a shell command that exits immediately
+	cmd := exec.Command("sh", "-c", "exit 0")
 
-	// Start the command in background
+	// Start the process
 	if err := cmd.Start(); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to create zombie: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("Failed to create process: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	// Get the output quickly before detaching
+	// Get the PID before it becomes a zombie
+	pid := cmd.Process.Pid
+	h.logger.Info("Created process that will become zombie", "pid", pid)
+
+	// Don't wait for it - this creates the zombie
+	// The process has exited but we haven't called Wait()
+
+	// Give it a moment to ensure the process exits
+	time.Sleep(100 * time.Millisecond)
+
+	// Check if it's a zombie now
+	isZombie := false
+	if statData, err := exec.Command("cat", fmt.Sprintf("/proc/%d/stat", pid)).Output(); err == nil {
+		statStr := string(statData)
+		if lastParen := strings.LastIndex(statStr, ")"); lastParen != -1 {
+			fields := strings.Fields(statStr[lastParen+1:])
+			if len(fields) > 0 && fields[0] == "Z" {
+				isZombie = true
+			}
+		}
+	}
+
+	// Now wait for sprite to reap it using the event system
+	reaped := false
+	reapStartTime := time.Now()
+	var reapDuration time.Duration
+
+	// First check if it was already reaped (in case we missed the event)
+	if wasReaped, reapTime := h.processManager.WasProcessReaped(pid); wasReaped {
+		reaped = true
+		reapDuration = reapTime.Sub(reapStartTime)
+	} else {
+		// Wait for the reap event
+		timeout := time.After(1 * time.Second)
+		for !reaped {
+			select {
+			case reapedPID := <-reapCh:
+				if reapedPID == pid {
+					reaped = true
+					reapDuration = time.Since(reapStartTime)
+				}
+			case <-timeout:
+				// Timeout - check one more time in case we missed it
+				if wasReaped, reapTime := h.processManager.WasProcessReaped(pid); wasReaped {
+					reaped = true
+					reapDuration = reapTime.Sub(reapStartTime)
+				} else {
+					reapDuration = time.Since(reapStartTime)
+				}
+				goto done
+			}
+		}
+	}
+
+done:
+	// Clean up - call Wait() to release resources if not already reaped
 	go func() {
 		cmd.Wait()
 	}()
 
-	// Alternative simpler approach - use a known pattern that creates zombies
-	zombieCmd := exec.Command("sh", "-c", "(sleep 0.1 && exit 0) & echo $!")
-	output, err := zombieCmd.Output()
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to create zombie: %v", err), http.StatusInternalServerError)
-		return
+	result := map[string]interface{}{
+		"message":       "Zombie reaping test completed",
+		"pid":           pid,
+		"was_zombie":    isZombie,
+		"was_reaped":    reaped,
+		"reap_duration": reapDuration.String(),
 	}
 
-	pidStr := strings.TrimSpace(string(output))
-	var pid int
-	if _, err := fmt.Sscanf(pidStr, "%d", &pid); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to parse zombie PID: %v", err), http.StatusInternalServerError)
-		return
+	if !isZombie {
+		result["warning"] = "Process may have exited too quickly to observe zombie state"
 	}
 
-	// Give it a moment to ensure the process exits and becomes zombie
-	time.Sleep(500 * time.Millisecond)
+	if !reaped {
+		result["error"] = "Process was not reaped within 1 second - sprite may not be functioning as init"
+	} else {
+		result["success"] = "Zombie was properly reaped by sprite (PID 1)"
+	}
 
-	h.logger.Info("Created zombie process for testing", "zombie_pid", pid)
+	h.logger.Info("Zombie reaping test result",
+		"pid", pid,
+		"was_zombie", isZombie,
+		"was_reaped", reaped,
+		"duration", reapDuration)
 
-	// Return the PID
+	// Return the result
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message": "Zombie process created",
-		"pid":     pid,
-		"note":    "This process should be in zombie state until reaped by init",
-	})
+	json.NewEncoder(w).Encode(result)
 }
 
 // HandleDebugCheckProcess checks if a process exists and its status

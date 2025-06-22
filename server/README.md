@@ -263,9 +263,66 @@ The `-config` option accepts a JSON file with the following structure:
   "process_working_dir": "/app",
   "process_environment": ["NODE_ENV=production"],
   "exec_wrapper_command": ["crun", "exec", "app"],
-  "exec_tty_wrapper_command": ["crun", "exec", "-t", "app"]
+  "exec_tty_wrapper_command": ["crun", "exec", "-t", "app"],
+  
+  "juicefs_enabled": true,
+  "juicefs_base_dir": "/var/lib/sprite/juicefs",
+  "juicefs_local_mode": false,
+  "juicefs_volume_name": "sprite-juicefs",
+  "s3_access_key": "",
+  "s3_secret_access_key": "",
+  "s3_endpoint_url": "",
+  "s3_bucket": "",
+  
+  "overlay_enabled": false,
+  "overlay_image_size": "100G",
+  "overlay_lower_path": "/mnt/app-image", 
+  "overlay_target_path": "/mnt/newroot",
+  "overlay_skip_overlayfs": false
 }
 ```
+
+### Configuration Options
+
+#### Process Configuration
+- `log_level` - Log level (debug, info, warn, error)
+- `log_json` - Output logs in JSON format
+- `api_listen_addr` - API server listen address
+- `process_command` - Command to run as the supervised process
+- `process_working_dir` - Working directory for the process
+- `process_environment` - Additional environment variables
+- `process_graceful_shutdown_timeout` - Timeout for graceful shutdown
+- `exec_wrapper_command` - Command wrapper for exec API
+- `exec_tty_wrapper_command` - Command wrapper for TTY exec API
+
+#### JuiceFS Configuration
+- `juicefs_enabled` - Enable JuiceFS filesystem (default: true if base_dir is set)
+- `juicefs_base_dir` - Base directory for JuiceFS data
+- `juicefs_local_mode` - Use local storage instead of S3
+- `juicefs_volume_name` - Name of the JuiceFS volume
+- `s3_access_key` - S3 access key (for non-local mode)
+- `s3_secret_access_key` - S3 secret key (for non-local mode) 
+- `s3_endpoint_url` - S3 endpoint URL (for non-local mode)
+- `s3_bucket` - S3 bucket name (for non-local mode)
+
+#### Overlay Configuration
+- `overlay_enabled` - Enable root overlay mounting system
+- `overlay_image_size` - Size of the sparse loopback image (e.g., "100G", "50G")
+- `overlay_lower_path` - Path to the lower (read-only) directory for overlayfs
+- `overlay_target_path` - Where to mount the final overlay filesystem
+- `overlay_skip_overlayfs` - If true, only mount the loopback image without overlayfs on top
+
+The overlay system creates a writable layer on top of a read-only base image, allowing for:
+- Persistent modifications that survive restarts
+- Easy rollback via checkpoint/restore
+- Separation of application data from the base system
+
+Environment variables override config file values:
+- `SPRITE_OVERLAY_ENABLED` - Override `overlay_enabled`
+- `SPRITE_OVERLAY_IMAGE_SIZE` - Override `overlay_image_size`
+- `SPRITE_OVERLAY_LOWER_PATH` - Override `overlay_lower_path`
+- `SPRITE_OVERLAY_TARGET_PATH` - Override `overlay_target_path`
+- `SPRITE_OVERLAY_SKIP_OVERLAYFS` - Override `overlay_skip_overlayfs`
 
 ## Building
 

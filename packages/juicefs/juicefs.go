@@ -56,6 +56,13 @@ type Config struct {
 
 	// Volume name for the JuiceFS filesystem
 	VolumeName string
+
+	// Overlay configuration
+	OverlayEnabled       bool   // Enable root overlay mounting
+	OverlayImageSize     string // Size of the overlay image (e.g., "100G")
+	OverlayLowerPath     string // Path to lower directory (read-only base layer)
+	OverlayTargetPath    string // Where to mount the final overlay
+	OverlaySkipOverlayFS bool   // Skip overlayfs, only mount loopback
 }
 
 // New creates a new JuiceFS instance
@@ -84,8 +91,22 @@ func New(config Config) (*JuiceFS, error) {
 		signalCh:   make(chan os.Signal, 1),
 	}
 
-	// Initialize the overlay manager
-	j.overlayMgr = NewOverlay(j)
+	// Initialize the overlay manager if enabled
+	if config.OverlayEnabled {
+		j.overlayMgr = NewOverlay(j)
+
+		// Apply overlay configuration
+		if config.OverlayImageSize != "" {
+			j.overlayMgr.imageSize = config.OverlayImageSize
+		}
+		if config.OverlayLowerPath != "" {
+			j.overlayMgr.SetAppImagePath(config.OverlayLowerPath)
+		}
+		if config.OverlayTargetPath != "" {
+			j.overlayMgr.SetOverlayTargetPath(config.OverlayTargetPath)
+		}
+		j.overlayMgr.SetSkipOverlayFS(config.OverlaySkipOverlayFS)
+	}
 
 	return j, nil
 }
@@ -259,11 +280,11 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 		j.mountCmd.Process.Kill()
 		// Don't call Wait() here - monitorProcess will handle it
 		return ctx.Err()
-	case <-time.After(30 * time.Second):
+	case <-time.After(2 * time.Minute):
 		// Kill mount process
 		j.mountCmd.Process.Kill()
 		// Don't call Wait() here - monitorProcess will handle it
-		return fmt.Errorf("timeout waiting for JuiceFS to be ready")
+		return fmt.Errorf("timeout waiting for JuiceFS to be ready (2 minutes)")
 	}
 }
 
@@ -333,8 +354,11 @@ func (j *JuiceFS) monitorProcess() {
 		fmt.Println("Syncing JuiceFS filesystem...")
 		syncStart := time.Now()
 		syncCmd := exec.Command("sync", "-f", mountPath)
-		if err := syncCmd.Run(); err != nil {
+		if output, err := syncCmd.CombinedOutput(); err != nil {
 			fmt.Printf("Warning: sync failed for JuiceFS mount: %v\n", err)
+			if len(output) > 0 {
+				fmt.Printf("  Sync stderr/stdout: %s\n", string(output))
+			}
 		} else {
 			fmt.Printf("Sync completed in %v\n", time.Since(syncStart))
 		}
@@ -547,6 +571,9 @@ func (j *JuiceFS) Restore(ctx context.Context, checkpointID string) error {
 	if j.overlayMgr != nil {
 		// Update the image path to point to the restored active directory
 		j.overlayMgr.UpdateImagePath()
+
+		fmt.Printf("Mounting overlay from restored checkpoint...\n")
+		fmt.Printf("  New image path: %s\n", j.overlayMgr.GetImagePath())
 
 		// Mount the overlay
 		if err := j.overlayMgr.Mount(ctx); err != nil {
@@ -866,13 +893,16 @@ func (j *JuiceFS) findAndUnmountDependentMounts(juicefsMountPath string) error {
 		syncStart := time.Now()
 		syncCtx, syncCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		syncCmd := exec.CommandContext(syncCtx, "sync", "-f", mount.mountPoint)
-		syncErr := syncCmd.Run()
+		syncOutput, syncErr := syncCmd.CombinedOutput()
 		syncCancel()
 
 		if syncErr != nil {
 			// sync might fail for some mount types, but we should still try to unmount
 			fmt.Printf("  Warning: sync failed for %s after %v: %v\n",
 				mount.mountPoint, time.Since(syncStart), syncErr)
+			if len(syncOutput) > 0 {
+				fmt.Printf("    Sync stderr/stdout: %s\n", string(syncOutput))
+			}
 		} else {
 			fmt.Printf("  Sync completed in %v\n", time.Since(syncStart))
 		}

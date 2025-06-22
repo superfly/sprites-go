@@ -1,14 +1,12 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sync"
@@ -56,9 +54,16 @@ type Config struct {
 
 	// Debug
 	KeepAliveOnError bool // Keep server running when process fails
+
+	// Overlay configuration
+	OverlayEnabled       bool   // Enable root overlay mounting
+	OverlayImageSize     string // Size of the overlay image (e.g., "100G")
+	OverlayLowerPath     string // Path to lower directory (read-only base layer)
+	OverlayTargetPath    string // Where to mount the final overlay
+	OverlaySkipOverlayFS bool   // Skip overlayfs, only mount loopback
 }
 
-// Application manages the sprite-env components and implements handlers.ProcessManager
+// Application represents the main application
 type Application struct {
 	config     Config
 	logger     *slog.Logger
@@ -80,6 +85,11 @@ type Application struct {
 
 	// Background task management
 	reaperDone chan struct{}
+
+	// Reap event tracking
+	reapEventsMu  sync.RWMutex
+	reapEvents    map[int]time.Time // Map of PID to reap time
+	reapListeners []chan int        // Channels listening for reap events
 }
 
 // NewApplication creates a new application instance
@@ -109,6 +119,7 @@ func NewApplication(config Config) (*Application, error) {
 		httpDoneCh:    make(chan error, 1),
 		signalCh:      make(chan os.Signal, 1),
 		reaperDone:    make(chan struct{}),
+		reapEvents:    make(map[int]time.Time),
 	}
 
 	// Set up JuiceFS if base directory is configured
@@ -121,6 +132,12 @@ func NewApplication(config Config) (*Application, error) {
 			S3EndpointURL:     config.S3EndpointURL,
 			S3Bucket:          config.S3Bucket,
 			VolumeName:        "sprite-juicefs",
+			// Overlay configuration
+			OverlayEnabled:       config.OverlayEnabled,
+			OverlayImageSize:     config.OverlayImageSize,
+			OverlayLowerPath:     config.OverlayLowerPath,
+			OverlayTargetPath:    config.OverlayTargetPath,
+			OverlaySkipOverlayFS: config.OverlaySkipOverlayFS,
 		}
 
 		jfs, err := juicefs.New(juicefsConfig)
@@ -171,6 +188,74 @@ func (app *Application) SendCommand(cmd handlers.Command) handlers.CommandRespon
 // IsProcessRunning implements handlers.ProcessManager
 func (app *Application) IsProcessRunning() bool {
 	return app.processRunning
+}
+
+// SubscribeToReapEvents creates a channel that receives PIDs when processes are reaped
+func (app *Application) SubscribeToReapEvents() <-chan int {
+	app.reapEventsMu.Lock()
+	defer app.reapEventsMu.Unlock()
+
+	ch := make(chan int, 10)
+	app.reapListeners = append(app.reapListeners, ch)
+	return ch
+}
+
+// UnsubscribeFromReapEvents removes a reap event listener
+func (app *Application) UnsubscribeFromReapEvents(ch <-chan int) {
+	app.reapEventsMu.Lock()
+	defer app.reapEventsMu.Unlock()
+
+	for i, listener := range app.reapListeners {
+		if listener == ch {
+			// Remove the listener and close it
+			close(listener)
+			app.reapListeners = append(app.reapListeners[:i], app.reapListeners[i+1:]...)
+			break
+		}
+	}
+}
+
+// WasProcessReaped checks if a process with the given PID was reaped
+func (app *Application) WasProcessReaped(pid int) (bool, time.Time) {
+	app.reapEventsMu.RLock()
+	defer app.reapEventsMu.RUnlock()
+
+	reapTime, found := app.reapEvents[pid]
+	return found, reapTime
+}
+
+// emitReapEvent notifies all listeners that a process was reaped
+func (app *Application) emitReapEvent(pid int) {
+	app.reapEventsMu.Lock()
+	defer app.reapEventsMu.Unlock()
+
+	// Record the reap event
+	app.reapEvents[pid] = time.Now()
+
+	// Clean up old events if map gets too large (keep last 1000)
+	if len(app.reapEvents) > 1000 {
+		// Find oldest events to remove
+		var oldestPIDs []int
+		for p := range app.reapEvents {
+			oldestPIDs = append(oldestPIDs, p)
+			if len(oldestPIDs) > 100 { // Remove 100 oldest
+				break
+			}
+		}
+		for _, p := range oldestPIDs {
+			delete(app.reapEvents, p)
+		}
+	}
+
+	// Notify all listeners
+	for _, ch := range app.reapListeners {
+		select {
+		case ch <- pid:
+			// Sent successfully
+		default:
+			// Channel is full, skip
+		}
+	}
 }
 
 // Start starts the application components
@@ -489,26 +574,6 @@ func (app *Application) streamingCheckpoint(ctx context.Context, checkpointID st
 		return fmt.Errorf("checkpoint ID is required")
 	}
 
-	mountPath := filepath.Join(app.config.JuiceFSBaseDir, "data")
-	activeDir := filepath.Join(mountPath, "active")
-	checkpointsDir := filepath.Join(mountPath, "checkpoints")
-	checkpointPath := filepath.Join(checkpointsDir, checkpointID)
-
-	// Ensure checkpoints directory exists
-	if err := os.MkdirAll(checkpointsDir, 0755); err != nil {
-		return fmt.Errorf("failed to create checkpoints directory: %w", err)
-	}
-
-	// Check if active directory exists
-	if _, err := os.Stat(activeDir); os.IsNotExist(err) {
-		return fmt.Errorf("active directory does not exist at %s", activeDir)
-	}
-
-	// Check if checkpoint already exists
-	if _, err := os.Stat(checkpointPath); err == nil {
-		return fmt.Errorf("checkpoint %s already exists at %s", checkpointID, checkpointPath)
-	}
-
 	// Send initial message
 	streamCh <- handlers.StreamMessage{
 		Type: "info",
@@ -516,71 +581,19 @@ func (app *Application) streamingCheckpoint(ctx context.Context, checkpointID st
 		Time: time.Now(),
 	}
 
-	// Create and run the juicefs clone command
-	cmd := exec.CommandContext(ctx, "juicefs", "clone", activeDir, checkpointPath)
-
-	// Capture stdout and stderr
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("failed to create stdout pipe: %w", err)
-	}
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("failed to create stderr pipe: %w", err)
-	}
-
-	// Start the command
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start juicefs clone: %w", err)
-	}
-
-	// Stream output
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	// Stream stdout
-	go func() {
-		defer wg.Done()
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			streamCh <- handlers.StreamMessage{
-				Type: "stdout",
-				Data: scanner.Text(),
-				Time: time.Now(),
-			}
-		}
-	}()
-
-	// Stream stderr
-	go func() {
-		defer wg.Done()
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			streamCh <- handlers.StreamMessage{
-				Type: "stderr",
-				Data: scanner.Text(),
-				Time: time.Now(),
-			}
-		}
-	}()
-
-	// Wait for command to complete
-	wg.Wait()
-	err = cmd.Wait()
-
-	if err != nil {
+	// Use the proper JuiceFS checkpoint method that handles overlay
+	if err := app.juicefs.Checkpoint(ctx, checkpointID); err != nil {
 		streamCh <- handlers.StreamMessage{
 			Type:  "error",
-			Error: fmt.Sprintf("juicefs clone failed: %v", err),
+			Error: fmt.Sprintf("Failed to create checkpoint: %v", err),
 			Time:  time.Now(),
 		}
-		return fmt.Errorf("juicefs clone failed: %w", err)
+		return err
 	}
 
 	streamCh <- handlers.StreamMessage{
 		Type: "info",
-		Data: fmt.Sprintf("Checkpoint created successfully at %s", checkpointPath),
+		Data: fmt.Sprintf("Checkpoint created successfully at checkpoints/%s", checkpointID),
 		Time: time.Now(),
 	}
 
@@ -600,107 +613,28 @@ func (app *Application) streamingRestore(ctx context.Context, checkpointID strin
 		return "", fmt.Errorf("checkpoint ID is required")
 	}
 
-	mountPath := filepath.Join(app.config.JuiceFSBaseDir, "data")
-	activeDir := filepath.Join(mountPath, "active")
-	checkpointsDir := filepath.Join(mountPath, "checkpoints")
-	checkpointPath := filepath.Join(checkpointsDir, checkpointID)
-
-	// Check if checkpoint exists
-	if _, err := os.Stat(checkpointPath); os.IsNotExist(err) {
-		return "", fmt.Errorf("checkpoint %s does not exist at %s", checkpointID, checkpointPath)
-	}
-
-	// Track the backup name for the previous state
-	var previousStateID string
-
-	// If active directory exists, back it up
-	if _, err := os.Stat(activeDir); err == nil {
-		timestamp := time.Now().Unix()
-		backupName := fmt.Sprintf("pre-restore-%s-%d", checkpointID, timestamp)
-		backupPath := filepath.Join(checkpointsDir, backupName)
-		previousStateID = backupName
-
-		streamCh <- handlers.StreamMessage{
-			Type: "info",
-			Data: fmt.Sprintf("Backing up current active directory to %s...", backupName),
-			Time: time.Now(),
-		}
-
-		if err := os.Rename(activeDir, backupPath); err != nil {
-			return "", fmt.Errorf("failed to backup active directory: %w", err)
-		}
-
-		streamCh <- handlers.StreamMessage{
-			Type: "info",
-			Data: "Backup completed",
-			Time: time.Now(),
-		}
-	}
-
-	// Clone checkpoint to active directory
+	// Send initial message
 	streamCh <- handlers.StreamMessage{
 		Type: "info",
-		Data: fmt.Sprintf("Cloning checkpoint %s to active directory...", checkpointID),
+		Data: fmt.Sprintf("Restoring from checkpoint %s...", checkpointID),
 		Time: time.Now(),
 	}
 
-	cmd := exec.CommandContext(ctx, "juicefs", "clone", checkpointPath, activeDir)
-
-	// Capture stdout and stderr
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", fmt.Errorf("failed to create stdout pipe: %w", err)
-	}
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return "", fmt.Errorf("failed to create stderr pipe: %w", err)
-	}
-
-	// Start the command
-	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("failed to start juicefs clone: %w", err)
-	}
-
-	// Stream output
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	// Stream stdout
-	go func() {
-		defer wg.Done()
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			streamCh <- handlers.StreamMessage{
-				Type: "stdout",
-				Data: scanner.Text(),
-				Time: time.Now(),
-			}
+	// Use the proper JuiceFS restore method that handles overlay
+	if err := app.juicefs.Restore(ctx, checkpointID); err != nil {
+		streamCh <- handlers.StreamMessage{
+			Type:  "error",
+			Error: fmt.Sprintf("Failed to restore checkpoint: %v", err),
+			Time:  time.Now(),
 		}
-	}()
-
-	// Stream stderr
-	go func() {
-		defer wg.Done()
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			streamCh <- handlers.StreamMessage{
-				Type: "stderr",
-				Data: scanner.Text(),
-				Time: time.Now(),
-			}
-		}
-	}()
-
-	// Wait for command to complete
-	wg.Wait()
-	err = cmd.Wait()
-
-	if err != nil {
-		return "", fmt.Errorf("juicefs clone failed: %w", err)
+		return "", err
 	}
 
-	// Send completion message with the format requested by the user
+	// For now, we don't track the previous state ID in the JuiceFS package
+	// This would need to be enhanced if we want to return it
+	previousStateID := ""
+
+	// Send completion message
 	message := fmt.Sprintf("Restore from %s complete", checkpointID)
 	if previousStateID != "" {
 		message += fmt.Sprintf(", previous state checkpoint id: %s", previousStateID)
@@ -806,6 +740,9 @@ func (app *Application) startReaper() {
 						break
 					}
 					app.logger.Debug("Reaped zombie process", "pid", pid, "status", status)
+
+					// Emit reap event
+					app.emitReapEvent(pid)
 				}
 			}
 		}
@@ -858,6 +795,23 @@ func parseCommandLine() (Config, error) {
 			ProcessEnv            []string `json:"process_environment"`
 			ExecWrapperCommand    []string `json:"exec_wrapper_command"`
 			ExecTTYWrapperCommand []string `json:"exec_tty_wrapper_command"`
+
+			// JuiceFS configuration
+			JuiceFSEnabled    bool   `json:"juicefs_enabled"`
+			JuiceFSBaseDir    string `json:"juicefs_base_dir"`
+			JuiceFSLocalMode  bool   `json:"juicefs_local_mode"`
+			JuiceFSVolumeName string `json:"juicefs_volume_name"`
+			S3AccessKey       string `json:"s3_access_key"`
+			S3SecretAccessKey string `json:"s3_secret_access_key"`
+			S3EndpointURL     string `json:"s3_endpoint_url"`
+			S3Bucket          string `json:"s3_bucket"`
+
+			// Overlay configuration
+			OverlayEnabled       bool   `json:"overlay_enabled"`
+			OverlayImageSize     string `json:"overlay_image_size"`
+			OverlayLowerPath     string `json:"overlay_lower_path"`
+			OverlayTargetPath    string `json:"overlay_target_path"`
+			OverlaySkipOverlayFS bool   `json:"overlay_skip_overlayfs"`
 		}
 
 		if err := json.Unmarshal(data, &fileConfig); err != nil {
@@ -884,6 +838,17 @@ func parseCommandLine() (Config, error) {
 		config.ProcessEnvironment = fileConfig.ProcessEnv
 		config.ExecWrapperCommand = fileConfig.ExecWrapperCommand
 		config.ExecTTYWrapperCommand = fileConfig.ExecTTYWrapperCommand
+		config.JuiceFSBaseDir = fileConfig.JuiceFSBaseDir
+		config.JuiceFSLocalMode = fileConfig.JuiceFSLocalMode
+		config.S3AccessKey = fileConfig.S3AccessKey
+		config.S3SecretAccessKey = fileConfig.S3SecretAccessKey
+		config.S3EndpointURL = fileConfig.S3EndpointURL
+		config.S3Bucket = fileConfig.S3Bucket
+		config.OverlayEnabled = fileConfig.OverlayEnabled
+		config.OverlayImageSize = fileConfig.OverlayImageSize
+		config.OverlayLowerPath = fileConfig.OverlayLowerPath
+		config.OverlayTargetPath = fileConfig.OverlayTargetPath
+		config.OverlaySkipOverlayFS = fileConfig.OverlaySkipOverlayFS
 	}
 
 	// Apply command-line overrides
@@ -908,10 +873,10 @@ func parseCommandLine() (Config, error) {
 	// Environment variables
 	config.APIToken = os.Getenv("SPRITE_HTTP_API_TOKEN")
 
-	// JuiceFS configuration
-	config.JuiceFSBaseDir = os.Getenv("SPRITE_WRITE_DIR")
-	if config.JuiceFSBaseDir != "" {
-		config.JuiceFSBaseDir = filepath.Join(config.JuiceFSBaseDir, "juicefs")
+	// JuiceFS configuration - environment overrides file config
+	juicefsBaseDir := os.Getenv("SPRITE_WRITE_DIR")
+	if juicefsBaseDir != "" {
+		config.JuiceFSBaseDir = filepath.Join(juicefsBaseDir, "juicefs")
 	}
 	if juicefsDirFlag != "" {
 		config.JuiceFSBaseDir = juicefsDirFlag
@@ -920,12 +885,43 @@ func parseCommandLine() (Config, error) {
 	// Check for local mode
 	if os.Getenv("SPRITE_LOCAL_MODE") == "true" {
 		config.JuiceFSLocalMode = true
-	} else {
-		// S3 configuration
-		config.S3AccessKey = os.Getenv("SPRITE_S3_ACCESS_KEY")
-		config.S3SecretAccessKey = os.Getenv("SPRITE_S3_SECRET_ACCESS_KEY")
-		config.S3EndpointURL = os.Getenv("SPRITE_S3_ENDPOINT_URL")
-		config.S3Bucket = os.Getenv("SPRITE_S3_BUCKET")
+	} else if os.Getenv("SPRITE_LOCAL_MODE") == "false" {
+		config.JuiceFSLocalMode = false
+	}
+
+	// S3 configuration - environment overrides file config
+	if s3Key := os.Getenv("SPRITE_S3_ACCESS_KEY"); s3Key != "" {
+		config.S3AccessKey = s3Key
+	}
+	if s3Secret := os.Getenv("SPRITE_S3_SECRET_ACCESS_KEY"); s3Secret != "" {
+		config.S3SecretAccessKey = s3Secret
+	}
+	if s3Endpoint := os.Getenv("SPRITE_S3_ENDPOINT_URL"); s3Endpoint != "" {
+		config.S3EndpointURL = s3Endpoint
+	}
+	if s3Bucket := os.Getenv("SPRITE_S3_BUCKET"); s3Bucket != "" {
+		config.S3Bucket = s3Bucket
+	}
+
+	// Overlay configuration - environment overrides file config
+	if overlayEnabled := os.Getenv("SPRITE_OVERLAY_ENABLED"); overlayEnabled == "true" {
+		config.OverlayEnabled = true
+	} else if overlayEnabled == "false" {
+		config.OverlayEnabled = false
+	}
+	if overlaySize := os.Getenv("SPRITE_OVERLAY_IMAGE_SIZE"); overlaySize != "" {
+		config.OverlayImageSize = overlaySize
+	}
+	if overlayLowerPath := os.Getenv("SPRITE_OVERLAY_LOWER_PATH"); overlayLowerPath != "" {
+		config.OverlayLowerPath = overlayLowerPath
+	}
+	if overlayTarget := os.Getenv("SPRITE_OVERLAY_TARGET_PATH"); overlayTarget != "" {
+		config.OverlayTargetPath = overlayTarget
+	}
+	if skipOverlayFS := os.Getenv("SPRITE_OVERLAY_SKIP_OVERLAYFS"); skipOverlayFS == "true" {
+		config.OverlaySkipOverlayFS = true
+	} else if skipOverlayFS == "false" {
+		config.OverlaySkipOverlayFS = false
 	}
 
 	// Debug configuration
