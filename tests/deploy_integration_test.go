@@ -184,13 +184,27 @@ func TestDeployAndFunctionality(t *testing.T) {
 		// Delete the file entirely to make the test more robust
 		runSpriteCommand(t, spriteURL, spriteToken, "exec", "rm", "-f", testFile)
 
+		// Add debugging: verify file deletion with explicit check
 		// Verify file is gone
 		cmd := exec.Command("../dist/sprite", "exec", "ls", testFile)
 		cmd.Env = append(os.Environ(),
 			fmt.Sprintf("SPRITE_URL=%s", spriteURL),
 			fmt.Sprintf("SPRITE_TOKEN=%s", spriteToken),
 		)
-		if _, err := cmd.CombinedOutput(); err == nil {
+		lsOutput, err := cmd.CombinedOutput()
+		t.Logf("ls command output after rm: %s", string(lsOutput))
+		t.Logf("ls command error after rm: %v", err)
+
+		// Also try with ls -la to see if file exists (don't fail if this errors)
+		debugCmd := exec.Command("../dist/sprite", "exec", "ls", "-la", filepath.Dir(testFile))
+		debugCmd.Env = append(os.Environ(),
+			fmt.Sprintf("SPRITE_URL=%s", spriteURL),
+			fmt.Sprintf("SPRITE_TOKEN=%s", spriteToken),
+		)
+		debugOutput, debugErr := debugCmd.CombinedOutput()
+		t.Logf("Directory listing after rm: %s (error: %v)", string(debugOutput), debugErr)
+
+		if err == nil {
 			t.Fatal("File should have been deleted")
 		}
 

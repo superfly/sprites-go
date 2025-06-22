@@ -4,4 +4,6 @@ use (
 	./lib
 	./client
 	./server
+	./packages/supervisor
+	./packages/juicefs
 )

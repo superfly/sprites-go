@@ -66,8 +66,38 @@ func NewServer(config Config, commandCh chan<- handlers.Command, processManager 
 func (s *Server) setupEndpoints(mux *http.ServeMux) {
 	// All endpoints require authentication
 
-	// Exec endpoint - waits for process to be running
-	mux.HandleFunc("/exec", s.authMiddleware(s.waitForRunningMiddleware(s.handlers.HandleExec)))
+	// Docker-compatible exec endpoints
+	// Pattern: /containers/{id}/exec for create
+	// Pattern: /exec/{id}/start for start
+	// Pattern: /exec/{id}/json for inspect
+	mux.HandleFunc("/containers/", s.authMiddleware(s.waitForRunningMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		// Parse path: /containers/{containerID}/exec
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) == 3 && parts[2] == "exec" && r.Method == http.MethodPost {
+			// Container ID is in parts[1], but we ignore it since we only have one container
+			s.handlers.HandleDockerExecCreate(w, r)
+		} else {
+			http.NotFound(w, r)
+		}
+	})))
+
+	mux.HandleFunc("/exec/", s.authMiddleware(s.waitForRunningMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		// Parse path: /exec/{execID}/start or /exec/{execID}/json
+		path := r.URL.Path
+		parts := strings.Split(strings.Trim(path, "/"), "/")
+
+		if len(parts) == 3 {
+			if parts[2] == "start" {
+				s.handlers.HandleDockerExecStart(w, r)
+			} else if parts[2] == "json" {
+				s.handlers.HandleDockerExecInspect(w, r)
+			} else {
+				http.NotFound(w, r)
+			}
+		} else {
+			http.NotFound(w, r)
+		}
+	})))
 
 	// State management endpoints - don't wait for running state
 	mux.HandleFunc("/checkpoint", s.authMiddleware(s.handlers.HandleCheckpoint))

@@ -128,11 +128,100 @@ If you're using an init system like s6-overlay, tini, or dumb-init, they will ha
 
 ## API Endpoints
 
-### Main Endpoints
+All endpoints require authentication via Bearer token in the `Authorization` header.
 
-- `POST /checkpoint` - Create a checkpoint of the current state
-- `POST /restore` - Restore from a checkpoint
-- `POST /exec` - Execute a command in the context of the supervised process
+### Exec
+
+Execute commands in the container environment.
+
+#### POST /exec (Original API)
+
+Execute a command and stream output in real-time using Docker's multiplexed stream format.
+
+**Request:**
+```json
+{
+  "command": ["ls", "-la"],
+  "timeout": 30000000000,
+  "tty": false
+}
+```
+
+**Response:** Streaming response in Docker multiplexed format compatible with `github.com/moby/moby/pkg/stdcopy`.
+
+The format uses an 8-byte header for each chunk:
+- Byte 0: Stream type (1=stdout, 2=stderr, 3=system)
+- Bytes 1-3: Unused (zero)
+- Bytes 4-7: Payload size (big-endian uint32)
+- Followed by the payload data
+
+Exit codes are sent as system messages (stream type 3) in the format `EXIT:<code>`.
+
+### Docker-Compatible Exec API
+
+The server also provides Docker-compatible exec endpoints for better integration with Docker tooling.
+
+#### POST /exec (Docker-Compatible)
+
+Create an exec instance.
+
+**Request:**
+```json
+{
+  "Cmd": ["ls", "-la"],
+  "AttachStdout": true,
+  "AttachStderr": true,
+  "Tty": false,
+  "Env": ["KEY=value"],
+  "WorkingDir": "/app"
+}
+```
+
+**Response:**
+```json
+{
+  "Id": "f7a7c843e2e741bf54161a2c5e7d5e66b2c93d5e93b34c6fdbd0ef0a5a40f37b"
+}
+```
+
+#### POST /exec/{id}/start
+
+Start an exec instance and stream output.
+
+**Request:**
+```json
+{
+  "Detach": false,
+  "Tty": false
+}
+```
+
+**Response:** HTTP 101 Switching Protocols, then raw Docker multiplexed stream.
+
+#### GET /exec/{id}/json
+
+Get exec instance details including exit code.
+
+**Response:**
+```json
+{
+  "Id": "exec_id",
+  "Running": false,
+  "ExitCode": 0,
+  "ProcessConfig": {
+    "entrypoint": "ls",
+    "arguments": ["-la"],
+    "privileged": false,
+    "tty": false
+  },
+  "OpenStdin": false,
+  "OpenStderr": true,
+  "OpenStdout": true,
+  "CanRemove": true,
+  "ContainerID": "sprite",
+  "Pid": 1234
+}
+```
 
 ### Debug Endpoints
 

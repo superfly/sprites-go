@@ -5,24 +5,15 @@ build:
 	go build -o tmp/sprite-env .
 
 # Run all tests (unit first, then integration)
-test: test-packages test-unit test-integration
-
-test-packages: test-supervisor test-docker
+test: test-unit test-integration
 
 # Run integration tests
 test-integration: build
-	TSCRIPTS_DIR=$$(cd test-scripts && pwd) go test -v -failfast ./tests
+	go test -v -failfast ./tests
 
 # Run unit tests
 test-unit:
-	go test -v -failfast ./lib/...
-
-# Run supervisor package tests specifically
-test-supervisor:
-	cd packages/supervisor && go test -v -failfast ./...
-
-test-juicefs:
-	cd packages/juicefs && make test-docker
+	go test -v -failfast ./api/...
 
 # Clean build artifacts
 clean:

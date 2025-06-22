@@ -97,6 +97,7 @@ done:
 		"was_zombie":    isZombie,
 		"was_reaped":    reaped,
 		"reap_duration": reapDuration.String(),
+		"note":          "This is a debug endpoint for testing zombie process reaping",
 	}
 
 	if !isZombie {

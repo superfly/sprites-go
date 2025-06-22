@@ -53,10 +53,6 @@ func TestNewHandlers(t *testing.T) {
 	if h == nil {
 		t.Error("NewHandlers returned nil")
 	}
-
-	if h.processManager != mockPM {
-		t.Error("processManager not set correctly")
-	}
 }
 
 // Test HandleCheckpoint validates request method
@@ -100,24 +96,6 @@ func TestHandleRestoreMethod(t *testing.T) {
 
 	if !strings.Contains(rr.Body.String(), "Method not allowed") {
 		t.Errorf("expected error message about method not allowed")
-	}
-}
-
-// Test HandleExec validates request method
-func TestHandleExecMethod(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	commandCh := make(chan Command, 1)
-	config := Config{}
-	mockPM := &mockProcessManager{}
-	h := NewHandlers(logger, commandCh, config, mockPM)
-
-	req := httptest.NewRequest(http.MethodGet, "/exec", nil)
-	rr := httptest.NewRecorder()
-
-	h.HandleExec(rr, req)
-
-	if rr.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected status %d, got %d", http.StatusMethodNotAllowed, rr.Code)
 	}
 }
 
@@ -222,4 +200,18 @@ func (m *mockProcessManager) SendCommand(cmd Command) CommandResponse {
 
 func (m *mockProcessManager) IsProcessRunning() bool {
 	return m.running
+}
+
+func (m *mockProcessManager) SubscribeToReapEvents() <-chan int {
+	ch := make(chan int)
+	close(ch) // Close immediately for testing
+	return ch
+}
+
+func (m *mockProcessManager) UnsubscribeFromReapEvents(ch <-chan int) {
+	// No-op for testing
+}
+
+func (m *mockProcessManager) WasProcessReaped(pid int) (bool, time.Time) {
+	return false, time.Time{}
 }

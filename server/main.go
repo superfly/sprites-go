@@ -5,16 +5,16 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"lib/api"
 	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
+	serverapi "spritectl/api"
+	"spritectl/api/handlers"
 	"sync"
 	"syscall"
 	"time"
-
-	"spritectl/api"
-	"spritectl/api/handlers"
 
 	"github.com/fly-dev-env/sprite-env/server/packages/juicefs"
 	"github.com/sprite-env/server/packages/supervisor"
@@ -69,7 +69,7 @@ type Application struct {
 	logger     *slog.Logger
 	juicefs    *juicefs.JuiceFS
 	supervisor *supervisor.Supervisor
-	apiServer  *api.Server
+	apiServer  *serverapi.Server
 	ctx        context.Context
 	cancel     context.CancelFunc
 
@@ -149,7 +149,7 @@ func NewApplication(config Config) (*Application, error) {
 
 	// Set up API server if configured
 	if config.APIListenAddr != "" {
-		apiConfig := api.Config{
+		apiConfig := serverapi.Config{
 			ListenAddr:            config.APIListenAddr,
 			APIToken:              config.APIToken,
 			MaxWaitTime:           30 * time.Second,
@@ -157,7 +157,7 @@ func NewApplication(config Config) (*Application, error) {
 			ExecTTYWrapperCommand: config.ExecTTYWrapperCommand,
 		}
 
-		apiServer, err := api.NewServer(apiConfig, app.commandCh, app, logger)
+		apiServer, err := serverapi.NewServer(apiConfig, app.commandCh, app, logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create API server: %w", err)
 		}
@@ -451,7 +451,7 @@ func (app *Application) handleCommand(cmd handlers.Command) {
 			}()
 		} else {
 			// Send error message before closing channel
-			data.StreamCh <- handlers.StreamMessage{
+			data.StreamCh <- api.StreamMessage{
 				Type:  "error",
 				Error: "JuiceFS not configured",
 				Time:  time.Now(),
@@ -475,8 +475,8 @@ func (app *Application) handleCommand(cmd handlers.Command) {
 	}
 }
 
-// performRestore performs the restore sequence with streaming progress
-func (app *Application) performRestore(checkpointID string, streamCh chan<- handlers.StreamMessage) {
+// performRestore handles the restore operation after the supervisor state change
+func (app *Application) performRestore(checkpointID string, streamCh chan<- api.StreamMessage) {
 	defer close(streamCh)
 
 	app.logger.Info("Starting restore sequence", "checkpointID", checkpointID)
@@ -488,7 +488,7 @@ func (app *Application) performRestore(checkpointID string, streamCh chan<- hand
 
 	// Stop process if running
 	if app.processRunning && app.supervisor != nil {
-		streamCh <- handlers.StreamMessage{
+		streamCh <- api.StreamMessage{
 			Type: "info",
 			Data: "Stopping process for restore...",
 			Time: time.Now(),
@@ -496,7 +496,7 @@ func (app *Application) performRestore(checkpointID string, streamCh chan<- hand
 		app.logger.Info("Stopping process for restore")
 		if err := app.supervisor.Stop(); err != nil {
 			app.logger.Error("Failed to stop process", "error", err)
-			streamCh <- handlers.StreamMessage{
+			streamCh <- api.StreamMessage{
 				Type:  "error",
 				Error: fmt.Sprintf("Failed to stop process: %v", err),
 				Time:  time.Now(),
@@ -506,7 +506,7 @@ func (app *Application) performRestore(checkpointID string, streamCh chan<- hand
 		// supervisor.Stop() blocks until the process has exited
 		app.processRunning = false
 		app.logger.Info("Process stopped successfully")
-		streamCh <- handlers.StreamMessage{
+		streamCh <- api.StreamMessage{
 			Type: "info",
 			Data: "Process stopped successfully",
 			Time: time.Now(),
@@ -515,7 +515,7 @@ func (app *Application) performRestore(checkpointID string, streamCh chan<- hand
 
 	// Perform JuiceFS restore with streaming
 	if app.juicefs != nil {
-		streamCh <- handlers.StreamMessage{
+		streamCh <- api.StreamMessage{
 			Type: "info",
 			Data: fmt.Sprintf("Restoring from checkpoint %s...", checkpointID),
 			Time: time.Now(),
@@ -527,7 +527,7 @@ func (app *Application) performRestore(checkpointID string, streamCh chan<- hand
 		previousStateID, err := app.streamingRestore(ctx, checkpointID, streamCh)
 		if err != nil {
 			app.logger.Error("Failed to restore checkpoint", "error", err)
-			streamCh <- handlers.StreamMessage{
+			streamCh <- api.StreamMessage{
 				Type:  "error",
 				Error: fmt.Sprintf("Failed to restore checkpoint: %v", err),
 				Time:  time.Now(),
@@ -539,7 +539,7 @@ func (app *Application) performRestore(checkpointID string, streamCh chan<- hand
 	}
 
 	// Restart process
-	streamCh <- handlers.StreamMessage{
+	streamCh <- api.StreamMessage{
 		Type: "info",
 		Data: "Starting process after restore...",
 		Time: time.Now(),
@@ -547,7 +547,7 @@ func (app *Application) performRestore(checkpointID string, streamCh chan<- hand
 	app.logger.Info("Starting process after restore")
 	if err := app.startProcess(); err != nil {
 		app.logger.Error("Failed to start process after restore", "error", err)
-		streamCh <- handlers.StreamMessage{
+		streamCh <- api.StreamMessage{
 			Type:  "error",
 			Error: fmt.Sprintf("Failed to start process after restore: %v", err),
 			Time:  time.Now(),
@@ -561,7 +561,7 @@ func (app *Application) performRestore(checkpointID string, streamCh chan<- hand
 	if previousStateID != "" {
 		completeMessage += fmt.Sprintf(", previous state checkpoint id: %s", previousStateID)
 	}
-	streamCh <- handlers.StreamMessage{
+	streamCh <- api.StreamMessage{
 		Type: "complete",
 		Data: completeMessage,
 		Time: time.Now(),
@@ -569,13 +569,13 @@ func (app *Application) performRestore(checkpointID string, streamCh chan<- hand
 }
 
 // streamingCheckpoint performs checkpoint with streaming output
-func (app *Application) streamingCheckpoint(ctx context.Context, checkpointID string, streamCh chan<- handlers.StreamMessage) error {
+func (app *Application) streamingCheckpoint(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) error {
 	if checkpointID == "" {
 		return fmt.Errorf("checkpoint ID is required")
 	}
 
 	// Send initial message
-	streamCh <- handlers.StreamMessage{
+	streamCh <- api.StreamMessage{
 		Type: "info",
 		Data: fmt.Sprintf("Creating checkpoint %s...", checkpointID),
 		Time: time.Now(),
@@ -583,7 +583,7 @@ func (app *Application) streamingCheckpoint(ctx context.Context, checkpointID st
 
 	// Use the proper JuiceFS checkpoint method that handles overlay
 	if err := app.juicefs.Checkpoint(ctx, checkpointID); err != nil {
-		streamCh <- handlers.StreamMessage{
+		streamCh <- api.StreamMessage{
 			Type:  "error",
 			Error: fmt.Sprintf("Failed to create checkpoint: %v", err),
 			Time:  time.Now(),
@@ -591,14 +591,14 @@ func (app *Application) streamingCheckpoint(ctx context.Context, checkpointID st
 		return err
 	}
 
-	streamCh <- handlers.StreamMessage{
+	streamCh <- api.StreamMessage{
 		Type: "info",
 		Data: fmt.Sprintf("Checkpoint created successfully at checkpoints/%s", checkpointID),
 		Time: time.Now(),
 	}
 
 	// Send final completion message
-	streamCh <- handlers.StreamMessage{
+	streamCh <- api.StreamMessage{
 		Type: "complete",
 		Data: fmt.Sprintf("Checkpoint %s created successfully", checkpointID),
 		Time: time.Now(),
@@ -608,13 +608,13 @@ func (app *Application) streamingCheckpoint(ctx context.Context, checkpointID st
 }
 
 // streamingRestore performs restore with streaming output
-func (app *Application) streamingRestore(ctx context.Context, checkpointID string, streamCh chan<- handlers.StreamMessage) (string, error) {
+func (app *Application) streamingRestore(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) (string, error) {
 	if checkpointID == "" {
 		return "", fmt.Errorf("checkpoint ID is required")
 	}
 
 	// Send initial message
-	streamCh <- handlers.StreamMessage{
+	streamCh <- api.StreamMessage{
 		Type: "info",
 		Data: fmt.Sprintf("Restoring from checkpoint %s...", checkpointID),
 		Time: time.Now(),
@@ -622,7 +622,7 @@ func (app *Application) streamingRestore(ctx context.Context, checkpointID strin
 
 	// Use the proper JuiceFS restore method that handles overlay
 	if err := app.juicefs.Restore(ctx, checkpointID); err != nil {
-		streamCh <- handlers.StreamMessage{
+		streamCh <- api.StreamMessage{
 			Type:  "error",
 			Error: fmt.Sprintf("Failed to restore checkpoint: %v", err),
 			Time:  time.Now(),
@@ -640,7 +640,7 @@ func (app *Application) streamingRestore(ctx context.Context, checkpointID strin
 		message += fmt.Sprintf(", previous state checkpoint id: %s", previousStateID)
 	}
 
-	streamCh <- handlers.StreamMessage{
+	streamCh <- api.StreamMessage{
 		Type: "info",
 		Data: message,
 		Time: time.Now(),

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -15,6 +16,10 @@ type Handlers struct {
 	maxWaitTime           time.Duration
 	execWrapperCommand    []string
 	execTTYWrapperCommand []string
+
+	// Exec instance storage
+	execInstances map[string]*ExecInstance
+	execMutex     sync.RWMutex
 }
 
 // Config holds handler configuration
@@ -33,5 +38,6 @@ func NewHandlers(logger *slog.Logger, commandCh chan<- Command, config Config, p
 		maxWaitTime:           config.MaxWaitTime,
 		execWrapperCommand:    config.ExecWrapperCommand,
 		execTTYWrapperCommand: config.ExecTTYWrapperCommand,
+		execInstances:         make(map[string]*ExecInstance),
 	}
 }

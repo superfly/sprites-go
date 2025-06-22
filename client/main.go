@@ -6,36 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"lib/api"
 	"net/http"
 	"os"
 	"strings"
-	"time"
 )
-
-// CheckpointRequest represents the checkpoint API request
-type CheckpointRequest struct {
-	CheckpointID string `json:"checkpoint_id"`
-}
-
-// RestoreRequest represents the restore API request
-type RestoreRequest struct {
-	CheckpointID string `json:"checkpoint_id"`
-}
-
-// APIResponse represents a generic API response
-type APIResponse struct {
-	Status       string `json:"status,omitempty"`
-	CheckpointID string `json:"checkpoint_id,omitempty"`
-	Error        string `json:"error,omitempty"`
-}
-
-// StreamMessage represents a streaming message from checkpoint/restore endpoints
-type StreamMessage struct {
-	Type  string    `json:"type"`
-	Data  string    `json:"data,omitempty"`
-	Error string    `json:"error,omitempty"`
-	Time  time.Time `json:"time"`
-}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -121,7 +96,7 @@ func checkpointCommand(baseURL, token string, args []string) {
 	checkpointID := args[0]
 
 	// Create request
-	req := CheckpointRequest{
+	req := api.CheckpointRequest{
 		CheckpointID: checkpointID,
 	}
 
@@ -174,7 +149,7 @@ func restoreCommand(baseURL, token string, args []string) {
 	checkpointID := args[0]
 
 	// Create request
-	req := RestoreRequest{
+	req := api.RestoreRequest{
 		CheckpointID: checkpointID,
 	}
 
@@ -229,7 +204,7 @@ func processStreamingResponse(reader io.Reader) int {
 			continue
 		}
 
-		var msg StreamMessage
+		var msg api.StreamMessage
 		if err := json.Unmarshal([]byte(line), &msg); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: Failed to parse message: %v\n", err)
 			continue

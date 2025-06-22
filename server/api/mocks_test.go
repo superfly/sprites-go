@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"time"
 
 	"spritectl/api/handlers"
 )
@@ -146,6 +147,20 @@ func (m *mockProcessManager) IsProcessRunning() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.processRunning
+}
+
+func (m *mockProcessManager) SubscribeToReapEvents() <-chan int {
+	ch := make(chan int)
+	close(ch) // Close immediately for testing
+	return ch
+}
+
+func (m *mockProcessManager) UnsubscribeFromReapEvents(ch <-chan int) {
+	// No-op for testing
+}
+
+func (m *mockProcessManager) WasProcessReaped(pid int) (bool, time.Time) {
+	return false, time.Time{}
 }
 
 func (m *mockProcessManager) setProcessRunning(running bool) {

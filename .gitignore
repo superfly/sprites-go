@@ -19,3 +19,5 @@ fly.toml
 sprite
 **/.envrc
 .envrc
+
+dist
