@@ -41,12 +41,20 @@ sprite-client exec -tty /bin/bash
 sprite-client exec -no-docker-stream cat data.json
 ```
 
-### Create Checkpoint
+### Checkpoint Management
 
 Create a checkpoint of the current state:
 
 ```bash
-sprite-client checkpoint my-checkpoint-id
+# Create a new checkpoint (can use checkpoint, checkpoints, or c)
+sprite-client checkpoint create my-checkpoint-id
+sprite-client checkpoints create my-checkpoint-id
+sprite-client c create my-checkpoint-id
+
+# List all checkpoints
+sprite-client checkpoint list
+sprite-client checkpoints list
+sprite-client c list
 ```
 
 ### Restore from Checkpoint
@@ -68,7 +76,10 @@ export SPRITE_TOKEN=mysecrettoken
 sprite-client exec ls -la /data
 
 # Create a checkpoint
-sprite-client checkpoint backup-$(date +%Y%m%d)
+sprite-client checkpoint create backup-$(date +%Y%m%d)
+
+# List all checkpoints
+sprite-client checkpoint list
 
 # Run a script
 sprite-client exec -dir /app ./run-tests.sh

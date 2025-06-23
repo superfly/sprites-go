@@ -150,7 +150,7 @@ func TestDeployAndFunctionality(t *testing.T) {
 
 		// Create a checkpoint
 		checkpointName := fmt.Sprintf("test-checkpoint-%d", time.Now().Unix())
-		output = runSpriteCommand(t, spriteURL, spriteToken, "checkpoint", checkpointName)
+		output = runSpriteCommand(t, spriteURL, spriteToken, "checkpoint", "create", checkpointName)
 		t.Logf("Created checkpoint: %s", checkpointName)
 		t.Logf("Checkpoint output: %s", output)
 

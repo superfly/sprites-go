@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 func main() {
@@ -41,8 +42,8 @@ func main() {
 	case "exec":
 		// Dispatch to exec command
 		execCommand(url, token, os.Args[2:])
-	case "checkpoint":
-		// Handle checkpoint command
+	case "checkpoint", "checkpoints", "c":
+		// Handle checkpoint command (accepts checkpoint, checkpoints, or c)
 		checkpointCommand(url, token, os.Args[2:])
 	case "restore":
 		// Handle restore command
@@ -64,9 +65,11 @@ Usage:
   sprite-client <command> [arguments]
 
 Commands:
-  exec         Execute a command in the sprite environment
-  checkpoint   Create a checkpoint
-  restore      Restore from a checkpoint
+  exec                      Execute a command in the sprite environment
+  checkpoint <subcommand>   Manage checkpoints (aliases: checkpoints, c)
+    create <id>             Create a new checkpoint
+    list                    List all checkpoints
+  restore <id>              Restore from a checkpoint
 
 Environment Variables:
   SPRITE_URL    Base URL of the Sprite API (required)
@@ -77,7 +80,10 @@ Examples:
   sprite-client exec ls -la
 
   # Create a checkpoint
-  sprite-client checkpoint my-checkpoint-id
+  sprite-client checkpoint create my-checkpoint-id
+
+  # List checkpoints
+  sprite-client checkpoint list
 
   # Restore from checkpoint
   sprite-client restore my-checkpoint-id
@@ -87,9 +93,31 @@ Use 'sprite-client exec -h' for exec command options.
 }
 
 func checkpointCommand(baseURL, token string, args []string) {
+	if len(args) < 1 {
+		fmt.Fprintf(os.Stderr, "Error: checkpoint requires a subcommand\n")
+		fmt.Fprintf(os.Stderr, "Usage: sprite-client checkpoint <create|list> [arguments]\n")
+		os.Exit(1)
+	}
+
+	subcommand := args[0]
+	subArgs := args[1:]
+
+	switch subcommand {
+	case "create":
+		checkpointCreateCommand(baseURL, token, subArgs)
+	case "list":
+		checkpointListCommand(baseURL, token, subArgs)
+	default:
+		fmt.Fprintf(os.Stderr, "Error: Unknown checkpoint subcommand '%s'\n", subcommand)
+		fmt.Fprintf(os.Stderr, "Usage: sprite-client checkpoint <create|list> [arguments]\n")
+		os.Exit(1)
+	}
+}
+
+func checkpointCreateCommand(baseURL, token string, args []string) {
 	if len(args) != 1 {
-		fmt.Fprintf(os.Stderr, "Error: checkpoint requires exactly one argument (checkpoint ID)\n")
-		fmt.Fprintf(os.Stderr, "Usage: sprite-client checkpoint <checkpoint-id>\n")
+		fmt.Fprintf(os.Stderr, "Error: checkpoint create requires exactly one argument (checkpoint ID)\n")
+		fmt.Fprintf(os.Stderr, "Usage: sprite-client checkpoint create <checkpoint-id>\n")
 		os.Exit(1)
 	}
 
@@ -139,6 +167,63 @@ func checkpointCommand(baseURL, token string, args []string) {
 	os.Exit(exitCode)
 }
 
+func checkpointListCommand(baseURL, token string, args []string) {
+	if len(args) != 0 {
+		fmt.Fprintf(os.Stderr, "Error: checkpoint list takes no arguments\n")
+		fmt.Fprintf(os.Stderr, "Usage: sprite-client checkpoint list\n")
+		os.Exit(1)
+	}
+
+	// Make HTTP request
+	url := fmt.Sprintf("%s/checkpoints", baseURL)
+	httpReq, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to create HTTP request: %v\n", err)
+		os.Exit(1)
+	}
+
+	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+
+	client := &http.Client{}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to make request: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Fprintf(os.Stderr, "Error: API returned status %d: %s\n", resp.StatusCode, string(body))
+		os.Exit(1)
+	}
+
+	// Parse response
+	var checkpoints []api.CheckpointInfo
+	if err := json.NewDecoder(resp.Body).Decode(&checkpoints); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to parse response: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Display checkpoints
+	if len(checkpoints) == 0 {
+		fmt.Println("No checkpoints found.")
+		return
+	}
+
+	fmt.Printf("%-30s %-25s %s\n", "ID", "CREATED", "SOURCE")
+	fmt.Printf("%-30s %-25s %s\n", strings.Repeat("-", 30), strings.Repeat("-", 25), strings.Repeat("-", 20))
+
+	for _, cp := range checkpoints {
+		created := cp.CreateTime.Format(time.RFC3339)
+		source := cp.SourceID
+		if source == "" {
+			source = "-"
+		}
+		fmt.Printf("%-30s %-25s %s\n", cp.ID, created, source)
+	}
+}
+
 func restoreCommand(baseURL, token string, args []string) {
 	if len(args) != 1 {
 		fmt.Fprintf(os.Stderr, "Error: restore requires exactly one argument (checkpoint ID)\n")
@@ -148,27 +233,15 @@ func restoreCommand(baseURL, token string, args []string) {
 
 	checkpointID := args[0]
 
-	// Create request
-	req := api.RestoreRequest{
-		CheckpointID: checkpointID,
-	}
-
-	jsonData, err := json.Marshal(req)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to create request: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Make HTTP request
-	url := fmt.Sprintf("%s/restore", baseURL)
-	httpReq, err := http.NewRequest("POST", url, bytes.NewReader(jsonData))
+	// Make HTTP request to new endpoint
+	url := fmt.Sprintf("%s/checkpoints/%s/restore", baseURL, checkpointID)
+	httpReq, err := http.NewRequest("POST", url, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to create HTTP request: %v\n", err)
 		os.Exit(1)
 	}
 
 	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-	httpReq.Header.Set("Content-Type", "application/json")
 
 	// Use client with no timeout for streaming
 	client := &http.Client{

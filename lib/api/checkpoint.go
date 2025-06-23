@@ -1,5 +1,7 @@
 package api
 
+import "time"
+
 // CheckpointRequest represents the checkpoint API request
 type CheckpointRequest struct {
 	CheckpointID string `json:"checkpoint_id"`
@@ -8,6 +10,13 @@ type CheckpointRequest struct {
 // RestoreRequest represents the restore API request
 type RestoreRequest struct {
 	CheckpointID string `json:"checkpoint_id"`
+}
+
+// CheckpointInfo contains information about a checkpoint
+type CheckpointInfo struct {
+	ID         string    `json:"id"`
+	CreateTime time.Time `json:"create_time"`
+	SourceID   string    `json:"source_id,omitempty"`
 }
 
 // APIResponse represents a generic API response

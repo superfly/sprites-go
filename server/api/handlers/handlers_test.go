@@ -46,17 +46,17 @@ func TestHandleCheckpointMethod(t *testing.T) {
 	}
 }
 
-// Test HandleRestore validates request method
-func TestHandleRestoreMethod(t *testing.T) {
+// Test HandleCheckpointRestore validates request method
+func TestHandleCheckpointRestoreMethod(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	config := Config{}
 	mockSys := newMockSystemManager()
 	h := NewHandlers(logger, mockSys, config)
 
-	req := httptest.NewRequest(http.MethodGet, "/restore", nil)
+	req := httptest.NewRequest(http.MethodGet, "/checkpoints/test-cp/restore", nil)
 	rr := httptest.NewRecorder()
 
-	h.HandleRestore(rr, req)
+	h.HandleCheckpointRestore(rr, req)
 
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected status %d, got %d", http.StatusMethodNotAllowed, rr.Code)

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -418,6 +419,47 @@ func (s *System) RestoreWithStream(ctx context.Context, checkpointID string, str
 	}
 
 	return nil
+}
+
+// ListCheckpoints returns a list of all available checkpoints
+func (s *System) ListCheckpoints(ctx context.Context) ([]juicefs.CheckpointInfo, error) {
+	if s.juicefs == nil {
+		return nil, fmt.Errorf("JuiceFS not configured")
+	}
+
+	checkpoints, err := s.juicefs.ListCheckpoints(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list checkpoints: %w", err)
+	}
+
+	// Also check for source info in the active directory
+	if len(checkpoints) > 0 && s.config.JuiceFSBaseDir != "" {
+		activeDir := filepath.Join(s.config.JuiceFSBaseDir, "data", "active")
+		sourceFile := filepath.Join(activeDir, ".source")
+		if sourceData, err := os.ReadFile(sourceFile); err == nil {
+			// Find the active checkpoint (usually the newest) and mark its source
+			sourceID := strings.TrimSpace(string(sourceData))
+			// The active state doesn't have its own checkpoint, but we can indicate
+			// what it was restored from
+			s.logger.Info("Active directory was restored from checkpoint", "source", sourceID)
+		}
+	}
+
+	return checkpoints, nil
+}
+
+// GetCheckpoint returns information about a specific checkpoint
+func (s *System) GetCheckpoint(ctx context.Context, checkpointID string) (*juicefs.CheckpointInfo, error) {
+	if s.juicefs == nil {
+		return nil, fmt.Errorf("JuiceFS not configured")
+	}
+
+	checkpoint, err := s.juicefs.GetCheckpoint(ctx, checkpointID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get checkpoint: %w", err)
+	}
+
+	return checkpoint, nil
 }
 
 // ForwardSignal forwards a signal to the supervised process

@@ -65,6 +65,13 @@ type Config struct {
 	OverlaySkipOverlayFS bool   // Skip overlayfs, only mount loopback
 }
 
+// CheckpointInfo contains information about a checkpoint
+type CheckpointInfo struct {
+	ID         string    `json:"id"`
+	CreateTime time.Time `json:"create_time"`
+	SourceID   string    `json:"source_id,omitempty"` // If this was restored from another checkpoint
+}
+
 // New creates a new JuiceFS instance
 func New(config Config) (*JuiceFS, error) {
 	if config.VolumeName == "" {
@@ -582,8 +589,101 @@ func (j *JuiceFS) Restore(ctx context.Context, checkpointID string) error {
 		}
 	}
 
+	// Write source checkpoint info to active directory
+	sourceFile := filepath.Join(activeDir, ".source")
+	if err := os.WriteFile(sourceFile, []byte(checkpointID), 0644); err != nil {
+		fmt.Printf("Warning: failed to write source checkpoint info: %v\n", err)
+	}
+
 	fmt.Printf("Restore from %s complete\n", checkpointID)
 	return nil
+}
+
+// ListCheckpoints returns a list of all available checkpoints
+func (j *JuiceFS) ListCheckpoints(ctx context.Context) ([]CheckpointInfo, error) {
+	mountPath := filepath.Join(j.config.BaseDir, "data")
+	checkpointsDir := filepath.Join(mountPath, "checkpoints")
+
+	// Check if checkpoints directory exists
+	if _, err := os.Stat(checkpointsDir); os.IsNotExist(err) {
+		// Return empty list if directory doesn't exist
+		return []CheckpointInfo{}, nil
+	}
+
+	// Read all entries in checkpoints directory
+	entries, err := os.ReadDir(checkpointsDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read checkpoints directory: %w", err)
+	}
+
+	var checkpoints []CheckpointInfo
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue // Skip non-directories
+		}
+
+		// Skip special pre-restore backups
+		if strings.HasPrefix(entry.Name(), "pre-restore-") {
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			continue // Skip entries we can't stat
+		}
+
+		checkpoint := CheckpointInfo{
+			ID:         entry.Name(),
+			CreateTime: info.ModTime(), // Use directory modification time as creation time
+		}
+
+		// Check if there's a source info file in the checkpoint
+		sourceFile := filepath.Join(checkpointsDir, entry.Name(), ".source")
+		if sourceData, err := os.ReadFile(sourceFile); err == nil {
+			checkpoint.SourceID = strings.TrimSpace(string(sourceData))
+		}
+
+		checkpoints = append(checkpoints, checkpoint)
+	}
+
+	return checkpoints, nil
+}
+
+// GetCheckpoint returns information about a specific checkpoint
+func (j *JuiceFS) GetCheckpoint(ctx context.Context, checkpointID string) (*CheckpointInfo, error) {
+	if checkpointID == "" {
+		return nil, fmt.Errorf("checkpoint ID is required")
+	}
+
+	mountPath := filepath.Join(j.config.BaseDir, "data")
+	checkpointsDir := filepath.Join(mountPath, "checkpoints")
+	checkpointPath := filepath.Join(checkpointsDir, checkpointID)
+
+	// Check if checkpoint exists
+	info, err := os.Stat(checkpointPath)
+	if os.IsNotExist(err) {
+		return nil, fmt.Errorf("checkpoint %s does not exist", checkpointID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat checkpoint: %w", err)
+	}
+
+	if !info.IsDir() {
+		return nil, fmt.Errorf("checkpoint %s is not a directory", checkpointID)
+	}
+
+	checkpoint := &CheckpointInfo{
+		ID:         checkpointID,
+		CreateTime: info.ModTime(),
+	}
+
+	// Check if there's a source info file in the checkpoint
+	sourceFile := filepath.Join(checkpointPath, ".source")
+	if sourceData, err := os.ReadFile(sourceFile); err == nil {
+		checkpoint.SourceID = strings.TrimSpace(string(sourceData))
+	}
+
+	return checkpoint, nil
 }
 
 // Helper functions

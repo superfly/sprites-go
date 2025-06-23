@@ -108,7 +108,9 @@ WORKDIR ${SPRITE_WRITE_DIR}
 # Expose the API port
 EXPOSE 7778
 
-RUN which juicefs
+# we want a fresh apt-get cache for each build
+RUN apt-get update
+
 # Use spritectl as entrypoint with config file
 # /usr/local/bin/spritectl -config /home/sprite/config.json -listen 0.0.0.0:7778
 ENTRYPOINT ["/usr/local/bin/spritectl", "-config", "/home/sprite/config.json", "-listen", "0.0.0.0:7778"] 

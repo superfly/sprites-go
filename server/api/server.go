@@ -101,7 +101,26 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 
 	// State management endpoints - don't wait for running state
 	mux.HandleFunc("/checkpoint", s.authMiddleware(s.handlers.HandleCheckpoint))
-	mux.HandleFunc("/restore", s.authMiddleware(s.handlers.HandleRestore))
+
+	// Checkpoint management endpoints
+	mux.HandleFunc("/checkpoints/", s.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		// Route to appropriate handler based on path
+		path := r.URL.Path
+		parts := strings.Split(strings.Trim(path, "/"), "/")
+
+		if len(parts) == 1 && parts[0] == "checkpoints" {
+			// GET /checkpoints - list all checkpoints
+			s.handlers.HandleListCheckpoints(w, r)
+		} else if len(parts) == 2 {
+			// GET /checkpoints/{id} - get specific checkpoint
+			s.handlers.HandleGetCheckpoint(w, r)
+		} else if len(parts) == 3 && parts[2] == "restore" {
+			// POST /checkpoints/{id}/restore - restore from checkpoint
+			s.handlers.HandleCheckpointRestore(w, r)
+		} else {
+			http.NotFound(w, r)
+		}
+	}))
 
 	// Proxy endpoint - waits for process to be running
 	mux.HandleFunc("/proxy", s.authMiddleware(s.waitForRunningMiddleware(s.handlers.HandleProxy)))

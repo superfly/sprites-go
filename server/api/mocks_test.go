@@ -3,11 +3,14 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"lib/api"
 	"os"
 	"sync"
 	"time"
+
+	"github.com/fly-dev-env/sprite-env/server/packages/juicefs"
 )
 
 // mockSupervisor implements Supervisor interface for testing
@@ -159,6 +162,41 @@ func (m *mockSystemManager) RestoreWithStream(ctx context.Context, checkpointID 
 		Time: time.Now(),
 	}
 	return nil
+}
+
+func (m *mockSystemManager) ListCheckpoints(ctx context.Context) ([]juicefs.CheckpointInfo, error) {
+	// Return mock checkpoints
+	return []juicefs.CheckpointInfo{
+		{
+			ID:         "checkpoint-1",
+			CreateTime: time.Now().Add(-1 * time.Hour),
+			SourceID:   "",
+		},
+		{
+			ID:         "checkpoint-2",
+			CreateTime: time.Now().Add(-30 * time.Minute),
+			SourceID:   "checkpoint-1",
+		},
+	}, nil
+}
+
+func (m *mockSystemManager) GetCheckpoint(ctx context.Context, checkpointID string) (*juicefs.CheckpointInfo, error) {
+	// Return mock checkpoint
+	if checkpointID == "checkpoint-1" {
+		return &juicefs.CheckpointInfo{
+			ID:         "checkpoint-1",
+			CreateTime: time.Now().Add(-1 * time.Hour),
+			SourceID:   "",
+		}, nil
+	}
+	if checkpointID == "checkpoint-2" {
+		return &juicefs.CheckpointInfo{
+			ID:         "checkpoint-2",
+			CreateTime: time.Now().Add(-30 * time.Minute),
+			SourceID:   "checkpoint-1",
+		}, nil
+	}
+	return nil, fmt.Errorf("checkpoint %s does not exist", checkpointID)
 }
 
 func (m *mockSystemManager) SubscribeToReapEvents() <-chan int {
