@@ -17,6 +17,7 @@ type CheckpointInfo struct {
 	ID         string    `json:"id"`
 	CreateTime time.Time `json:"create_time"`
 	SourceID   string    `json:"source_id,omitempty"`
+	History    []string  `json:"history,omitempty"`
 }
 
 // APIResponse represents a generic API response

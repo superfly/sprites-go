@@ -65,13 +65,6 @@ type Config struct {
 	OverlaySkipOverlayFS bool   // Skip overlayfs, only mount loopback
 }
 
-// CheckpointInfo contains information about a checkpoint
-type CheckpointInfo struct {
-	ID         string    `json:"id"`
-	CreateTime time.Time `json:"create_time"`
-	SourceID   string    `json:"source_id,omitempty"` // If this was restored from another checkpoint
-}
-
 // New creates a new JuiceFS instance
 func New(config Config) (*JuiceFS, error) {
 	if config.VolumeName == "" {
@@ -468,224 +461,6 @@ func (j *JuiceFS) monitorProcess() {
 	}
 }
 
-// Checkpoint creates a checkpoint of the active directory
-func (j *JuiceFS) Checkpoint(ctx context.Context, checkpointID string) error {
-	if checkpointID == "" {
-		return fmt.Errorf("checkpoint ID is required")
-	}
-
-	mountPath := filepath.Join(j.config.BaseDir, "data")
-	activeDir := filepath.Join(mountPath, "active")
-	checkpointsDir := filepath.Join(mountPath, "checkpoints")
-	checkpointPath := filepath.Join(checkpointsDir, checkpointID)
-
-	// Ensure checkpoints directory exists
-	if err := os.MkdirAll(checkpointsDir, 0755); err != nil {
-		return fmt.Errorf("failed to create checkpoints directory: %w", err)
-	}
-
-	// Check if active directory exists
-	if _, err := os.Stat(activeDir); os.IsNotExist(err) {
-		return fmt.Errorf("active directory does not exist at %s", activeDir)
-	}
-
-	// Check if checkpoint already exists
-	if _, err := os.Stat(checkpointPath); err == nil {
-		return fmt.Errorf("checkpoint %s already exists at %s", checkpointID, checkpointPath)
-	}
-
-	// Prepare overlay for checkpoint (sync and freeze)
-	if j.overlayMgr != nil {
-		if err := j.overlayMgr.PrepareForCheckpoint(ctx); err != nil {
-			return fmt.Errorf("failed to prepare overlay for checkpoint: %w", err)
-		}
-
-		// Ensure we unfreeze the overlay even if the clone fails
-		defer func() {
-			if unfreezeErr := j.overlayMgr.UnfreezeAfterCheckpoint(ctx); unfreezeErr != nil {
-				fmt.Printf("Warning: failed to unfreeze overlay: %v\n", unfreezeErr)
-			}
-		}()
-	}
-
-	// Clone active directory to checkpoint
-	fmt.Printf("Creating checkpoint %s...\n", checkpointID)
-	cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", activeDir, checkpointPath)
-	if output, err := cloneCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to create checkpoint: %w, output: %s", err, string(output))
-	}
-
-	fmt.Printf("Checkpoint created successfully at %s\n", checkpointPath)
-	return nil
-}
-
-// Restore restores from a checkpoint
-func (j *JuiceFS) Restore(ctx context.Context, checkpointID string) error {
-	if checkpointID == "" {
-		return fmt.Errorf("checkpoint ID is required")
-	}
-
-	mountPath := filepath.Join(j.config.BaseDir, "data")
-	activeDir := filepath.Join(mountPath, "active")
-	checkpointsDir := filepath.Join(mountPath, "checkpoints")
-	checkpointPath := filepath.Join(checkpointsDir, checkpointID)
-
-	// Check if checkpoint exists
-	if _, err := os.Stat(checkpointPath); os.IsNotExist(err) {
-		return fmt.Errorf("checkpoint %s does not exist at %s", checkpointID, checkpointPath)
-	}
-
-	// Handle overlay if present
-	if j.overlayMgr != nil {
-		// First sync and freeze the overlay (same as checkpoint)
-		if err := j.overlayMgr.PrepareForCheckpoint(ctx); err != nil {
-			// If prepare fails, it might be because overlay is not mounted, which is ok
-			fmt.Printf("Note: could not prepare overlay for restore: %v\n", err)
-		} else {
-			// Unfreeze after sync
-			if err := j.overlayMgr.UnfreezeAfterCheckpoint(ctx); err != nil {
-				fmt.Printf("Warning: failed to unfreeze overlay: %v\n", err)
-			}
-		}
-
-		// Unmount the overlay before restore
-		if err := j.overlayMgr.Unmount(ctx); err != nil {
-			fmt.Printf("Warning: failed to unmount overlay: %v\n", err)
-		}
-	}
-
-	// If active directory exists, back it up
-	if _, err := os.Stat(activeDir); err == nil {
-		timestamp := time.Now().Unix()
-		backupName := fmt.Sprintf("pre-restore-%s-%d", checkpointID, timestamp)
-		backupPath := filepath.Join(checkpointsDir, backupName)
-
-		fmt.Printf("Backing up current active directory to %s...\n", backupPath)
-		if err := os.Rename(activeDir, backupPath); err != nil {
-			return fmt.Errorf("failed to backup active directory: %w", err)
-		}
-		fmt.Println("Backup completed")
-	}
-
-	// Clone checkpoint to active directory
-	fmt.Printf("Restoring from checkpoint %s...\n", checkpointID)
-	cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", checkpointPath, activeDir)
-	if output, err := cloneCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to restore from checkpoint: %w, output: %s", err, string(output))
-	}
-
-	// Mount the overlay from the restored active directory
-	if j.overlayMgr != nil {
-		// Update the image path to point to the restored active directory
-		j.overlayMgr.UpdateImagePath()
-
-		fmt.Printf("Mounting overlay from restored checkpoint...\n")
-		fmt.Printf("  New image path: %s\n", j.overlayMgr.GetImagePath())
-
-		// Mount the overlay
-		if err := j.overlayMgr.Mount(ctx); err != nil {
-			// Log error but don't fail the restore
-			fmt.Printf("Warning: failed to mount overlay after restore: %v\n", err)
-		}
-	}
-
-	// Write source checkpoint info to active directory
-	sourceFile := filepath.Join(activeDir, ".source")
-	if err := os.WriteFile(sourceFile, []byte(checkpointID), 0644); err != nil {
-		fmt.Printf("Warning: failed to write source checkpoint info: %v\n", err)
-	}
-
-	fmt.Printf("Restore from %s complete\n", checkpointID)
-	return nil
-}
-
-// ListCheckpoints returns a list of all available checkpoints
-func (j *JuiceFS) ListCheckpoints(ctx context.Context) ([]CheckpointInfo, error) {
-	mountPath := filepath.Join(j.config.BaseDir, "data")
-	checkpointsDir := filepath.Join(mountPath, "checkpoints")
-
-	// Check if checkpoints directory exists
-	if _, err := os.Stat(checkpointsDir); os.IsNotExist(err) {
-		// Return empty list if directory doesn't exist
-		return []CheckpointInfo{}, nil
-	}
-
-	// Read all entries in checkpoints directory
-	entries, err := os.ReadDir(checkpointsDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read checkpoints directory: %w", err)
-	}
-
-	var checkpoints []CheckpointInfo
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue // Skip non-directories
-		}
-
-		// Skip special pre-restore backups
-		if strings.HasPrefix(entry.Name(), "pre-restore-") {
-			continue
-		}
-
-		info, err := entry.Info()
-		if err != nil {
-			continue // Skip entries we can't stat
-		}
-
-		checkpoint := CheckpointInfo{
-			ID:         entry.Name(),
-			CreateTime: info.ModTime(), // Use directory modification time as creation time
-		}
-
-		// Check if there's a source info file in the checkpoint
-		sourceFile := filepath.Join(checkpointsDir, entry.Name(), ".source")
-		if sourceData, err := os.ReadFile(sourceFile); err == nil {
-			checkpoint.SourceID = strings.TrimSpace(string(sourceData))
-		}
-
-		checkpoints = append(checkpoints, checkpoint)
-	}
-
-	return checkpoints, nil
-}
-
-// GetCheckpoint returns information about a specific checkpoint
-func (j *JuiceFS) GetCheckpoint(ctx context.Context, checkpointID string) (*CheckpointInfo, error) {
-	if checkpointID == "" {
-		return nil, fmt.Errorf("checkpoint ID is required")
-	}
-
-	mountPath := filepath.Join(j.config.BaseDir, "data")
-	checkpointsDir := filepath.Join(mountPath, "checkpoints")
-	checkpointPath := filepath.Join(checkpointsDir, checkpointID)
-
-	// Check if checkpoint exists
-	info, err := os.Stat(checkpointPath)
-	if os.IsNotExist(err) {
-		return nil, fmt.Errorf("checkpoint %s does not exist", checkpointID)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to stat checkpoint: %w", err)
-	}
-
-	if !info.IsDir() {
-		return nil, fmt.Errorf("checkpoint %s is not a directory", checkpointID)
-	}
-
-	checkpoint := &CheckpointInfo{
-		ID:         checkpointID,
-		CreateTime: info.ModTime(),
-	}
-
-	// Check if there's a source info file in the checkpoint
-	sourceFile := filepath.Join(checkpointPath, ".source")
-	if sourceData, err := os.ReadFile(sourceFile); err == nil {
-		checkpoint.SourceID = strings.TrimSpace(string(sourceData))
-	}
-
-	return checkpoint, nil
-}
-
 // Helper functions
 
 func (j *JuiceFS) createLitestreamConfig(configPath, metaDB string) error {
@@ -862,6 +637,31 @@ func (j *JuiceFS) watchForReady(stderr io.Reader, mountPath string) {
 				return
 			}
 			fmt.Printf("JuiceFS ready: created active directory at %s\n", filepath.Dir(activeDir))
+
+			// Initialize version file
+			if err := j.initializeVersion(); err != nil {
+				fmt.Printf("Warning: failed to initialize version file: %v\n", err)
+			}
+
+			// Initialize history file if it doesn't exist
+			historyFile := filepath.Join(mountPath, "active", ".history")
+			if _, err := os.Stat(historyFile); os.IsNotExist(err) {
+				// Get current version
+				version, err := j.GetCurrentVersion()
+				if err == nil {
+					// Get active directory creation time
+					if info, err := os.Stat(activeDir); err == nil {
+						// Use directory modification time as creation time
+						createTime := info.ModTime().Format(time.RFC3339)
+						// Write initial history entry with directory creation time
+						versionStr := fmt.Sprintf("v%d", version)
+						record := fmt.Sprintf("to=%s;time=%s\n", versionStr, createTime)
+						if err := os.WriteFile(historyFile, []byte(record), 0644); err != nil {
+							fmt.Printf("Warning: failed to initialize history file: %v\n", err)
+						}
+					}
+				}
+			}
 
 			// Mount the overlay
 			if j.overlayMgr != nil {

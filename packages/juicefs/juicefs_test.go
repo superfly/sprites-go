@@ -334,10 +334,11 @@ func TestCheckpointValidation(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Test empty checkpoint ID
+	// Empty checkpoint ID is now valid (auto-generates version)
+	// Test will fail because JuiceFS is not actually mounted, which is expected
 	err = jfs.Checkpoint(ctx, "")
-	if err == nil || err.Error() != "checkpoint ID is required" {
-		t.Errorf("Expected 'checkpoint ID is required' error, got: %v", err)
+	if err == nil {
+		t.Error("Expected error when JuiceFS is not mounted")
 	}
 }
 

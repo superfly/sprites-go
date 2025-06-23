@@ -168,32 +168,55 @@ func (m *mockSystemManager) ListCheckpoints(ctx context.Context) ([]juicefs.Chec
 	// Return mock checkpoints
 	return []juicefs.CheckpointInfo{
 		{
-			ID:         "checkpoint-1",
+			ID:         "v0",
+			CreateTime: time.Now().Add(-2 * time.Hour),
+			SourceID:   "",
+		},
+		{
+			ID:         "v1",
 			CreateTime: time.Now().Add(-1 * time.Hour),
 			SourceID:   "",
 		},
 		{
-			ID:         "checkpoint-2",
+			ID:         "v2",
 			CreateTime: time.Now().Add(-30 * time.Minute),
-			SourceID:   "checkpoint-1",
+			SourceID:   "",
 		},
 	}, nil
 }
 
+func (m *mockSystemManager) ListCheckpointsByHistory(ctx context.Context, version string) ([]string, error) {
+	// Return mock history search results
+	if version == "v0" {
+		return []string{
+			"v1/.history: from=v0;time=2024-01-15T10:00:00Z",
+			"v2/.history: from=v0;time=2024-01-15T11:00:00Z",
+		}, nil
+	}
+	return []string{}, nil
+}
+
 func (m *mockSystemManager) GetCheckpoint(ctx context.Context, checkpointID string) (*juicefs.CheckpointInfo, error) {
 	// Return mock checkpoint
-	if checkpointID == "checkpoint-1" {
+	if checkpointID == "v0" {
 		return &juicefs.CheckpointInfo{
-			ID:         "checkpoint-1",
+			ID:         "v0",
+			CreateTime: time.Now().Add(-2 * time.Hour),
+			SourceID:   "",
+		}, nil
+	}
+	if checkpointID == "v1" {
+		return &juicefs.CheckpointInfo{
+			ID:         "v1",
 			CreateTime: time.Now().Add(-1 * time.Hour),
 			SourceID:   "",
 		}, nil
 	}
-	if checkpointID == "checkpoint-2" {
+	if checkpointID == "v2" {
 		return &juicefs.CheckpointInfo{
-			ID:         "checkpoint-2",
+			ID:         "v2",
 			CreateTime: time.Now().Add(-30 * time.Minute),
-			SourceID:   "checkpoint-1",
+			SourceID:   "",
 		}, nil
 	}
 	return nil, fmt.Errorf("checkpoint %s does not exist", checkpointID)

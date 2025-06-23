@@ -223,21 +223,33 @@ func (s *System) IsRestoring() bool {
 
 // Checkpoint creates a checkpoint of the current system state
 func (s *System) Checkpoint(ctx context.Context, checkpointID string) error {
-	if checkpointID == "" {
-		return fmt.Errorf("checkpoint ID is required")
-	}
-
 	if s.juicefs == nil {
 		return fmt.Errorf("JuiceFS not configured")
 	}
 
 	// Use the proper JuiceFS checkpoint method that handles overlay
-	if err := s.juicefs.Checkpoint(ctx, checkpointID); err != nil {
+	// Note: checkpointID parameter is ignored, version is auto-generated
+	if err := s.juicefs.Checkpoint(ctx, ""); err != nil {
 		return fmt.Errorf("failed to create checkpoint: %w", err)
 	}
 
-	s.logger.Info("Checkpoint created successfully", "checkpointID", checkpointID)
+	s.logger.Info("Checkpoint created successfully")
 	return nil
+}
+
+// CheckpointAndGetVersion creates a checkpoint and returns the version used
+func (s *System) CheckpointAndGetVersion(ctx context.Context) (string, error) {
+	if s.juicefs == nil {
+		return "", fmt.Errorf("JuiceFS not configured")
+	}
+
+	version, err := s.juicefs.CheckpointWithVersion(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to create checkpoint: %w", err)
+	}
+
+	s.logger.Info("Checkpoint created successfully", "version", version)
+	return version, nil
 }
 
 // Restore restores the system from a checkpoint
@@ -287,10 +299,6 @@ func (s *System) Restore(ctx context.Context, checkpointID string) error {
 func (s *System) CheckpointWithStream(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) error {
 	defer close(streamCh)
 
-	if checkpointID == "" {
-		return fmt.Errorf("checkpoint ID is required")
-	}
-
 	if s.juicefs == nil {
 		return fmt.Errorf("JuiceFS not configured")
 	}
@@ -298,12 +306,14 @@ func (s *System) CheckpointWithStream(ctx context.Context, checkpointID string, 
 	// Send initial message
 	streamCh <- api.StreamMessage{
 		Type: "info",
-		Data: fmt.Sprintf("Creating checkpoint %s...", checkpointID),
+		Data: "Creating checkpoint...",
 		Time: time.Now(),
 	}
 
 	// Use the proper JuiceFS checkpoint method that handles overlay
-	if err := s.juicefs.Checkpoint(ctx, checkpointID); err != nil {
+	// Get the version that will be used
+	version, err := s.juicefs.CheckpointWithVersion(ctx)
+	if err != nil {
 		streamCh <- api.StreamMessage{
 			Type:  "error",
 			Error: fmt.Sprintf("Failed to create checkpoint: %v", err),
@@ -314,14 +324,14 @@ func (s *System) CheckpointWithStream(ctx context.Context, checkpointID string, 
 
 	streamCh <- api.StreamMessage{
 		Type: "info",
-		Data: fmt.Sprintf("Checkpoint created successfully at checkpoints/%s", checkpointID),
+		Data: fmt.Sprintf("Checkpoint created successfully at checkpoints/%s", version),
 		Time: time.Now(),
 	}
 
 	// Send final completion message
 	streamCh <- api.StreamMessage{
 		Type: "complete",
-		Data: fmt.Sprintf("Checkpoint %s created successfully", checkpointID),
+		Data: fmt.Sprintf("Checkpoint %s created successfully", version),
 		Time: time.Now(),
 	}
 
@@ -369,6 +379,13 @@ func (s *System) RestoreWithStream(ctx context.Context, checkpointID string, str
 
 	// Perform JuiceFS restore with streaming
 	if s.juicefs != nil {
+		// The restore will create a checkpoint before restoring
+		streamCh <- api.StreamMessage{
+			Type: "info",
+			Data: "Creating checkpoint before restore...",
+			Time: time.Now(),
+		}
+
 		streamCh <- api.StreamMessage{
 			Type: "info",
 			Data: fmt.Sprintf("Restoring from checkpoint %s...", checkpointID),
@@ -427,7 +444,8 @@ func (s *System) ListCheckpoints(ctx context.Context) ([]juicefs.CheckpointInfo,
 		return nil, fmt.Errorf("JuiceFS not configured")
 	}
 
-	checkpoints, err := s.juicefs.ListCheckpoints(ctx)
+	// Use reverse order (newest first) and include active at the top
+	checkpoints, err := s.juicefs.ListCheckpointsWithActive(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list checkpoints: %w", err)
 	}
@@ -448,10 +466,31 @@ func (s *System) ListCheckpoints(ctx context.Context) ([]juicefs.CheckpointInfo,
 	return checkpoints, nil
 }
 
+// ListCheckpointsByHistory returns checkpoints that were restored from a specific version
+func (s *System) ListCheckpointsByHistory(ctx context.Context, version string) ([]string, error) {
+	if s.juicefs == nil {
+		return nil, fmt.Errorf("JuiceFS not configured")
+	}
+
+	results, err := s.juicefs.ListCheckpointsWithHistory(ctx, version)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list checkpoints by history: %w", err)
+	}
+
+	return results, nil
+}
+
 // GetCheckpoint returns information about a specific checkpoint
 func (s *System) GetCheckpoint(ctx context.Context, checkpointID string) (*juicefs.CheckpointInfo, error) {
 	if s.juicefs == nil {
 		return nil, fmt.Errorf("JuiceFS not configured")
+	}
+
+	// First, check if the requested ID matches the current active version
+	activeVersion, err := s.juicefs.GetCurrentVersion()
+	if err == nil && checkpointID == fmt.Sprintf("v%d", activeVersion) {
+		// Redirect to "active" to get the active state info
+		checkpointID = "active"
 	}
 
 	checkpoint, err := s.juicefs.GetCheckpoint(ctx, checkpointID)

@@ -22,6 +22,7 @@ type SystemManager interface {
 	CheckpointWithStream(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) error
 	RestoreWithStream(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) error
 	ListCheckpoints(ctx context.Context) ([]juicefs.CheckpointInfo, error)
+	ListCheckpointsByHistory(ctx context.Context, version string) ([]string, error)
 	GetCheckpoint(ctx context.Context, checkpointID string) (*juicefs.CheckpointInfo, error)
 
 	// Reaper integration

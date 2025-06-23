@@ -67,8 +67,9 @@ Usage:
 Commands:
   exec                      Execute a command in the sprite environment
   checkpoint <subcommand>   Manage checkpoints (aliases: checkpoints, c)
-    create <id>             Create a new checkpoint
+    create                  Create a new checkpoint
     list                    List all checkpoints
+    info <id>               Show information about a specific checkpoint
   restore <id>              Restore from a checkpoint
 
 Environment Variables:
@@ -80,10 +81,13 @@ Examples:
   sprite-client exec ls -la
 
   # Create a checkpoint
-  sprite-client checkpoint create my-checkpoint-id
+  sprite-client checkpoint create
 
   # List checkpoints
   sprite-client checkpoint list
+
+  # Get checkpoint info
+  sprite-client checkpoint info v3
 
   # Restore from checkpoint
   sprite-client restore my-checkpoint-id
@@ -95,7 +99,7 @@ Use 'sprite-client exec -h' for exec command options.
 func checkpointCommand(baseURL, token string, args []string) {
 	if len(args) < 1 {
 		fmt.Fprintf(os.Stderr, "Error: checkpoint requires a subcommand\n")
-		fmt.Fprintf(os.Stderr, "Usage: sprite-client checkpoint <create|list> [arguments]\n")
+		fmt.Fprintf(os.Stderr, "Usage: sprite-client checkpoint <create|list|info> [arguments]\n")
 		os.Exit(1)
 	}
 
@@ -107,26 +111,24 @@ func checkpointCommand(baseURL, token string, args []string) {
 		checkpointCreateCommand(baseURL, token, subArgs)
 	case "list":
 		checkpointListCommand(baseURL, token, subArgs)
+	case "info":
+		checkpointInfoCommand(baseURL, token, subArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "Error: Unknown checkpoint subcommand '%s'\n", subcommand)
-		fmt.Fprintf(os.Stderr, "Usage: sprite-client checkpoint <create|list> [arguments]\n")
+		fmt.Fprintf(os.Stderr, "Usage: sprite-client checkpoint <create|list|info> [arguments]\n")
 		os.Exit(1)
 	}
 }
 
 func checkpointCreateCommand(baseURL, token string, args []string) {
-	if len(args) != 1 {
-		fmt.Fprintf(os.Stderr, "Error: checkpoint create requires exactly one argument (checkpoint ID)\n")
-		fmt.Fprintf(os.Stderr, "Usage: sprite-client checkpoint create <checkpoint-id>\n")
+	if len(args) != 0 {
+		fmt.Fprintf(os.Stderr, "Error: checkpoint create takes no arguments\n")
+		fmt.Fprintf(os.Stderr, "Usage: sprite-client checkpoint create\n")
 		os.Exit(1)
 	}
 
-	checkpointID := args[0]
-
-	// Create request
-	req := api.CheckpointRequest{
-		CheckpointID: checkpointID,
-	}
+	// Create empty request (backward compatible)
+	req := api.CheckpointRequest{}
 
 	jsonData, err := json.Marshal(req)
 	if err != nil {
@@ -168,14 +170,30 @@ func checkpointCreateCommand(baseURL, token string, args []string) {
 }
 
 func checkpointListCommand(baseURL, token string, args []string) {
-	if len(args) != 0 {
-		fmt.Fprintf(os.Stderr, "Error: checkpoint list takes no arguments\n")
-		fmt.Fprintf(os.Stderr, "Usage: sprite-client checkpoint list\n")
-		os.Exit(1)
+	var historyFilter string
+
+	// Simple flag parsing for --history
+	if len(args) > 0 {
+		for i := 0; i < len(args); i++ {
+			if args[i] == "--history" && i+1 < len(args) {
+				historyFilter = args[i+1]
+				break
+			}
+		}
+
+		if historyFilter == "" {
+			fmt.Fprintf(os.Stderr, "Error: invalid arguments\n")
+			fmt.Fprintf(os.Stderr, "Usage: sprite-client checkpoint list [--history VERSION]\n")
+			os.Exit(1)
+		}
 	}
 
 	// Make HTTP request
 	url := fmt.Sprintf("%s/checkpoints", baseURL)
+	if historyFilter != "" {
+		url += fmt.Sprintf("?history=%s", historyFilter)
+	}
+
 	httpReq, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to create HTTP request: %v\n", err)
@@ -198,7 +216,16 @@ func checkpointListCommand(baseURL, token string, args []string) {
 		os.Exit(1)
 	}
 
-	// Parse response
+	// Check content type
+	contentType := resp.Header.Get("Content-Type")
+	if strings.HasPrefix(contentType, "text/plain") {
+		// History filter results - just print as-is
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Print(string(body))
+		return
+	}
+
+	// Parse JSON response
 	var checkpoints []api.CheckpointInfo
 	if err := json.NewDecoder(resp.Body).Decode(&checkpoints); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to parse response: %v\n", err)
@@ -211,16 +238,75 @@ func checkpointListCommand(baseURL, token string, args []string) {
 		return
 	}
 
-	fmt.Printf("%-30s %-25s %s\n", "ID", "CREATED", "SOURCE")
-	fmt.Printf("%-30s %-25s %s\n", strings.Repeat("-", 30), strings.Repeat("-", 25), strings.Repeat("-", 20))
+	fmt.Printf("%-30s %s\n", "ID", "CREATED")
+	fmt.Printf("%-30s %s\n", strings.Repeat("-", 30), strings.Repeat("-", 25))
 
 	for _, cp := range checkpoints {
 		created := cp.CreateTime.Format(time.RFC3339)
-		source := cp.SourceID
-		if source == "" {
-			source = "-"
+		fmt.Printf("%-30s %s\n", cp.ID, created)
+	}
+}
+
+func checkpointInfoCommand(baseURL, token string, args []string) {
+	if len(args) != 1 {
+		fmt.Fprintf(os.Stderr, "Error: checkpoint info requires exactly one argument (checkpoint ID)\n")
+		fmt.Fprintf(os.Stderr, "Usage: sprite-client checkpoint info <checkpoint-id>\n")
+		os.Exit(1)
+	}
+
+	checkpointID := args[0]
+
+	// Make HTTP request
+	url := fmt.Sprintf("%s/checkpoints/%s", baseURL, checkpointID)
+	httpReq, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to create HTTP request: %v\n", err)
+		os.Exit(1)
+	}
+
+	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+
+	client := &http.Client{}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to make request: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Fprintf(os.Stderr, "Error: API returned status %d: %s\n", resp.StatusCode, string(body))
+		os.Exit(1)
+	}
+
+	// Check content type
+	contentType := resp.Header.Get("Content-Type")
+	if strings.HasPrefix(contentType, "text/plain") {
+		// History filter results - just print as-is
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Print(string(body))
+		return
+	}
+
+	// Parse JSON response
+	var checkpoint api.CheckpointInfo
+	if err := json.NewDecoder(resp.Body).Decode(&checkpoint); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to parse response: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Display checkpoint information
+	fmt.Printf("ID: %s\n", checkpoint.ID)
+	fmt.Printf("Created: %s\n", checkpoint.CreateTime.Format(time.RFC3339))
+
+	if len(checkpoint.History) > 0 {
+		fmt.Println("History:")
+		for _, entry := range checkpoint.History {
+			fmt.Printf("  %s\n", entry)
 		}
-		fmt.Printf("%-30s %-25s %s\n", cp.ID, created, source)
+	} else {
+		fmt.Println("History: (none)")
 	}
 }
 

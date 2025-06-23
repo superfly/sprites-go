@@ -24,6 +24,27 @@ func (h *Handlers) HandleListCheckpoints(w http.ResponseWriter, r *http.Request)
 	}
 
 	ctx := r.Context()
+
+	// Check for history filter query parameter
+	historyVersion := r.URL.Query().Get("history")
+	if historyVersion != "" {
+		// Return grep-style results for checkpoints with this version in history
+		results, err := h.system.ListCheckpointsByHistory(ctx, historyVersion)
+		if err != nil {
+			h.logger.Error("Failed to list checkpoints by history", "error", err, "version", historyVersion)
+			http.Error(w, fmt.Sprintf("Failed to list checkpoints: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		// Return as simple text output (like grep)
+		w.Header().Set("Content-Type", "text/plain")
+		for _, result := range results {
+			fmt.Fprintln(w, result)
+		}
+		return
+	}
+
+	// Regular checkpoint listing (reverse order by default)
 	checkpoints, err := h.system.ListCheckpoints(ctx)
 	if err != nil {
 		h.logger.Error("Failed to list checkpoints", "error", err)
@@ -92,10 +113,12 @@ func (h *Handlers) HandleGetCheckpoint(w http.ResponseWriter, r *http.Request) {
 		ID         string    `json:"id"`
 		CreateTime time.Time `json:"create_time"`
 		SourceID   string    `json:"source_id,omitempty"`
+		History    []string  `json:"history,omitempty"`
 	}{
 		ID:         checkpoint.ID,
 		CreateTime: checkpoint.CreateTime,
 		SourceID:   checkpoint.SourceID,
+		History:    checkpoint.History,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -181,21 +204,14 @@ func (h *Handlers) HandleCheckpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse request body
+	// Parse request body (optional now, for backward compatibility)
 	var req struct {
 		CheckpointID string `json:"checkpoint_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, fmt.Sprintf("Invalid request body: %v", err), http.StatusBadRequest)
-		return
-	}
+	// Try to parse body but don't fail if empty
+	json.NewDecoder(r.Body).Decode(&req)
 
-	if req.CheckpointID == "" {
-		http.Error(w, "checkpoint_id is required", http.StatusBadRequest)
-		return
-	}
-
-	h.logger.Info("Checkpoint request", "checkpoint_id", req.CheckpointID)
+	h.logger.Info("Checkpoint request")
 
 	// Check if checkpoint process is supported
 	if !h.system.IsProcessRunning() {
@@ -232,8 +248,8 @@ func (h *Handlers) HandleCheckpoint(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
-		// Perform checkpoint with streaming
-		err := h.system.CheckpointWithStream(ctx, req.CheckpointID, streamCh)
+		// Perform checkpoint with streaming (ID is ignored)
+		err := h.system.CheckpointWithStream(ctx, "", streamCh)
 		if err != nil {
 			h.logger.Error("Checkpoint failed", "error", err)
 		}

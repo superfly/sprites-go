@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,11 +56,52 @@ func TestJuiceFSLocalModeIntegration(t *testing.T) {
 		t.Fatalf("Failed to write test file: %v", err)
 	}
 
-	// Create a checkpoint
-	checkpointID := "test-checkpoint-1"
-	if err := jfs.Checkpoint(ctx, checkpointID); err != nil {
-		t.Fatalf("Failed to create checkpoint: %v", err)
-	}
+	// Test checkpoint
+	t.Run("Checkpoint", func(t *testing.T) {
+		// Create checkpoint (version will be auto-generated)
+		err := jfs.Checkpoint(ctx, "")
+		if err != nil {
+			t.Fatalf("Failed to create checkpoint: %v", err)
+		}
+
+		// List checkpoints to verify
+		checkpoints, err := jfs.ListCheckpoints(ctx)
+		if err != nil {
+			t.Fatalf("Failed to list checkpoints: %v", err)
+		}
+
+		if len(checkpoints) != 1 {
+			t.Fatalf("Expected 1 checkpoint, got %d", len(checkpoints))
+		}
+
+		// Should be v0 (first checkpoint)
+		if checkpoints[0].ID != "v0" {
+			t.Errorf("Expected checkpoint ID to be v0, got %s", checkpoints[0].ID)
+		}
+
+		// Test restore
+		t.Run("Restore", func(t *testing.T) {
+			// Restore from v0
+			err := jfs.Restore(ctx, "v0")
+			if err != nil {
+				t.Fatalf("Failed to restore checkpoint: %v", err)
+			}
+
+			// Verify history file was created
+			activeDir := filepath.Join(tmpDir, "data", "active")
+			historyFile := filepath.Join(activeDir, ".history")
+			historyData, err := os.ReadFile(historyFile)
+			if err != nil {
+				t.Fatalf("Failed to read history file: %v", err)
+			}
+
+			// Check history format
+			historyStr := string(historyData)
+			if !strings.Contains(historyStr, "from=v0;time=") {
+				t.Errorf("History file has incorrect format: %s", historyStr)
+			}
+		})
+	})
 
 	// Modify the file
 	newContent := []byte("Modified content")
@@ -68,7 +110,7 @@ func TestJuiceFSLocalModeIntegration(t *testing.T) {
 	}
 
 	// Restore from checkpoint
-	if err := jfs.Restore(ctx, checkpointID); err != nil {
+	if err := jfs.Restore(ctx, "v0"); err != nil {
 		t.Fatalf("Failed to restore from checkpoint: %v", err)
 	}
 
