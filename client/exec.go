@@ -34,6 +34,9 @@ func execCommand(baseURL, token string, args []string) {
 		fmt.Fprintf(os.Stderr, "Execute a command in the sprite environment.\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		execFlags.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nNotes:\n")
+		fmt.Fprintf(os.Stderr, "  When using -tty, terminal environment variables (TERM, COLORTERM, LANG, LC_ALL)\n")
+		fmt.Fprintf(os.Stderr, "  are automatically passed through from your local environment.\n")
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
 		fmt.Fprintf(os.Stderr, "  sprite-client exec ls -la\n")
 		fmt.Fprintf(os.Stderr, "  sprite-client exec -dir /app echo hello world\n")
@@ -68,6 +71,27 @@ func execCommand(baseURL, token string, args []string) {
 		pairs := strings.Split(*envVars, ",")
 		for _, pair := range pairs {
 			envList = append(envList, strings.TrimSpace(pair))
+		}
+	}
+
+	// When using TTY mode, automatically include essential terminal environment variables
+	if *tty {
+		terminalEnvVars := []string{"TERM", "COLORTERM", "LANG", "LC_ALL"}
+		for _, envVar := range terminalEnvVars {
+			if value := os.Getenv(envVar); value != "" {
+				// Check if this env var is already explicitly set
+				envVar = envVar + "=" + value
+				alreadySet := false
+				for _, existing := range envList {
+					if strings.HasPrefix(existing, strings.Split(envVar, "=")[0]+"=") {
+						alreadySet = true
+						break
+					}
+				}
+				if !alreadySet {
+					envList = append(envList, envVar)
+				}
+			}
 		}
 	}
 
