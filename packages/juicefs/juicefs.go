@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -141,7 +140,11 @@ func (j *JuiceFS) GetOverlay() *OverlayManager {
 
 // Start initializes and starts JuiceFS with Litestream replication
 func (j *JuiceFS) Start(ctx context.Context) error {
+	startTime := time.Now()
+	fmt.Printf("[DEBUG] JuiceFS Start beginning at %s\n", startTime.Format(time.RFC3339))
+
 	// Create necessary directories
+	stepStart := time.Now()
 	cacheDir := filepath.Join(j.config.BaseDir, "cache")
 	metaDB := filepath.Join(j.config.BaseDir, "metadata.db")
 	checkpointDB := filepath.Join(j.config.BaseDir, "checkpoints.db")
@@ -166,14 +169,18 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 			return fmt.Errorf("failed to create directory %s: %w", dir, err)
 		}
 	}
+	fmt.Printf("[DEBUG] Directory creation completed in %.3fs\n", time.Since(stepStart).Seconds())
 
 	// Create litestream configuration
+	stepStart = time.Now()
 	litestreamConfigPath := filepath.Join(os.TempDir(), "litestream-juicefs.yml")
 	if err := j.createLitestreamConfig(litestreamConfigPath, metaDB, checkpointDB); err != nil {
 		return fmt.Errorf("failed to create litestream config: %w", err)
 	}
+	fmt.Printf("[DEBUG] Litestream config creation completed in %.3fs\n", time.Since(stepStart).Seconds())
 
 	// Handle lease acquisition and determine if we need to restore
+	stepStart = time.Now()
 	needsRestore := false
 	if j.config.LocalMode {
 		// In local mode, check if litestream backup exists
@@ -181,6 +188,7 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 		if _, err := os.Stat(backupPath); err == nil {
 			needsRestore = true
 		}
+		fmt.Printf("[DEBUG] Local mode backup check completed in %.3fs (needsRestore: %v)\n", time.Since(stepStart).Seconds(), needsRestore)
 	} else if j.leaseMgr != nil {
 		// S3 mode - use lease manager
 		fmt.Println("Acquiring JuiceFS database lease...")
@@ -208,10 +216,13 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 				needsRestore = false
 			}
 		}
+		fmt.Printf("[DEBUG] Lease acquisition completed in %.3fs (attempts: %d, needsRestore: %v)\n",
+			time.Since(stepStart).Seconds(), j.leaseMgr.LeaseAttemptCount(), needsRestore)
 	}
 
 	// Perform restore if needed
 	if needsRestore {
+		stepStart = time.Now()
 		if j.config.LocalMode {
 			fmt.Println("Restoring from local litestream backup")
 		} else {
@@ -223,6 +234,7 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 		}
 
 		// Restore metadata database
+		metaRestoreStart := time.Now()
 		restoreCmd := exec.CommandContext(ctx, "litestream", "restore",
 			"-config", litestreamConfigPath,
 			"-if-replica-exists",
@@ -243,8 +255,10 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 			// If restore fails, it's okay - we'll format a new filesystem
 			fmt.Printf("Litestream restore output for metadata: %s\n", string(output))
 		}
+		fmt.Printf("[DEBUG] Metadata database restore completed in %.3fs\n", time.Since(metaRestoreStart).Seconds())
 
 		// Restore checkpoint database
+		checkpointRestoreStart := time.Now()
 		restoreCheckpointCmd := exec.CommandContext(ctx, "litestream", "restore",
 			"-config", litestreamConfigPath,
 			"-if-replica-exists",
@@ -258,24 +272,37 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 			// If restore fails, it's okay - checkpoint DB will be created fresh
 			fmt.Printf("Litestream restore output for checkpoints: %s\n", string(output))
 		}
+		fmt.Printf("[DEBUG] Checkpoint database restore completed in %.3fs\n", time.Since(checkpointRestoreStart).Seconds())
+		fmt.Printf("[DEBUG] Total restore process completed in %.3fs\n", time.Since(stepStart).Seconds())
 	}
 
 	// Ensure cache directory exists (might have been removed)
+	stepStart = time.Now()
 	os.MkdirAll(cacheDir, 0755)
+	fmt.Printf("[DEBUG] Cache directory recreation completed in %.3fs\n", time.Since(stepStart).Seconds())
 
 	// Format JuiceFS if needed
+	stepStart = time.Now()
 	metaURL := fmt.Sprintf("sqlite3://%s", metaDB)
 	if !j.isFormatted(metaURL) {
+		fmt.Printf("[DEBUG] JuiceFS not formatted, formatting...\n")
 		if err := j.formatJuiceFS(ctx, metaURL); err != nil {
 			return fmt.Errorf("failed to format JuiceFS: %w", err)
 		}
+		fmt.Printf("[DEBUG] JuiceFS formatting completed in %.3fs\n", time.Since(stepStart).Seconds())
+	} else {
+		fmt.Printf("[DEBUG] JuiceFS already formatted, skipped formatting in %.3fs\n", time.Since(stepStart).Seconds())
 	}
 
 	// Calculate cache and buffer sizes
+	stepStart = time.Now()
 	cacheSizeMB := j.calculateCacheSize(cacheDir)
 	bufferSizeMB := j.calculateBufferSize()
+	fmt.Printf("[DEBUG] Cache and buffer size calculation completed in %.3fs (cache: %dMB, buffer: %dMB)\n",
+		time.Since(stepStart).Seconds(), cacheSizeMB, bufferSizeMB)
 
 	// Start litestream replication in parallel
+	stepStart = time.Now()
 	j.litestreamCmd = exec.Command("litestream", "replicate", "-config", litestreamConfigPath)
 
 	// Only set environment variables for S3 mode
@@ -293,8 +320,10 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	if err := j.litestreamCmd.Start(); err != nil {
 		return fmt.Errorf("failed to start litestream: %w", err)
 	}
+	fmt.Printf("[DEBUG] Litestream startup completed in %.3fs\n", time.Since(stepStart).Seconds())
 
 	// Mount JuiceFS
+	stepStart = time.Now()
 	mountArgs := []string{
 		"mount",
 		"--no-usage-report",
@@ -314,28 +343,27 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	j.mountCmd.Env = append(os.Environ(),
 		"FSTAB_NAME_PREFIX=\"sprite:\"",
 	)
-	// Set up stderr pipe to watch for ready message
-	stderrPipe, err := j.mountCmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("failed to create stderr pipe: %w", err)
-	}
-
-	// Start watching for ready message
-	go j.watchForReady(stderrPipe, mountPath)
 
 	// Start the mount command
 	if err := j.mountCmd.Start(); err != nil {
 		return fmt.Errorf("failed to start JuiceFS mount: %w", err)
 	}
+	fmt.Printf("[DEBUG] JuiceFS mount command startup completed in %.3fs\n", time.Since(stepStart).Seconds())
 
+	// Start watching for ready signal
+	go j.watchForReady(mountPath, time.Now())
 	// Set up signal handling
+	stepStart = time.Now()
 	signal.Notify(j.signalCh, syscall.SIGTERM, syscall.SIGINT)
 	go j.handleSignals()
 
 	// Start the process monitor
 	go j.monitorProcess()
+	fmt.Printf("[DEBUG] Signal handling and process monitor setup completed in %.3fs\n", time.Since(stepStart).Seconds())
 
 	// Wait for mount to be ready or timeout
+	fmt.Printf("[DEBUG] Waiting for JuiceFS mount to be ready...\n")
+	waitStart := time.Now()
 	select {
 	case err := <-j.mountReady:
 		if err != nil {
@@ -344,6 +372,8 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 			// Don't call Wait() here - monitorProcess will handle it
 			return err
 		}
+		fmt.Printf("[DEBUG] JuiceFS mount ready in %.3fs\n", time.Since(waitStart).Seconds())
+		fmt.Printf("[DEBUG] Total JuiceFS Start completed in %.3fs\n", time.Since(startTime).Seconds())
 		return nil
 	case <-ctx.Done():
 		// Kill mount process
@@ -600,15 +630,17 @@ dbs:
 	return os.WriteFile(configPath, []byte(config), 0644)
 }
 
-func (j *JuiceFS) getExistingBucket(metaDB string) (string, error) {
+// getJuiceFSFormatInfo reads JuiceFS format information from the metadata database
+// Returns the bucket name and whether the database is properly formatted
+func (j *JuiceFS) getJuiceFSFormatInfo(metaDB string) (bucketName string, isFormatted bool, err error) {
 	// Check if database file exists
 	if _, err := os.Stat(metaDB); os.IsNotExist(err) {
-		return "", fmt.Errorf("metadata database file does not exist")
+		return "", false, fmt.Errorf("metadata database file does not exist")
 	}
 
 	db, err := sql.Open("sqlite", metaDB)
 	if err != nil {
-		return "", fmt.Errorf("failed to open database: %w", err)
+		return "", false, fmt.Errorf("failed to open database: %w", err)
 	}
 	defer db.Close()
 
@@ -616,33 +648,45 @@ func (j *JuiceFS) getExistingBucket(metaDB string) (string, error) {
 	var tableExists int
 	err = db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='jfs_setting'").Scan(&tableExists)
 	if err != nil {
-		return "", fmt.Errorf("failed to check for jfs_setting table: %w", err)
+		return "", false, fmt.Errorf("failed to check for jfs_setting table: %w", err)
 	}
 	if tableExists == 0 {
-		return "", fmt.Errorf("database exists but is not fully formatted (missing jfs_setting table)")
+		return "", false, fmt.Errorf("database exists but is not fully formatted (missing jfs_setting table)")
 	}
 
+	// Database is formatted if we got here
 	var bucketURL string
 	err = db.QueryRow("SELECT json_extract(value, '$.Bucket') FROM jfs_setting WHERE name = 'format'").Scan(&bucketURL)
 	if err != nil {
-		return "", fmt.Errorf("failed to read bucket from format setting: %w", err)
+		return "", true, fmt.Errorf("failed to read bucket from format setting: %w", err)
 	}
 
 	// Extract bucket name from the URL (format: https://endpoint/bucket-name)
 	if bucketURL == "" {
-		return "", fmt.Errorf("bucket not found in format settings")
+		return "", true, fmt.Errorf("bucket not found in format settings")
 	}
 
 	parts := strings.Split(bucketURL, "/")
 	if len(parts) > 0 {
-		return parts[len(parts)-1], nil
+		return parts[len(parts)-1], true, nil
 	}
-	return bucketURL, nil
+	return bucketURL, true, nil
+}
+
+func (j *JuiceFS) getExistingBucket(metaDB string) (string, error) {
+	bucketName, _, err := j.getJuiceFSFormatInfo(metaDB)
+	return bucketName, err
 }
 
 func (j *JuiceFS) isFormatted(metaURL string) bool {
-	cmd := exec.Command("juicefs", "status", metaURL)
-	return cmd.Run() == nil
+	// Extract database path from sqlite3:// URL
+	if !strings.HasPrefix(metaURL, "sqlite3://") {
+		return false
+	}
+	metaDB := strings.TrimPrefix(metaURL, "sqlite3://")
+
+	_, isFormatted, _ := j.getJuiceFSFormatInfo(metaDB)
+	return isFormatted
 }
 
 func (j *JuiceFS) formatJuiceFS(ctx context.Context, metaURL string) error {
@@ -741,50 +785,75 @@ func (j *JuiceFS) calculateBufferSize() int {
 	return 1024 // Default to 1GB
 }
 
-func (j *JuiceFS) watchForReady(stderr io.Reader, mountPath string) {
-	scanner := bufio.NewScanner(stderr)
-	for scanner.Scan() {
-		line := scanner.Text()
-		fmt.Println(line) // Echo the line for transparency
+// watchForReady polls the mount point until it's ready and then performs post-mount setup
+func (j *JuiceFS) watchForReady(mountPath string, startTime time.Time) {
+	timeout := 2 * time.Minute
+	interval := 10 * time.Millisecond
+	deadline := time.Now().Add(timeout)
 
-		// Check for both possible ready messages
-		if strings.Contains(line, "juicefs is ready") || strings.Contains(line, "is ready at") {
-			// Create the active directory
-			activeDir := filepath.Join(mountPath, "active", "fs")
-			if err := os.MkdirAll(activeDir, 0755); err != nil {
-				j.mountReady <- fmt.Errorf("failed to create active directory: %w", err)
-				return
-			}
-			fmt.Printf("JuiceFS ready: created active directory at %s\n", filepath.Dir(activeDir))
+	fmt.Printf("[DEBUG] Starting mount readiness polling with %.0fms interval (%.3fs since start)\n",
+		interval.Seconds()*1000, time.Since(startTime).Seconds())
 
-			// Initialize checkpoint database using the base directory (where metadata.db is located)
-			db, err := NewCheckpointDB(j.config.BaseDir)
-			if err != nil {
-				j.mountReady <- fmt.Errorf("failed to initialize checkpoint database: %w", err)
-				return
-			}
-			j.checkpointDB = db
-			fmt.Println("Checkpoint database initialized")
+	for time.Now().Before(deadline) {
+		var stat syscall.Stat_t
+		if err := syscall.Stat(mountPath, &stat); err == nil {
+			if stat.Ino == 1 {
+				fmt.Printf("[DEBUG] Mount detected as ready (inode=1) after %.3fs of polling (%.3fs since start)\n",
+					time.Since(deadline.Add(-timeout)).Seconds(), time.Since(startTime).Seconds())
 
-			// Apply quota asynchronously
-			go j.applyActiveFsQuota()
-
-			// Mount the overlay
-			if j.overlayMgr != nil {
-				ctx := context.Background()
-				if err := j.overlayMgr.Mount(ctx); err != nil {
-					j.mountReady <- fmt.Errorf("failed to mount overlay: %w", err)
+				// Now perform post-mount setup tasks
+				if err := j.performPostMountSetup(mountPath, startTime); err != nil {
+					j.mountReady <- err
 					return
 				}
+				j.mountReady <- nil
+				return
 			}
-
-			j.mountReady <- nil
-			return
 		}
+		time.Sleep(interval)
 	}
 
-	// If we get here, we didn't see the ready message
-	j.mountReady <- fmt.Errorf("did not receive 'juicefs is ready' message")
+	j.mountReady <- fmt.Errorf("timeout waiting for mount at %s after %.0fs", mountPath, timeout.Seconds())
+}
+
+// performPostMountSetup handles the tasks that need to be done after mount is ready
+func (j *JuiceFS) performPostMountSetup(mountPath string, startTime time.Time) error {
+	// Create the active directory
+	stepStart := time.Now()
+	activeDir := filepath.Join(mountPath, "active", "fs")
+	if err := os.MkdirAll(activeDir, 0755); err != nil {
+		return fmt.Errorf("failed to create active directory: %w", err)
+	}
+	fmt.Printf("JuiceFS ready: created active directory at %s\n", filepath.Dir(activeDir))
+	fmt.Printf("[DEBUG] Active directory creation completed in %.3fs\n", time.Since(stepStart).Seconds())
+
+	// Initialize checkpoint database using the base directory (where metadata.db is located)
+	stepStart = time.Now()
+	db, err := NewCheckpointDB(j.config.BaseDir)
+	if err != nil {
+		return fmt.Errorf("failed to initialize checkpoint database: %w", err)
+	}
+	j.checkpointDB = db
+	fmt.Println("Checkpoint database initialized")
+	fmt.Printf("[DEBUG] Checkpoint database initialization completed in %.3fs\n", time.Since(stepStart).Seconds())
+
+	// Apply quota asynchronously
+	fmt.Printf("[DEBUG] Starting async quota application\n")
+	go j.applyActiveFsQuota()
+
+	// Mount the overlay
+	if j.overlayMgr != nil {
+		stepStart = time.Now()
+		fmt.Printf("[DEBUG] Starting overlay mount\n")
+		ctx := context.Background()
+		if err := j.overlayMgr.Mount(ctx); err != nil {
+			return fmt.Errorf("failed to mount overlay: %w", err)
+		}
+		fmt.Printf("[DEBUG] Overlay mount completed in %.3fs\n", time.Since(stepStart).Seconds())
+	}
+
+	fmt.Printf("[DEBUG] Post-mount setup completed (%.3fs since start)\n", time.Since(startTime).Seconds())
+	return nil
 }
 
 // applyActiveFsQuota applies a 10TB quota to the active/fs directory

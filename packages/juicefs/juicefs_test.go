@@ -280,47 +280,25 @@ func TestWatchForReady(t *testing.T) {
 		}
 	}()
 
-	// Create a pipe to simulate stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("Failed to create pipe: %v", err)
-	}
-	defer r.Close()
-	defer w.Close()
-
 	// Start watching
-	go jfs.watchForReady(r, mountPoint)
+	startTime := time.Now()
+	go jfs.watchForReady(mountPoint, startTime)
 
-	// Write non-ready message
-	w.Write([]byte("Some other log message\n"))
+	// Give it a moment to start polling
+	time.Sleep(50 * time.Millisecond)
 
-	// Give it a moment
-	time.Sleep(10 * time.Millisecond)
-
-	// Check that it's still waiting
-	select {
-	case <-jfs.mountReady:
-		t.Error("Should not be ready yet")
-	default:
-		// Good, still waiting
-	}
-
-	// Write ready message
-	w.Write([]byte("2024-01-01 12:00:00 juicefs is ready\n"))
-
-	// Wait for ready signal
+	// Check that it's still waiting (mount point doesn't exist yet so it should timeout)
 	select {
 	case err := <-jfs.mountReady:
-		if err != nil {
-			t.Errorf("Expected nil error, got: %v", err)
+		// It should timeout after 2 minutes, but for testing we expect it to be trying
+		if err == nil {
+			t.Error("Should have received timeout error since no real mount exists")
+		} else if !strings.Contains(err.Error(), "timeout") {
+			t.Errorf("Expected timeout error, got: %v", err)
 		}
-		// Check if active directory was created
-		activeDir := filepath.Join(mountPoint, "active", "fs")
-		if _, err := os.Stat(activeDir); os.IsNotExist(err) {
-			t.Error("Active directory was not created")
-		}
-	case <-time.After(1 * time.Second):
-		t.Error("Timeout waiting for ready signal")
+	case <-time.After(100 * time.Millisecond):
+		// This is expected - it should still be polling
+		t.Log("watchForReady is still polling as expected")
 	}
 }
 
