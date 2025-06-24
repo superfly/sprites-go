@@ -4,6 +4,7 @@ use (
 	./client
 	./lib
 	./packages/juicefs
+	./packages/leaser
 	./packages/supervisor
 	./packages/wsexec
 	./server

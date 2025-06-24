@@ -21,3 +21,5 @@ sprite
 .envrc
 
 dist
+server/server
+client/client

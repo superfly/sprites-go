@@ -14,16 +14,18 @@ import (
 	"github.com/sprite-env/lib/api"
 
 	"github.com/sprite-env/packages/juicefs"
+	"github.com/sprite-env/packages/leaser"
 	"github.com/sprite-env/packages/supervisor"
 )
 
 // System encapsulates the JuiceFS and supervised process management
 type System struct {
-	config     SystemConfig
-	logger     *slog.Logger
-	juicefs    *juicefs.JuiceFS
-	supervisor *supervisor.Supervisor
-	reaper     *Reaper
+	config         SystemConfig
+	logger         *slog.Logger
+	leaserInstance *leaser.Leaser
+	juicefs        *juicefs.JuiceFS
+	supervisor     *supervisor.Supervisor
+	reaper         *Reaper
 
 	// Channels for monitoring
 	processDoneCh chan error
@@ -49,7 +51,6 @@ type SystemConfig struct {
 
 	// JuiceFS configuration
 	JuiceFSBaseDir    string
-	JuiceFSLocalMode  bool
 	S3AccessKey       string
 	S3SecretAccessKey string
 	S3EndpointURL     string
@@ -78,7 +79,6 @@ func NewSystem(config SystemConfig, logger *slog.Logger, reaper *Reaper) (*Syste
 	if config.JuiceFSBaseDir != "" {
 		juicefsConfig := juicefs.Config{
 			BaseDir:           config.JuiceFSBaseDir,
-			LocalMode:         config.JuiceFSLocalMode,
 			S3AccessKey:       config.S3AccessKey,
 			S3SecretAccessKey: config.S3SecretAccessKey,
 			S3EndpointURL:     config.S3EndpointURL,
@@ -90,6 +90,22 @@ func NewSystem(config SystemConfig, logger *slog.Logger, reaper *Reaper) (*Syste
 			OverlayLowerPath:     config.OverlayLowerPath,
 			OverlayTargetPath:    config.OverlayTargetPath,
 			OverlaySkipOverlayFS: config.OverlaySkipOverlayFS,
+		}
+
+		// Create leaser for S3 mode (non-local mode)
+		if config.S3AccessKey != "" && config.S3SecretAccessKey != "" &&
+			config.S3EndpointURL != "" && config.S3Bucket != "" {
+			leaserConfig := leaser.Config{
+				S3AccessKey:       config.S3AccessKey,
+				S3SecretAccessKey: config.S3SecretAccessKey,
+				S3EndpointURL:     config.S3EndpointURL,
+				S3Bucket:          config.S3Bucket,
+				BaseDir:           config.JuiceFSBaseDir,
+			}
+
+			leaserInstance := leaser.New(leaserConfig)
+			s.leaserInstance = leaserInstance
+			juicefsConfig.LeaseManager = leaserInstance
 		}
 
 		jfs, err := juicefs.New(juicefsConfig)
@@ -662,6 +678,13 @@ func (s *System) Shutdown(ctx context.Context) error {
 		s.mu.Lock()
 		s.juicefsReady = false
 		s.mu.Unlock()
+	}
+
+	// Stop leaser (if it exists and wasn't already stopped by JuiceFS)
+	if s.leaserInstance != nil {
+		s.logger.Info("Stopping lease manager...")
+		s.leaserInstance.Stop()
+		s.logger.Info("Lease manager stopped successfully")
 	}
 
 	return nil

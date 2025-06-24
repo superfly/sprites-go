@@ -1,0 +1,65 @@
+# leaser
+
+The leaser package provides a distributed lease management system using S3 (or compatible) object storage with optimistic concurrency control via ETags.
+
+## Features
+
+- **Optimistic lease acquisition**: Attempts to claim a lease without reading first
+- **ETag-based concurrency control**: Uses S3 ETags for atomic compare-and-swap operations
+- **Automatic lease refresh**: Keeps leases alive while the holder is running
+- **Graceful failure handling**: Handles machine crashes and network partitions
+- **No external dependencies**: Uses only S3 object storage for coordination
+
+## Usage
+
+```go
+import "github.com/sprite-env/packages/leaser"
+
+// Create configuration
+config := leaser.Config{
+    BaseDir:           "/var/sprite",
+    S3AccessKey:       "your-access-key",
+    S3SecretAccessKey: "your-secret-key", 
+    S3EndpointURL:     "https://s3.amazonaws.com",
+    S3Bucket:          "your-bucket",
+}
+
+// Create lease manager
+lm, err := leaser.New(config)
+if err != nil {
+    log.Fatal(err)
+}
+defer lm.Stop()
+
+// Wait for lease acquisition
+ctx := context.Background()
+if err := lm.Wait(ctx); err != nil {
+    log.Fatal("Failed to acquire lease:", err)
+}
+
+// Check attempt count (useful for slow start logic)
+if lm.LeaseAttemptCount() > 1 {
+    // Lease required multiple attempts, may want to restore from backup
+}
+
+// Lease is now held and will be automatically refreshed
+```
+
+## How It Works
+
+1. **Optimistic Acquisition**: First attempts to create/update the lease object using the last known ETag (stored locally)
+2. **Conflict Resolution**: If the optimistic attempt fails:
+   - Reads the current lease to check if it's expired or held by the same machine
+   - If expired or same machine, acquires with the current ETag
+   - If held by another machine, waits with exponential backoff
+3. **Automatic Refresh**: Once acquired, the lease is refreshed every 30 minutes
+4. **Local State**: Stores the last successful ETag locally for fast reacquisition on restart
+
+## Testing
+
+The package includes comprehensive tests using mock S3 clients. Run tests with:
+
+```bash
+cd packages/leaser
+go test -v
+```

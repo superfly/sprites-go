@@ -29,6 +29,17 @@ import (
 //   - Falls back to force unmount if graceful fails
 //
 // 3. Stop the Litestream replication process
+
+// LeaseManager interface defines the lease management operations needed by JuiceFS
+type LeaseManager interface {
+	// Wait blocks until the lease is successfully acquired
+	Wait(ctx context.Context) error
+	// LeaseAttemptCount returns the number of times lease acquisition has been attempted
+	LeaseAttemptCount() int
+	// Stop stops the lease manager
+	Stop()
+}
+
 type JuiceFS struct {
 	config        Config
 	litestreamCmd *exec.Cmd
@@ -39,7 +50,7 @@ type JuiceFS struct {
 	signalCh      chan os.Signal
 	overlayMgr    *OverlayManager
 	checkpointDB  *CheckpointDB
-	leaseMgr      *LeaseManager
+	leaseMgr      LeaseManager
 }
 
 // Config holds the configuration for JuiceFS
@@ -65,12 +76,15 @@ type Config struct {
 	OverlayLowerPath     string // Path to lower directory (read-only base layer)
 	OverlayTargetPath    string // Where to mount the final overlay
 	OverlaySkipOverlayFS bool   // Skip overlayfs, only mount loopback
+
+	// LeaseManager for distributed coordination (optional, only used if not LocalMode)
+	LeaseManager LeaseManager
 }
 
 // New creates a new JuiceFS instance
 func New(config Config) (*JuiceFS, error) {
 	if config.VolumeName == "" {
-		config.VolumeName = "fs"
+		config.VolumeName = "juicefs"
 	}
 
 	// Validate required configuration
@@ -93,9 +107,9 @@ func New(config Config) (*JuiceFS, error) {
 		signalCh:   make(chan os.Signal, 1),
 	}
 
-	// Initialize lease manager for non-local mode
-	if !config.LocalMode {
-		j.leaseMgr = NewLeaseManager(config)
+	// Use provided lease manager for non-local mode
+	if !config.LocalMode && config.LeaseManager != nil {
+		j.leaseMgr = config.LeaseManager
 	}
 
 	// Initialize the overlay manager if enabled
@@ -167,17 +181,21 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 		if _, err := os.Stat(backupPath); err == nil {
 			needsRestore = true
 		}
-	} else {
+	} else if j.leaseMgr != nil {
 		// S3 mode - use lease manager
 		fmt.Println("Acquiring JuiceFS database lease...")
-		leaseAcquired, err := j.leaseMgr.AcquireLease(ctx)
+		err := j.leaseMgr.Wait(ctx)
 		if err != nil {
-			// If we got an error after waiting (meaning we eventually acquired the lease)
-			// we need to restore
+			return fmt.Errorf("failed to acquire lease: %w", err)
+		}
+
+		// Check if this was a slow start (multiple attempts)
+		if j.leaseMgr.LeaseAttemptCount() > 1 {
+			// We had to wait or retry, need to restore
 			needsRestore = true
-			fmt.Println("Acquired lease after waiting, will restore from litestream")
-		} else if leaseAcquired {
-			// We got the lease immediately
+			fmt.Printf("Acquired lease after %d attempts, will restore from litestream\n", j.leaseMgr.LeaseAttemptCount())
+		} else {
+			// We got the lease immediately, check if we can use existing data
 			existingBucket, err := j.getExistingBucket(metaDB)
 			if err != nil {
 				fmt.Printf("Acquired lease but no existing metadata DB found (%v), will restore\n", err)
@@ -186,7 +204,7 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 				fmt.Printf("Acquired lease but bucket mismatch (existing: %s, current: %s), will restore\n", existingBucket, j.config.S3Bucket)
 				needsRestore = true
 			} else {
-				fmt.Printf("Acquired lease and bucket matches (%s), using existing databases on disk\n", existingBucket)
+				fmt.Printf("Acquired lease on first attempt and bucket matches (%s), using existing databases on disk\n", existingBucket)
 				needsRestore = false
 			}
 		}

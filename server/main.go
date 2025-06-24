@@ -38,7 +38,6 @@ type Config struct {
 
 	// JuiceFS
 	JuiceFSBaseDir    string
-	JuiceFSLocalMode  bool
 	S3AccessKey       string
 	S3SecretAccessKey string
 	S3EndpointURL     string
@@ -107,7 +106,6 @@ func NewApplication(config Config) (*Application, error) {
 		ProcessEnvironment:             config.ProcessEnvironment,
 		ProcessGracefulShutdownTimeout: config.ProcessGracefulShutdownTimeout,
 		JuiceFSBaseDir:                 config.JuiceFSBaseDir,
-		JuiceFSLocalMode:               config.JuiceFSLocalMode,
 		S3AccessKey:                    config.S3AccessKey,
 		S3SecretAccessKey:              config.S3SecretAccessKey,
 		S3EndpointURL:                  config.S3EndpointURL,
@@ -329,7 +327,6 @@ func parseCommandLine() (Config, error) {
 			// JuiceFS configuration
 			JuiceFSEnabled    bool   `json:"juicefs_enabled"`
 			JuiceFSBaseDir    string `json:"juicefs_base_dir"`
-			JuiceFSLocalMode  bool   `json:"juicefs_local_mode"`
 			JuiceFSVolumeName string `json:"juicefs_volume_name"`
 			S3AccessKey       string `json:"s3_access_key"`
 			S3SecretAccessKey string `json:"s3_secret_access_key"`
@@ -368,7 +365,6 @@ func parseCommandLine() (Config, error) {
 		config.ProcessEnvironment = fileConfig.ProcessEnv
 		config.ExecWrapperCommand = fileConfig.ExecWrapperCommand
 		config.JuiceFSBaseDir = fileConfig.JuiceFSBaseDir
-		config.JuiceFSLocalMode = fileConfig.JuiceFSLocalMode
 		config.S3AccessKey = fileConfig.S3AccessKey
 		config.S3SecretAccessKey = fileConfig.S3SecretAccessKey
 		config.S3EndpointURL = fileConfig.S3EndpointURL
@@ -409,13 +405,6 @@ func parseCommandLine() (Config, error) {
 	}
 	if juicefsDirFlag != "" {
 		config.JuiceFSBaseDir = juicefsDirFlag
-	}
-
-	// Check for local mode
-	if os.Getenv("SPRITE_LOCAL_MODE") == "true" {
-		config.JuiceFSLocalMode = true
-	} else if os.Getenv("SPRITE_LOCAL_MODE") == "false" {
-		config.JuiceFSLocalMode = false
 	}
 
 	// S3 configuration - environment overrides file config

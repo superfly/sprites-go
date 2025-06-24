@@ -1,4 +1,4 @@
-package juicefs
+package leaser
 
 import (
 	"bytes"
@@ -18,40 +18,48 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
-// S3API interface for S3 operations used by LeaseManager
+// S3API interface for S3 operations used by Leaser
 type S3API interface {
 	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
 	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
 	HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error)
 }
 
-// LeaseManager handles the Tigris lease for JuiceFS database safety
-type LeaseManager struct {
+// Leaser handles distributed leasing using S3 optimistic concurrency
+type Leaser struct {
 	s3Client      S3API
 	bucketName    string
 	primaryRegion string
 	machineID     string
 	leaseKey      string
 	etagFilePath  string
+	baseDir       string
+	attemptCount  int
 	refreshTicker *time.Ticker
 	stopCh        chan struct{}
+	stoppedCh     chan struct{}
 	currentETag   string
 }
 
-// LeaseInfo represents the lease data stored in Tigris
+// Config holds the configuration for the Leaser
+type Config struct {
+	S3AccessKey       string
+	S3SecretAccessKey string
+	S3EndpointURL     string
+	S3Bucket          string
+	BaseDir           string // Base directory for storing etag file
+	LeaseKey          string // Optional custom lease key (defaults to "sprite.lock")
+}
+
+// LeaseInfo represents the lease data stored in S3
 type LeaseInfo struct {
 	MachineID  string    `json:"machine_id"`
 	ExpiresAt  time.Time `json:"expires_at"`
 	AcquiredAt time.Time `json:"acquired_at"`
 }
 
-// NewLeaseManager creates a new lease manager
-func NewLeaseManager(config Config) *LeaseManager {
-	return NewLeaseManagerWithKey(config, "")
-}
-
-// NewLeaseManagerWithKey creates a new lease manager with a custom lease key
-func NewLeaseManagerWithKey(config Config, customKey string) *LeaseManager {
+// New creates a new Leaser instance
+func New(config Config) *Leaser {
 	// Use environment variables for Tigris configuration
 	primaryRegion := os.Getenv("SPRITE_PRIMARY_REGION")
 	if primaryRegion == "" {
@@ -64,17 +72,7 @@ func NewLeaseManagerWithKey(config Config, customKey string) *LeaseManager {
 		machineID, _ = os.Hostname()
 	}
 
-	// The etag file is stored in the base directory root path (not inside JuiceFS)
-	baseDir := config.BaseDir
-	if baseDir == "" {
-		// Fallback to FLY_VOLUME_PATH for backward compatibility
-		baseDir = os.Getenv("FLY_VOLUME_PATH")
-		if baseDir == "" {
-			baseDir = "/fly_vol" // Default path
-		}
-	}
-
-	leaseKey := customKey
+	leaseKey := config.LeaseKey
 	if leaseKey == "" {
 		leaseKey = "sprite.lock"
 	}
@@ -94,96 +92,126 @@ func NewLeaseManagerWithKey(config Config, customKey string) *LeaseManager {
 		o.BaseEndpoint = aws.String(config.S3EndpointURL)
 	})
 
-	return &LeaseManager{
+	return &Leaser{
 		s3Client:      s3Client,
 		bucketName:    config.S3Bucket,
 		primaryRegion: primaryRegion,
 		machineID:     machineID,
 		leaseKey:      leaseKey,
-		etagFilePath:  filepath.Join(baseDir, ".juicefs-lease-etag"),
+		baseDir:       config.BaseDir,
+		etagFilePath:  filepath.Join(config.BaseDir, ".sprite-lease-etag"),
 		stopCh:        make(chan struct{}),
+		stoppedCh:     make(chan struct{}),
 	}
 }
 
-// NewLeaseManagerWithS3Client creates a lease manager with a custom S3 client (for testing)
-func NewLeaseManagerWithS3Client(s3Client S3API, bucketName, leaseKey, machineID, etagFilePath string) *LeaseManager {
-	return &LeaseManager{
+// NewWithS3Client creates a Leaser with a custom S3 client (for testing)
+func NewWithS3Client(s3Client S3API, bucketName, leaseKey, machineID, baseDir string) *Leaser {
+	return &Leaser{
 		s3Client:      s3Client,
 		bucketName:    bucketName,
 		primaryRegion: "test-region",
 		machineID:     machineID,
 		leaseKey:      leaseKey,
-		etagFilePath:  etagFilePath,
+		baseDir:       baseDir,
+		etagFilePath:  filepath.Join(baseDir, ".sprite-lease-etag"),
 		stopCh:        make(chan struct{}),
+		stoppedCh:     make(chan struct{}),
 	}
 }
 
-// AcquireLease attempts to acquire the lease for JuiceFS
-// Returns true if lease was acquired, false if it needs to restore from litestream
-func (lm *LeaseManager) AcquireLease(ctx context.Context) (bool, error) {
-	// 1. Attempt to acquire lease optimistically with etag (or "") stored on disk
-	// tryAcquireLease will read the etag file if ifMatch is empty
-	acquired, etag, err := lm.tryAcquireLease(ctx, "")
+// Wait blocks until the lease is successfully acquired
+func (l *Leaser) Wait(ctx context.Context) error {
+	// 1. Attempt to acquire lease optimistically with etag stored on disk
+	acquired, etag, err := l.tryAcquireLease(ctx, "")
 	if err != nil {
-		return false, fmt.Errorf("failed to try acquire lease: %w", err)
+		return fmt.Errorf("failed to try acquire lease: %w", err)
 	}
 
 	if acquired {
-		// Success! No litestream restore needed
-		// etag file is already written by tryAcquireLease
-		lm.currentETag = etag
+		// Success! No need to wait
+		l.currentETag = etag
 		fmt.Printf("Successfully acquired lease with etag: %s\n", etag)
-		lm.startLeaseRefresh()
-		return true, nil
+		l.startLeaseRefresh()
+		return nil
 	}
 
 	// 2. If there's a conflict, read current lease info
 	fmt.Println("Lease acquisition failed, reading current lease info...")
-	currentLease, expired, err := lm.checkCurrentLease(ctx)
+	currentLease, expired, err := l.checkCurrentLease(ctx)
 	if err != nil {
-		return false, fmt.Errorf("failed to check current lease: %w", err)
+		return fmt.Errorf("failed to check current lease: %w", err)
 	}
 
-	// 3. If expired, or the id is the same as our machine id, use current etag value for acquisition
-	if expired || (currentLease != nil && currentLease.MachineID == lm.machineID) {
-		fmt.Printf("Lease is expired or held by us (%s), attempting acquisition with current etag\n", lm.machineID)
+	// 3. If expired, or held by the same machine, use current etag for acquisition
+	if expired || (currentLease != nil && currentLease.MachineID == l.machineID) {
+		fmt.Printf("Lease is expired or held by us (%s), attempting acquisition with current etag\n", l.machineID)
 
 		// Get current etag for the object
-		currentETag, err := lm.getCurrentETag(ctx)
+		currentETag, err := l.getCurrentETag(ctx)
 		if err != nil {
-			return false, fmt.Errorf("failed to get current etag: %w", err)
+			return fmt.Errorf("failed to get current etag: %w", err)
 		}
 
-		acquired, etag, err := lm.tryAcquireLease(ctx, currentETag)
+		acquired, etag, err := l.tryAcquireLease(ctx, currentETag)
 		if err != nil {
-			return false, fmt.Errorf("failed to acquire lease with current etag: %w", err)
+			return fmt.Errorf("failed to acquire lease with current etag: %w", err)
 		}
 
 		if acquired {
-			// etag file is already written by tryAcquireLease
-			lm.currentETag = etag
+			l.currentETag = etag
 			fmt.Printf("Successfully acquired lease with current etag: %s\n", etag)
-			lm.startLeaseRefresh()
-			return true, nil
+			l.startLeaseRefresh()
+			return nil
 		}
 	}
 
-	// 4. If not expired AND machine id is different than ours, wait for lease
-	if currentLease != nil && !expired && currentLease.MachineID != lm.machineID {
+	// 4. If not expired AND held by a different machine, wait for lease
+	if currentLease != nil && !expired && currentLease.MachineID != l.machineID {
 		fmt.Printf("Lease held by different machine (%s), waiting for lease to expire...\n", currentLease.MachineID)
-		return false, lm.waitForLease(ctx)
+		return l.waitForLease(ctx)
 	}
 
 	// Should not reach here, but if we do, return error
-	return false, fmt.Errorf("unexpected state in lease acquisition")
+	return fmt.Errorf("unexpected state in lease acquisition")
+}
+
+// LeaseAttemptCount returns the number of attempts made to acquire the lease
+func (l *Leaser) LeaseAttemptCount() int {
+	return l.attemptCount
+}
+
+// Stop stops the lease manager and cleanup
+func (l *Leaser) Stop() {
+	select {
+	case <-l.stopCh:
+		// Already stopped
+		return
+	default:
+		close(l.stopCh)
+	}
+
+	if l.refreshTicker != nil {
+		l.refreshTicker.Stop()
+	}
+
+	// Signal that stop is complete - only close if not already closed
+	select {
+	case <-l.stoppedCh:
+		// Already closed
+	default:
+		close(l.stoppedCh)
+	}
 }
 
 // tryAcquireLease attempts to acquire the lease once
-func (lm *LeaseManager) tryAcquireLease(ctx context.Context, ifMatch string) (bool, string, error) {
+func (l *Leaser) tryAcquireLease(ctx context.Context, ifMatch string) (bool, string, error) {
+	l.attemptCount++
+
 	// If ifMatch is empty, try to read etag from file
 	actualIfMatch := ifMatch
 	if actualIfMatch == "" {
-		if data, err := os.ReadFile(lm.etagFilePath); err == nil {
+		if data, err := os.ReadFile(l.etagFilePath); err == nil {
 			actualIfMatch = string(bytes.TrimSpace(data))
 			fmt.Printf("Read existing etag from file: %s\n", actualIfMatch)
 		} else {
@@ -194,7 +222,7 @@ func (lm *LeaseManager) tryAcquireLease(ctx context.Context, ifMatch string) (bo
 	}
 
 	leaseInfo := LeaseInfo{
-		MachineID:  lm.machineID,
+		MachineID:  l.machineID,
 		ExpiresAt:  time.Now().Add(1 * time.Hour),
 		AcquiredAt: time.Now(),
 	}
@@ -206,8 +234,8 @@ func (lm *LeaseManager) tryAcquireLease(ctx context.Context, ifMatch string) (bo
 
 	// Create the put object input
 	input := &s3.PutObjectInput{
-		Bucket:      aws.String(lm.bucketName),
-		Key:         aws.String(lm.leaseKey),
+		Bucket:      aws.String(l.bucketName),
+		Key:         aws.String(l.leaseKey),
 		Body:        bytes.NewReader(data),
 		ContentType: aws.String("application/json"),
 	}
@@ -223,7 +251,7 @@ func (lm *LeaseManager) tryAcquireLease(ctx context.Context, ifMatch string) (bo
 	}
 
 	// Attempt to put the object with X-Tigris-Regions header
-	output, err := lm.s3Client.PutObject(ctx, input, func(o *s3.Options) {
+	output, err := l.s3Client.PutObject(ctx, input, func(o *s3.Options) {
 		o.APIOptions = append(o.APIOptions, func(stack *middleware.Stack) error {
 			return stack.Build.Add(middleware.BuildMiddlewareFunc("AddTigrisRegionsHeader", func(
 				ctx context.Context, in middleware.BuildInput, next middleware.BuildHandler,
@@ -232,7 +260,7 @@ func (lm *LeaseManager) tryAcquireLease(ctx context.Context, ifMatch string) (bo
 			) {
 				switch v := in.Request.(type) {
 				case *smithyhttp.Request:
-					v.Header.Set("X-Tigris-Regions", lm.primaryRegion)
+					v.Header.Set("X-Tigris-Regions", l.primaryRegion)
 				}
 				return next.HandleBuild(ctx, in)
 			}), middleware.After)
@@ -259,11 +287,11 @@ func (lm *LeaseManager) tryAcquireLease(ctx context.Context, ifMatch string) (bo
 	}
 
 	// Write etag to file immediately upon successful acquisition
-	if err := os.WriteFile(lm.etagFilePath, []byte(etag), 0644); err != nil {
+	if err := os.WriteFile(l.etagFilePath, []byte(etag), 0644); err != nil {
 		fmt.Printf("Warning: failed to write etag file: %v\n", err)
 		// Don't fail the lease acquisition for file write errors
 	} else {
-		fmt.Printf("Successfully wrote etag to file: %s\n", lm.etagFilePath)
+		fmt.Printf("Successfully wrote etag to file: %s\n", l.etagFilePath)
 	}
 
 	fmt.Printf("Successfully acquired/updated lease with new ETag: %s\n", etag)
@@ -271,14 +299,14 @@ func (lm *LeaseManager) tryAcquireLease(ctx context.Context, ifMatch string) (bo
 }
 
 // checkCurrentLease reads the current lease and returns the lease info and whether it's expired
-func (lm *LeaseManager) checkCurrentLease(ctx context.Context) (*LeaseInfo, bool, error) {
+func (l *Leaser) checkCurrentLease(ctx context.Context) (*LeaseInfo, bool, error) {
 	// Get the lease object
 	getInput := &s3.GetObjectInput{
-		Bucket: aws.String(lm.bucketName),
-		Key:    aws.String(lm.leaseKey),
+		Bucket: aws.String(l.bucketName),
+		Key:    aws.String(l.leaseKey),
 	}
 
-	output, err := lm.s3Client.GetObject(ctx, getInput)
+	output, err := l.s3Client.GetObject(ctx, getInput)
 	if err != nil {
 		// If object doesn't exist, lease is available
 		if strings.Contains(err.Error(), "NoSuchKey") || strings.Contains(err.Error(), "404") {
@@ -313,13 +341,13 @@ func (lm *LeaseManager) checkCurrentLease(ctx context.Context) (*LeaseInfo, bool
 }
 
 // getCurrentETag gets the current ETag of the lease object
-func (lm *LeaseManager) getCurrentETag(ctx context.Context) (string, error) {
+func (l *Leaser) getCurrentETag(ctx context.Context) (string, error) {
 	headInput := &s3.HeadObjectInput{
-		Bucket: aws.String(lm.bucketName),
-		Key:    aws.String(lm.leaseKey),
+		Bucket: aws.String(l.bucketName),
+		Key:    aws.String(l.leaseKey),
 	}
 
-	output, err := lm.s3Client.HeadObject(ctx, headInput)
+	output, err := l.s3Client.HeadObject(ctx, headInput)
 	if err != nil {
 		return "", fmt.Errorf("failed to head lease object: %w", err)
 	}
@@ -332,33 +360,39 @@ func (lm *LeaseManager) getCurrentETag(ctx context.Context) (string, error) {
 }
 
 // waitForLease waits for the lease to become available
-func (lm *LeaseManager) waitForLease(ctx context.Context) error {
+func (l *Leaser) waitForLease(ctx context.Context) error {
 	checkInterval := 5 * time.Second
 	maxCheckInterval := 1 * time.Minute
 
+	// Check immediately first, don't wait
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(checkInterval):
-			currentLease, expired, err := lm.checkCurrentLease(ctx)
-			if err != nil {
-				fmt.Printf("Error checking current lease: %v\n", err)
-				continue
-			}
-
+		currentLease, expired, err := l.checkCurrentLease(ctx)
+		if err != nil {
+			fmt.Printf("Error checking current lease: %v\n", err)
+		} else {
 			if currentLease == nil || expired {
 				fmt.Println("Lease is now available, attempting to acquire...")
 
-				// Try to acquire with empty etag since lease expired or doesn't exist
-				acquired, etag, err := lm.tryAcquireLease(ctx, "")
+				// Get current etag and try to acquire with it
+				var ifMatch string
+				if currentLease != nil && expired {
+					// Lease exists but is expired, use current ETag
+					currentETag, err := l.getCurrentETag(ctx)
+					if err != nil {
+						fmt.Printf("Error getting current etag: %v\n", err)
+					} else {
+						ifMatch = currentETag
+					}
+				}
+				// If currentLease is nil, use empty string (new lease)
+
+				acquired, etag, err := l.tryAcquireLease(ctx, ifMatch)
 				if err != nil {
 					fmt.Printf("Error trying to acquire lease: %v\n", err)
 				} else if acquired {
-					// etag file is already written by tryAcquireLease
-					lm.currentETag = etag
+					l.currentETag = etag
 					fmt.Printf("Successfully acquired lease after waiting with etag: %s\n", etag)
-					lm.startLeaseRefresh()
+					l.startLeaseRefresh()
 					return nil
 				}
 			} else {
@@ -366,7 +400,10 @@ func (lm *LeaseManager) waitForLease(ctx context.Context) error {
 				timeUntilExpiry := time.Until(currentLease.ExpiresAt)
 
 				// Adjust check interval based on time until expiry
-				if timeUntilExpiry < 30*time.Second {
+				if timeUntilExpiry <= 0 {
+					// Already expired, check immediately on next iteration
+					checkInterval = 1 * time.Millisecond
+				} else if timeUntilExpiry < 30*time.Second {
 					checkInterval = 5 * time.Second
 				} else if timeUntilExpiry < 5*time.Minute {
 					checkInterval = 15 * time.Second
@@ -381,19 +418,27 @@ func (lm *LeaseManager) waitForLease(ctx context.Context) error {
 					currentLease.MachineID, timeUntilExpiry.Round(time.Second), checkInterval)
 			}
 		}
+
+		// Wait before next check
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(checkInterval):
+			// Continue to next iteration
+		}
 	}
 }
 
 // startLeaseRefresh starts the background lease refresh goroutine
-func (lm *LeaseManager) startLeaseRefresh() {
-	lm.refreshTicker = time.NewTicker(30 * time.Minute) // Refresh every 30 minutes
+func (l *Leaser) startLeaseRefresh() {
+	l.refreshTicker = time.NewTicker(30 * time.Minute) // Refresh every 30 minutes
 
 	go func() {
 		for {
 			select {
-			case <-lm.refreshTicker.C:
+			case <-l.refreshTicker.C:
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				acquired, etag, err := lm.tryAcquireLease(ctx, lm.currentETag)
+				acquired, etag, err := l.tryAcquireLease(ctx, l.currentETag)
 				cancel()
 
 				if err != nil {
@@ -401,21 +446,12 @@ func (lm *LeaseManager) startLeaseRefresh() {
 				} else if !acquired {
 					fmt.Println("WARNING: Failed to refresh lease, another instance may have taken over")
 				} else {
-					lm.currentETag = etag
-					// etag file is already updated by tryAcquireLease
+					l.currentETag = etag
 					fmt.Printf("Successfully refreshed lease with etag: %s\n", etag)
 				}
-			case <-lm.stopCh:
+			case <-l.stopCh:
 				return
 			}
 		}
 	}()
-}
-
-// Stop stops the lease refresh
-func (lm *LeaseManager) Stop() {
-	if lm.refreshTicker != nil {
-		lm.refreshTicker.Stop()
-	}
-	close(lm.stopCh)
 }

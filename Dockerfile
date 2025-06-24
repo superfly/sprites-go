@@ -21,6 +21,7 @@ COPY client/go.mod client/go.sum* ./client/
 COPY packages/juicefs/go.mod packages/juicefs/go.sum* ./packages/juicefs/
 COPY packages/supervisor/go.mod packages/supervisor/go.sum* ./packages/supervisor/
 COPY packages/wsexec/go.mod packages/wsexec/go.sum* ./packages/wsexec/
+COPY packages/leaser/go.mod packages/leaser/go.sum* ./packages/leaser/
 
 # Download dependencies for all modules in the workspace
 RUN go mod download -x
@@ -56,6 +57,7 @@ COPY client/go.mod client/go.sum* ./client/
 COPY packages/juicefs/go.mod packages/juicefs/go.sum* ./packages/juicefs/
 COPY packages/supervisor/go.mod packages/supervisor/go.sum* ./packages/supervisor/
 COPY packages/wsexec/go.mod packages/wsexec/go.sum* ./packages/wsexec/
+COPY packages/leaser/go.mod packages/leaser/go.sum* ./packages/leaser/
 
 # Download dependencies for all modules in the workspace
 RUN go mod download -x
