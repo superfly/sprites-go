@@ -149,9 +149,11 @@ func TestProcessCrashAfter5s(t *testing.T) {
 		t.Errorf("Process %d not running after start: %v", pid, err)
 	}
 
-	// Read output in background
-	var output strings.Builder
+	// Read output in background using channel-based communication
+	outputCh := make(chan string, 1)
+
 	go func() {
+		var output strings.Builder
 		buf := make([]byte, 1024)
 		for {
 			n, err := stdout.Read(buf)
@@ -162,6 +164,8 @@ func TestProcessCrashAfter5s(t *testing.T) {
 				output.Write(buf[:n])
 			}
 		}
+		// Send the complete output through channel when done
+		outputCh <- output.String()
 	}()
 
 	// Wait for crash
@@ -179,8 +183,9 @@ func TestProcessCrashAfter5s(t *testing.T) {
 		t.Error("Expected error from crash, got nil")
 	}
 
-	// Check output contains countdown
-	outputStr := output.String()
+	// Get the output from the channel (safe after process has exited)
+	outputStr := <-outputCh
+
 	if !strings.Contains(outputStr, "Will crash in 5 seconds") {
 		t.Errorf("Expected countdown message in output, got: %s", outputStr)
 	}
