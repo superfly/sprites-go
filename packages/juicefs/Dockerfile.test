@@ -15,10 +15,10 @@ RUN apk add --no-cache \
     util-linux
 
 # Install JuiceFS
-RUN wget -q https://github.com/juicedata/juicefs/releases/download/v1.1.2/juicefs-1.1.2-linux-amd64.tar.gz && \
-    tar -xzf juicefs-1.1.2-linux-amd64.tar.gz && \
+RUN wget -q https://github.com/juicedata/juicefs/releases/download/v1.2.3/juicefs-1.2.3-linux-amd64.tar.gz && \
+    tar -xzf juicefs-1.2.3-linux-amd64.tar.gz && \
     mv juicefs /usr/local/bin/ && \
-    rm -f juicefs-1.1.2-linux-amd64.tar.gz && \
+    rm -f juicefs-1.2.3-linux-amd64.tar.gz && \
     chmod +x /usr/local/bin/juicefs
 
 # Install Litestream
@@ -45,6 +45,9 @@ COPY packages/juicefs/ ./
 
 # Enable FUSE (required for JuiceFS mount)
 RUN echo "user_allow_other" >> /etc/fuse.conf
+
+# Create symlink for fusermount (JuiceFS expects fusermount but Alpine has fusermount3)
+RUN ln -s /usr/bin/fusermount3 /bin/fusermount
 
 # Run tests with coverage (including integration tests with build tag) as root
 CMD ["go", "test", "-v", "-race", "-tags=integration", "-coverprofile=coverage.out", "-covermode=atomic", "-run", "^Test", "./..."]

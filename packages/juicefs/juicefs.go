@@ -280,7 +280,7 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	mountArgs := []string{
 		"mount",
 		"--no-usage-report",
-		"-o", "writeback_cache",
+		"-o", "writeback_cache,fsname=SpriteFS",
 		"--writeback",
 		"--upload-delay=1m",
 		"--cache-dir", cacheDir,
