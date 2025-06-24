@@ -41,7 +41,6 @@ func TestLargeDataTransfer(t *testing.T) {
 	cmd := wsexec.Command(req, "cat")
 	cmd.Stdin = stdin
 	cmd.Stdout = &stdout
-	cmd.PingInterval = 100 * time.Millisecond
 
 	start := time.Now()
 	if err := cmd.Run(); err != nil {
@@ -91,7 +90,6 @@ func TestBinaryDataIntegrity(t *testing.T) {
 	cmd := wsexec.Command(req, "cat")
 	cmd.Stdin = stdin
 	cmd.Stdout = &stdout
-	cmd.PingInterval = 100 * time.Millisecond
 
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Command failed: %v", err)
@@ -137,7 +135,6 @@ func BenchmarkSmallCommands(b *testing.B) {
 		var stdout bytes.Buffer
 		cmd := wsexec.Command(req, "echo", "benchmark")
 		cmd.Stdout = &stdout
-		cmd.PingInterval = 100 * time.Millisecond
 
 		if err := cmd.Run(); err != nil {
 			b.Fatalf("Command failed: %v", err)
@@ -179,7 +176,6 @@ func BenchmarkLargeDataTransfer(b *testing.B) {
 		cmd := wsexec.Command(req, "cat")
 		cmd.Stdin = stdin
 		cmd.Stdout = &stdout
-		cmd.PingInterval = 100 * time.Millisecond
 
 		if err := cmd.Run(); err != nil {
 			b.Fatalf("Command failed: %v", err)

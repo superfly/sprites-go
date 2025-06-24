@@ -83,7 +83,6 @@ func TestServerCommandWithEnvironment(t *testing.T) {
 	var stdout bytes.Buffer
 	cmd := wsexec.Command(req, "sh", "-c", "echo $TEST_VAR")
 	cmd.Stdout = &stdout
-	cmd.PingInterval = 100 * time.Millisecond
 
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Command failed: %v", err)
@@ -119,7 +118,6 @@ func TestServerCommandWithWorkingDirectory(t *testing.T) {
 	var stdout bytes.Buffer
 	cmd := wsexec.Command(req, "pwd")
 	cmd.Stdout = &stdout
-	cmd.PingInterval = 100 * time.Millisecond
 
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Command failed: %v", err)
@@ -157,7 +155,6 @@ func TestServerCommandContextCancellation(t *testing.T) {
 	req.URL.Scheme = "ws"
 
 	cmd := wsexec.Command(req, "sleep", "10")
-	cmd.PingInterval = 50 * time.Millisecond
 
 	start := time.Now()
 	err = cmd.Run()

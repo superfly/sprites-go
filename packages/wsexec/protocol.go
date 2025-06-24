@@ -3,173 +3,134 @@ package wsexec
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
-	"sync"
-	"time"
+	"io"
 
 	gorillaws "github.com/gorilla/websocket"
 )
 
-// MessageType represents the type of WebSocket message
-type MessageType uint8
+// StreamID represents the stream identifier for non-PTY mode
+type StreamID byte
 
 const (
-	MessageTypeStdin MessageType = iota
-	MessageTypeStdout
-	MessageTypeStderr
-	MessageTypeStdinEOF
-	MessageTypeExit
-	MessageTypeError
-	MessageTypeResize
-	MessageTypePing
-	MessageTypePong
+	StreamStdin    StreamID = 0x00
+	StreamStdout   StreamID = 0x01
+	StreamStderr   StreamID = 0x02
+	StreamExit     StreamID = 0x03
+	StreamStdinEOF StreamID = 0x04 // Explicit EOF signal
 )
 
-// Message represents a WebSocket message
-type Message struct {
-	Type MessageType `json:"type"`
-	Data []byte      `json:"data"`
+// ControlMessage represents a control message sent via text WebSocket frames
+type ControlMessage struct {
+	Type string `json:"type"`
+	// Resize fields
+	Cols uint16 `json:"cols,omitempty"`
+	Rows uint16 `json:"rows,omitempty"`
 }
 
-// ResizeMessage represents a terminal resize message
-type ResizeMessage struct {
-	Width  uint16 `json:"width"`
-	Height uint16 `json:"height"`
-}
-
-// ExitMessage represents a command exit message
-type ExitMessage struct {
-	Code int `json:"code"`
-}
-
-// ErrorMessage represents an error message
-type ErrorMessage struct {
-	Error string `json:"error"`
-}
-
-// Adapter wraps a gorilla WebSocket connection for our protocol
+// Adapter wraps a gorilla WebSocket connection for our simplified protocol
 type Adapter struct {
-	conn   *gorillaws.Conn
-	mu     sync.Mutex
-	closed bool
+	conn      *gorillaws.Conn
+	isPTY     bool // Whether this is a PTY session (transparent byte mode)
+	writeChan chan writeRequest
+	done      chan struct{}
+}
+
+type writeRequest struct {
+	messageType int
+	data        []byte
+	result      chan error
 }
 
 // NewAdapter creates a new WebSocket adapter
-func NewAdapter(conn *gorillaws.Conn) *Adapter {
-	return &Adapter{
-		conn: conn,
+func NewAdapter(conn *gorillaws.Conn, isPTY bool) *Adapter {
+	a := &Adapter{
+		conn:      conn,
+		isPTY:     isPTY,
+		writeChan: make(chan writeRequest, 100),
+		done:      make(chan struct{}),
+	}
+
+	// Start the write loop
+	go a.writeLoop()
+
+	return a
+}
+
+// writeLoop handles all writes to ensure only one goroutine writes at a time
+func (a *Adapter) writeLoop() {
+	for {
+		select {
+		case req := <-a.writeChan:
+			err := a.conn.WriteMessage(req.messageType, req.data)
+			if req.result != nil {
+				req.result <- err
+			}
+		case <-a.done:
+			return
+		}
 	}
 }
 
-// WriteMessage writes a message to the WebSocket
-func (a *Adapter) WriteMessage(msg *Message) error {
+// WriteRaw writes raw bytes directly to the WebSocket (for PTY mode)
+func (a *Adapter) WriteRaw(data []byte) error {
+	result := make(chan error, 1)
+	select {
+	case a.writeChan <- writeRequest{
+		messageType: gorillaws.BinaryMessage,
+		data:        data,
+		result:      result,
+	}:
+		return <-result
+	case <-a.done:
+		return errors.New("adapter closed")
+	}
+}
+
+// WriteControl writes a control message as a text WebSocket frame
+func (a *Adapter) WriteControl(msg *ControlMessage) error {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
 
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	result := make(chan error, 1)
+	select {
+	case a.writeChan <- writeRequest{
+		messageType: gorillaws.TextMessage,
+		data:        data,
+		result:      result,
+	}:
+		return <-result
+	case <-a.done:
+		return errors.New("adapter closed")
+	}
+}
 
-	if a.closed {
-		return gorillaws.ErrCloseSent
+// WriteStream writes data with a stream ID prefix (for non-PTY mode)
+func (a *Adapter) WriteStream(stream StreamID, data []byte) error {
+	if a.isPTY {
+		// In PTY mode, just write raw data
+		return a.WriteRaw(data)
 	}
 
-	return a.conn.WriteMessage(gorillaws.BinaryMessage, data)
+	// Prepend stream ID to data
+	msg := make([]byte, len(data)+1)
+	msg[0] = byte(stream)
+	copy(msg[1:], data)
+
+	return a.WriteRaw(msg)
 }
 
-// WriteStdin writes stdin data
-func (a *Adapter) WriteStdin(data []byte) error {
-	return a.WriteMessage(&Message{
-		Type: MessageTypeStdin,
-		Data: data,
-	})
-}
-
-// WriteStdinEOF signals that stdin has been closed
-func (a *Adapter) WriteStdinEOF() error {
-	return a.WriteMessage(&Message{
-		Type: MessageTypeStdinEOF,
-		Data: []byte{},
-	})
-}
-
-// WriteStdout writes stdout data
-func (a *Adapter) WriteStdout(data []byte) error {
-	return a.WriteMessage(&Message{
-		Type: MessageTypeStdout,
-		Data: data,
-	})
-}
-
-// WriteStderr writes stderr data
-func (a *Adapter) WriteStderr(data []byte) error {
-	return a.WriteMessage(&Message{
-		Type: MessageTypeStderr,
-		Data: data,
-	})
-}
-
-// WriteResize writes a resize message
-func (a *Adapter) WriteResize(width, height uint16) error {
-	resize := ResizeMessage{Width: width, Height: height}
-	data, err := json.Marshal(resize)
-	if err != nil {
-		return err
-	}
-	return a.WriteMessage(&Message{
-		Type: MessageTypeResize,
-		Data: data,
-	})
-}
-
-// WriteExit writes an exit message
+// WriteExit writes an exit code message
 func (a *Adapter) WriteExit(code int) error {
-	exit := ExitMessage{Code: code}
-	data, err := json.Marshal(exit)
-	if err != nil {
-		return err
+	if code < 0 || code > 255 {
+		code = 255 // Cap at 255 for byte representation
 	}
-	return a.WriteMessage(&Message{
-		Type: MessageTypeExit,
-		Data: data,
-	})
+	return a.WriteStream(StreamExit, []byte{byte(code)})
 }
 
-// WriteError writes an error message
-func (a *Adapter) WriteError(err error) error {
-	if err == nil {
-		return nil
-	}
-	errMsg := ErrorMessage{Error: err.Error()}
-	data, err := json.Marshal(errMsg)
-	if err != nil {
-		return err
-	}
-	return a.WriteMessage(&Message{
-		Type: MessageTypeError,
-		Data: data,
-	})
-}
-
-// WritePing writes a ping message
-func (a *Adapter) WritePing() error {
-	return a.WriteMessage(&Message{
-		Type: MessageTypePing,
-		Data: nil,
-	})
-}
-
-// WritePong writes a pong message
-func (a *Adapter) WritePong() error {
-	return a.WriteMessage(&Message{
-		Type: MessageTypePong,
-		Data: nil,
-	})
-}
-
-// ReadMessage reads a message from the WebSocket
-func (a *Adapter) ReadMessage() (*Message, error) {
+// ReadRaw reads raw bytes from the WebSocket
+func (a *Adapter) ReadRaw() ([]byte, error) {
 	messageType, data, err := a.conn.ReadMessage()
 	if err != nil {
 		return nil, err
@@ -180,64 +141,111 @@ func (a *Adapter) ReadMessage() (*Message, error) {
 		return nil, errors.New("invalid message type: only binary messages are supported")
 	}
 
-	var msg Message
-	if err := json.Unmarshal(data, &msg); err != nil {
-		return nil, err
+	return data, nil
+}
+
+// ReadStream reads a message and extracts the stream ID (for non-PTY mode)
+func (a *Adapter) ReadStream() (StreamID, []byte, error) {
+	data, err := a.ReadRaw()
+	if err != nil {
+		return 0, nil, err
 	}
 
-	return &msg, nil
+	if a.isPTY {
+		// In PTY mode, all data is stdin
+		return StreamStdin, data, nil
+	}
+
+	if len(data) == 0 {
+		return 0, nil, errors.New("empty message")
+	}
+
+	stream := StreamID(data[0])
+
+	return stream, data[1:], nil
 }
 
 // Close closes the WebSocket connection
 func (a *Adapter) Close() error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if a.closed {
-		return nil
-	}
-
-	a.closed = true
-
-	// Send close message with timeout
-	deadline := time.Now().Add(5 * time.Second)
-	a.conn.WriteControl(gorillaws.CloseMessage, gorillaws.FormatCloseMessage(gorillaws.CloseNormalClosure, ""), deadline)
-
+	close(a.done)
 	return a.conn.Close()
 }
 
-// Ping sends a ping message
-func (a *Adapter) Ping() error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+// Read implements io.Reader for PTY mode (raw bytes)
+func (a *Adapter) Read(p []byte) (n int, err error) {
+	if !a.isPTY {
+		return 0, errors.New("Read only supported in PTY mode")
+	}
+	data, err := a.ReadRaw()
+	if err != nil {
+		return 0, err
+	}
+	n = copy(p, data)
+	return n, nil
+}
 
-	if a.closed {
-		return gorillaws.ErrCloseSent
+// Write implements io.Writer for PTY mode (raw bytes)
+func (a *Adapter) Write(p []byte) (n int, err error) {
+	if !a.isPTY {
+		return 0, errors.New("Write only supported in PTY mode")
+	}
+	err = a.WriteRaw(p)
+	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+// streamReader reads from WebSocket for a specific stream
+type streamReader struct {
+	ws       *Adapter
+	streamID StreamID
+	buffer   []byte // Buffer for unread data
+}
+
+func (r *streamReader) Read(p []byte) (n int, err error) {
+	// If we have buffered data, return it first
+	if len(r.buffer) > 0 {
+		n = copy(p, r.buffer)
+		r.buffer = r.buffer[n:]
+		return n, nil
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
-	return a.conn.WriteControl(gorillaws.PingMessage, []byte{}, deadline)
-}
+	// Read new messages
+	for {
+		stream, data, err := r.ws.ReadStream()
+		if err != nil {
+			return 0, err
+		}
 
-// DecodeResize decodes resize message data
-func DecodeResize(data []byte) (width, height uint16, err error) {
-	var resize ResizeMessage
-	err = json.Unmarshal(data, &resize)
-	return resize.Width, resize.Height, err
-}
+		// Handle explicit EOF message
+		if stream == StreamStdinEOF {
+			return 0, io.EOF
+		}
 
-// DecodeExit decodes exit message data
-func DecodeExit(data []byte) (code int, err error) {
-	var exit ExitMessage
-	err = json.Unmarshal(data, &exit)
-	return exit.Code, err
-}
-
-// DecodeError decodes error message data
-func DecodeError(data []byte) error {
-	var errMsg ErrorMessage
-	if err := json.Unmarshal(data, &errMsg); err != nil {
-		return err
+		// Only read data for our stream
+		if stream == r.streamID {
+			n = copy(p, data)
+			// If we couldn't fit all data, buffer the rest
+			if n < len(data) {
+				r.buffer = data[n:]
+			}
+			return n, nil
+		}
+		// Ignore data for other streams and keep reading
 	}
-	return fmt.Errorf("%s", errMsg.Error)
+}
+
+// streamWriter writes to WebSocket with a specific stream ID
+type streamWriter struct {
+	ws       *Adapter
+	streamID StreamID
+}
+
+func (w *streamWriter) Write(p []byte) (n int, err error) {
+	err = w.ws.WriteStream(w.streamID, p)
+	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }

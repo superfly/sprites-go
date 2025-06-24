@@ -2,6 +2,7 @@ package wsexec
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -125,6 +126,8 @@ func (c *ServerCommand) Handle(w http.ResponseWriter, r *http.Request) error {
 
 	// Set up WebSocket upgrader
 	upgrader := gorillaws.Upgrader{
+		ReadBufferSize:  1024 * 1024, // 1MB buffer
+		WriteBufferSize: 1024 * 1024, // 1MB buffer
 		CheckOrigin: func(r *http.Request) bool {
 			if c.Logger != nil {
 				c.Logger.Debug("ServerCommand.Handle: CheckOrigin called",
@@ -150,11 +153,14 @@ func (c *ServerCommand) Handle(w http.ResponseWriter, r *http.Request) error {
 	}
 	defer conn.Close()
 
+	// Set read limit to allow large messages (10MB)
+	conn.SetReadLimit(10 * 1024 * 1024)
+
 	if c.Logger != nil {
 		c.Logger.Info("ServerCommand.Handle: WebSocket upgrade successful")
 	}
 
-	adapter := NewAdapter(conn)
+	adapter := NewAdapter(conn, c.Tty)
 	defer adapter.Close()
 
 	// Run the command using the ServerCommand's context, fallback to request context
@@ -175,6 +181,10 @@ func (c *ServerCommand) Handle(w http.ResponseWriter, r *http.Request) error {
 	if c.Logger != nil {
 		c.Logger.Debug("ServerCommand.Handle: Command execution completed", "exitCode", exitCode)
 	}
+
+	// Give a moment for any remaining output to be sent
+	// This is important for non-PTY mode where we have separate stdout/stderr streams
+	time.Sleep(50 * time.Millisecond)
 
 	// Send exit code
 	if err := adapter.WriteExit(exitCode); err != nil {
@@ -279,6 +289,70 @@ func (c *ServerCommand) run(ctx context.Context, ws *Adapter) int {
 	}
 }
 
+// handlePTYIO handles the I/O between WebSocket and PTY
+func (c *ServerCommand) handlePTYIO(ctx context.Context, ptmx *os.File, ws *Adapter) {
+	// Create channels to signal completion
+	wsDone := make(chan struct{})
+	ptyDone := make(chan struct{})
+
+	// Handle WebSocket -> PTY (for binary data and control messages)
+	go func() {
+		defer close(wsDone)
+		for {
+			messageType, data, err := ws.conn.ReadMessage()
+			if err != nil {
+				return
+			}
+
+			switch messageType {
+			case gorillaws.BinaryMessage:
+				// Write binary data to PTY
+				ptmx.Write(data)
+			case gorillaws.TextMessage:
+				// Handle control messages
+				var msg ControlMessage
+				if err := json.Unmarshal(data, &msg); err == nil {
+					if msg.Type == "resize" && msg.Cols > 0 && msg.Rows > 0 {
+						if c.Logger != nil {
+							c.Logger.Debug("Received resize message", "cols", msg.Cols, "rows", msg.Rows)
+						}
+						// Apply resize to PTY
+						if err := creackpty.Setsize(ptmx, &creackpty.Winsize{
+							Cols: msg.Cols,
+							Rows: msg.Rows,
+						}); err != nil {
+							if c.Logger != nil {
+								c.Logger.Warn("Failed to resize PTY", "error", err)
+							}
+						}
+					}
+				}
+			}
+		}
+	}()
+
+	// Handle PTY -> WebSocket
+	go func() {
+		defer close(ptyDone)
+		io.Copy(ws, ptmx)
+		if c.Logger != nil {
+			c.Logger.Debug("PTY closed, stopping I/O copy")
+		}
+	}()
+
+	// Wait for either WebSocket or PTY to close
+	select {
+	case <-wsDone:
+		if c.Logger != nil {
+			c.Logger.Debug("WebSocket closed, terminating PTY I/O")
+		}
+	case <-ptyDone:
+		if c.Logger != nil {
+			c.Logger.Debug("PTY closed, terminating WebSocket I/O")
+		}
+	}
+}
+
 // runWithNewPTY runs command with newly allocated PTY
 func (c *ServerCommand) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, ws *Adapter) int {
 	// Ensure TERM is set for PTY mode
@@ -307,7 +381,6 @@ func (c *ServerCommand) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, ws *Ad
 		if c.Logger != nil {
 			c.Logger.Error("Failed to start with PTY", "error", err)
 		}
-		ws.WriteError(err)
 		return -1
 	}
 	defer ptmx.Close()
@@ -316,62 +389,11 @@ func (c *ServerCommand) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, ws *Ad
 		c.Logger.Debug("PTY created successfully")
 	}
 
-	// Handle PTY I/O
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	// Channel to signal I/O completion
-	ioDone := make(chan struct{}, 3)
-
-	// Handle WebSocket -> PTY
-	go func() {
-		c.handleWebSocketToPTY(ctx, ws, ptmx)
-		ioDone <- struct{}{}
-	}()
-
-	// Handle PTY -> WebSocket
-	go func() {
-		c.handlePTYToWebSocket(ctx, ptmx, ws)
-		ioDone <- struct{}{}
-	}()
-
-	// Handle ping/pong
-	go func() {
-		c.handlePings(ctx, ws)
-		ioDone <- struct{}{}
-	}()
+	// Handle all PTY I/O
+	c.handlePTYIO(ctx, ptmx, ws)
 
 	// Wait for command
 	cmdErr := cmd.Wait()
-
-	// Cancel context immediately to stop I/O goroutines
-	cancel()
-
-	// Close the PTY immediately when command exits
-	// This ensures that any readers get EOF
-	ptmx.Close()
-
-	// Wait for I/O to finish with a shorter timeout
-	done := make(chan struct{})
-	go func() {
-		for i := 0; i < 3; i++ {
-			<-ioDone
-		}
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		// All I/O completed cleanly
-		if c.Logger != nil {
-			c.Logger.Debug("All I/O goroutines completed cleanly")
-		}
-	case <-time.After(100 * time.Millisecond):
-		// Very short timeout since PTY close should trigger immediate EOF
-		if c.Logger != nil {
-			c.Logger.Debug("I/O cleanup timed out (this is normal)")
-		}
-	}
 
 	// Get exit code
 	if cmdErr != nil {
@@ -391,7 +413,6 @@ func (c *ServerCommand) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd,
 		if c.Logger != nil {
 			c.Logger.Error("Failed to create console socket", "error", err)
 		}
-		ws.WriteError(err)
 		return -1
 	}
 	defer consoleSocket.Close()
@@ -419,7 +440,6 @@ func (c *ServerCommand) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd,
 		if c.Logger != nil {
 			c.Logger.Error("Failed to start command", "error", err)
 		}
-		ws.WriteError(err)
 		return -1
 	}
 
@@ -429,7 +449,6 @@ func (c *ServerCommand) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd,
 		if c.Logger != nil {
 			c.Logger.Error("Failed to receive PTY from console socket", "error", err)
 		}
-		ws.WriteError(err)
 		cmd.Process.Kill()
 		cmd.Wait()
 		return -1
@@ -448,61 +467,11 @@ func (c *ServerCommand) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd,
 		// Continue anyway - PTY will work but might have echo issues
 	}
 
-	// Now handle I/O with the PTY we received from crun
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	// Channel to signal I/O completion
-	ioDone := make(chan struct{}, 3)
-
-	// Handle WebSocket -> PTY
-	go func() {
-		c.handleWebSocketToPTY(ctx, ws, ptyFile)
-		ioDone <- struct{}{}
-	}()
-
-	// Handle PTY -> WebSocket
-	go func() {
-		c.handlePTYToWebSocket(ctx, ptyFile, ws)
-		ioDone <- struct{}{}
-	}()
-
-	// Handle ping/pong
-	go func() {
-		c.handlePings(ctx, ws)
-		ioDone <- struct{}{}
-	}()
+	// Handle all PTY I/O
+	c.handlePTYIO(ctx, ptyFile, ws)
 
 	// Wait for command
 	cmdErr := cmd.Wait()
-
-	// Cancel context immediately to stop I/O goroutines
-	cancel()
-
-	// Close the PTY immediately when command exits
-	ptyFile.Close()
-
-	// Wait for I/O to finish with a shorter timeout
-	done := make(chan struct{})
-	go func() {
-		for i := 0; i < 3; i++ {
-			<-ioDone
-		}
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		// All I/O completed cleanly
-		if c.Logger != nil {
-			c.Logger.Debug("All I/O goroutines completed cleanly")
-		}
-	case <-time.After(100 * time.Millisecond):
-		// Very short timeout since PTY close should trigger immediate EOF
-		if c.Logger != nil {
-			c.Logger.Debug("I/O cleanup timed out (this is normal)")
-		}
-	}
 
 	// Get exit code
 	if cmdErr != nil {
@@ -519,60 +488,47 @@ func (c *ServerCommand) runWithoutPTY(ctx context.Context, cmd *exec.Cmd, ws *Ad
 	// Set up pipes
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		ws.WriteError(err)
 		return -1
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		ws.WriteError(err)
 		return -1
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		ws.WriteError(err)
 		return -1
 	}
 
 	// Start command
 	if err := cmd.Start(); err != nil {
-		ws.WriteError(err)
 		return -1
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	// Channel to signal I/O completion
-	ioDone := make(chan struct{}, 3)
+	// Create readers/writers for the WebSocket streams
+	stdinReader := &streamReader{ws: ws, streamID: StreamStdin}
+	stdoutWriter := &streamWriter{ws: ws, streamID: StreamStdout}
+	stderrWriter := &streamWriter{ws: ws, streamID: StreamStderr}
 
 	// Handle stdin
 	go func() {
 		defer stdin.Close()
-		c.handleWebSocketInput(ctx, ws, stdin)
-		ioDone <- struct{}{}
+		io.Copy(stdin, stdinReader)
 	}()
 
 	// Handle stdout
 	go func() {
-		c.streamToWebSocket(ctx, stdout, ws, MessageTypeStdout)
-		ioDone <- struct{}{}
+		io.Copy(stdoutWriter, stdout)
 	}()
 
 	// Handle stderr
 	go func() {
-		c.streamToWebSocket(ctx, stderr, ws, MessageTypeStderr)
-		ioDone <- struct{}{}
+		io.Copy(stderrWriter, stderr)
 	}()
 
-	// Wait for command
+	// Wait for command to complete
 	err = cmd.Wait()
-	cancel()
 
-	// Wait for I/O to complete
-	for i := 0; i < 3; i++ {
-		<-ioDone
-	}
-
+	// Return exit code
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return exitErr.ExitCode()
@@ -580,200 +536,4 @@ func (c *ServerCommand) runWithoutPTY(ctx context.Context, cmd *exec.Cmd, ws *Ad
 		return -1
 	}
 	return 0
-}
-
-// handleWebSocketToPTY handles input from WebSocket to PTY
-func (c *ServerCommand) handleWebSocketToPTY(ctx context.Context, ws *Adapter, ptmx io.Writer) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			msg, err := ws.ReadMessage()
-			if err != nil {
-				return
-			}
-
-			switch msg.Type {
-			case MessageTypeStdin:
-				if _, err := ptmx.Write(msg.Data); err != nil {
-					return
-				}
-			case MessageTypeStdinEOF:
-				// PTY doesn't have a separate stdin to close
-				// Just ignore EOF and continue - the PTY will close when the process exits
-				continue
-			case MessageTypeResize:
-				// Handle resize if PTY supports it
-				width, height, _ := DecodeResize(msg.Data)
-
-				// Try the Setsize method first (for creack/pty objects)
-				if resizer, ok := ptmx.(interface{ Setsize(rows, cols uint16) error }); ok {
-					if err := resizer.Setsize(height, width); err != nil && c.Logger != nil {
-						c.Logger.Warn("Failed to resize PTY", "error", err)
-					}
-				} else if f, ok := ptmx.(*os.File); ok {
-					// For plain file descriptors (like from console socket), use creack/pty
-					winsize := &creackpty.Winsize{
-						Rows: height,
-						Cols: width,
-					}
-					if err := creackpty.Setsize(f, winsize); err != nil && c.Logger != nil {
-						c.Logger.Warn("Failed to resize PTY file", "error", err)
-					} else if c.Logger != nil {
-						c.Logger.Debug("Resized PTY", "width", width, "height", height)
-					}
-				}
-			case MessageTypePing:
-				ws.WritePong()
-			}
-		}
-	}
-}
-
-// handlePTYToWebSocket handles output from PTY to WebSocket
-func (c *ServerCommand) handlePTYToWebSocket(ctx context.Context, ptmx io.Reader, ws *Adapter) {
-	buf := make([]byte, 4096)
-	totalRead := 0
-
-	// Use a goroutine to perform the blocking read
-	readChan := make(chan struct {
-		n   int
-		err error
-	}, 1)
-
-	go func() {
-		defer close(readChan)
-		for {
-			n, err := ptmx.Read(buf)
-			select {
-			case readChan <- struct {
-				n   int
-				err error
-			}{n, err}:
-				if err != nil {
-					return // EOF or other error - stop reading
-				}
-			case <-ctx.Done():
-				return // Context cancelled
-			}
-		}
-	}()
-
-	for {
-		select {
-		case <-ctx.Done():
-			if c.Logger != nil {
-				c.Logger.Debug("PTY reader: context done", "totalRead", totalRead)
-			}
-			return
-		case result, ok := <-readChan:
-			if !ok {
-				// Channel closed - reader goroutine exited
-				if c.Logger != nil {
-					c.Logger.Debug("PTY reader: read channel closed", "totalRead", totalRead)
-				}
-				return
-			}
-
-			if result.n > 0 {
-				totalRead += result.n
-				if c.Logger != nil {
-					c.Logger.Debug("PTY reader: read data", "bytes", result.n, "data", string(buf[:result.n]))
-				}
-				if err := ws.WriteStdout(buf[:result.n]); err != nil {
-					if c.Logger != nil {
-						c.Logger.Error("PTY reader: write error", "error", err)
-					}
-					return
-				}
-			}
-
-			if result.err != nil {
-				// EOF is expected when command finishes, don't log as error
-				if c.Logger != nil && result.err != io.EOF {
-					c.Logger.Debug("PTY reader: read error", "error", result.err, "totalRead", totalRead)
-				} else if c.Logger != nil && result.err == io.EOF {
-					c.Logger.Debug("PTY reader: command completed", "totalRead", totalRead)
-				}
-				return
-			}
-		}
-	}
-}
-
-// handleWebSocketInput handles stdin from WebSocket
-func (c *ServerCommand) handleWebSocketInput(ctx context.Context, ws *Adapter, stdin io.Writer) {
-	stdinCloser, ok := stdin.(io.Closer)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			msg, err := ws.ReadMessage()
-			if err != nil {
-				return
-			}
-
-			switch msg.Type {
-			case MessageTypeStdin:
-				if _, err := stdin.Write(msg.Data); err != nil {
-					return
-				}
-			case MessageTypeStdinEOF:
-				// Close stdin to signal EOF to the command
-				if ok {
-					stdinCloser.Close()
-				}
-				return
-			case MessageTypePing:
-				ws.WritePong()
-			}
-		}
-	}
-}
-
-// streamToWebSocket streams from reader to WebSocket
-func (c *ServerCommand) streamToWebSocket(ctx context.Context, r io.Reader, ws *Adapter, msgType MessageType) {
-	buf := make([]byte, 4096)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			n, err := r.Read(buf)
-			if n > 0 {
-				var writeErr error
-				switch msgType {
-				case MessageTypeStdout:
-					writeErr = ws.WriteStdout(buf[:n])
-				case MessageTypeStderr:
-					writeErr = ws.WriteStderr(buf[:n])
-				}
-				if writeErr != nil {
-					return
-				}
-			}
-			if err != nil {
-				return
-			}
-		}
-	}
-}
-
-// handlePings handles ping/pong keepalive
-func (c *ServerCommand) handlePings(ctx context.Context, ws *Adapter) {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if err := ws.Ping(); err != nil {
-				return
-			}
-		}
-	}
 }

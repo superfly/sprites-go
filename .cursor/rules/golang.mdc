@@ -1,0 +1,10 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+- NEVER use mutexes for synchronization
+- Use clean, channel based communications instead of locking
+- When working in packages/**, ONLY work on one package at a time. Make sure tests pass before you move on
+- NEVER cancel contexts when things are working like they're supposed to
+- ALWAYS write the simplest possible clean, idiomatic golang

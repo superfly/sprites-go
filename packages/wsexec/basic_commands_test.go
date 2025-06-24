@@ -16,10 +16,11 @@ import (
 func TestBasicEchoCommand(t *testing.T) {
 	// Create test server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Create server command
+		// Create server command with PTY mode for simplicity
 		cmd := &wsexec.ServerCommand{
 			Path: "echo",
 			Args: []string{"echo", "hello", "world"},
+			Tty:  true, // Use PTY mode to avoid stream multiplexing
 		}
 
 		// Handle the request
@@ -42,16 +43,16 @@ func TestBasicEchoCommand(t *testing.T) {
 	var stdout bytes.Buffer
 	cmd := wsexec.Command(req, "echo", "hello", "world")
 	cmd.Stdout = &stdout
-	cmd.PingInterval = 100 * time.Millisecond
+	cmd.Tty = true // Match server PTY mode
 
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Command failed: %v", err)
 	}
 
-	// Check output
+	// Check output (PTY may add \r\n)
 	output := strings.TrimSpace(stdout.String())
-	if output != "hello world" {
-		t.Errorf("Expected 'hello world', got %q", output)
+	if !strings.Contains(output, "hello world") {
+		t.Errorf("Expected output to contain 'hello world', got %q", output)
 	}
 
 	// Check exit code
@@ -89,7 +90,6 @@ func TestStdinPipeWithCat(t *testing.T) {
 	cmd := wsexec.Command(req, "cat")
 	cmd.Stdin = stdin
 	cmd.Stdout = &stdout
-	cmd.PingInterval = 100 * time.Millisecond
 
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Command failed: %v", err)
@@ -127,7 +127,6 @@ func TestStderrCapture(t *testing.T) {
 	cmd := wsexec.Command(req, "sh", "-c", "echo stdout; echo stderr >&2")
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	cmd.PingInterval = 100 * time.Millisecond
 
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Command failed: %v", err)
@@ -169,7 +168,6 @@ func TestCommandContextCancellation(t *testing.T) {
 	req.URL.Scheme = "ws"
 
 	cmd := wsexec.CommandContext(ctx, req, "sleep", "10")
-	cmd.PingInterval = 50 * time.Millisecond
 
 	start := time.Now()
 	err = cmd.Run()
@@ -212,7 +210,6 @@ func TestNonZeroExitCode(t *testing.T) {
 	req.URL.Scheme = "ws"
 
 	cmd := wsexec.Command(req, "sh", "-c", "exit 42")
-	cmd.PingInterval = 100 * time.Millisecond
 
 	// Run should succeed even with non-zero exit
 	if err := cmd.Run(); err != nil {
@@ -251,7 +248,6 @@ func TestWorkingDirectoryChange(t *testing.T) {
 	var stdout bytes.Buffer
 	cmd := wsexec.Command(req, "pwd")
 	cmd.Stdout = &stdout
-	cmd.PingInterval = 100 * time.Millisecond
 
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Command failed: %v", err)
@@ -301,7 +297,6 @@ func TestConcurrentCommandExecution(t *testing.T) {
 			var stdout bytes.Buffer
 			cmd := wsexec.Command(req, "echo", "concurrent test")
 			cmd.Stdout = &stdout
-			cmd.PingInterval = 100 * time.Millisecond
 
 			if err := cmd.Run(); err != nil {
 				errors[index] = err

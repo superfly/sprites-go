@@ -18,14 +18,13 @@ func Command(req *http.Request, name string, arg ...string) *Cmd {
 		panic("wsexec: Command called with nil request")
 	}
 	return &Cmd{
-		Request:     req,
-		Path:        name,
-		Args:        append([]string{name}, arg...),
-		ctx:         context.Background(),
-		startChan:   make(chan error, 1),
-		exitChan:    make(chan int, 1),
-		doneChan:    make(chan struct{}),
-		adapterChan: make(chan *Adapter, 1),
+		Request:   req,
+		Path:      name,
+		Args:      append([]string{name}, arg...),
+		ctx:       context.Background(),
+		startChan: make(chan error, 1),
+		exitChan:  make(chan int, 1),
+		doneChan:  make(chan struct{}),
 	}
 }
 
@@ -58,22 +57,15 @@ type Cmd struct {
 	Dir string
 	Tty bool
 
-	// PingInterval controls how often to send WebSocket pings (default 5s)
-	PingInterval time.Duration
-
 	// Private fields
-	ctx    context.Context
-	conn   *gorillaws.Conn
-	cancel context.CancelFunc // Add cancel function to stop all goroutines
+	ctx     context.Context
+	conn    *gorillaws.Conn
+	adapter *Adapter
 
 	// Channels for communication
-	startChan   chan error    // Signals start completion
-	exitChan    chan int      // Sends exit code
-	doneChan    chan struct{} // Signals command completion
-	adapterChan chan *Adapter // Stores adapter reference
-
-	// For PTY support
-	ptyMaster *wsPTY
+	startChan chan error    // Signals start completion
+	exitChan  chan int      // Sends exit code
+	doneChan  chan struct{} // Signals command completion
 }
 
 // Run starts the command and waits for it to complete
@@ -99,26 +91,13 @@ func (c *Cmd) Start() error {
 
 // start performs the actual WebSocket connection and setup
 func (c *Cmd) start() {
-	defer func() {
-		// Debug: log when we're about to close doneChan
-		if c.ptyMaster != nil && c.ptyMaster.cmd != nil {
-			// For debugging PTY issues
-			select {
-			case code := <-c.exitChan:
-				// Put it back
-				select {
-				case c.exitChan <- code:
-				default:
-				}
-			default:
-			}
-		}
-		close(c.doneChan) // Always close doneChan
-	}()
+	defer close(c.doneChan)
 
 	// Set up WebSocket dialer
 	dialer := gorillaws.DefaultDialer
 	dialer.HandshakeTimeout = 10 * time.Second
+	dialer.ReadBufferSize = 1024 * 1024  // 1MB buffer
+	dialer.WriteBufferSize = 1024 * 1024 // 1MB buffer
 
 	// Configure TLS if using wss://
 	if c.Request.URL.Scheme == "wss" {
@@ -133,30 +112,19 @@ func (c *Cmd) start() {
 	}
 
 	c.conn = conn
-	adapter := NewAdapter(conn)
-
-	// Send adapter to anyone waiting
-	select {
-	case c.adapterChan <- adapter:
-	default:
-	}
-
-	// Send command configuration if needed
-	// Note: In this implementation, command configuration is sent via HTTP headers or URL
-	// The server should extract command details from the request
+	c.adapter = NewAdapter(conn, c.Tty)
 
 	// Signal successful start
 	c.startChan <- nil
 
 	// Run the I/O loop
-	c.runIO(adapter)
+	c.runIO()
 }
 
 // Wait waits for the command to exit
 func (c *Cmd) Wait() error {
 	select {
 	case <-c.doneChan:
-		// Command finished
 		return nil
 	case <-c.ctx.Done():
 		return c.ctx.Err()
@@ -164,85 +132,16 @@ func (c *Cmd) Wait() error {
 }
 
 // runIO handles the WebSocket I/O loop
-func (c *Cmd) runIO(adapter *Adapter) {
-	defer adapter.Close()
-	defer c.conn.Close()
+func (c *Cmd) runIO() {
+	adapter := c.adapter
+	conn := c.conn
 
-	ctx, cancel := context.WithCancel(c.ctx)
-	c.cancel = cancel // Store cancel function for Close() method
-	defer cancel()
-
-	// If PTY is active, give it the context to manage lifecycle
-	if c.ptyMaster != nil {
-		c.setupPTYContext(ctx, cancel)
-		// PTY handles its own I/O, we just wait for completion
-		<-c.ptyMaster.closed
+	if adapter == nil || conn == nil {
 		return
 	}
 
-	// For non-PTY mode, handle I/O with channels
-	type wsMessage struct {
-		msg *Message
-		err error
-	}
-
-	// Channel for incoming WebSocket messages
-	msgChan := make(chan wsMessage, 1)
-
-	// Start WebSocket reader
-	go func() {
-		for {
-			msg, err := adapter.ReadMessage()
-			select {
-			case msgChan <- wsMessage{msg, err}:
-			case <-ctx.Done():
-				return
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
-
-	// Send EOF if no stdin
-	if c.Stdin == nil {
-		adapter.WriteStdinEOF()
-	}
-
-	// Channels for stdin and ping ticker
-	stdinChan := make(chan []byte, 1)
-	if c.Stdin != nil {
-		go func() {
-			buf := make([]byte, 4096)
-			for {
-				n, err := c.Stdin.Read(buf)
-				if n > 0 {
-					data := make([]byte, n)
-					copy(data, buf[:n])
-					select {
-					case stdinChan <- data:
-					case <-ctx.Done():
-						return
-					}
-				}
-				if err != nil {
-					if err == io.EOF {
-						adapter.WriteStdinEOF()
-					}
-					close(stdinChan)
-					return
-				}
-			}
-		}()
-	}
-
-	// Ping ticker
-	pingInterval := c.PingInterval
-	if pingInterval == 0 {
-		pingInterval = 5 * time.Second
-	}
-	pingTicker := time.NewTicker(pingInterval)
-	defer pingTicker.Stop()
+	defer adapter.Close()
+	defer conn.Close()
 
 	// Get output writers
 	stdout := c.Stdout
@@ -254,56 +153,59 @@ func (c *Cmd) runIO(adapter *Adapter) {
 		stderr = os.Stderr
 	}
 
-	// Main event loop
-	for {
+	// For PTY mode, it's just bidirectional copying
+	if c.Tty {
+		// Copy stdin to WebSocket
+		if c.Stdin != nil {
+			go io.Copy(adapter, c.Stdin)
+		}
+
+		// Copy WebSocket to stdout
+		io.Copy(stdout, adapter)
+
+		// When io.Copy returns, the command is done
+		// Send default exit code
 		select {
-		case <-ctx.Done():
+		case c.exitChan <- 0:
+		default:
+		}
+		return
+	}
+
+	// For non-PTY mode, we need to handle stream multiplexing
+	// Copy stdin to WebSocket in background
+	if c.Stdin != nil {
+		go func() {
+			stdinWriter := &streamWriter{ws: adapter, streamID: StreamStdin}
+			io.Copy(stdinWriter, c.Stdin)
+
+			// Send explicit EOF message
+			adapter.WriteStream(StreamStdinEOF, []byte{})
+		}()
+	}
+
+	// Read messages until we get an exit code
+	for {
+		stream, data, err := adapter.ReadStream()
+		if err != nil {
+			// Connection closed
 			return
+		}
 
-		case data := <-stdinChan:
-			if data != nil {
-				if err := adapter.WriteStdin(data); err != nil {
-					return
-				}
-			}
-
-		case wsMsg := <-msgChan:
-			if wsMsg.err != nil {
-				// Check for normal close
-				if !gorillaws.IsCloseError(wsMsg.err, gorillaws.CloseNormalClosure, gorillaws.CloseGoingAway) {
-					// Unexpected error, but continue to try to get exit code
-					continue
-				}
-				return
-			}
-
-			switch wsMsg.msg.Type {
-			case MessageTypeStdout:
-				if _, err := stdout.Write(wsMsg.msg.Data); err != nil {
-					return
-				}
-			case MessageTypeStderr:
-				if _, err := stderr.Write(wsMsg.msg.Data); err != nil {
-					return
-				}
-			case MessageTypeExit:
-				code, _ := DecodeExit(wsMsg.msg.Data)
-				// Send exit code
+		switch stream {
+		case StreamStdout:
+			stdout.Write(data)
+		case StreamStderr:
+			stderr.Write(data)
+		case StreamExit:
+			if len(data) > 0 {
+				code := int(data[0])
 				select {
 				case c.exitChan <- code:
 				default:
 				}
-				// Normal exit - just return, deferred cleanup will handle the rest
-				return
-			case MessageTypeError:
-				// Server error
-				return
 			}
-
-		case <-pingTicker.C:
-			if err := adapter.WritePing(); err != nil {
-				return
-			}
+			return // Command finished
 		}
 	}
 }
@@ -320,40 +222,26 @@ func (c *Cmd) ExitCode() int {
 		}
 		return code
 	default:
+		// Check if done
+		if c.IsDone() {
+			return 0 // Default to success if done but no exit code
+		}
 		return -1
 	}
 }
 
-// getAdapter returns the WebSocket adapter (for PTY support)
-func (c *Cmd) getAdapter() *Adapter {
+// IsDone returns true if the command has finished
+func (c *Cmd) IsDone() bool {
 	select {
-	case adapter := <-c.adapterChan:
-		// Put it back for other callers
-		select {
-		case c.adapterChan <- adapter:
-		default:
-		}
-		return adapter
+	case <-c.doneChan:
+		return true
 	default:
-		return nil
-	}
-}
-
-// setupPTYContext sets up the context for PTY to manage command lifecycle
-func (c *Cmd) setupPTYContext(ctx context.Context, cancel context.CancelFunc) {
-	if c.ptyMaster != nil {
-		c.ptyMaster.ctx = ctx
-		c.ptyMaster.cancel = cancel
+		return false
 	}
 }
 
 // Close gracefully shuts down the command and all its goroutines
 func (c *Cmd) Close() error {
-	// Cancel the context to stop all goroutines
-	if c.cancel != nil {
-		c.cancel()
-	}
-
 	// Close WebSocket connection if open
 	if c.conn != nil {
 		// Send close message
@@ -365,26 +253,21 @@ func (c *Cmd) Close() error {
 		c.conn.Close()
 	}
 
-	// Close PTY if active
-	if c.ptyMaster != nil {
-		c.ptyMaster.Close()
-	}
-
 	return nil
 }
 
-// Resize sends a terminal resize message
+// Resize sends a terminal resize message (for PTY mode)
 func (c *Cmd) Resize(width, height uint16) error {
-	// If we have a PTY, use its SetSize method
-	if c.ptyMaster != nil {
-		return c.ptyMaster.SetSize(height, width)
+	if !c.Tty || c.adapter == nil {
+		return nil
 	}
 
-	// Otherwise, send resize message directly
-	adapter := c.getAdapter()
-	if adapter == nil {
-		return fmt.Errorf("no active connection")
+	// Send resize control message via text frame
+	msg := &ControlMessage{
+		Type: "resize",
+		Cols: width,
+		Rows: height,
 	}
 
-	return adapter.WriteResize(height, width)
+	return c.adapter.WriteControl(msg)
 }

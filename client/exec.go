@@ -11,7 +11,6 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/sprite-env/packages/wsexec"
 	"golang.org/x/term"
@@ -78,17 +77,17 @@ func execCommand(baseURL, token string, args []string) {
 }
 
 // handlePTYMode sets up the terminal for PTY mode and returns a cleanup function
-func handlePTYMode(wsCmd *wsexec.Cmd, debug bool) (cleanup func(), sendInitialSize func(), err error) {
+func handlePTYMode(wsCmd *wsexec.Cmd) (cleanup func(), err error) {
 	// Check if stdin is a terminal
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		// Not a terminal, no special handling needed
-		return func() {}, func() {}, nil
+		return func() {}, nil
 	}
 
 	// Save the current terminal state
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to set terminal to raw mode: %w", err)
+		return nil, fmt.Errorf("failed to set terminal to raw mode: %w", err)
 	}
 
 	// Set up cleanup function
@@ -99,43 +98,26 @@ func handlePTYMode(wsCmd *wsexec.Cmd, debug bool) (cleanup func(), sendInitialSi
 		fmt.Print("\033[?25h")
 	}
 
+	// Send initial terminal size
+	if width, height, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
+		wsCmd.Resize(uint16(width), uint16(height))
+	}
+
 	// Handle terminal resize
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGWINCH)
 
 	go func() {
 		for range sigCh {
-			// Get current terminal size
-			width, height, err := term.GetSize(int(os.Stdout.Fd()))
-			if err != nil {
-				if debug {
-					fmt.Fprintf(os.Stderr, "Failed to get terminal size: %v\n", err)
-				}
-				continue
-			}
-
-			// Send resize command
-			if err := wsCmd.Resize(uint16(width), uint16(height)); err != nil {
-				if debug {
-					fmt.Fprintf(os.Stderr, "Failed to send resize: %v\n", err)
-				}
+			// Get current terminal size and send to server
+			width, height, err := term.GetSize(int(os.Stdin.Fd()))
+			if err == nil {
+				wsCmd.Resize(uint16(width), uint16(height))
 			}
 		}
 	}()
 
-	// Function to send initial size (to be called after WebSocket is connected)
-	sendInitialSize = func() {
-		if width, height, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
-			if debug {
-				fmt.Fprintf(os.Stderr, "Sending initial terminal size: %dx%d\n", width, height)
-			}
-			if err := wsCmd.Resize(uint16(width), uint16(height)); err != nil && debug {
-				fmt.Fprintf(os.Stderr, "Failed to send initial size: %v\n", err)
-			}
-		}
-	}
-
-	return cleanup, sendInitialSize, nil
+	return cleanup, nil
 }
 
 func executeDirectWebSocket(baseURL, token string, cmd []string, workingDir string, env []string, tty bool, debug bool) int {
@@ -217,34 +199,24 @@ func executeDirectWebSocket(baseURL, token string, cmd []string, workingDir stri
 		logger.Debug("Request headers", "headers", req.Header)
 	}
 
-	// Create wsexec command - don't duplicate the command arguments
-	// wsexec will get the command info from the URL query parameters
+	// Create wsexec command
 	wsCmd := wsexec.CommandContext(context.Background(), req, "placeholder")
 
 	// Set client-side I/O configuration
 	wsCmd.Stdin = os.Stdin
 	wsCmd.Stdout = os.Stdout
 	wsCmd.Stderr = os.Stderr
+	wsCmd.Tty = tty
 
 	if debug {
-		logger.Debug("Created wsexec command",
-			"request_url", wsCmd.Request.URL.String())
-
-		// Set a shorter ping interval for debug mode
-		wsCmd.PingInterval = 1 * time.Second
-		logger.Debug("Set ping interval for debug mode", "interval", wsCmd.PingInterval)
-	}
-
-	if debug {
-		logger.Info("Starting WebSocket command execution")
+		logger.Debug("Created wsexec command", "tty", wsCmd.Tty)
 	}
 
 	// Set up PTY mode if needed
 	var cleanup func()
-	var sendInitialSize func()
 	if tty {
 		var err error
-		cleanup, sendInitialSize, err = handlePTYMode(wsCmd, debug)
+		cleanup, err = handlePTYMode(wsCmd)
 		if err != nil {
 			if debug {
 				logger.Error("Failed to set up PTY mode", "error", err)
@@ -259,6 +231,10 @@ func executeDirectWebSocket(baseURL, token string, cmd []string, workingDir stri
 		}()
 	}
 
+	if debug {
+		logger.Info("Starting WebSocket command execution")
+	}
+
 	// Start the command
 	if err := wsCmd.Start(); err != nil {
 		if debug {
@@ -266,13 +242,6 @@ func executeDirectWebSocket(baseURL, token string, cmd []string, workingDir stri
 		}
 		fmt.Fprintf(os.Stderr, "Error: Failed to start command: %v\n", err)
 		return 1
-	}
-
-	// Send initial terminal size after connection is established
-	if sendInitialSize != nil {
-		// Give the connection a moment to establish
-		time.Sleep(100 * time.Millisecond)
-		sendInitialSize()
 	}
 
 	// Wait for command to complete

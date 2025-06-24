@@ -1,13 +1,52 @@
 # wsexec
 
-A Go package for executing commands remotely over WebSocket connections.
+A Go package for executing commands remotely over WebSocket connections with a simplified, efficient binary protocol.
 
 ## Features
 
 - **Client Interface**: Connect to remote WebSocket servers and execute commands
 - **Server Interface**: Handle WebSocket requests and execute commands locally  
-- **TTY Support**: Pseudo-terminal support for interactive commands
+- **TTY Support**: Full pseudo-terminal support with transparent byte streaming
+- **Terminal Resize**: PTY resize support via control messages
 - **Streaming I/O**: Real-time stdin/stdout/stderr streaming
+- **Simple Protocol**: Minimal overhead binary protocol (no JSON encoding)
+- **Large Data Support**: Efficient handling of large data transfers
+
+## Protocol Overview
+
+### PTY Mode (TTY enabled)
+When TTY is enabled, the WebSocket uses a mixed message type approach:
+
+**Binary Messages** - Raw terminal data:
+```
+[Client Terminal] <--raw bytes--> [WebSocket] <--raw bytes--> [Server PTY]
+```
+All terminal data, control sequences (except resize) pass through unchanged.
+
+**Text Messages** - Control messages (JSON):
+```json
+{"type":"resize","cols":80,"rows":24}
+```
+Control messages are sent as text frames to avoid interfering with the raw byte stream.
+
+### Non-PTY Mode  
+Uses simple binary messages with stream IDs:
+- First byte: stream identifier
+  - `0x00`: stdin
+  - `0x01`: stdout  
+  - `0x02`: stderr
+  - `0x03`: exit code
+  - `0x04`: stdin EOF
+- Remaining bytes: raw data
+
+Example messages:
+```
+[0x00][stdin data...]     // Client -> Server
+[0x01][stdout data...]    // Server -> Client
+[0x02][stderr data...]    // Server -> Client
+[0x04]                    // Client -> Server (EOF)
+[0x03][exit_code_byte]    // Server -> Client
+```
 
 ## Basic Server Example
 
@@ -65,6 +104,9 @@ func main() {
     if err := cmd.Run(); err != nil {
         panic(err)
     }
+    
+    // Get exit code
+    exitCode := cmd.ExitCode()
 }
 ```
 
@@ -76,6 +118,8 @@ Available methods:
 - `SetWorkingDir(string)` - Set working directory
 - `SetWrapperCommand([]string)` - Set wrapper command (e.g., timeout, sudo)
 - `SetLogger(*slog.Logger)` - Set logger for debugging
+- `SetContext(context.Context)` - Set context for cancellation
+- `SetConsoleSocketPath(string)` - Use crun's console socket feature
 
 Example:
 ```go
@@ -85,6 +129,14 @@ cmd.SetTTY(true).
     SetWorkingDir("/tmp").
     SetWrapperCommand([]string{"timeout", "60"})
 ```
+
+## Architecture Benefits
+
+- **Simplicity**: No complex message encoding/decoding
+- **Performance**: Direct byte streaming with minimal overhead
+- **Compatibility**: Terminal features "just work" in PTY mode
+- **Reliability**: Uses Go's standard `io.Copy` for data transfer
+- **Scalability**: Efficient handling of large data transfers
 
 ## Running Tests
 
