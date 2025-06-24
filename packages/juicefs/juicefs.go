@@ -39,6 +39,7 @@ type JuiceFS struct {
 	signalCh      chan os.Signal
 	overlayMgr    *OverlayManager
 	checkpointDB  *CheckpointDB
+	leaseMgr      *LeaseManager
 }
 
 // Config holds the configuration for JuiceFS
@@ -92,6 +93,11 @@ func New(config Config) (*JuiceFS, error) {
 		signalCh:   make(chan os.Signal, 1),
 	}
 
+	// Initialize lease manager for non-local mode
+	if !config.LocalMode {
+		j.leaseMgr = NewLeaseManager(config)
+	}
+
 	// Initialize the overlay manager if enabled
 	if config.OverlayEnabled {
 		j.overlayMgr = NewOverlay(j)
@@ -124,6 +130,7 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	// Create necessary directories
 	cacheDir := filepath.Join(j.config.BaseDir, "cache")
 	metaDB := filepath.Join(j.config.BaseDir, "metadata.db")
+	checkpointDB := filepath.Join(j.config.BaseDir, "checkpoints.db")
 	mountPath := filepath.Join(j.config.BaseDir, "data")
 
 	dirs := []string{
@@ -148,53 +155,90 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 
 	// Create litestream configuration
 	litestreamConfigPath := filepath.Join(os.TempDir(), "litestream-juicefs.yml")
-	if err := j.createLitestreamConfig(litestreamConfigPath, metaDB); err != nil {
+	if err := j.createLitestreamConfig(litestreamConfigPath, metaDB, checkpointDB); err != nil {
 		return fmt.Errorf("failed to create litestream config: %w", err)
 	}
 
-	// Check if we need to restore
+	// Handle lease acquisition and determine if we need to restore
+	needsRestore := false
 	if j.config.LocalMode {
 		// In local mode, check if litestream backup exists
 		backupPath := filepath.Join(j.config.BaseDir, "litestream", "generations")
 		if _, err := os.Stat(backupPath); err == nil {
-			fmt.Println("Restoring from local litestream backup")
-			restoreCmd := exec.CommandContext(ctx, "litestream", "restore",
-				"-config", litestreamConfigPath,
-				"-if-replica-exists",
-				metaDB)
-
-			if output, err := restoreCmd.CombinedOutput(); err != nil {
-				fmt.Printf("Litestream restore output: %s\n", string(output))
-			}
+			needsRestore = true
 		}
 	} else {
-		// S3 mode - original logic
-		if existingBucket, err := j.getExistingBucket(metaDB); err == nil && existingBucket == j.config.S3Bucket {
-			fmt.Println("Using sqlite db on disk (bucket matches)")
+		// S3 mode - use lease manager
+		fmt.Println("Acquiring JuiceFS database lease...")
+		leaseAcquired, err := j.leaseMgr.AcquireLease(ctx)
+		if err != nil {
+			// If we got an error after waiting (meaning we eventually acquired the lease)
+			// we need to restore
+			needsRestore = true
+			fmt.Println("Acquired lease after waiting, will restore from litestream")
+		} else if leaseAcquired {
+			// We got the lease immediately
+			existingBucket, err := j.getExistingBucket(metaDB)
+			if err != nil {
+				fmt.Printf("Acquired lease but no existing metadata DB found (%v), will restore\n", err)
+				needsRestore = true
+			} else if existingBucket != j.config.S3Bucket {
+				fmt.Printf("Acquired lease but bucket mismatch (existing: %s, current: %s), will restore\n", existingBucket, j.config.S3Bucket)
+				needsRestore = true
+			} else {
+				fmt.Printf("Acquired lease and bucket matches (%s), using existing databases on disk\n", existingBucket)
+				needsRestore = false
+			}
+		}
+	}
+
+	// Perform restore if needed
+	if needsRestore {
+		if j.config.LocalMode {
+			fmt.Println("Restoring from local litestream backup")
 		} else {
-			// Remove existing metadata and cache
+			// Remove existing databases and cache before restore
 			os.Remove(metaDB)
+			os.Remove(checkpointDB)
 			os.RemoveAll(cacheDir)
+			fmt.Printf("Restoring databases from %s\n", j.config.S3Bucket)
+		}
 
-			fmt.Printf("Restoring juicefs db from %s\n", j.config.S3Bucket)
-			// Restore from S3 using litestream
-			restoreCmd := exec.CommandContext(ctx, "litestream", "restore",
-				"-config", litestreamConfigPath,
-				"-if-replica-exists",
-				metaDB)
+		// Restore metadata database
+		restoreCmd := exec.CommandContext(ctx, "litestream", "restore",
+			"-config", litestreamConfigPath,
+			"-if-replica-exists",
+			metaDB)
 
+		if !j.config.LocalMode {
 			restoreCmd.Env = append(os.Environ(),
 				fmt.Sprintf("JUICEFS_META_DB=%s", metaDB),
+				fmt.Sprintf("CHECKPOINT_DB=%s", checkpointDB),
 				fmt.Sprintf("SPRITE_S3_ACCESS_KEY=%s", j.config.S3AccessKey),
 				fmt.Sprintf("SPRITE_S3_SECRET_ACCESS_KEY=%s", j.config.S3SecretAccessKey),
 				fmt.Sprintf("SPRITE_S3_ENDPOINT_URL=%s", j.config.S3EndpointURL),
 				fmt.Sprintf("SPRITE_S3_BUCKET=%s", j.config.S3Bucket),
 			)
+		}
 
-			if output, err := restoreCmd.CombinedOutput(); err != nil {
-				// If restore fails, it's okay - we'll format a new filesystem
-				fmt.Printf("Litestream restore output: %s\n", string(output))
-			}
+		if output, err := restoreCmd.CombinedOutput(); err != nil {
+			// If restore fails, it's okay - we'll format a new filesystem
+			fmt.Printf("Litestream restore output for metadata: %s\n", string(output))
+		}
+
+		// Restore checkpoint database
+		restoreCheckpointCmd := exec.CommandContext(ctx, "litestream", "restore",
+			"-config", litestreamConfigPath,
+			"-if-replica-exists",
+			checkpointDB)
+
+		if !j.config.LocalMode {
+			restoreCheckpointCmd.Env = restoreCmd.Env // Use same environment
+		}
+
+		if output, err := restoreCheckpointCmd.CombinedOutput(); err != nil {
+			// If restore fails, it's okay - checkpoint DB will be created fresh
+			fmt.Printf("Litestream restore output for checkpoints: %s\n", string(output))
 		}
 	}
 
@@ -220,6 +264,7 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	if !j.config.LocalMode {
 		j.litestreamCmd.Env = append(os.Environ(),
 			fmt.Sprintf("JUICEFS_META_DB=%s", metaDB),
+			fmt.Sprintf("CHECKPOINT_DB=%s", checkpointDB),
 			fmt.Sprintf("SPRITE_S3_ACCESS_KEY=%s", j.config.S3AccessKey),
 			fmt.Sprintf("SPRITE_S3_SECRET_ACCESS_KEY=%s", j.config.S3SecretAccessKey),
 			fmt.Sprintf("SPRITE_S3_ENDPOINT_URL=%s", j.config.S3EndpointURL),
@@ -297,6 +342,11 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 // for flushing all cached writes to the backend storage.
 func (j *JuiceFS) Stop(ctx context.Context) error {
 	startTime := time.Now()
+
+	// Stop lease manager if present
+	if j.leaseMgr != nil {
+		j.leaseMgr.Stop()
+	}
 
 	// Stop signal handling
 	signal.Stop(j.signalCh)
@@ -476,7 +526,7 @@ func (j *JuiceFS) monitorProcess() {
 
 // Helper functions
 
-func (j *JuiceFS) createLitestreamConfig(configPath, metaDB string) error {
+func (j *JuiceFS) createLitestreamConfig(configPath, metaDB, checkpointDB string) error {
 	var config string
 
 	if j.config.LocalMode {
@@ -492,7 +542,14 @@ dbs:
         retention: 24h
         snapshot-interval: 1m
         sync-interval: 1s
-`, metaDB, localBackupPath)
+  - path: %s
+    replicas:
+      - type: file
+        path: %s
+        retention: 24h
+        snapshot-interval: 1m
+        sync-interval: 1s
+`, metaDB, localBackupPath, checkpointDB, localBackupPath)
 	} else {
 		// S3-based replication
 		config = `logging:
@@ -507,6 +564,15 @@ dbs:
         access-key-id: ${SPRITE_S3_ACCESS_KEY}
         secret-access-key: ${SPRITE_S3_SECRET_ACCESS_KEY}
         sync-interval: 1s
+  - path: ${CHECKPOINT_DB}
+    replicas:
+      - type: s3
+        endpoint: ${SPRITE_S3_ENDPOINT_URL}
+        bucket: ${SPRITE_S3_BUCKET}
+        path: checkpoints
+        access-key-id: ${SPRITE_S3_ACCESS_KEY}
+        secret-access-key: ${SPRITE_S3_SECRET_ACCESS_KEY}
+        sync-interval: 1s
 `
 	}
 
@@ -514,24 +580,43 @@ dbs:
 }
 
 func (j *JuiceFS) getExistingBucket(metaDB string) (string, error) {
+	// Check if database file exists
+	if _, err := os.Stat(metaDB); os.IsNotExist(err) {
+		return "", fmt.Errorf("metadata database file does not exist")
+	}
+
 	db, err := sql.Open("sqlite", metaDB)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to open database: %w", err)
 	}
 	defer db.Close()
 
-	var bucket string
-	err = db.QueryRow("SELECT value FROM setting WHERE name = 'bucket'").Scan(&bucket)
+	// Check if the jfs_setting table exists
+	var tableExists int
+	err = db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='jfs_setting'").Scan(&tableExists)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to check for jfs_setting table: %w", err)
+	}
+	if tableExists == 0 {
+		return "", fmt.Errorf("database exists but is not fully formatted (missing jfs_setting table)")
 	}
 
-	// Extract bucket name from the stored value (format: endpoint/bucket)
-	parts := strings.Split(bucket, "/")
+	var bucketURL string
+	err = db.QueryRow("SELECT json_extract(value, '$.Bucket') FROM jfs_setting WHERE name = 'format'").Scan(&bucketURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to read bucket from format setting: %w", err)
+	}
+
+	// Extract bucket name from the URL (format: https://endpoint/bucket-name)
+	if bucketURL == "" {
+		return "", fmt.Errorf("bucket not found in format settings")
+	}
+
+	parts := strings.Split(bucketURL, "/")
 	if len(parts) > 0 {
 		return parts[len(parts)-1], nil
 	}
-	return bucket, nil
+	return bucketURL, nil
 }
 
 func (j *JuiceFS) isFormatted(metaURL string) bool {

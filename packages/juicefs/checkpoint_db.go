@@ -44,8 +44,8 @@ type CheckpointDB struct {
 
 // NewCheckpointDB creates a new checkpoint database manager in the baseDir (outside JuiceFS partition)
 func NewCheckpointDB(baseDir string) (*CheckpointDB, error) {
-	// Use a separate sprite-checkpoints.db file in baseDir (not inside the JuiceFS partition)
-	dbPath := filepath.Join(baseDir, "sprite-checkpoints.db")
+	// Use a separate checkpoints.db file in baseDir (not inside the JuiceFS partition)
+	dbPath := filepath.Join(baseDir, "checkpoints.db")
 
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {

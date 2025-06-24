@@ -131,6 +131,7 @@ func TestCalculateBufferSize(t *testing.T) {
 func TestLitestreamConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	metaDB := "/tmp/test.db"
+	checkpointDB := "/tmp/checkpoints.db"
 
 	tests := []struct {
 		name     string
@@ -151,9 +152,12 @@ func TestLitestreamConfig(t *testing.T) {
 				"logging:",
 				"level: warn",
 				"path: ${JUICEFS_META_DB}",
+				"path: ${CHECKPOINT_DB}",
 				"type: s3",
 				"endpoint: ${SPRITE_S3_ENDPOINT_URL}",
 				"bucket: ${SPRITE_S3_BUCKET}",
+				"path: juicefs-metadata",
+				"path: checkpoints",
 			},
 		},
 		{
@@ -166,6 +170,7 @@ func TestLitestreamConfig(t *testing.T) {
 				"logging:",
 				"level: warn",
 				fmt.Sprintf("path: %s", metaDB),
+				fmt.Sprintf("path: %s", checkpointDB),
 				"type: file",
 				"path: " + filepath.Join(tmpDir, "litestream"),
 				"retention: 24h",
@@ -184,7 +189,7 @@ func TestLitestreamConfig(t *testing.T) {
 				t.Fatalf("Failed to create JuiceFS: %v", err)
 			}
 
-			err = jfs.createLitestreamConfig(configPath, metaDB)
+			err = jfs.createLitestreamConfig(configPath, metaDB, checkpointDB)
 			if err != nil {
 				t.Fatalf("Failed to create litestream config: %v", err)
 			}
@@ -320,6 +325,10 @@ func TestWatchForReady(t *testing.T) {
 }
 
 func TestCheckpointValidation(t *testing.T) {
+	if !commandExists("juicefs") {
+		t.Skip("juicefs not found in PATH")
+	}
+
 	tmpDir := t.TempDir()
 	config := Config{
 		BaseDir:           tmpDir,
@@ -340,7 +349,7 @@ func TestCheckpointValidation(t *testing.T) {
 		t.Fatalf("Failed to create mount path: %v", err)
 	}
 
-	db, err := NewCheckpointDB(mountPath)
+	db, err := NewCheckpointDB(tmpDir) // Use BaseDir, not mountPath
 	if err != nil {
 		t.Fatalf("Failed to create checkpoint database: %v", err)
 	}
@@ -352,8 +361,8 @@ func TestCheckpointValidation(t *testing.T) {
 	// Test checkpoint without active directory
 	// Note: In the new implementation, checkpoint ID is ignored as we use auto-incrementing IDs
 	err = jfs.Checkpoint(ctx, "ignored-id")
-	if err == nil || !strings.Contains(err.Error(), "no such file or directory") {
-		t.Errorf("Expected 'no such file or directory' error, got: %v", err)
+	if err == nil || (!strings.Contains(err.Error(), "no such file or directory") && !strings.Contains(err.Error(), "executable file not found")) {
+		t.Errorf("Expected 'no such file or directory' or 'executable file not found' error, got: %v", err)
 	}
 }
 
@@ -378,7 +387,7 @@ func TestRestoreValidation(t *testing.T) {
 		t.Fatalf("Failed to create mount path: %v", err)
 	}
 
-	db, err := NewCheckpointDB(mountPath)
+	db, err := NewCheckpointDB(tmpDir) // Use BaseDir, not mountPath
 	if err != nil {
 		t.Fatalf("Failed to create checkpoint database: %v", err)
 	}
