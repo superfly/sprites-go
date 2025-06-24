@@ -9,8 +9,21 @@ This directory contains integration tests for the Sprite deployment and function
 3. Go 1.21 or later
 4. Environment variables:
    - `FLY_APP_NAME`: Your Fly.io app name
-   - `SPRITE_TOKEN`: Authentication token for the Sprite API
-   - `FLY_API_TOKEN` (optional): Fly API token, will use `flyctl auth token` if not set
+   - `SPRITE_TOKEN`: Authentication token for the Sprite API (see below)
+   - `FLY_API_TOKEN` (optional): Fly API token; will use `flyctl auth token` if not set
+
+### Obtaining the Sprite API token
+
+When you deploy the Sprite environment (e.g. via `go run ../cmd/deploy.go` or `make build && make deploy`),
+the machine configuration (in `cmd/machine-config.json`) contains the HTTP API token under the
+`SPRITE_HTTP_API_TOKEN` field. You can extract and export it locally (using `jq`) before running tests:
+
+```bash
+export SPRITE_TOKEN=$(jq -r '.containers[0].env.SPRITE_HTTP_API_TOKEN' cmd/machine-config.json)
+```
+
+If you prefer, you can copy the token value manually from `cmd/machine-config.json`, or use a custom
+show command to retrieve it from the deployed machine.
 
 ## Running the Tests
 
