@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"lib/api"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fly-dev-env/sprite-env/server/packages/juicefs"
+	"github.com/sprite-env/lib/api"
+
+	"github.com/sprite-env/packages/juicefs"
 )
 
 // mockSystemManager implements SystemManager for testing

@@ -8,8 +8,7 @@
   "process_environment": ["ENV_VAR=value"],
   "process_graceful_shutdown_timeout": "30s",
   
-  "exec_wrapper_command": ["crun", "exec", "app"],
-  "exec_tty_wrapper_command": ["crun", "exec", "-t", "app"],
+  "exec_wrapper_command": ["crun", "exec", "-t", "app"],
   
   "juicefs_enabled": true,
   "juicefs_base_dir": "/var/lib/sprite/juicefs",

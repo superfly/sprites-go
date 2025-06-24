@@ -6,7 +6,7 @@ TIMEOUT ?= 10m
 # Run all integration tests
 test:
 	@echo "Running all integration tests..."
-	GOWORK=off go test -v -timeout $(TIMEOUT)
+	GOWORK=off go test -v --failfast -timeout $(TIMEOUT)
 
 # Run only deployment test
 test-deploy:
@@ -22,6 +22,11 @@ test-zombie:
 test-checkpoint:
 	@echo "Running checkpoint/restore test..."
 	GOWORK=off go test -v -timeout $(TIMEOUT) -run TestDeployAndFunctionality/CheckpointRestore
+
+# Run only TTY test
+test-tty:
+	@echo "Running TTY functionality test..."
+	GOWORK=off go test -v -timeout $(TIMEOUT) -run TestTTYFunctionality
 
 # Clean up built artifacts
 clean:

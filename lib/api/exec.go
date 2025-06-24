@@ -1,9 +1,8 @@
 package api
 
-// DockerExecCreateRequest represents the request to create an exec instance
-type DockerExecCreateRequest struct {
+// ExecCreateRequest represents the request to create an exec instance
+type ExecCreateRequest struct {
 	Cmd          []string `json:"Cmd"`
-	AttachStdin  bool     `json:"AttachStdin,omitempty"`
 	AttachStdout bool     `json:"AttachStdout,omitempty"`
 	AttachStderr bool     `json:"AttachStderr,omitempty"`
 	DetachKeys   string   `json:"DetachKeys,omitempty"`
@@ -14,34 +13,34 @@ type DockerExecCreateRequest struct {
 	Privileged   bool     `json:"Privileged,omitempty"`
 }
 
-// DockerExecCreateResponse represents the response from creating an exec instance
-type DockerExecCreateResponse struct {
+// ExecCreateResponse represents the response from creating an exec instance
+type ExecCreateResponse struct {
 	Id string `json:"Id"`
 }
 
-// DockerExecStartRequest represents the request to start an exec instance
-type DockerExecStartRequest struct {
+// ExecStartRequest represents the request to start an exec instance
+type ExecStartRequest struct {
 	Detach bool `json:"Detach,omitempty"`
 	Tty    bool `json:"Tty,omitempty"`
 }
 
-// DockerExecInspectResponse represents the response from inspecting an exec instance
-type DockerExecInspectResponse struct {
-	Id            string              `json:"Id"`
-	Running       bool                `json:"Running"`
-	ExitCode      int                 `json:"ExitCode"`
-	ProcessConfig DockerProcessConfig `json:"ProcessConfig"`
-	OpenStdin     bool                `json:"OpenStdin"`
-	OpenStderr    bool                `json:"OpenStderr"`
-	OpenStdout    bool                `json:"OpenStdout"`
-	CanRemove     bool                `json:"CanRemove"`
-	ContainerID   string              `json:"ContainerID"`
-	DetachKeys    string              `json:"DetachKeys"`
-	Pid           int                 `json:"Pid,omitempty"`
+// ExecInspectResponse represents the response from inspecting an exec instance
+type ExecInspectResponse struct {
+	Id            string        `json:"Id"`
+	Running       bool          `json:"Running"`
+	ExitCode      int           `json:"ExitCode"`
+	ProcessConfig ProcessConfig `json:"ProcessConfig"`
+	OpenStdin     bool          `json:"OpenStdin"`
+	OpenStderr    bool          `json:"OpenStderr"`
+	OpenStdout    bool          `json:"OpenStdout"`
+	CanRemove     bool          `json:"CanRemove"`
+	ContainerID   string        `json:"ContainerID"`
+	DetachKeys    string        `json:"DetachKeys"`
+	Pid           int           `json:"Pid,omitempty"`
 }
 
-// DockerProcessConfig represents the process configuration
-type DockerProcessConfig struct {
+// ProcessConfig represents the process configuration
+type ProcessConfig struct {
 	Entrypoint string   `json:"entrypoint"`
 	Arguments  []string `json:"arguments"`
 	Privileged bool     `json:"privileged"`

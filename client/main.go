@@ -6,11 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"lib/api"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/sprite-env/lib/api"
 )
 
 func main() {

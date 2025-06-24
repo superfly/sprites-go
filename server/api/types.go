@@ -11,6 +11,5 @@ type Config struct {
 	MaxWaitTime time.Duration
 
 	// Exec configuration
-	ExecWrapperCommand    []string
-	ExecTTYWrapperCommand []string
+	ExecWrapperCommand []string
 }

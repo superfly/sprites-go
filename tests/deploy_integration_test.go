@@ -1,6 +1,8 @@
 package tests
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/creack/pty"
 )
 
 // TestDeployAndFunctionality tests the full deployment and sprite functionality
@@ -274,6 +278,138 @@ func TestDeployAndFunctionality(t *testing.T) {
 		)
 		if output, err := cleanupCmd.CombinedOutput(); err != nil {
 			t.Logf("Warning: Cleanup failed (non-fatal): %v\nOutput: %s", err, string(output))
+		}
+	})
+
+	// Test WebSocket TTY exit with real PTY
+	t.Run("WebSocketTTYExitWithPTY", func(t *testing.T) {
+		t.Log("Testing WebSocket TTY exit behavior with real PTY...")
+
+		// Use sprite exec with TTY
+		cmd := exec.Command("../dist/sprite", "exec", "-tty", "/bin/bash")
+		cmd.Env = append(os.Environ(),
+			fmt.Sprintf("SPRITE_URL=%s", spriteURL),
+			fmt.Sprintf("SPRITE_TOKEN=%s", spriteToken),
+		)
+
+		// Start with PTY
+		ptmx, err := pty.Start(cmd)
+		if err != nil {
+			t.Fatalf("Failed to start with PTY: %v", err)
+		}
+		defer ptmx.Close()
+
+		// Read output in background
+		output := &bytes.Buffer{}
+		done := make(chan error, 1)
+		go func() {
+			_, err := io.Copy(output, ptmx)
+			done <- err
+		}()
+
+		// Wait for prompt
+		time.Sleep(1 * time.Second)
+
+		// Send commands
+		commands := []string{
+			"echo 'Starting PTY test'\n",
+			"pwd\n",
+			"echo 'Test complete'\n",
+			"exit\n",
+		}
+
+		for _, cmd := range commands {
+			t.Logf("Sending command: %q", strings.TrimSpace(cmd))
+			if _, err := ptmx.Write([]byte(cmd)); err != nil {
+				t.Fatalf("Failed to write command: %v", err)
+			}
+			time.Sleep(500 * time.Millisecond) // Give time for command to execute
+		}
+
+		// Set a timeout for the entire operation
+		timeout := time.After(10 * time.Second)
+		cmdDone := make(chan error, 1)
+
+		go func() {
+			cmdDone <- cmd.Wait()
+		}()
+
+		// Wait for command to complete or timeout
+		select {
+		case err := <-cmdDone:
+			t.Log("Command completed")
+			if err != nil {
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					t.Logf("Exit code: %d", exitErr.ExitCode())
+					if exitErr.ExitCode() != 0 {
+						t.Errorf("Expected exit code 0, got %d", exitErr.ExitCode())
+					}
+				} else {
+					t.Errorf("Command failed with error: %v", err)
+				}
+			} else {
+				t.Log("Command exited successfully with code 0")
+			}
+
+		case <-timeout:
+			t.Error("Command timed out after 10 seconds - TTY session is hanging")
+			// Try to kill the process
+			cmd.Process.Kill()
+			<-cmdDone // Wait for it to actually die
+		}
+
+		// Check output
+		outputStr := output.String()
+		t.Logf("PTY output:\n%s", outputStr)
+
+		// Verify we got expected output
+		if !strings.Contains(outputStr, "Starting PTY test") {
+			t.Error("Expected 'Starting PTY test' in output")
+		}
+		if !strings.Contains(outputStr, "Test complete") {
+			t.Error("Expected 'Test complete' in output")
+		}
+	})
+
+	// Test interactive TTY commands with exit
+	t.Run("InteractiveTTYExit", func(t *testing.T) {
+		t.Log("Testing interactive TTY commands with exit...")
+
+		// Use a shorter timeout for this test
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, "../dist/sprite", "exec", "-tty", "/bin/bash", "-c", "echo 'Hello'; sleep 1; echo 'World'; exit 0")
+		cmd.Env = append(os.Environ(),
+			fmt.Sprintf("SPRITE_URL=%s", spriteURL),
+			fmt.Sprintf("SPRITE_TOKEN=%s", spriteToken),
+		)
+
+		output, err := cmd.CombinedOutput()
+
+		if ctx.Err() == context.DeadlineExceeded {
+			t.Errorf("Command timed out after 10 seconds")
+			t.Logf("Output before timeout: %s", output)
+		} else if err != nil {
+			t.Logf("Command failed with error: %v", err)
+			t.Logf("Output: %s", output)
+			// Check exit code
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				if exitErr.ExitCode() != 0 {
+					t.Errorf("Expected exit code 0, got %d", exitErr.ExitCode())
+				}
+			}
+		} else {
+			t.Log("Command completed successfully")
+			t.Logf("Output: %s", output)
+
+			// Verify output
+			if !strings.Contains(string(output), "Hello") {
+				t.Error("Expected 'Hello' in output")
+			}
+			if !strings.Contains(string(output), "World") {
+				t.Error("Expected 'World' in output")
+			}
 		}
 	})
 }

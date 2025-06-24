@@ -351,8 +351,7 @@ The `-config` option accepts a JSON file with the following structure:
   "process_command": ["/app/start.sh"],
   "process_working_dir": "/app",
   "process_environment": ["NODE_ENV=production"],
-  "exec_wrapper_command": ["crun", "exec", "app"],
-  "exec_tty_wrapper_command": ["crun", "exec", "-t", "app"],
+  "exec_wrapper_command": ["crun", "exec", "-t", "app"],
   
   "juicefs_enabled": true,
   "juicefs_base_dir": "/var/lib/sprite/juicefs",
@@ -382,7 +381,6 @@ The `-config` option accepts a JSON file with the following structure:
 - `process_environment` - Additional environment variables
 - `process_graceful_shutdown_timeout` - Timeout for graceful shutdown
 - `exec_wrapper_command` - Command wrapper for exec API
-- `exec_tty_wrapper_command` - Command wrapper for TTY exec API
 
 #### JuiceFS Configuration
 - `juicefs_enabled` - Enable JuiceFS filesystem (default: true if base_dir is set)
@@ -424,4 +422,5 @@ go build -o spritectl .
 
 ```bash
 make test
-``` 
+```
+

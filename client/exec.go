@@ -1,16 +1,20 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
 	"flag"
 	"fmt"
-	"io"
-	"lib/api"
-	"lib/stdcopy"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
+
+	"github.com/sprite-env/packages/wsexec"
+	"golang.org/x/term"
 )
 
 func execCommand(baseURL, token string, args []string) {
@@ -21,6 +25,7 @@ func execCommand(baseURL, token string, args []string) {
 		workingDir = execFlags.String("dir", "", "Working directory for the command")
 		tty        = execFlags.Bool("tty", false, "Allocate a pseudo-TTY")
 		envVars    = execFlags.String("env", "", "Environment variables (KEY=value,KEY2=value2)")
+		debug      = execFlags.Bool("debug", false, "Enable debug logging")
 		help       = execFlags.Bool("h", false, "Show help")
 	)
 
@@ -34,6 +39,8 @@ func execCommand(baseURL, token string, args []string) {
 		fmt.Fprintf(os.Stderr, "  sprite-client exec ls -la\n")
 		fmt.Fprintf(os.Stderr, "  sprite-client exec -dir /app echo hello world\n")
 		fmt.Fprintf(os.Stderr, "  sprite-client exec -env KEY=value,FOO=bar env\n")
+		fmt.Fprintf(os.Stderr, "  sprite-client exec -tty /bin/bash\n")
+		fmt.Fprintf(os.Stderr, "  sprite-client exec -debug echo hello  # Enable debug logging\n")
 	}
 
 	// Parse exec flags
@@ -65,149 +72,257 @@ func execCommand(baseURL, token string, args []string) {
 		}
 	}
 
-	// Execute using Docker-compatible API
-	exitCode := executeDockerExec(baseURL, token, cmdArgs, *workingDir, envList, *tty)
+	// Execute using direct WebSocket connection
+	exitCode := executeDirectWebSocket(baseURL, token, cmdArgs, *workingDir, envList, *tty, *debug)
 	os.Exit(exitCode)
 }
 
-func executeDockerExec(baseURL, token string, cmd []string, workingDir string, env []string, tty bool) int {
-	// Step 1: Create exec instance
-	createReq := api.DockerExecCreateRequest{
-		Cmd:          cmd,
-		AttachStdout: true,
-		AttachStderr: true,
-		AttachStdin:  false,
-		Tty:          tty,
-		Env:          env,
-		WorkingDir:   workingDir,
+// handlePTYMode sets up the terminal for PTY mode and returns a cleanup function
+func handlePTYMode(wsCmd *wsexec.Cmd, debug bool) (cleanup func(), sendInitialSize func(), err error) {
+	// Check if stdin is a terminal
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		// Not a terminal, no special handling needed
+		return func() {}, func() {}, nil
 	}
 
-	createBody, err := json.Marshal(createReq)
+	// Save the current terminal state
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to marshal create request: %v\n", err)
+		return nil, nil, fmt.Errorf("failed to set terminal to raw mode: %w", err)
+	}
+
+	// Set up cleanup function
+	cleanup = func() {
+		// Restore terminal state
+		term.Restore(int(os.Stdin.Fd()), oldState)
+		// Show cursor in case it was hidden
+		fmt.Print("\033[?25h")
+	}
+
+	// Handle terminal resize
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGWINCH)
+
+	go func() {
+		for range sigCh {
+			// Get current terminal size
+			width, height, err := term.GetSize(int(os.Stdout.Fd()))
+			if err != nil {
+				if debug {
+					fmt.Fprintf(os.Stderr, "Failed to get terminal size: %v\n", err)
+				}
+				continue
+			}
+
+			// Send resize command
+			if err := wsCmd.Resize(uint16(width), uint16(height)); err != nil {
+				if debug {
+					fmt.Fprintf(os.Stderr, "Failed to send resize: %v\n", err)
+				}
+			}
+		}
+	}()
+
+	// Function to send initial size (to be called after WebSocket is connected)
+	sendInitialSize = func() {
+		if width, height, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
+			if debug {
+				fmt.Fprintf(os.Stderr, "Sending initial terminal size: %dx%d\n", width, height)
+			}
+			if err := wsCmd.Resize(uint16(width), uint16(height)); err != nil && debug {
+				fmt.Fprintf(os.Stderr, "Failed to send initial size: %v\n", err)
+			}
+		}
+	}
+
+	return cleanup, sendInitialSize, nil
+}
+
+func executeDirectWebSocket(baseURL, token string, cmd []string, workingDir string, env []string, tty bool, debug bool) int {
+	// Set up debug logging if enabled
+	var logger *slog.Logger
+	if debug {
+		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		}))
+		logger.Info("Debug mode enabled")
+		logger.Debug("Starting WebSocket exec",
+			"baseURL", baseURL,
+			"cmd", cmd,
+			"workingDir", workingDir,
+			"env", env,
+			"tty", tty)
+	}
+
+	// Build WebSocket URL - directly to /exec endpoint
+	wsURL, err := buildExecWebSocketURL(baseURL)
+	if err != nil {
+		if debug {
+			logger.Error("Failed to build WebSocket URL", "error", err)
+		}
+		fmt.Fprintf(os.Stderr, "Error: Failed to build WebSocket URL: %v\n", err)
 		return 1
 	}
 
-	// Use a dummy container ID (server ignores it anyway)
-	createURL := fmt.Sprintf("%s/containers/sprite/exec", baseURL)
-	req, err := http.NewRequest("POST", createURL, bytes.NewReader(createBody))
+	if debug {
+		logger.Debug("Built WebSocket URL", "url", wsURL.String())
+	}
+
+	// Add command arguments as query parameters
+	// This is how wsexec expects command configuration to be sent
+	query := wsURL.Query()
+	for i, arg := range cmd {
+		query.Add("cmd", arg)
+		if i == 0 {
+			query.Set("path", arg) // Set the main command path
+		}
+	}
+	if workingDir != "" {
+		query.Set("dir", workingDir)
+		if debug {
+			logger.Debug("Set working directory", "dir", workingDir)
+		}
+	}
+	if tty {
+		query.Set("tty", "true")
+		if debug {
+			logger.Debug("Enabled TTY mode")
+		}
+	}
+	for _, envVar := range env {
+		query.Add("env", envVar)
+		if debug {
+			logger.Debug("Added environment variable", "env", envVar)
+		}
+	}
+	wsURL.RawQuery = query.Encode()
+
+	if debug {
+		logger.Debug("Final WebSocket URL with query parameters", "url", wsURL.String())
+	}
+
+	// Create HTTP request with auth header
+	req, err := http.NewRequest("GET", wsURL.String(), nil)
 	if err != nil {
+		if debug {
+			logger.Error("Failed to create HTTP request", "error", err)
+		}
 		fmt.Fprintf(os.Stderr, "Error: Failed to create request: %v\n", err)
 		return 1
 	}
-
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to create exec instance: %v\n", err)
-		return 1
+	if debug {
+		logger.Debug("Created HTTP request", "method", req.Method, "url", req.URL.String())
+		logger.Debug("Request headers", "headers", req.Header)
 	}
 
-	if resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		fmt.Fprintf(os.Stderr, "Error: Failed to create exec instance (status %d): %s\n", resp.StatusCode, string(body))
-		return 1
+	// Create wsexec command - don't duplicate the command arguments
+	// wsexec will get the command info from the URL query parameters
+	wsCmd := wsexec.CommandContext(context.Background(), req, "placeholder")
+
+	// Set client-side I/O configuration
+	wsCmd.Stdin = os.Stdin
+	wsCmd.Stdout = os.Stdout
+	wsCmd.Stderr = os.Stderr
+
+	if debug {
+		logger.Debug("Created wsexec command",
+			"request_url", wsCmd.Request.URL.String())
+
+		// Set a shorter ping interval for debug mode
+		wsCmd.PingInterval = 1 * time.Second
+		logger.Debug("Set ping interval for debug mode", "interval", wsCmd.PingInterval)
 	}
 
-	var createResp api.DockerExecCreateResponse
-	if err := json.NewDecoder(resp.Body).Decode(&createResp); err != nil {
-		resp.Body.Close()
-		fmt.Fprintf(os.Stderr, "Error: Failed to decode create response: %v\n", err)
-		return 1
-	}
-	resp.Body.Close()
-
-	execID := createResp.Id
-
-	// Step 2: Start exec instance
-	startReq := api.DockerExecStartRequest{
-		Detach: false,
-		Tty:    tty,
+	if debug {
+		logger.Info("Starting WebSocket command execution")
 	}
 
-	startBody, err := json.Marshal(startReq)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to marshal start request: %v\n", err)
-		return 1
-	}
-
-	startURL := fmt.Sprintf("%s/exec/%s/start", baseURL, execID)
-	req, err = http.NewRequest("POST", startURL, bytes.NewReader(startBody))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to create start request: %v\n", err)
-		return 1
-	}
-
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-	req.Header.Set("Content-Type", "application/json")
-
-	// Only request upgrade for non-HTTPS connections (HTTP/1.1)
-	// HTTP/2 (used by HTTPS) doesn't support the Upgrade mechanism
-	if !strings.HasPrefix(baseURL, "https://") {
-		req.Header.Set("Connection", "Upgrade")
-		req.Header.Set("Upgrade", "tcp")
-	}
-
-	// Use client with no timeout for streaming
-	streamClient := &http.Client{Timeout: 0}
-	resp, err = streamClient.Do(req)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to start exec instance: %v\n", err)
-		return 1
-	}
-	defer resp.Body.Close()
-
-	// Check if we got upgraded or regular streaming
-	if resp.StatusCode == http.StatusSwitchingProtocols {
-		// Got upgraded connection - use stdcopy to demultiplex
-		_, err := stdcopy.StdCopy(os.Stdout, os.Stderr, resp.Body)
-		if err != nil && err != io.EOF {
-			fmt.Fprintf(os.Stderr, "Error reading stream: %v\n", err)
+	// Set up PTY mode if needed
+	var cleanup func()
+	var sendInitialSize func()
+	if tty {
+		var err error
+		cleanup, sendInitialSize, err = handlePTYMode(wsCmd, debug)
+		if err != nil {
+			if debug {
+				logger.Error("Failed to set up PTY mode", "error", err)
+			}
+			fmt.Fprintf(os.Stderr, "Warning: Failed to set up PTY mode: %v\n", err)
+			// Continue anyway - PTY will work but without raw mode
 		}
-	} else if resp.StatusCode == http.StatusOK {
-		// Regular streaming - use stdcopy to demultiplex
-		_, err := stdcopy.StdCopy(os.Stdout, os.Stderr, resp.Body)
-		if err != nil && err != io.EOF {
-			fmt.Fprintf(os.Stderr, "Error reading stream: %v\n", err)
+		defer func() {
+			if cleanup != nil {
+				cleanup()
+			}
+		}()
+	}
+
+	// Start the command
+	if err := wsCmd.Start(); err != nil {
+		if debug {
+			logger.Error("Failed to start WebSocket command", "error", err)
 		}
-	} else {
-		body, _ := io.ReadAll(resp.Body)
-		fmt.Fprintf(os.Stderr, "Error: Failed to start exec instance (status %d): %s\n", resp.StatusCode, string(body))
+		fmt.Fprintf(os.Stderr, "Error: Failed to start command: %v\n", err)
 		return 1
 	}
 
-	// Step 3: Get exit code from inspect
-	inspectURL := fmt.Sprintf("%s/exec/%s/json", baseURL, execID)
-	req, err = http.NewRequest("GET", inspectURL, nil)
+	// Send initial terminal size after connection is established
+	if sendInitialSize != nil {
+		// Give the connection a moment to establish
+		time.Sleep(100 * time.Millisecond)
+		sendInitialSize()
+	}
+
+	// Wait for command to complete
+	if err := wsCmd.Wait(); err != nil {
+		if debug {
+			logger.Error("WebSocket command wait failed", "error", err)
+		}
+		// Don't print error here - it's usually just context cancelled
+	}
+
+	// Get exit code
+	exitCode := wsCmd.ExitCode()
+	if debug {
+		logger.Debug("Command completed", "exitCode", exitCode)
+	}
+
+	if exitCode == -1 {
+		if debug {
+			logger.Warn("No proper exit code received, defaulting to 1")
+		}
+		// If we didn't get a proper exit code, default to 1
+		exitCode = 1
+	}
+
+	if debug {
+		logger.Info("WebSocket exec completed", "finalExitCode", exitCode)
+	}
+
+	return exitCode
+}
+
+// buildExecWebSocketURL converts HTTP/HTTPS URL to WS/WSS URL for exec
+func buildExecWebSocketURL(baseURL string) (*url.URL, error) {
+	u, err := url.Parse(baseURL)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to create inspect request: %v\n", err)
-		return 1
+		return nil, err
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-
-	resp, err = client.Do(req)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to inspect exec instance: %v\n", err)
-		return 1
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		fmt.Fprintf(os.Stderr, "Error: Failed to inspect exec instance (status %d): %s\n", resp.StatusCode, string(body))
-		return 1
+	// Convert scheme
+	switch u.Scheme {
+	case "http":
+		u.Scheme = "ws"
+	case "https":
+		u.Scheme = "wss"
+	default:
+		return nil, fmt.Errorf("unsupported scheme: %s", u.Scheme)
 	}
 
-	var inspectResp api.DockerExecInspectResponse
-	if err := json.NewDecoder(resp.Body).Decode(&inspectResp); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to decode inspect response: %v\n", err)
-		return 1
-	}
+	// Set path to simple /exec endpoint
+	u.Path = "/exec"
 
-	return inspectResp.ExitCode
+	return u, nil
 }

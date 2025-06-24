@@ -1,7 +1,6 @@
 package juicefs
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -9,7 +8,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -21,68 +19,19 @@ type CheckpointInfo struct {
 	History    []string  `json:"history,omitempty"`   // Restore history from .history file
 }
 
-// Checkpoint creates a checkpoint of the active directory
+// Checkpoint creates a checkpoint of the active directory using SQLite
 func (j *JuiceFS) Checkpoint(ctx context.Context, checkpointID string) error {
+	if j.checkpointDB == nil {
+		return fmt.Errorf("checkpoint database not initialized")
+	}
+
 	mountPath := filepath.Join(j.config.BaseDir, "data")
-	activeDir := filepath.Join(mountPath, "active")
 	checkpointsDir := filepath.Join(mountPath, "checkpoints")
-	versionFile := filepath.Join(activeDir, ".version")
 
 	// Ensure checkpoints directory exists
 	if err := os.MkdirAll(checkpointsDir, 0755); err != nil {
 		return fmt.Errorf("failed to create checkpoints directory: %w", err)
 	}
-
-	// Check if active directory exists
-	if _, err := os.Stat(activeDir); os.IsNotExist(err) {
-		return fmt.Errorf("active directory does not exist at %s", activeDir)
-	}
-
-	// Get current version
-	currentVersion, err := j.GetCurrentVersion()
-	if err != nil {
-		return fmt.Errorf("failed to get current version: %w", err)
-	}
-
-	// The checkpoint will use the current version
-	versionID := fmt.Sprintf("v%d", currentVersion)
-	checkpointPath := filepath.Join(checkpointsDir, versionID)
-
-	// Check if checkpoint already exists
-	if _, err := os.Stat(checkpointPath); err == nil {
-		return fmt.Errorf("checkpoint %s already exists at %s", versionID, checkpointPath)
-	}
-
-	// Increment version in active BEFORE creating checkpoint
-	nextVersion := currentVersion + 1
-
-	// Write new version to active directory with exclusive lock
-	file, err := os.OpenFile(versionFile, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open version file: %w", err)
-	}
-
-	// Get exclusive lock
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
-		file.Close()
-		return fmt.Errorf("failed to acquire exclusive lock on version file: %w", err)
-	}
-
-	// Write the new version
-	if _, err := fmt.Fprintf(file, "v%d\n", nextVersion); err != nil {
-		syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
-		file.Close()
-		return fmt.Errorf("failed to write new version: %w", err)
-	}
-
-	if err := file.Sync(); err != nil {
-		syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
-		file.Close()
-		return fmt.Errorf("failed to sync version file: %w", err)
-	}
-
-	syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
-	file.Close()
 
 	// Prepare overlay for checkpoint (sync and freeze)
 	if j.overlayMgr != nil {
@@ -98,84 +47,102 @@ func (j *JuiceFS) Checkpoint(ctx context.Context, checkpointID string) error {
 		}()
 	}
 
-	// Clone active directory to checkpoint
-	fmt.Printf("Creating checkpoint %s...\n", versionID)
-	cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", activeDir, checkpointPath)
-	if output, err := cloneCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to create checkpoint: %w, output: %s", err, string(output))
+	// Create checkpoint using the database transaction
+	record, err := j.checkpointDB.CreateCheckpoint(func(src, dst string) error {
+		// Convert relative paths to absolute paths
+		srcPath := filepath.Join(mountPath, src)
+		dstPath := filepath.Join(mountPath, dst)
+
+		fmt.Printf("Creating checkpoint: cloning %s to %s...\n", src, dst)
+		cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", srcPath, dstPath)
+		if output, err := cloneCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to clone: %w, output: %s", err, string(output))
+		}
+		return nil
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to create checkpoint: %w", err)
 	}
 
-	// Update the .latest_version symlink to point to this checkpoint
-	latestLink := filepath.Join(checkpointsDir, ".latest_version")
-	// Remove old symlink if it exists
-	os.Remove(latestLink)
-	// Create new symlink (relative path)
-	if err := os.Symlink(versionID, latestLink); err != nil {
-		fmt.Printf("Warning: failed to update latest version symlink: %v\n", err)
-	}
-
-	// Also create .latest symlink pointing to the checkpoint's .version file
-	latestVersionLink := filepath.Join(checkpointsDir, ".latest")
-	os.Remove(latestVersionLink)
-	// Create symlink to the .version file inside the checkpoint
-	versionFilePath := filepath.Join(versionID, ".version")
-	if err := os.Symlink(versionFilePath, latestVersionLink); err != nil {
-		fmt.Printf("Warning: failed to create .latest symlink: %v\n", err)
-	}
-
-	fmt.Printf("Checkpoint created successfully at %s\n", checkpointPath)
+	fmt.Printf("Checkpoint created successfully: ID=%d, Path=%s\n", record.ID, record.Path)
 	return nil
 }
 
 // CheckpointWithVersion creates a checkpoint and returns the version used
 func (j *JuiceFS) CheckpointWithVersion(ctx context.Context) (string, error) {
-	// Get current version before checkpoint (this will be the checkpoint ID)
-	version, err := j.GetCurrentVersion()
-	if err != nil {
-		return "", fmt.Errorf("failed to get current version: %w", err)
+	if j.checkpointDB == nil {
+		return "", fmt.Errorf("checkpoint database not initialized")
 	}
 
-	// Create checkpoint (which will increment the version)
+	// Get the current latest checkpoint to determine what the new version will be
+	latest, err := j.checkpointDB.GetLatestCheckpoint()
+	if err != nil {
+		return "", fmt.Errorf("failed to get latest checkpoint: %w", err)
+	}
+
+	// The new checkpoint will have ID = latest.ID + 1, but represents version = latest.ID - 1
+	// (since IDs start at 1 but versions start at 0)
+	newVersion := fmt.Sprintf("v%d", latest.ID-1)
+
+	// Create the checkpoint
 	err = j.Checkpoint(ctx, "")
 	if err != nil {
 		return "", err
 	}
 
-	// Return the version that was used for the checkpoint
-	return fmt.Sprintf("v%d", version), nil
+	return newVersion, nil
 }
 
-// Restore restores from a checkpoint
+// Restore restores from a checkpoint using SQLite
 func (j *JuiceFS) Restore(ctx context.Context, checkpointID string) error {
 	if checkpointID == "" {
 		return fmt.Errorf("checkpoint ID is required")
 	}
 
+	if j.checkpointDB == nil {
+		return fmt.Errorf("checkpoint database not initialized")
+	}
+
 	mountPath := filepath.Join(j.config.BaseDir, "data")
 	activeDir := filepath.Join(mountPath, "active")
 	checkpointsDir := filepath.Join(mountPath, "checkpoints")
-	checkpointPath := filepath.Join(checkpointsDir, checkpointID)
 
-	// Check if checkpoint exists
-	if _, err := os.Stat(checkpointPath); os.IsNotExist(err) {
-		return fmt.Errorf("checkpoint %s does not exist at %s", checkpointID, checkpointPath)
-	}
+	// Look up the checkpoint in the database
+	var checkpointPath string
+	var record *CheckpointRecord
+	var err error
 
-	// Create a checkpoint of current state before restoring
-	fmt.Printf("Creating checkpoint before restore...\n")
-	preRestoreVersion, err := j.CheckpointWithVersion(ctx)
-	if err != nil {
-		// Log warning but don't fail the restore
-		fmt.Printf("Warning: failed to create pre-restore checkpoint: %v\n", err)
+	// Check if the checkpointID is a path like "checkpoints/v3" or just "v3" or "3"
+	if strings.HasPrefix(checkpointID, "checkpoints/v") {
+		// Full path provided
+		checkpointPath = checkpointID
+	} else if strings.HasPrefix(checkpointID, "v") {
+		// Version string like "v3"
+		checkpointPath = filepath.Join("checkpoints", checkpointID)
+	} else if id, err := strconv.ParseInt(checkpointID, 10, 64); err == nil {
+		// Numeric ID provided
+		record, err = j.checkpointDB.GetCheckpointByID(id)
+		if err != nil {
+			return fmt.Errorf("checkpoint %d not found: %w", id, err)
+		}
+		checkpointPath = record.Path
 	} else {
-		fmt.Printf("Created pre-restore checkpoint %s\n", preRestoreVersion)
+		// Try to find by path
+		checkpointPath = filepath.Join("checkpoints", checkpointID)
 	}
 
-	// Get current version after checkpoint (it was incremented)
-	currentVersion, err := j.GetCurrentVersion()
-	if err != nil {
-		// If we can't read version, we'll use 0
-		currentVersion = 0
+	// If we don't have the record yet, look it up by path
+	if record == nil {
+		record, err = j.checkpointDB.FindCheckpointByPath(checkpointPath)
+		if err != nil {
+			return fmt.Errorf("checkpoint not found in database: %w", err)
+		}
+	}
+
+	fullCheckpointPath := filepath.Join(mountPath, checkpointPath)
+	if _, err := os.Stat(fullCheckpointPath); os.IsNotExist(err) {
+		return fmt.Errorf("checkpoint directory does not exist at %s", fullCheckpointPath)
 	}
 
 	// Handle overlay if present
@@ -197,32 +164,24 @@ func (j *JuiceFS) Restore(ctx context.Context, checkpointID string) error {
 		}
 	}
 
-	// If active directory exists, remove it
+	// If active directory exists, back it up
 	if _, err := os.Stat(activeDir); err == nil {
-		fmt.Printf("Removing current active directory...\n")
-		if err := os.RemoveAll(activeDir); err != nil {
-			return fmt.Errorf("failed to remove active directory: %w", err)
+		timestamp := time.Now().UnixNano()
+		backupName := fmt.Sprintf("pre-restore-v%d-%d", record.ID, timestamp)
+		backupPath := filepath.Join(checkpointsDir, backupName)
+
+		fmt.Printf("Backing up current active directory to %s...\n", backupPath)
+		if err := os.Rename(activeDir, backupPath); err != nil {
+			return fmt.Errorf("failed to backup active directory: %w", err)
 		}
+		fmt.Println("Backup completed")
 	}
 
 	// Clone checkpoint to active directory
-	fmt.Printf("Restoring from checkpoint %s...\n", checkpointID)
-	cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", checkpointPath, activeDir)
+	fmt.Printf("Restoring from checkpoint v%d (path: %s)...\n", record.ID, checkpointPath)
+	cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", fullCheckpointPath, activeDir)
 	if output, err := cloneCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to restore from checkpoint: %w, output: %s", err, string(output))
-	}
-
-	// Write back the saved version to active/.version
-	versionFile := filepath.Join(activeDir, ".version")
-	if err := os.WriteFile(versionFile, []byte(fmt.Sprintf("v%d\n", currentVersion)), 0644); err != nil {
-		fmt.Printf("Warning: failed to restore version file: %v\n", err)
-	}
-
-	// The clone operation will have copied the .history file from the checkpoint (if it exists)
-	// Now append the new restore record to track that we restored TO the current version
-	currentVersionStr := fmt.Sprintf("v%d", currentVersion)
-	if err := j.appendToHistory(currentVersionStr); err != nil {
-		fmt.Printf("Warning: failed to append to history file: %v\n", err)
 	}
 
 	// Mount the overlay from the restored active directory
@@ -240,78 +199,42 @@ func (j *JuiceFS) Restore(ctx context.Context, checkpointID string) error {
 		}
 	}
 
-	// Initialize version file
-	if err := j.initializeVersion(); err != nil {
-		fmt.Printf("Warning: failed to initialize version file: %v\n", err)
-	}
-
-	// Initialize history file if it doesn't exist
-	historyFile := filepath.Join(mountPath, "active", ".history")
-	if _, err := os.Stat(historyFile); os.IsNotExist(err) {
-		// Get current version
-		version, err := j.GetCurrentVersion()
-		if err == nil {
-			// Get active directory creation time
-			if info, err := os.Stat(activeDir); err == nil {
-				// Use directory modification time as creation time
-				createTime := info.ModTime().Format(time.RFC3339)
-				// Write initial history entry with directory creation time
-				versionStr := fmt.Sprintf("v%d", version)
-				record := fmt.Sprintf("to=%s;time=%s\n", versionStr, createTime)
-				if err := os.WriteFile(historyFile, []byte(record), 0644); err != nil {
-					fmt.Printf("Warning: failed to initialize history file: %v\n", err)
-				}
-			}
-		}
-	}
-
-	fmt.Printf("Restore from %s complete\n", checkpointID)
+	fmt.Printf("Restore from checkpoint v%d complete\n", record.ID)
 	return nil
 }
 
-// ListCheckpoints returns a list of all available checkpoints
+// ListCheckpoints returns a list of all available checkpoints from SQLite
 func (j *JuiceFS) ListCheckpoints(ctx context.Context) ([]CheckpointInfo, error) {
-	mountPath := filepath.Join(j.config.BaseDir, "data")
-	checkpointsDir := filepath.Join(mountPath, "checkpoints")
-
-	// Check if checkpoints directory exists
-	if _, err := os.Stat(checkpointsDir); os.IsNotExist(err) {
-		// Return empty list if directory doesn't exist
-		return []CheckpointInfo{}, nil
+	if j.checkpointDB == nil {
+		return nil, fmt.Errorf("checkpoint database not initialized")
 	}
 
-	// Read all entries in checkpoints directory
-	entries, err := os.ReadDir(checkpointsDir)
+	// Get all checkpoints from database
+	rows, err := j.checkpointDB.db.Query(`
+		SELECT id, path, parent_id, created_at 
+		FROM sprite_checkpoints 
+		WHERE path LIKE 'checkpoints/%'
+		ORDER BY id DESC
+	`)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read checkpoints directory: %w", err)
+		return nil, fmt.Errorf("failed to query checkpoints: %w", err)
 	}
+	defer rows.Close()
 
 	var checkpoints []CheckpointInfo
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue // Skip non-directories
+	for rows.Next() {
+		var record CheckpointRecord
+		if err := rows.Scan(&record.ID, &record.Path, &record.ParentID, &record.CreatedAt); err != nil {
+			continue // Skip invalid rows
 		}
 
-		// Skip the .latest_version symlink
-		if entry.Name() == ".latest_version" {
-			continue
-		}
-
-		// Skip the .latest symlink
-		if entry.Name() == ".latest" {
-			continue
-		}
-
-		info, err := entry.Info()
-		if err != nil {
-			continue // Skip entries we can't stat
-		}
+		// Convert path like "checkpoints/v3" to version ID "v3"
+		versionID := filepath.Base(record.Path)
 
 		checkpoint := CheckpointInfo{
-			ID:         entry.Name(),
-			CreateTime: info.ModTime(), // Use directory modification time as creation time
+			ID:         versionID,
+			CreateTime: record.CreatedAt,
 		}
-
 		checkpoints = append(checkpoints, checkpoint)
 	}
 
@@ -327,9 +250,9 @@ func (j *JuiceFS) ListCheckpointsReverse(ctx context.Context) ([]CheckpointInfo,
 
 	// Sort by creation time in reverse order
 	for i := 0; i < len(checkpoints)-1; i++ {
-		for j := i + 1; j < len(checkpoints); j++ {
-			if checkpoints[i].CreateTime.Before(checkpoints[j].CreateTime) {
-				checkpoints[i], checkpoints[j] = checkpoints[j], checkpoints[i]
+		for k := i + 1; k < len(checkpoints); k++ {
+			if checkpoints[i].CreateTime.Before(checkpoints[k].CreateTime) {
+				checkpoints[i], checkpoints[k] = checkpoints[k], checkpoints[i]
 			}
 		}
 	}
@@ -365,229 +288,63 @@ func (j *JuiceFS) ListCheckpointsWithActive(ctx context.Context) ([]CheckpointIn
 
 // ListCheckpointsWithHistory returns checkpoints that have the specified version in their history
 func (j *JuiceFS) ListCheckpointsWithHistory(ctx context.Context, version string) ([]string, error) {
-	mountPath := filepath.Join(j.config.BaseDir, "data")
-
-	// Also check active directory's history
-	activeDir := filepath.Join(mountPath, "active")
-	activeHistoryFile := filepath.Join(activeDir, ".history")
-
-	var results []string
-	searchPattern := fmt.Sprintf("to=%s;", version)
-
-	// Check active directory history
-	if data, err := os.ReadFile(activeHistoryFile); err == nil {
-		lines := strings.Split(string(data), "\n")
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if line != "" && strings.Contains(line, searchPattern) {
-				results = append(results, fmt.Sprintf("active/.history: %s", line))
-				break // Only report once per directory
-			}
-		}
+	if j.checkpointDB == nil {
+		return nil, fmt.Errorf("checkpoint database not initialized")
 	}
 
-	// Check checkpoint directories
-	checkpointsDir := filepath.Join(mountPath, "checkpoints")
-
-	// Check if checkpoints directory exists
-	if _, err := os.Stat(checkpointsDir); os.IsNotExist(err) {
-		return results, nil // Return what we have from active
-	}
-
-	// Read all entries in checkpoints directory
-	entries, err := os.ReadDir(checkpointsDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read checkpoints directory: %w", err)
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		// Skip the .latest_version symlink
-		if entry.Name() == ".latest_version" {
-			continue
-		}
-
-		// Skip the .latest symlink
-		if entry.Name() == ".latest" {
-			continue
-		}
-
-		// Check history file in checkpoint
-		historyFile := filepath.Join(checkpointsDir, entry.Name(), ".history")
-		data, err := os.ReadFile(historyFile)
-		if err != nil {
-			continue // No history file
-		}
-
-		// Search for the version in history
-		lines := strings.Split(string(data), "\n")
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if line != "" && strings.Contains(line, searchPattern) {
-				results = append(results, fmt.Sprintf("%s/.history: %s", entry.Name(), line))
-				break // Only report the first match per checkpoint
-			}
-		}
-	}
-
-	return results, nil
+	// For SQLite implementation, we could track parent relationships
+	// For now, return empty list as this feature needs to be redesigned for SQLite
+	return []string{}, nil
 }
 
 // GetCheckpoint returns information about a specific checkpoint
 func (j *JuiceFS) GetCheckpoint(ctx context.Context, checkpointID string) (*CheckpointInfo, error) {
-	if checkpointID == "" {
-		return nil, fmt.Errorf("checkpoint ID is required")
+	if j.checkpointDB == nil {
+		return nil, fmt.Errorf("checkpoint database not initialized")
 	}
-
-	mountPath := filepath.Join(j.config.BaseDir, "data")
 
 	// Handle special "active" checkpoint ID
 	if checkpointID == "active" {
-		// Get current version
-		version, err := j.GetCurrentVersion()
+		// Get the latest checkpoint (which represents the current active state)
+		latest, err := j.checkpointDB.GetLatestCheckpoint()
 		if err != nil {
-			return nil, fmt.Errorf("failed to get current version: %w", err)
-		}
-
-		// Get active directory info
-		activeDir := filepath.Join(mountPath, "active")
-		info, err := os.Stat(activeDir)
-		if err != nil {
-			return nil, fmt.Errorf("failed to stat active directory: %w", err)
+			return nil, fmt.Errorf("failed to get latest checkpoint: %w", err)
 		}
 
 		checkpoint := &CheckpointInfo{
-			ID:         fmt.Sprintf("v%d", version),
-			CreateTime: info.ModTime(),
-		}
-
-		// Read .history file if it exists
-		historyFile := filepath.Join(activeDir, ".history")
-		if data, err := os.ReadFile(historyFile); err == nil {
-			lines := strings.Split(string(data), "\n")
-			for _, line := range lines {
-				line = strings.TrimSpace(line)
-				if line != "" {
-					checkpoint.History = append(checkpoint.History, line)
-				}
-			}
+			ID:         fmt.Sprintf("v%d", latest.ID-1), // Convert DB ID to version
+			CreateTime: latest.CreatedAt,
 		}
 
 		return checkpoint, nil
 	}
 
-	checkpointsDir := filepath.Join(mountPath, "checkpoints")
-	checkpointPath := filepath.Join(checkpointsDir, checkpointID)
+	// Look up specific checkpoint
+	var record *CheckpointRecord
+	var err error
 
-	// Check if checkpoint exists
-	info, err := os.Stat(checkpointPath)
-	if os.IsNotExist(err) {
-		return nil, fmt.Errorf("checkpoint %s does not exist", checkpointID)
+	if strings.HasPrefix(checkpointID, "v") {
+		// Version string like "v3" - look up by path
+		checkpointPath := filepath.Join("checkpoints", checkpointID)
+		record, err = j.checkpointDB.FindCheckpointByPath(checkpointPath)
+	} else if id, parseErr := strconv.ParseInt(checkpointID, 10, 64); parseErr == nil {
+		// Numeric ID provided
+		record, err = j.checkpointDB.GetCheckpointByID(id)
+	} else {
+		return nil, fmt.Errorf("invalid checkpoint ID format: %s", checkpointID)
 	}
+
 	if err != nil {
-		return nil, fmt.Errorf("failed to stat checkpoint: %w", err)
+		return nil, fmt.Errorf("checkpoint %s not found: %w", checkpointID, err)
 	}
 
-	if !info.IsDir() {
-		return nil, fmt.Errorf("checkpoint %s is not a directory", checkpointID)
-	}
+	// Convert path like "checkpoints/v3" to version ID "v3"
+	versionID := filepath.Base(record.Path)
 
 	checkpoint := &CheckpointInfo{
-		ID:         checkpointID,
-		CreateTime: info.ModTime(),
-	}
-
-	// Read .history file if it exists
-	historyFile := filepath.Join(checkpointPath, ".history")
-	if data, err := os.ReadFile(historyFile); err == nil {
-		lines := strings.Split(string(data), "\n")
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if line != "" {
-				checkpoint.History = append(checkpoint.History, line)
-			}
-		}
+		ID:         versionID,
+		CreateTime: record.CreatedAt,
 	}
 
 	return checkpoint, nil
-}
-
-// GetCurrentVersion reads the current version from active/.version file
-// Returns 0 if the file doesn't exist (initial state)
-func (j *JuiceFS) GetCurrentVersion() (int, error) {
-	mountPath := filepath.Join(j.config.BaseDir, "data")
-	versionFile := filepath.Join(mountPath, "active", ".version")
-
-	// Open file for reading with shared lock
-	file, err := os.Open(versionFile)
-	if os.IsNotExist(err) {
-		return 0, nil // Initial state
-	}
-	if err != nil {
-		return 0, fmt.Errorf("failed to open version file: %w", err)
-	}
-	defer file.Close()
-
-	// Get shared lock
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_SH); err != nil {
-		return 0, fmt.Errorf("failed to acquire shared lock on version file: %w", err)
-	}
-	defer syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
-
-	// Read version
-	var version int
-	scanner := bufio.NewScanner(file)
-	if scanner.Scan() {
-		versionStr := strings.TrimPrefix(scanner.Text(), "v")
-		version, err = strconv.Atoi(versionStr)
-		if err != nil {
-			return 0, fmt.Errorf("invalid version format in file: %s", scanner.Text())
-		}
-	}
-
-	return version, nil
-}
-
-// initializeVersion creates the initial .version file if it doesn't exist
-func (j *JuiceFS) initializeVersion() error {
-	mountPath := filepath.Join(j.config.BaseDir, "data")
-	versionFile := filepath.Join(mountPath, "active", ".version")
-
-	// Check if file already exists
-	if _, err := os.Stat(versionFile); err == nil {
-		return nil // Already initialized
-	}
-
-	// Create initial version file with v0
-	if err := os.MkdirAll(filepath.Dir(versionFile), 0755); err != nil {
-		return fmt.Errorf("failed to create active directory: %w", err)
-	}
-
-	return os.WriteFile(versionFile, []byte("v0\n"), 0644)
-}
-
-// appendToHistory appends a restore record to the .history file
-func (j *JuiceFS) appendToHistory(toVersion string) error {
-	mountPath := filepath.Join(j.config.BaseDir, "data")
-	historyFile := filepath.Join(mountPath, "active", ".history")
-
-	// Open file for appending, create if not exists
-	file, err := os.OpenFile(historyFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open history file: %w", err)
-	}
-	defer file.Close()
-
-	// Format: to=v9;time=<timestamp>
-	timestamp := time.Now().Format(time.RFC3339)
-	record := fmt.Sprintf("to=%s;time=%s\n", toVersion, timestamp)
-
-	if _, err := file.WriteString(record); err != nil {
-		return fmt.Errorf("failed to write to history file: %w", err)
-	}
-
-	return file.Sync()
 }

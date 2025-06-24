@@ -5,12 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"lib/api"
 	"os"
 	"sync"
 	"time"
 
-	"github.com/fly-dev-env/sprite-env/server/packages/juicefs"
+	"github.com/sprite-env/lib/api"
+
+	"github.com/sprite-env/packages/juicefs"
 )
 
 // mockSupervisor implements Supervisor interface for testing

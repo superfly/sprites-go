@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"lib/api"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/sprite-env/lib/api"
 )
 
 // HandleListCheckpoints handles GET /checkpoints

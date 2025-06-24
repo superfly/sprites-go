@@ -2,8 +2,10 @@ package juicefs
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -24,6 +26,19 @@ func TestListCheckpoints(t *testing.T) {
 		t.Fatalf("Failed to create JuiceFS: %v", err)
 	}
 
+	// Initialize checkpoint database for testing
+	mountPath := filepath.Join(tmpDir, "data")
+	if err := os.MkdirAll(mountPath, 0755); err != nil {
+		t.Fatalf("Failed to create mount path: %v", err)
+	}
+
+	db, err := NewCheckpointDB(mountPath)
+	if err != nil {
+		t.Fatalf("Failed to create checkpoint database: %v", err)
+	}
+	jfs.checkpointDB = db
+	defer db.Close()
+
 	ctx := context.Background()
 
 	// Test with no checkpoints directory
@@ -36,26 +51,19 @@ func TestListCheckpoints(t *testing.T) {
 	}
 
 	// Create checkpoints directory and some test checkpoints
-	mountPath := filepath.Join(tmpDir, "data")
 	checkpointsDir := filepath.Join(mountPath, "checkpoints")
 	if err := os.MkdirAll(checkpointsDir, 0755); err != nil {
 		t.Fatalf("Failed to create checkpoints directory: %v", err)
 	}
 
-	// Create test checkpoint directories
-	testCheckpoints := []string{
-		"v0",
-		"v1",
-		"v2",
-	}
-
-	for _, id := range testCheckpoints {
-		cpDir := filepath.Join(checkpointsDir, id)
-		if err := os.MkdirAll(cpDir, 0755); err != nil {
-			t.Fatalf("Failed to create checkpoint directory %s: %v", id, err)
+	// Create test checkpoints using the SQLite database
+	// Insert test checkpoints directly into the database
+	for i := 0; i < 3; i++ {
+		checkpointPath := fmt.Sprintf("checkpoints/v%d", i)
+		_, err := db.db.Exec("INSERT INTO sprite_checkpoints (path, parent_id) VALUES (?, ?)", checkpointPath, nil)
+		if err != nil {
+			t.Fatalf("Failed to insert checkpoint v%d: %v", i, err)
 		}
-
-		// Touch the directory to set modification time
 		time.Sleep(10 * time.Millisecond) // Ensure different timestamps
 	}
 
@@ -119,6 +127,19 @@ func TestGetCheckpoint(t *testing.T) {
 		t.Fatalf("Failed to create JuiceFS: %v", err)
 	}
 
+	// Initialize checkpoint database for testing
+	mountPath := filepath.Join(tmpDir, "data")
+	if err := os.MkdirAll(mountPath, 0755); err != nil {
+		t.Fatalf("Failed to create mount path: %v", err)
+	}
+
+	db, err := NewCheckpointDB(mountPath)
+	if err != nil {
+		t.Fatalf("Failed to create checkpoint database: %v", err)
+	}
+	jfs.checkpointDB = db
+	defer db.Close()
+
 	ctx := context.Background()
 
 	// Test with non-existent checkpoint
@@ -127,20 +148,13 @@ func TestGetCheckpoint(t *testing.T) {
 		t.Error("Expected error for non-existent checkpoint")
 	}
 
-	// Create a test checkpoint
-	mountPath := filepath.Join(tmpDir, "data")
-	checkpointsDir := filepath.Join(mountPath, "checkpoints")
-	cpDir := filepath.Join(checkpointsDir, "v3")
-	if err := os.MkdirAll(cpDir, 0755); err != nil {
-		t.Fatalf("Failed to create checkpoint directory: %v", err)
+	// Create a test checkpoint in the database
+	_, err = db.db.Exec("INSERT INTO sprite_checkpoints (path, parent_id) VALUES (?, ?)", "checkpoints/v3", nil)
+	if err != nil {
+		t.Fatalf("Failed to insert checkpoint v3: %v", err)
 	}
 
-	// Add history file
-	historyFile := filepath.Join(cpDir, ".history")
-	historyContent := "to=v0;time=2024-01-01T10:00:00Z\nto=v1;time=2024-01-01T11:00:00Z\n"
-	if err := os.WriteFile(historyFile, []byte(historyContent), 0644); err != nil {
-		t.Fatalf("Failed to write history file: %v", err)
-	}
+	// Note: History files are no longer used
 
 	// Test getting checkpoint
 	checkpoint, err := jfs.GetCheckpoint(ctx, "v3")
@@ -152,17 +166,7 @@ func TestGetCheckpoint(t *testing.T) {
 		t.Errorf("Expected ID 'v3', got %s", checkpoint.ID)
 	}
 
-	// Check history
-	if len(checkpoint.History) != 2 {
-		t.Errorf("Expected 2 history entries, got %d", len(checkpoint.History))
-	} else {
-		if checkpoint.History[0] != "to=v0;time=2024-01-01T10:00:00Z" {
-			t.Errorf("Unexpected history[0]: %s", checkpoint.History[0])
-		}
-		if checkpoint.History[1] != "to=v1;time=2024-01-01T11:00:00Z" {
-			t.Errorf("Unexpected history[1]: %s", checkpoint.History[1])
-		}
-	}
+	// Note: History checking removed - history files are no longer used
 
 	// Test empty checkpoint ID
 	_, err = jfs.GetCheckpoint(ctx, "")
@@ -187,10 +191,22 @@ func TestListCheckpointsWithActive(t *testing.T) {
 		t.Fatalf("Failed to create JuiceFS: %v", err)
 	}
 
+	// Initialize checkpoint database for testing
+	mountPath := filepath.Join(tmpDir, "data")
+	if err := os.MkdirAll(mountPath, 0755); err != nil {
+		t.Fatalf("Failed to create mount path: %v", err)
+	}
+
+	db, err := NewCheckpointDB(mountPath)
+	if err != nil {
+		t.Fatalf("Failed to create checkpoint database: %v", err)
+	}
+	jfs.checkpointDB = db
+	defer db.Close()
+
 	ctx := context.Background()
 
 	// Create necessary directories
-	mountPath := filepath.Join(tmpDir, "data")
 	activeDir := filepath.Join(mountPath, "active")
 	checkpointsDir := filepath.Join(mountPath, "checkpoints")
 
@@ -201,28 +217,17 @@ func TestListCheckpointsWithActive(t *testing.T) {
 		t.Fatalf("Failed to create checkpoints directory: %v", err)
 	}
 
-	// Create a version file
-	versionFile := filepath.Join(activeDir, ".version")
-	if err := os.WriteFile(versionFile, []byte("v3\n"), 0644); err != nil {
-		t.Fatalf("Failed to write version file: %v", err)
-	}
+	// Note: Version files are no longer used in SQLite system
 
-	// Create a history file
-	historyFile := filepath.Join(activeDir, ".history")
-	historyContent := "to=v0;time=2024-01-01T10:00:00Z\nto=v1;time=2024-01-01T11:00:00Z\n"
-	if err := os.WriteFile(historyFile, []byte(historyContent), 0644); err != nil {
-		t.Fatalf("Failed to write history file: %v", err)
-	}
-
-	// Create some test checkpoints
-	testCheckpoints := []string{"v0", "v1", "v2"}
-	for i, id := range testCheckpoints {
-		cpDir := filepath.Join(checkpointsDir, id)
-		if err := os.MkdirAll(cpDir, 0755); err != nil {
-			t.Fatalf("Failed to create checkpoint directory %s: %v", id, err)
+	// Create some test checkpoints in the database
+	// Insert 3 checkpoints - the active version will be determined by the latest checkpoint
+	for i := 0; i < 3; i++ {
+		checkpointPath := fmt.Sprintf("checkpoints/v%d", i)
+		_, err := db.db.Exec("INSERT INTO sprite_checkpoints (path, parent_id) VALUES (?, ?)", checkpointPath, nil)
+		if err != nil {
+			t.Fatalf("Failed to insert checkpoint v%d: %v", i, err)
 		}
-		// Sleep to ensure different timestamps
-		time.Sleep(10 * time.Millisecond * time.Duration(i+1))
+		time.Sleep(10 * time.Millisecond) // Ensure different timestamps
 	}
 
 	// Test ListCheckpointsWithActive
@@ -236,20 +241,26 @@ func TestListCheckpointsWithActive(t *testing.T) {
 		t.Errorf("Expected 4 checkpoints, got %d", len(checkpoints))
 	}
 
-	// First should be the active version
-	if checkpoints[0].ID != "v3 (active)" {
-		t.Errorf("Expected first checkpoint to be 'v3 (active)', got %s", checkpoints[0].ID)
+	// First should be the active version (latest checkpoint ID - 1)
+	if !strings.HasSuffix(checkpoints[0].ID, " (active)") {
+		t.Errorf("Expected first checkpoint to end with ' (active)', got %s", checkpoints[0].ID)
 	}
 
-	// Next should be v2, v1, v0 in reverse order
-	expectedOrder := []string{"v3 (active)", "v2", "v1", "v0"}
-	for i, expected := range expectedOrder {
-		if i >= len(checkpoints) {
-			t.Errorf("Missing checkpoint at index %d, expected %s", i, expected)
+	// Verify we have the expected number of checkpoints (3 regular + 1 active)
+	if len(checkpoints) != 4 {
+		return // Already failed above
+	}
+
+	// The remaining should be the actual checkpoints v2, v1, v0 in reverse order
+	expectedCheckpoints := []string{"v2", "v1", "v0"}
+	for i, expected := range expectedCheckpoints {
+		actualIndex := i + 1 // Skip the active checkpoint at index 0
+		if actualIndex >= len(checkpoints) {
+			t.Errorf("Missing checkpoint at index %d, expected %s", actualIndex, expected)
 			continue
 		}
-		if checkpoints[i].ID != expected {
-			t.Errorf("At index %d: expected %s, got %s", i, expected, checkpoints[i].ID)
+		if checkpoints[actualIndex].ID != expected {
+			t.Errorf("At index %d: expected %s, got %s", actualIndex, expected, checkpoints[actualIndex].ID)
 		}
 	}
 }
@@ -270,28 +281,30 @@ func TestGetCheckpointActive(t *testing.T) {
 		t.Fatalf("Failed to create JuiceFS: %v", err)
 	}
 
+	// Initialize checkpoint database for testing
+	mountPath := filepath.Join(tmpDir, "data")
+	if err := os.MkdirAll(mountPath, 0755); err != nil {
+		t.Fatalf("Failed to create mount path: %v", err)
+	}
+
+	db, err := NewCheckpointDB(mountPath)
+	if err != nil {
+		t.Fatalf("Failed to create checkpoint database: %v", err)
+	}
+	jfs.checkpointDB = db
+	defer db.Close()
+
 	ctx := context.Background()
 
 	// Create necessary directories
-	mountPath := filepath.Join(tmpDir, "data")
 	activeDir := filepath.Join(mountPath, "active")
 
 	if err := os.MkdirAll(activeDir, 0755); err != nil {
 		t.Fatalf("Failed to create active directory: %v", err)
 	}
 
-	// Create a version file
-	versionFile := filepath.Join(activeDir, ".version")
-	if err := os.WriteFile(versionFile, []byte("v5\n"), 0644); err != nil {
-		t.Fatalf("Failed to write version file: %v", err)
-	}
-
-	// Create a history file
-	historyFile := filepath.Join(activeDir, ".history")
-	historyContent := "to=v0;time=2024-01-01T10:00:00Z\nto=v2;time=2024-01-01T11:00:00Z\n"
-	if err := os.WriteFile(historyFile, []byte(historyContent), 0644); err != nil {
-		t.Fatalf("Failed to write history file: %v", err)
-	}
+	// Note: Version files are no longer used in SQLite system
+	// The initial database starts with ID=1, so active version is v0
 
 	// Test getting active checkpoint
 	checkpoint, err := jfs.GetCheckpoint(ctx, "active")
@@ -299,19 +312,11 @@ func TestGetCheckpointActive(t *testing.T) {
 		t.Fatalf("Failed to get active checkpoint: %v", err)
 	}
 
-	if checkpoint.ID != "v5" {
-		t.Errorf("Expected ID 'v5', got %s", checkpoint.ID)
+	// In the SQLite system, the active version is the latest checkpoint ID - 1
+	// Since we start with ID=1, the active version is v0
+	if checkpoint.ID != "v0" {
+		t.Errorf("Expected ID 'v0', got %s", checkpoint.ID)
 	}
 
-	// Check history
-	if len(checkpoint.History) != 2 {
-		t.Errorf("Expected 2 history entries, got %d", len(checkpoint.History))
-	} else {
-		if checkpoint.History[0] != "to=v0;time=2024-01-01T10:00:00Z" {
-			t.Errorf("Unexpected history[0]: %s", checkpoint.History[0])
-		}
-		if checkpoint.History[1] != "to=v2;time=2024-01-01T11:00:00Z" {
-			t.Errorf("Unexpected history[1]: %s", checkpoint.History[1])
-		}
-	}
+	// Note: History checking removed - history files are no longer used
 }

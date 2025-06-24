@@ -9,9 +9,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	serverapi "spritectl/api"
+	"runtime/debug"
 	"syscall"
 	"time"
+
+	serverapi "github.com/sprite-env/server/api"
 )
 
 // version is set at build time via ldflags
@@ -43,8 +45,7 @@ type Config struct {
 	S3Bucket          string
 
 	// Exec
-	ExecWrapperCommand    []string
-	ExecTTYWrapperCommand []string
+	ExecWrapperCommand []string
 
 	// Debug
 	KeepAliveOnError bool // Keep server running when process fails
@@ -127,11 +128,10 @@ func NewApplication(config Config) (*Application, error) {
 	// Set up API server if configured
 	if config.APIListenAddr != "" {
 		apiConfig := serverapi.Config{
-			ListenAddr:            config.APIListenAddr,
-			APIToken:              config.APIToken,
-			MaxWaitTime:           30 * time.Second,
-			ExecWrapperCommand:    config.ExecWrapperCommand,
-			ExecTTYWrapperCommand: config.ExecTTYWrapperCommand,
+			ListenAddr:         config.APIListenAddr,
+			APIToken:           config.APIToken,
+			MaxWaitTime:        30 * time.Second,
+			ExecWrapperCommand: config.ExecWrapperCommand,
 		}
 
 		apiServer, err := serverapi.NewServer(apiConfig, app.system, logger)
@@ -318,14 +318,13 @@ func parseCommandLine() (Config, error) {
 		}
 
 		var fileConfig struct {
-			LogLevel              string   `json:"log_level"`
-			LogJSON               bool     `json:"log_json"`
-			APIListen             string   `json:"api_listen_addr"`
-			ProcessCmd            []string `json:"process_command"`
-			ProcessDir            string   `json:"process_working_dir"`
-			ProcessEnv            []string `json:"process_environment"`
-			ExecWrapperCommand    []string `json:"exec_wrapper_command"`
-			ExecTTYWrapperCommand []string `json:"exec_tty_wrapper_command"`
+			LogLevel           string   `json:"log_level"`
+			LogJSON            bool     `json:"log_json"`
+			APIListen          string   `json:"api_listen_addr"`
+			ProcessCmd         []string `json:"process_command"`
+			ProcessDir         string   `json:"process_working_dir"`
+			ProcessEnv         []string `json:"process_environment"`
+			ExecWrapperCommand []string `json:"exec_wrapper_command"`
 
 			// JuiceFS configuration
 			JuiceFSEnabled    bool   `json:"juicefs_enabled"`
@@ -368,7 +367,6 @@ func parseCommandLine() (Config, error) {
 		config.ProcessWorkingDir = fileConfig.ProcessDir
 		config.ProcessEnvironment = fileConfig.ProcessEnv
 		config.ExecWrapperCommand = fileConfig.ExecWrapperCommand
-		config.ExecTTYWrapperCommand = fileConfig.ExecTTYWrapperCommand
 		config.JuiceFSBaseDir = fileConfig.JuiceFSBaseDir
 		config.JuiceFSLocalMode = fileConfig.JuiceFSLocalMode
 		config.S3AccessKey = fileConfig.S3AccessKey
@@ -469,22 +467,83 @@ func parseCommandLine() (Config, error) {
 }
 
 func main() {
+	// Create crash log file for debugging
+	crashLogFile, err := os.OpenFile("/tmp/sprite-env-crash.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Could not create crash log file: %v\n", err)
+	} else {
+		defer crashLogFile.Close()
+	}
+
+	// Set up panic recovery
+	defer func() {
+		if r := recover(); r != nil {
+			crashMsg := fmt.Sprintf("PANIC at %s: %v\n", time.Now().Format(time.RFC3339), r)
+			fmt.Fprintf(os.Stderr, "%s", crashMsg)
+			if crashLogFile != nil {
+				crashLogFile.WriteString(crashMsg)
+				crashLogFile.WriteString(fmt.Sprintf("Stack trace:\n%s\n", debug.Stack()))
+				crashLogFile.Sync()
+			}
+			os.Exit(1)
+		}
+	}()
+
+	// Log startup
+	startupMsg := fmt.Sprintf("Starting sprite-env at %s\n", time.Now().Format(time.RFC3339))
+	fmt.Printf("%s", startupMsg)
+	if crashLogFile != nil {
+		crashLogFile.WriteString(startupMsg)
+		crashLogFile.Sync()
+	}
+
 	config, err := parseCommandLine()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		errMsg := fmt.Sprintf("Error parsing command line: %v\n", err)
+		fmt.Fprintf(os.Stderr, "%s", errMsg)
+		if crashLogFile != nil {
+			crashLogFile.WriteString(errMsg)
+			crashLogFile.Sync()
+		}
 		flag.Usage()
 		os.Exit(1)
 	}
 
+	if crashLogFile != nil {
+		crashLogFile.WriteString(fmt.Sprintf("Config parsed successfully at %s\n", time.Now().Format(time.RFC3339)))
+		crashLogFile.Sync()
+	}
+
 	app, err := NewApplication(config)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create application: %v\n", err)
+		errMsg := fmt.Sprintf("Failed to create application: %v\n", err)
+		fmt.Fprintf(os.Stderr, "%s", errMsg)
+		if crashLogFile != nil {
+			crashLogFile.WriteString(errMsg)
+			crashLogFile.Sync()
+		}
 		os.Exit(1)
+	}
+
+	if crashLogFile != nil {
+		crashLogFile.WriteString(fmt.Sprintf("Application created successfully at %s\n", time.Now().Format(time.RFC3339)))
+		crashLogFile.Sync()
 	}
 
 	// Run the application
 	if err := app.Run(); err != nil {
+		errMsg := fmt.Sprintf("Application run failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "%s", errMsg)
+		if crashLogFile != nil {
+			crashLogFile.WriteString(errMsg)
+			crashLogFile.Sync()
+		}
 		// Error already logged, just exit
 		os.Exit(1)
+	}
+
+	if crashLogFile != nil {
+		crashLogFile.WriteString(fmt.Sprintf("Application completed normally at %s\n", time.Now().Format(time.RFC3339)))
+		crashLogFile.Sync()
 	}
 }

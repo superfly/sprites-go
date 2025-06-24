@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"spritectl/api/handlers"
+	"github.com/sprite-env/server/api/handlers"
 )
 
 // Server provides the HTTP API with authentication
@@ -35,9 +35,8 @@ func NewServer(config Config, system handlers.SystemManager, logger *slog.Logger
 
 	// Create handlers config
 	handlersConfig := handlers.Config{
-		MaxWaitTime:           config.MaxWaitTime,
-		ExecWrapperCommand:    config.ExecWrapperCommand,
-		ExecTTYWrapperCommand: config.ExecTTYWrapperCommand,
+		MaxWaitTime:        config.MaxWaitTime,
+		ExecWrapperCommand: config.ExecWrapperCommand,
 	}
 
 	// Create handlers
@@ -66,38 +65,8 @@ func NewServer(config Config, system handlers.SystemManager, logger *slog.Logger
 func (s *Server) setupEndpoints(mux *http.ServeMux) {
 	// All endpoints require authentication
 
-	// Docker-compatible exec endpoints
-	// Pattern: /containers/{id}/exec for create
-	// Pattern: /exec/{id}/start for start
-	// Pattern: /exec/{id}/json for inspect
-	mux.HandleFunc("/containers/", s.authMiddleware(s.waitForRunningMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		// Parse path: /containers/{containerID}/exec
-		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-		if len(parts) == 3 && parts[2] == "exec" && r.Method == http.MethodPost {
-			// Container ID is in parts[1], but we ignore it since we only have one container
-			s.handlers.HandleDockerExecCreate(w, r)
-		} else {
-			http.NotFound(w, r)
-		}
-	})))
-
-	mux.HandleFunc("/exec/", s.authMiddleware(s.waitForRunningMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		// Parse path: /exec/{execID}/start or /exec/{execID}/json
-		path := r.URL.Path
-		parts := strings.Split(strings.Trim(path, "/"), "/")
-
-		if len(parts) == 3 {
-			if parts[2] == "start" {
-				s.handlers.HandleDockerExecStart(w, r)
-			} else if parts[2] == "json" {
-				s.handlers.HandleDockerExecInspect(w, r)
-			} else {
-				http.NotFound(w, r)
-			}
-		} else {
-			http.NotFound(w, r)
-		}
-	})))
+	// Simple exec endpoint - only POST /exec with WebSocket support
+	mux.HandleFunc("/exec", s.authMiddleware(s.waitForRunningMiddleware(s.handlers.HandleExec)))
 
 	// State management endpoints - don't wait for running state
 	mux.HandleFunc("/checkpoint", s.authMiddleware(s.handlers.HandleCheckpoint))

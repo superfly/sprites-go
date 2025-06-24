@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -319,8 +320,9 @@ func TestWatchForReady(t *testing.T) {
 }
 
 func TestCheckpointValidation(t *testing.T) {
+	tmpDir := t.TempDir()
 	config := Config{
-		BaseDir:           "/tmp/test",
+		BaseDir:           tmpDir,
 		S3AccessKey:       "test",
 		S3SecretAccessKey: "test",
 		S3EndpointURL:     "http://localhost:9000",
@@ -332,19 +334,33 @@ func TestCheckpointValidation(t *testing.T) {
 		t.Fatalf("Failed to create JuiceFS: %v", err)
 	}
 
+	// Initialize checkpoint database for testing
+	mountPath := filepath.Join(tmpDir, "data")
+	if err := os.MkdirAll(mountPath, 0755); err != nil {
+		t.Fatalf("Failed to create mount path: %v", err)
+	}
+
+	db, err := NewCheckpointDB(mountPath)
+	if err != nil {
+		t.Fatalf("Failed to create checkpoint database: %v", err)
+	}
+	jfs.checkpointDB = db
+	defer db.Close()
+
 	ctx := context.Background()
 
-	// Empty checkpoint ID is now valid (auto-generates version)
-	// Test will fail because JuiceFS is not actually mounted, which is expected
-	err = jfs.Checkpoint(ctx, "")
-	if err == nil {
-		t.Error("Expected error when JuiceFS is not mounted")
+	// Test checkpoint without active directory
+	// Note: In the new implementation, checkpoint ID is ignored as we use auto-incrementing IDs
+	err = jfs.Checkpoint(ctx, "ignored-id")
+	if err == nil || !strings.Contains(err.Error(), "no such file or directory") {
+		t.Errorf("Expected 'no such file or directory' error, got: %v", err)
 	}
 }
 
 func TestRestoreValidation(t *testing.T) {
+	tmpDir := t.TempDir()
 	config := Config{
-		BaseDir:           "/tmp/test",
+		BaseDir:           tmpDir,
 		S3AccessKey:       "test",
 		S3SecretAccessKey: "test",
 		S3EndpointURL:     "http://localhost:9000",
@@ -356,12 +372,31 @@ func TestRestoreValidation(t *testing.T) {
 		t.Fatalf("Failed to create JuiceFS: %v", err)
 	}
 
+	// Initialize checkpoint database for testing
+	mountPath := filepath.Join(tmpDir, "data")
+	if err := os.MkdirAll(mountPath, 0755); err != nil {
+		t.Fatalf("Failed to create mount path: %v", err)
+	}
+
+	db, err := NewCheckpointDB(mountPath)
+	if err != nil {
+		t.Fatalf("Failed to create checkpoint database: %v", err)
+	}
+	jfs.checkpointDB = db
+	defer db.Close()
+
 	ctx := context.Background()
 
-	// Test empty checkpoint ID
+	// Test empty checkpoint ID - still required for restore
 	err = jfs.Restore(ctx, "")
 	if err == nil || err.Error() != "checkpoint ID is required" {
 		t.Errorf("Expected 'checkpoint ID is required' error, got: %v", err)
+	}
+
+	// Test restore with non-existent checkpoint
+	err = jfs.Restore(ctx, "v1")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("Expected 'not found' error, got: %v", err)
 	}
 }
 

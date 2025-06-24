@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 // JuiceFS manages the JuiceFS filesystem and Litestream replication
@@ -38,6 +38,7 @@ type JuiceFS struct {
 	stoppedCh     chan struct{}
 	signalCh      chan os.Signal
 	overlayMgr    *OverlayManager
+	checkpointDB  *CheckpointDB
 }
 
 // Config holds the configuration for JuiceFS
@@ -107,6 +108,8 @@ func New(config Config) (*JuiceFS, error) {
 		}
 		j.overlayMgr.SetSkipOverlayFS(config.OverlaySkipOverlayFS)
 	}
+
+	// checkpointDB will be initialized after mount is ready
 
 	return j, nil
 }
@@ -231,6 +234,7 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	// Mount JuiceFS
 	mountArgs := []string{
 		"mount",
+		"--no-usage-report",
 		"-o", "writeback_cache",
 		"--writeback",
 		"--upload-delay=1m",
@@ -320,6 +324,15 @@ func (j *JuiceFS) Stop(ctx context.Context) error {
 // monitorProcess handles the lifecycle of the mount process
 func (j *JuiceFS) monitorProcess() {
 	defer close(j.stoppedCh)
+
+	// Ensure checkpoint database is closed on exit
+	defer func() {
+		if j.checkpointDB != nil {
+			if err := j.checkpointDB.Close(); err != nil {
+				fmt.Printf("Warning: failed to close checkpoint database: %v\n", err)
+			}
+		}
+	}()
 
 	mountPath := filepath.Join(j.config.BaseDir, "data")
 
@@ -501,7 +514,7 @@ dbs:
 }
 
 func (j *JuiceFS) getExistingBucket(metaDB string) (string, error) {
-	db, err := sql.Open("sqlite3", metaDB)
+	db, err := sql.Open("sqlite", metaDB)
 	if err != nil {
 		return "", err
 	}
@@ -638,30 +651,14 @@ func (j *JuiceFS) watchForReady(stderr io.Reader, mountPath string) {
 			}
 			fmt.Printf("JuiceFS ready: created active directory at %s\n", filepath.Dir(activeDir))
 
-			// Initialize version file
-			if err := j.initializeVersion(); err != nil {
-				fmt.Printf("Warning: failed to initialize version file: %v\n", err)
+			// Initialize checkpoint database using the base directory (where metadata.db is located)
+			db, err := NewCheckpointDB(j.config.BaseDir)
+			if err != nil {
+				j.mountReady <- fmt.Errorf("failed to initialize checkpoint database: %w", err)
+				return
 			}
-
-			// Initialize history file if it doesn't exist
-			historyFile := filepath.Join(mountPath, "active", ".history")
-			if _, err := os.Stat(historyFile); os.IsNotExist(err) {
-				// Get current version
-				version, err := j.GetCurrentVersion()
-				if err == nil {
-					// Get active directory creation time
-					if info, err := os.Stat(activeDir); err == nil {
-						// Use directory modification time as creation time
-						createTime := info.ModTime().Format(time.RFC3339)
-						// Write initial history entry with directory creation time
-						versionStr := fmt.Sprintf("v%d", version)
-						record := fmt.Sprintf("to=%s;time=%s\n", versionStr, createTime)
-						if err := os.WriteFile(historyFile, []byte(record), 0644); err != nil {
-							fmt.Printf("Warning: failed to initialize history file: %v\n", err)
-						}
-					}
-				}
-			}
+			j.checkpointDB = db
+			fmt.Println("Checkpoint database initialized")
 
 			// Mount the overlay
 			if j.overlayMgr != nil {

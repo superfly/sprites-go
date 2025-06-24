@@ -6,7 +6,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sprite-env/server/packages/supervisor"
+	"github.com/sprite-env/packages/supervisor"
 )
 
 func ExampleSupervisor() {

@@ -1,8 +1,14 @@
 # syntax=docker/dockerfile:1
 
 # Build stage for AMD64
-FROM --platform=linux/amd64 golang:1.24-alpine AS builder-amd64
-RUN apk add --no-cache git
+FROM --platform=linux/amd64 golang:1.24-bookworm AS builder-amd64
+ENV CGO_ENABLED=1
+
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive \
+    apt-get install --no-install-recommends --assume-yes \
+      build-essential \
+      libsqlite3-dev
 WORKDIR /build
 
 # Copy go.work files first
@@ -14,6 +20,7 @@ COPY lib/go.mod lib/go.sum* ./lib/
 COPY client/go.mod client/go.sum* ./client/
 COPY packages/juicefs/go.mod packages/juicefs/go.sum* ./packages/juicefs/
 COPY packages/supervisor/go.mod packages/supervisor/go.sum* ./packages/supervisor/
+COPY packages/wsexec/go.mod packages/wsexec/go.sum* ./packages/wsexec/
 
 # Download dependencies for all modules in the workspace
 RUN go mod download -x
@@ -24,12 +31,19 @@ COPY . .
 ARG VERSION=dev
 RUN cd server && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-    -ldflags="-w -s -X main.version=${VERSION}" \
+    -ldflags="-w -s -X main.version=${VERSION} -extldflags '-static'" \
+    -tags 'netgo osusergo' \
     -o ../spritectl .
 
 # Build stage for ARM64
-FROM --platform=linux/arm64 golang:1.24-alpine AS builder-arm64
-RUN apk add --no-cache git
+FROM --platform=linux/arm64 golang:1.24-bookworm AS builder-arm64
+ENV CGO_ENABLED=1
+
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive \
+    apt-get install --no-install-recommends --assume-yes \
+      build-essential \
+      libsqlite3-dev
 WORKDIR /build
 
 # Copy go.work files first
@@ -41,6 +55,7 @@ COPY lib/go.mod lib/go.sum* ./lib/
 COPY client/go.mod client/go.sum* ./client/
 COPY packages/juicefs/go.mod packages/juicefs/go.sum* ./packages/juicefs/
 COPY packages/supervisor/go.mod packages/supervisor/go.sum* ./packages/supervisor/
+COPY packages/wsexec/go.mod packages/wsexec/go.sum* ./packages/wsexec/
 
 # Download dependencies for all modules in the workspace
 RUN go mod download -x
@@ -51,7 +66,8 @@ COPY . .
 ARG VERSION=dev
 RUN cd server && \
     CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
-    -ldflags="-w -s -X main.version=${VERSION}" \
+    -ldflags="-w -s -X main.version=${VERSION} -extldflags '-static'" \
+    -tags 'netgo osusergo' \
     -o ../spritectl .
 
 # Download crun binary

@@ -3,16 +3,18 @@ package main
 import (
 	"context"
 	"fmt"
-	"lib/api"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/fly-dev-env/sprite-env/server/packages/juicefs"
-	"github.com/sprite-env/server/packages/supervisor"
+	"github.com/sprite-env/lib/api"
+
+	"github.com/sprite-env/packages/juicefs"
+	"github.com/sprite-env/packages/supervisor"
 )
 
 // System encapsulates the JuiceFS and supervised process management
@@ -95,29 +97,42 @@ func NewSystem(config SystemConfig, logger *slog.Logger, reaper *Reaper) (*Syste
 
 // Boot handles the boot sequence for the system
 func (s *System) Boot(ctx context.Context) error {
+	s.logger.Info("=== Starting system boot sequence ===")
+
 	// Start JuiceFS if configured
 	if s.juicefs != nil {
 		s.logger.Info("Starting JuiceFS...")
 		if err := s.juicefs.Start(ctx); err != nil {
+			s.logger.Error("JuiceFS start failed", "error", err)
 			return fmt.Errorf("failed to start JuiceFS: %w", err)
 		}
 		s.logger.Info("JuiceFS started successfully")
+	} else {
+		s.logger.Info("JuiceFS not configured, skipping")
 	}
 
 	// Start supervised process if configured
 	if len(s.config.ProcessCommand) > 0 {
-		s.logger.Info("Starting supervised process...")
+		s.logger.Info("Starting supervised process...", "command", s.config.ProcessCommand)
 		if err := s.StartProcess(); err != nil {
+			s.logger.Error("Process start failed", "error", err)
 			// If process fails to start, stop JuiceFS
 			if s.juicefs != nil {
+				s.logger.Info("Stopping JuiceFS due to process start failure")
 				stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
-				s.juicefs.Stop(stopCtx)
+				if stopErr := s.juicefs.Stop(stopCtx); stopErr != nil {
+					s.logger.Error("Failed to stop JuiceFS during cleanup", "error", stopErr)
+				}
 			}
 			return fmt.Errorf("failed to start process: %w", err)
 		}
+		s.logger.Info("Supervised process started successfully")
+	} else {
+		s.logger.Info("No process command configured, skipping process start")
 	}
 
+	s.logger.Info("=== System boot sequence completed successfully ===")
 	return nil
 }
 
@@ -126,15 +141,33 @@ func (s *System) StartProcess() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.logger.Info("StartProcess: Entering method")
+
 	if len(s.config.ProcessCommand) == 0 {
+		s.logger.Error("StartProcess: No process command configured")
 		return fmt.Errorf("no process command configured")
 	}
+
+	s.logger.Info("StartProcess: Setting up working directory", "command", s.config.ProcessCommand)
 
 	// Set up process working directory
 	workingDir := s.config.ProcessWorkingDir
 	if s.juicefs != nil && workingDir == "" {
 		// Default to JuiceFS active directory if available
 		workingDir = filepath.Join(s.config.JuiceFSBaseDir, "data", "active", "fs")
+		s.logger.Info("StartProcess: Using JuiceFS default working directory", "workingDir", workingDir)
+	}
+
+	s.logger.Info("StartProcess: Final working directory", "workingDir", workingDir)
+
+	// Check if working directory exists
+	if workingDir != "" {
+		if stat, err := os.Stat(workingDir); err != nil {
+			s.logger.Error("StartProcess: Working directory does not exist", "workingDir", workingDir, "error", err)
+			return fmt.Errorf("working directory does not exist: %s: %w", workingDir, err)
+		} else {
+			s.logger.Info("StartProcess: Working directory exists", "workingDir", workingDir, "isDir", stat.IsDir())
+		}
 	}
 
 	supervisorConfig := supervisor.Config{
@@ -145,31 +178,65 @@ func (s *System) StartProcess() error {
 		Dir:         workingDir,
 	}
 
+	s.logger.Info("StartProcess: Creating supervisor",
+		"command", supervisorConfig.Command,
+		"args", supervisorConfig.Args,
+		"gracePeriod", supervisorConfig.GracePeriod,
+		"dir", supervisorConfig.Dir,
+		"envCount", len(supervisorConfig.Env))
+
+	// Validate that the command exists and is executable
+	if _, err := exec.LookPath(supervisorConfig.Command); err != nil {
+		s.logger.Error("StartProcess: Command not found in PATH", "command", supervisorConfig.Command, "error", err)
+		return fmt.Errorf("command not found: %s: %w", supervisorConfig.Command, err)
+	}
+
+	// Check if it's an absolute path that exists
+	if filepath.IsAbs(supervisorConfig.Command) {
+		if stat, err := os.Stat(supervisorConfig.Command); err != nil {
+			s.logger.Error("StartProcess: Command file does not exist", "command", supervisorConfig.Command, "error", err)
+			return fmt.Errorf("command file does not exist: %s: %w", supervisorConfig.Command, err)
+		} else if stat.Mode()&0111 == 0 {
+			s.logger.Error("StartProcess: Command file is not executable", "command", supervisorConfig.Command)
+			return fmt.Errorf("command file is not executable: %s", supervisorConfig.Command)
+		}
+	}
+
+	s.logger.Info("StartProcess: Command validation successful")
+
 	sup, err := supervisor.New(supervisorConfig)
 	if err != nil {
+		s.logger.Error("StartProcess: Failed to create supervisor", "error", err)
 		return fmt.Errorf("failed to create supervisor: %w", err)
 	}
 
+	s.logger.Info("StartProcess: Supervisor created successfully, starting process")
+
 	pid, err := sup.Start()
 	if err != nil {
+		s.logger.Error("StartProcess: Failed to start process", "error", err)
 		return fmt.Errorf("failed to start process: %w", err)
 	}
 
 	s.supervisor = sup
 	s.processRunning = true
 
-	s.logger.Info("Process started", "pid", pid, "command", s.config.ProcessCommand)
+	s.logger.Info("StartProcess: Process started successfully", "pid", pid, "command", s.config.ProcessCommand)
 
 	// Monitor process in background
 	go func() {
+		s.logger.Info("StartProcess: Starting background process monitor")
 		err := s.supervisor.Wait()
+		s.logger.Info("StartProcess: Process monitor detected process exit", "error", err)
 		s.processDoneCh <- err
 
 		s.mu.Lock()
 		s.processRunning = false
 		s.mu.Unlock()
+		s.logger.Info("StartProcess: Background monitor completed")
 	}()
 
+	s.logger.Info("StartProcess: Method completed successfully")
 	return nil
 }
 
@@ -486,13 +553,8 @@ func (s *System) GetCheckpoint(ctx context.Context, checkpointID string) (*juice
 		return nil, fmt.Errorf("JuiceFS not configured")
 	}
 
-	// First, check if the requested ID matches the current active version
-	activeVersion, err := s.juicefs.GetCurrentVersion()
-	if err == nil && checkpointID == fmt.Sprintf("v%d", activeVersion) {
-		// Redirect to "active" to get the active state info
-		checkpointID = "active"
-	}
-
+	// Note: GetCurrentVersion() was removed in SQLite migration
+	// The juicefs.GetCheckpoint() method now handles "active" checkpoint lookup internally
 	checkpoint, err := s.juicefs.GetCheckpoint(ctx, checkpointID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get checkpoint: %w", err)

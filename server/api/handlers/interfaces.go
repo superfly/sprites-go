@@ -2,11 +2,12 @@ package handlers
 
 import (
 	"context"
-	"lib/api"
 	"os"
 	"time"
 
-	"github.com/fly-dev-env/sprite-env/server/packages/juicefs"
+	"github.com/sprite-env/lib/api"
+
+	"github.com/sprite-env/packages/juicefs"
 )
 
 // SystemManager interface provides methods for managing the system (process + storage)

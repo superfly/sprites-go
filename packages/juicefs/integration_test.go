@@ -7,11 +7,10 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/fly-dev-env/sprite-env/server/packages/juicefs"
+	"github.com/sprite-env/packages/juicefs"
 )
 
 // TestJuiceFSLocalModeIntegration tests JuiceFS in local mode
@@ -87,18 +86,10 @@ func TestJuiceFSLocalModeIntegration(t *testing.T) {
 				t.Fatalf("Failed to restore checkpoint: %v", err)
 			}
 
-			// Verify history file was created
-			activeDir := filepath.Join(tmpDir, "data", "active")
-			historyFile := filepath.Join(activeDir, ".history")
-			historyData, err := os.ReadFile(historyFile)
-			if err != nil {
-				t.Fatalf("Failed to read history file: %v", err)
-			}
-
-			// Check history format
-			historyStr := string(historyData)
-			if !strings.Contains(historyStr, "from=v0;time=") {
-				t.Errorf("History file has incorrect format: %s", historyStr)
+			// Verify the restore was successful by checking file content
+			restoredTestFile := filepath.Join(tmpDir, "data", "active", "fs", "test.txt")
+			if _, err := os.Stat(restoredTestFile); os.IsNotExist(err) {
+				t.Errorf("Test file was not restored after checkpoint restore")
 			}
 		})
 	})
