@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/sprite-env/packages/wsexec"
@@ -111,6 +112,20 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 	if envVars := query["env"]; len(envVars) > 0 {
 		cmd.SetEnv(envVars)
 		h.logger.Debug("HandleExec: Environment variables set", "env", envVars)
+	}
+
+	// Set initial terminal size if specified (for TTY mode)
+	if tty {
+		if colsStr := query.Get("cols"); colsStr != "" {
+			if cols, err := strconv.ParseUint(colsStr, 10, 16); err == nil {
+				if rowsStr := query.Get("rows"); rowsStr != "" {
+					if rows, err := strconv.ParseUint(rowsStr, 10, 16); err == nil {
+						cmd.SetInitialTerminalSize(uint16(cols), uint16(rows))
+						h.logger.Debug("HandleExec: Initial terminal size set", "cols", cols, "rows", rows)
+					}
+				}
+			}
+		}
 	}
 
 	// Set wrapper command and logger

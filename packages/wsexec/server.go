@@ -52,6 +52,10 @@ type ServerCommand struct {
 	Dir  string
 	Tty  bool
 
+	// Initial terminal size (for PTY mode)
+	InitialCols uint16
+	InitialRows uint16
+
 	// Console socket path for receiving PTY from crun
 	ConsoleSocketPath string
 
@@ -104,6 +108,13 @@ func (c *ServerCommand) SetContext(ctx context.Context) *ServerCommand {
 // SetConsoleSocketPath sets the path for console socket to receive PTY from crun
 func (c *ServerCommand) SetConsoleSocketPath(path string) *ServerCommand {
 	c.ConsoleSocketPath = path
+	return c
+}
+
+// SetInitialTerminalSize sets the initial terminal size for PTY mode
+func (c *ServerCommand) SetInitialTerminalSize(cols, rows uint16) *ServerCommand {
+	c.InitialCols = cols
+	c.InitialRows = rows
 	return c
 }
 
@@ -385,6 +396,22 @@ func (c *ServerCommand) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, ws *Ad
 	}
 	defer ptmx.Close()
 
+	// Set initial terminal size if specified
+	if c.InitialCols > 0 && c.InitialRows > 0 {
+		if err := creackpty.Setsize(ptmx, &creackpty.Winsize{
+			Cols: c.InitialCols,
+			Rows: c.InitialRows,
+		}); err != nil {
+			if c.Logger != nil {
+				c.Logger.Warn("Failed to set initial PTY size", "error", err, "cols", c.InitialCols, "rows", c.InitialRows)
+			}
+		} else {
+			if c.Logger != nil {
+				c.Logger.Debug("Set initial PTY size", "cols", c.InitialCols, "rows", c.InitialRows)
+			}
+		}
+	}
+
 	if c.Logger != nil {
 		c.Logger.Debug("PTY created successfully")
 	}
@@ -465,6 +492,22 @@ func (c *ServerCommand) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd,
 			c.Logger.Warn("Failed to configure PTY", "error", err)
 		}
 		// Continue anyway - PTY will work but might have echo issues
+	}
+
+	// Set initial terminal size if specified
+	if c.InitialCols > 0 && c.InitialRows > 0 {
+		if err := creackpty.Setsize(ptyFile, &creackpty.Winsize{
+			Cols: c.InitialCols,
+			Rows: c.InitialRows,
+		}); err != nil {
+			if c.Logger != nil {
+				c.Logger.Warn("Failed to set initial PTY size", "error", err, "cols", c.InitialCols, "rows", c.InitialRows)
+			}
+		} else {
+			if c.Logger != nil {
+				c.Logger.Debug("Set initial PTY size", "cols", c.InitialCols, "rows", c.InitialRows)
+			}
+		}
 	}
 
 	// Handle all PTY I/O

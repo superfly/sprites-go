@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -419,6 +420,19 @@ func startMockServer(t *testing.T) (*http.Server, string, string) {
 		// Set environment variables if specified
 		if envVars := query["env"]; len(envVars) > 0 {
 			cmd.SetEnv(envVars)
+		}
+
+		// Set initial terminal size if specified (for TTY mode)
+		if tty {
+			if colsStr := query.Get("cols"); colsStr != "" {
+				if cols, err := strconv.ParseUint(colsStr, 10, 16); err == nil {
+					if rowsStr := query.Get("rows"); rowsStr != "" {
+						if rows, err := strconv.ParseUint(rowsStr, 10, 16); err == nil {
+							cmd.SetInitialTerminalSize(uint16(cols), uint16(rows))
+						}
+					}
+				}
+			}
 		}
 
 		// Set logger for debugging (only in verbose mode)

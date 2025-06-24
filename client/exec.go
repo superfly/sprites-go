@@ -122,10 +122,8 @@ func handlePTYMode(wsCmd *wsexec.Cmd) (cleanup func(), err error) {
 		fmt.Print("\033[?25h")
 	}
 
-	// Send initial terminal size
-	if width, height, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
-		wsCmd.Resize(uint16(width), uint16(height))
-	}
+	// Note: Initial terminal size is now sent as part of WebSocket connection setup,
+	// so we don't need to send it again here. The Resize call would be redundant.
 
 	// Handle terminal resize
 	sigCh := make(chan os.Signal, 1)
@@ -193,6 +191,17 @@ func executeDirectWebSocket(baseURL, token string, cmd []string, workingDir stri
 		query.Set("tty", "true")
 		if debug {
 			logger.Debug("Enabled TTY mode")
+		}
+
+		// Send initial terminal size as part of connection setup
+		if term.IsTerminal(int(os.Stdin.Fd())) {
+			if width, height, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
+				query.Set("cols", fmt.Sprintf("%d", width))
+				query.Set("rows", fmt.Sprintf("%d", height))
+				if debug {
+					logger.Debug("Set initial terminal size", "cols", width, "rows", height)
+				}
+			}
 		}
 	}
 	for _, envVar := range env {
