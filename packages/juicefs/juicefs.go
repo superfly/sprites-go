@@ -70,7 +70,7 @@ type Config struct {
 // New creates a new JuiceFS instance
 func New(config Config) (*JuiceFS, error) {
 	if config.VolumeName == "" {
-		config.VolumeName = "juicefs"
+		config.VolumeName = "fs"
 	}
 
 	// Validate required configuration
@@ -280,7 +280,8 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	mountArgs := []string{
 		"mount",
 		"--no-usage-report",
-		"-o", "writeback_cache,fsname=SpriteFS",
+		"-o", "writeback_cache",
+		"-o", "fsname=SpriteFS", // not currently working like it's suppposed to
 		"--writeback",
 		"--upload-delay=1m",
 		"--cache-dir", cacheDir,
@@ -292,7 +293,9 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	}
 
 	j.mountCmd = exec.CommandContext(ctx, "juicefs", mountArgs...)
-
+	j.mountCmd.Env = append(os.Environ(),
+		"FSTAB_NAME_PREFIX=\"sprite:\"",
+	)
 	// Set up stderr pipe to watch for ready message
 	stderrPipe, err := j.mountCmd.StderrPipe()
 	if err != nil {
