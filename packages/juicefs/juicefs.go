@@ -660,6 +660,9 @@ func (j *JuiceFS) watchForReady(stderr io.Reader, mountPath string) {
 			j.checkpointDB = db
 			fmt.Println("Checkpoint database initialized")
 
+			// Apply quota asynchronously
+			go j.applyActiveFsQuota()
+
 			// Mount the overlay
 			if j.overlayMgr != nil {
 				ctx := context.Background()
@@ -676,6 +679,41 @@ func (j *JuiceFS) watchForReady(stderr io.Reader, mountPath string) {
 
 	// If we get here, we didn't see the ready message
 	j.mountReady <- fmt.Errorf("did not receive 'juicefs is ready' message")
+}
+
+// applyActiveFsQuota applies a 10TB quota to the active/fs directory
+func (j *JuiceFS) applyActiveFsQuota() {
+	ctx := context.Background()
+
+	// Construct metadata URL
+	metaDB := filepath.Join(j.config.BaseDir, "metadata.db")
+	metaURL := fmt.Sprintf("sqlite3://%s", metaDB)
+
+	// Wait a moment for the mount to stabilize
+	time.Sleep(2 * time.Second)
+
+	fmt.Println("Applying 10TB quota to /active/fs directory...")
+
+	// Apply 10TB quota using juicefs quota command
+	// 10TB = 10240 GiB
+	quotaCmd := exec.CommandContext(ctx, "juicefs", "quota", "set", metaURL,
+		"--path", "/active/fs",
+		"--capacity", "10240")
+
+	output, err := quotaCmd.CombinedOutput()
+	if err != nil {
+		// Check if quota already exists
+		if strings.Contains(string(output), "already exists") {
+			fmt.Println("Quota already exists for /active/fs directory")
+		} else {
+			fmt.Printf("Warning: failed to apply quota to /active/fs: %v, output: %s\n", err, string(output))
+		}
+	} else {
+		fmt.Printf("Successfully applied 10TB quota to /active/fs directory\n")
+		if len(output) > 0 {
+			fmt.Printf("Quota info: %s\n", string(output))
+		}
+	}
 }
 
 func (j *JuiceFS) handleSignals() {

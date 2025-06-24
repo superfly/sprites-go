@@ -199,6 +199,9 @@ func (j *JuiceFS) Restore(ctx context.Context, checkpointID string) error {
 		}
 	}
 
+	// Apply quota asynchronously after restore
+	go j.applyActiveFsQuota()
+
 	fmt.Printf("Restore from checkpoint v%d complete\n", record.ID)
 	return nil
 }

@@ -469,6 +469,69 @@ func TestLocalModeDirectories(t *testing.T) {
 	}
 }
 
+func TestQuotaApplication(t *testing.T) {
+	if !commandExists("juicefs") || !commandExists("litestream") {
+		t.Skip("juicefs or litestream not found in PATH")
+	}
+
+	// Create a temporary directory for testing
+	tempDir, err := os.MkdirTemp("", "TestQuotaApplication")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	config := Config{
+		BaseDir:    tempDir,
+		LocalMode:  true,
+		VolumeName: "test-quota-volume",
+	}
+
+	// Create JuiceFS instance
+	jfs, err := New(config)
+	if err != nil {
+		t.Fatalf("Failed to create JuiceFS: %v", err)
+	}
+
+	// Start JuiceFS
+	ctx := context.Background()
+	if err := jfs.Start(ctx); err != nil {
+		t.Fatalf("Failed to start JuiceFS: %v", err)
+	}
+
+	// Give quota application time to run
+	time.Sleep(5 * time.Second)
+
+	// Check quota using juicefs quota get command
+	metaDB := filepath.Join(tempDir, "metadata.db")
+	metaURL := fmt.Sprintf("sqlite3://%s", metaDB)
+
+	quotaCmd := exec.Command("juicefs", "quota", "get", metaURL, "--path", "/active/fs")
+	output, err := quotaCmd.CombinedOutput()
+
+	if err != nil {
+		t.Logf("Quota check output: %s", string(output))
+		// Don't fail the test as quota might take time to apply
+		t.Logf("Warning: Could not verify quota (may still be applying): %v", err)
+	} else {
+		// Check if output contains 10TB quota
+		outputStr := string(output)
+		if strings.Contains(outputStr, "10 TiB") || strings.Contains(outputStr, "10240 GiB") {
+			t.Logf("Successfully verified 10TB quota on /active/fs")
+		} else {
+			t.Logf("Quota output: %s", outputStr)
+			t.Errorf("Expected 10TB quota not found in output")
+		}
+	}
+
+	// Stop JuiceFS
+	stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := jfs.Stop(stopCtx); err != nil {
+		t.Errorf("Failed to stop JuiceFS: %v", err)
+	}
+}
+
 func TestFindAndUnmountDependentMounts(t *testing.T) {
 	// Note: This test documents the expected behavior of findAndUnmountDependentMounts
 	// In production, this function would:

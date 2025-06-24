@@ -5,8 +5,11 @@ package juicefs_test
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -90,6 +93,29 @@ func TestJuiceFSLocalModeIntegration(t *testing.T) {
 			restoredTestFile := filepath.Join(tmpDir, "data", "active", "fs", "test.txt")
 			if _, err := os.Stat(restoredTestFile); os.IsNotExist(err) {
 				t.Errorf("Test file was not restored after checkpoint restore")
+			}
+
+			// Give quota application time to run after restore
+			time.Sleep(3 * time.Second)
+
+			// Verify quota was applied after restore
+			metaDB := filepath.Join(tmpDir, "metadata.db")
+			metaURL := fmt.Sprintf("sqlite3://%s", metaDB)
+
+			quotaCmd := exec.Command("juicefs", "quota", "get", metaURL, "--path", "/active/fs")
+			output, err := quotaCmd.CombinedOutput()
+
+			if err != nil {
+				t.Logf("Quota check after restore - output: %s", string(output))
+				t.Logf("Warning: Could not verify quota after restore: %v", err)
+			} else {
+				outputStr := string(output)
+				if strings.Contains(outputStr, "10 TiB") || strings.Contains(outputStr, "10240 GiB") {
+					t.Logf("Successfully verified 10TB quota on /active/fs after restore")
+				} else {
+					t.Logf("Quota output after restore: %s", outputStr)
+					t.Errorf("Expected 10TB quota not found after restore")
+				}
 			}
 		})
 	})

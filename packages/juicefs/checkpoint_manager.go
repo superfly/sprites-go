@@ -13,9 +13,9 @@ import (
 
 // CheckpointManager handles all checkpoint and restore operations for JuiceFS
 type CheckpointManager struct {
-	baseDir      string
-	db           *CheckpointDB
-	overlayMgr   *OverlayManager
+	baseDir    string
+	db         *CheckpointDB
+	overlayMgr *OverlayManager
 }
 
 // NewCheckpointManager creates a new checkpoint manager
@@ -48,7 +48,7 @@ func (cm *CheckpointManager) Close() error {
 func (cm *CheckpointManager) Checkpoint(ctx context.Context, checkpointID string) error {
 	// Note: checkpointID parameter is ignored in the new implementation
 	// as we use auto-incrementing IDs from the database
-	
+
 	if cm.db == nil {
 		return fmt.Errorf("checkpoint database not initialized")
 	}
@@ -80,7 +80,7 @@ func (cm *CheckpointManager) Checkpoint(ctx context.Context, checkpointID string
 		// Convert relative paths to absolute paths
 		srcPath := filepath.Join(mountPath, src)
 		dstPath := filepath.Join(mountPath, dst)
-		
+
 		fmt.Printf("Creating checkpoint: cloning %s to %s...\n", src, dst)
 		cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", srcPath, dstPath)
 		if output, err := cloneCmd.CombinedOutput(); err != nil {
@@ -88,7 +88,7 @@ func (cm *CheckpointManager) Checkpoint(ctx context.Context, checkpointID string
 		}
 		return nil
 	})
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to create checkpoint: %w", err)
 	}
@@ -110,12 +110,12 @@ func (cm *CheckpointManager) Restore(ctx context.Context, checkpointID string) e
 	mountPath := filepath.Join(cm.baseDir, "data")
 	activeDir := filepath.Join(mountPath, "active")
 	checkpointsDir := filepath.Join(mountPath, "checkpoints")
-	
+
 	// Look up the checkpoint in the database
 	var checkpointPath string
 	var record *CheckpointRecord
 	var err error
-	
+
 	// Check if the checkpointID is a path like "checkpoints/v3" or just "v3" or "3"
 	if strings.HasPrefix(checkpointID, "checkpoints/v") {
 		// Full path provided
@@ -134,7 +134,7 @@ func (cm *CheckpointManager) Restore(ctx context.Context, checkpointID string) e
 		// Try to find by path
 		checkpointPath = filepath.Join("checkpoints", checkpointID)
 	}
-	
+
 	// If we don't have the record yet, look it up by path
 	if record == nil {
 		record, err = cm.db.FindCheckpointByPath(checkpointPath)
@@ -142,7 +142,7 @@ func (cm *CheckpointManager) Restore(ctx context.Context, checkpointID string) e
 			return fmt.Errorf("checkpoint not found in database: %w", err)
 		}
 	}
-	
+
 	fullCheckpointPath := filepath.Join(mountPath, checkpointPath)
 	if _, err := os.Stat(fullCheckpointPath); os.IsNotExist(err) {
 		return fmt.Errorf("checkpoint directory does not exist at %s", fullCheckpointPath)
@@ -202,6 +202,47 @@ func (cm *CheckpointManager) Restore(ctx context.Context, checkpointID string) e
 		}
 	}
 
+	// Apply quota asynchronously after restore
+	go cm.applyActiveFsQuotaAsync()
+
 	fmt.Printf("Restore from checkpoint v%d complete\n", record.ID)
 	return nil
 }
+
+// applyActiveFsQuotaAsync applies a 10TB quota to the active/fs directory asynchronously
+func (cm *CheckpointManager) applyActiveFsQuotaAsync() {
+	ctx := context.Background()
+
+	// Construct metadata URL
+	metaDB := filepath.Join(cm.baseDir, "metadata.db")
+	metaURL := fmt.Sprintf("sqlite3://%s", metaDB)
+
+	// Wait a moment for the mount to stabilize
+	time.Sleep(2 * time.Second)
+
+	fmt.Println("Applying 10TB quota to /active/fs directory...")
+
+	// Apply 10TB quota using juicefs quota command
+	// 10TB = 10240 GiB
+	quotaCmd := exec.CommandContext(ctx, "juicefs", "quota", "set", metaURL,
+		"--path", "/active/fs",
+		"--capacity", "10240")
+
+	output, err := quotaCmd.CombinedOutput()
+	if err != nil {
+		// Check if quota already exists
+		if strings.Contains(string(output), "already exists") {
+			fmt.Println("Quota already exists for /active/fs directory")
+		} else {
+			fmt.Printf("Warning: failed to apply quota to /active/fs: %v, output: %s\n", err, string(output))
+		}
+	} else {
+		fmt.Printf("Successfully applied 10TB quota to /active/fs directory\n")
+		if len(output) > 0 {
+			fmt.Printf("Quota info: %s\n", string(output))
+		}
+	}
+}
+
+// ListCheckpoints returns a list of all available checkpoints
+// ... existing code ...
