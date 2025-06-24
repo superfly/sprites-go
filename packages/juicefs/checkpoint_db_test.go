@@ -1,6 +1,7 @@
 package juicefs
 
 import (
+	"fmt"
 	"os"
 	"testing"
 )
@@ -37,14 +38,30 @@ func TestCheckpointDB(t *testing.T) {
 
 	// Test 2: Create a checkpoint
 	cloneExecuted := false
-	var cloneSrc, cloneDst string
-	
-	newCheckpoint, err := db.CreateCheckpoint(func(src, dst string) error {
-		cloneExecuted = true
-		cloneSrc = src
-		cloneDst = dst
-		return nil
-	})
+	renameExecuted := false
+
+	newCheckpoint, err := db.CreateCheckpoint(
+		func(src, dst string) error {
+			cloneExecuted = true
+			// For testing, just verify the paths
+			if src != "active/" || dst != "checkpoints/v0.in-progress" {
+				return fmt.Errorf("unexpected paths: src=%s, dst=%s", src, dst)
+			}
+			return nil
+		},
+		func(src, dst string) error {
+			renameExecuted = true
+			// For testing, verify the rename operation
+			if dst == "" {
+				// Cleanup
+				return nil
+			}
+			if src != "checkpoints/v0.in-progress" || dst != "checkpoints/v0" {
+				return fmt.Errorf("unexpected rename: src=%s, dst=%s", src, dst)
+			}
+			return nil
+		},
+	)
 	if err != nil {
 		t.Fatalf("Failed to create checkpoint: %v", err)
 	}
@@ -52,11 +69,8 @@ func TestCheckpointDB(t *testing.T) {
 	if !cloneExecuted {
 		t.Error("Clone function was not executed")
 	}
-	if cloneSrc != "active/" {
-		t.Errorf("Expected clone source to be 'active/', got %s", cloneSrc)
-	}
-	if cloneDst != "checkpoints/v0" {
-		t.Errorf("Expected clone destination to be 'checkpoints/v0', got %s", cloneDst)
+	if !renameExecuted {
+		t.Error("Rename function was not executed")
 	}
 
 	// Verify the new checkpoint
@@ -89,12 +103,20 @@ func TestCheckpointDB(t *testing.T) {
 	}
 
 	// Test 5: Create another checkpoint
-	newCheckpoint2, err := db.CreateCheckpoint(func(src, dst string) error {
-		if dst != "checkpoints/v1" {
-			t.Errorf("Expected second checkpoint destination to be 'checkpoints/v1', got %s", dst)
-		}
-		return nil
-	})
+	newCheckpoint2, err := db.CreateCheckpoint(
+		func(src, dst string) error {
+			if dst != "checkpoints/v1.in-progress" {
+				t.Errorf("Expected second checkpoint destination to be 'checkpoints/v1.in-progress', got %s", dst)
+			}
+			return nil
+		},
+		func(src, dst string) error {
+			if dst != "" && dst != "checkpoints/v1" {
+				t.Errorf("Expected rename destination to be 'checkpoints/v1', got %s", dst)
+			}
+			return nil
+		},
+	)
 	if err != nil {
 		t.Fatalf("Failed to create second checkpoint: %v", err)
 	}

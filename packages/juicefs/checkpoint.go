@@ -48,18 +48,35 @@ func (j *JuiceFS) Checkpoint(ctx context.Context, checkpointID string) error {
 	}
 
 	// Create checkpoint using the database transaction
-	record, err := j.checkpointDB.CreateCheckpoint(func(src, dst string) error {
-		// Convert relative paths to absolute paths
-		srcPath := filepath.Join(mountPath, src)
-		dstPath := filepath.Join(mountPath, dst)
+	record, err := j.checkpointDB.CreateCheckpoint(
+		// Clone function
+		func(src, dst string) error {
+			// Convert relative paths to absolute paths
+			srcPath := filepath.Join(mountPath, src)
+			dstPath := filepath.Join(mountPath, dst)
 
-		fmt.Printf("Creating checkpoint: cloning %s to %s...\n", src, dst)
-		cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", srcPath, dstPath)
-		if output, err := cloneCmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("failed to clone: %w, output: %s", err, string(output))
-		}
-		return nil
-	})
+			fmt.Printf("Creating checkpoint: cloning %s to %s...\n", src, dst)
+			cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", srcPath, dstPath)
+			if output, err := cloneCmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("failed to clone: %w, output: %s", err, string(output))
+			}
+			return nil
+		},
+		// Rename function (also handles cleanup when dst is empty)
+		func(src, dst string) error {
+			srcPath := filepath.Join(mountPath, src)
+
+			if dst == "" {
+				// Cleanup request
+				fmt.Printf("Cleaning up temporary checkpoint directory: %s\n", srcPath)
+				return os.RemoveAll(srcPath)
+			}
+
+			dstPath := filepath.Join(mountPath, dst)
+			fmt.Printf("Finalizing checkpoint: renaming %s to %s\n", src, dst)
+			return os.Rename(srcPath, dstPath)
+		},
+	)
 
 	if err != nil {
 		return fmt.Errorf("failed to create checkpoint: %w", err)
