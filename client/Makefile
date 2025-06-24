@@ -28,5 +28,5 @@ build-all:
 
 # Run with example
 run-example: build
-	@echo "Make sure SPRITE_URL and SPRITE_TOKEN are set!"
+		@echo "Make sure SPRITE_URL and SPRITE_TOKEN are set! (see client/README.md for details)"
 	./sprite exec echo "Hello from sprite" 

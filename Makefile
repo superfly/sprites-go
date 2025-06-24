@@ -13,7 +13,7 @@ build:
 # Run machine integration tests
 test-machine: build
 	@echo "Running machine integration tests..."
-	@echo "Make sure FLY_APP_NAME and SPRITE_TOKEN are set"
+		@echo "Make sure FLY_APP_NAME and SPRITE_TOKEN are set (see tests/README.md for details)"
 	cd tests && make test
 
 # Show available targets
