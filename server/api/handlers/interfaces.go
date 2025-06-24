@@ -14,12 +14,14 @@ import (
 type SystemManager interface {
 	// Process management
 	IsProcessRunning() bool
+	WaitForProcessRunning(ctx context.Context) error
 	StartProcess() error
 	StopProcess() error
 	ForwardSignal(sig os.Signal) error
 
 	// Storage management
 	HasJuiceFS() bool
+	WaitForJuiceFS(ctx context.Context) error
 	CheckpointWithStream(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) error
 	RestoreWithStream(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) error
 	ListCheckpoints(ctx context.Context) ([]juicefs.CheckpointInfo, error)

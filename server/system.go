@@ -32,6 +32,11 @@ type System struct {
 	mu             sync.RWMutex
 	processRunning bool
 	restoringNow   bool
+	juicefsReady   bool
+
+	// Channels for notifying when components become ready
+	processReadyCh chan struct{}
+	juicefsReadyCh chan struct{}
 }
 
 // SystemConfig holds configuration for the System
@@ -61,10 +66,12 @@ type SystemConfig struct {
 // NewSystem creates a new System instance
 func NewSystem(config SystemConfig, logger *slog.Logger, reaper *Reaper) (*System, error) {
 	s := &System{
-		config:        config,
-		logger:        logger,
-		reaper:        reaper,
-		processDoneCh: make(chan error, 1),
+		config:         config,
+		logger:         logger,
+		reaper:         reaper,
+		processDoneCh:  make(chan error, 1),
+		processReadyCh: make(chan struct{}),
+		juicefsReadyCh: make(chan struct{}),
 	}
 
 	// Set up JuiceFS if base directory is configured
@@ -107,6 +114,13 @@ func (s *System) Boot(ctx context.Context) error {
 			return fmt.Errorf("failed to start JuiceFS: %w", err)
 		}
 		s.logger.Info("JuiceFS started successfully")
+
+		// Mark JuiceFS as ready
+		s.mu.Lock()
+		s.juicefsReady = true
+		close(s.juicefsReadyCh)
+		s.juicefsReadyCh = make(chan struct{})
+		s.mu.Unlock()
 	} else {
 		s.logger.Info("JuiceFS not configured, skipping")
 	}
@@ -221,6 +235,10 @@ func (s *System) StartProcess() error {
 	s.supervisor = sup
 	s.processRunning = true
 
+	// Close the old channel and create a new one for future waits
+	close(s.processReadyCh)
+	s.processReadyCh = make(chan struct{})
+
 	s.logger.Info("StartProcess: Process started successfully", "pid", pid, "command", s.config.ProcessCommand)
 
 	// Monitor process in background
@@ -279,6 +297,58 @@ func (s *System) IsProcessRunning() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.processRunning
+}
+
+// WaitForProcessRunning blocks until the process is running
+// Returns immediately if already running
+func (s *System) WaitForProcessRunning(ctx context.Context) error {
+	s.mu.RLock()
+	if s.processRunning {
+		s.mu.RUnlock()
+		return nil
+	}
+	ch := s.processReadyCh
+	s.mu.RUnlock()
+
+	// Wait for process to be ready or context to be cancelled
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// IsJuiceFSReady returns whether JuiceFS is ready
+func (s *System) IsJuiceFSReady() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.juicefsReady
+}
+
+// WaitForJuiceFS blocks until JuiceFS is ready
+// Returns immediately if already ready or not configured
+func (s *System) WaitForJuiceFS(ctx context.Context) error {
+	s.mu.RLock()
+	// If JuiceFS is not configured, it's "ready" (nothing to wait for)
+	if s.juicefs == nil {
+		s.mu.RUnlock()
+		return nil
+	}
+	if s.juicefsReady {
+		s.mu.RUnlock()
+		return nil
+	}
+	ch := s.juicefsReadyCh
+	s.mu.RUnlock()
+
+	// Wait for JuiceFS to be ready or context to be cancelled
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // IsRestoring returns whether the system is currently restoring
@@ -587,6 +657,11 @@ func (s *System) Shutdown(ctx context.Context) error {
 		if err := s.juicefs.Stop(ctx); err != nil {
 			return fmt.Errorf("failed to stop JuiceFS: %w", err)
 		}
+
+		// Mark JuiceFS as not ready
+		s.mu.Lock()
+		s.juicefsReady = false
+		s.mu.Unlock()
 	}
 
 	return nil

@@ -65,14 +65,14 @@ func NewServer(config Config, system handlers.SystemManager, logger *slog.Logger
 func (s *Server) setupEndpoints(mux *http.ServeMux) {
 	// All endpoints require authentication
 
-	// Simple exec endpoint - only POST /exec with WebSocket support
-	mux.HandleFunc("/exec", s.authMiddleware(s.waitForRunningMiddleware(s.handlers.HandleExec)))
+	// Exec endpoint - waits for process to be running
+	mux.HandleFunc("/exec", s.authMiddleware(s.waitForProcessMiddleware(s.handlers.HandleExec)))
 
-	// State management endpoints - don't wait for running state
-	mux.HandleFunc("/checkpoint", s.authMiddleware(s.handlers.HandleCheckpoint))
+	// Checkpoint endpoint - waits for JuiceFS to be ready
+	mux.HandleFunc("/checkpoint", s.authMiddleware(s.waitForJuiceFSMiddleware(s.handlers.HandleCheckpoint)))
 
-	// Checkpoint management endpoints
-	mux.HandleFunc("/checkpoints/", s.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+	// Checkpoint management endpoints - wait for JuiceFS to be ready
+	mux.HandleFunc("/checkpoints/", s.authMiddleware(s.waitForJuiceFSMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		// Route to appropriate handler based on path
 		path := r.URL.Path
 		parts := strings.Split(strings.Trim(path, "/"), "/")
@@ -89,12 +89,12 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 		} else {
 			http.NotFound(w, r)
 		}
-	}))
+	})))
 
 	// Proxy endpoint - waits for process to be running
-	mux.HandleFunc("/proxy", s.authMiddleware(s.waitForRunningMiddleware(s.handlers.HandleProxy)))
+	mux.HandleFunc("/proxy", s.authMiddleware(s.waitForProcessMiddleware(s.handlers.HandleProxy)))
 
-	// Debug endpoints - require auth but don't wait for process
+	// Debug endpoints - require auth but don't wait for process or JuiceFS
 	mux.HandleFunc("/debug/create-zombie", s.authMiddleware(s.handlers.HandleDebugCreateZombie))
 	mux.HandleFunc("/debug/check-process", s.authMiddleware(s.handlers.HandleDebugCheckProcess))
 }
@@ -129,39 +129,67 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// waitForRunningMiddleware waits for the process to be running before handling the request
-func (s *Server) waitForRunningMiddleware(next http.HandlerFunc) http.HandlerFunc {
+// waitForProcessMiddleware waits for the process to be running before handling the request
+func (s *Server) waitForProcessMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), s.config.MaxWaitTime)
 		defer cancel()
 
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
+		startTime := time.Now()
+
+		// Use efficient waiting instead of polling
+		err := s.system.WaitForProcessRunning(ctx)
+		waitTime := time.Since(startTime)
+
+		if err != nil {
+			s.logger.Warn("Request timeout waiting for process to be running",
+				"requestPath", r.URL.Path,
+				"waitTime", waitTime,
+				"error", err)
+			http.Error(w, "Process not ready", http.StatusServiceUnavailable)
+			return
+		}
+
+		// Log if we waited more than 5ms
+		if waitTime > 5*time.Millisecond {
+			s.logger.Info("Process became ready, processing request",
+				"requestPath", r.URL.Path,
+				"waitTime", waitTime)
+		}
+
+		next(w, r)
+	}
+}
+
+// waitForJuiceFSMiddleware waits for JuiceFS to be ready before handling the request
+func (s *Server) waitForJuiceFSMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), s.config.MaxWaitTime)
+		defer cancel()
 
 		startTime := time.Now()
 
-		for {
-			select {
-			case <-ctx.Done():
-				s.logger.Warn("Request timeout waiting for process to be running",
-					"requestPath", r.URL.Path,
-					"waitTime", time.Since(startTime))
-				http.Error(w, "Process not ready", http.StatusServiceUnavailable)
-				return
+		// Use efficient waiting
+		err := s.system.WaitForJuiceFS(ctx)
+		waitTime := time.Since(startTime)
 
-			case <-ticker.C:
-				if s.system.IsProcessRunning() {
-					waitTime := time.Since(startTime)
-					if waitTime > 100*time.Millisecond {
-						s.logger.Info("Process became ready, processing request",
-							"requestPath", r.URL.Path,
-							"waitTime", waitTime)
-					}
-					next(w, r)
-					return
-				}
-			}
+		if err != nil {
+			s.logger.Warn("Request timeout waiting for JuiceFS to be ready",
+				"requestPath", r.URL.Path,
+				"waitTime", waitTime,
+				"error", err)
+			http.Error(w, "Storage not ready", http.StatusServiceUnavailable)
+			return
 		}
+
+		// Log if we waited more than 5ms
+		if waitTime > 5*time.Millisecond {
+			s.logger.Info("JuiceFS became ready, processing request",
+				"requestPath", r.URL.Path,
+				"waitTime", waitTime)
+		}
+
+		next(w, r)
 	}
 }
 

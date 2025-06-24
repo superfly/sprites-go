@@ -144,6 +144,16 @@ func (m *mockSystemManager) WasProcessReaped(pid int) (bool, time.Time) {
 	return false, time.Time{}
 }
 
+func (m *mockSystemManager) WaitForProcessRunning(ctx context.Context) error {
+	// Mock always returns immediately as if process is running
+	return nil
+}
+
+func (m *mockSystemManager) WaitForJuiceFS(ctx context.Context) error {
+	// Mock always returns immediately as if JuiceFS is ready
+	return nil
+}
+
 // TestHandleDebugCreateZombie tests the debug zombie creation handler
 func TestHandleDebugCreateZombie(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))

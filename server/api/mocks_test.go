@@ -121,6 +121,23 @@ func (m *mockSystemManager) IsProcessRunning() bool {
 	return m.processRunning
 }
 
+func (m *mockSystemManager) WaitForProcessRunning(ctx context.Context) error {
+	m.mu.Lock()
+	if m.processRunning {
+		m.mu.Unlock()
+		return nil
+	}
+	m.mu.Unlock()
+
+	// For testing, just return immediately or timeout based on context
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(10 * time.Millisecond):
+		return nil
+	}
+}
+
 func (m *mockSystemManager) StartProcess() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -143,6 +160,11 @@ func (m *mockSystemManager) HasJuiceFS() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.hasJuiceFS
+}
+
+func (m *mockSystemManager) WaitForJuiceFS(ctx context.Context) error {
+	// Mock always returns immediately as if JuiceFS is ready
+	return nil
 }
 
 func (m *mockSystemManager) CheckpointWithStream(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) error {
