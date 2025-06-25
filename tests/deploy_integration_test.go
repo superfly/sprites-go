@@ -70,42 +70,70 @@ func TestRollback(t *testing.T) {
 		return ok
 	}
 
-	x("dd", "if=/dev/random", "of=/data/test.file", "bs=4k", "count=200")
-
-	sum, ok := csum("/data/test.file")
-	assert.True(t, ok)
-
-	result := run("checkpoint", "create")
-	lines := strings.Split(result, "\n")
-	assert.True(t, len(lines) >= 3)
-	checktup := strings.Split(lines[2], " ")
-	assert.Equal(t, checktup[3], "successfully")
-	checkpoint := checktup[1]
-
-	t.Logf("result: %s", checkpoint)
-
-	x("dd", "if=/dev/random", "of=/data/test.file", "count=1", "bs=512", "seek=1024")
-
-	ns, ok := csum("/data/test.file")
-	assert.True(t, ok)
-	assert.NotEqual(t, sum, ns)
-
-	run("restore", checkpoint)
-
-	up := false
-	for i := 0; i < 10; i++ {
-		if ready(250 * time.Millisecond) {
-			up = true
-			break
+	waitup := func() {
+		up := false
+		for i := 0; i < 10; i++ {
+			if ready(250 * time.Millisecond) {
+				up = true
+				break
+			}
 		}
 
+		assert.True(t, up)
 	}
 
-	assert.True(t, up)
+	t.Run("SimpleRollback", func(t *testing.T) {
+		x("dd", "if=/dev/random", "of=/data/test.file", "bs=4k", "count=200")
 
-	fsum, ok := csum("/data/test.file")
-	assert.True(t, ok)
-	assert.Equal(t, sum, fsum)
+		sum, ok := csum("/data/test.file")
+		assert.True(t, ok)
+
+		result := run("checkpoint", "create")
+		lines := strings.Split(result, "\n")
+		assert.True(t, len(lines) >= 3)
+		checktup := strings.Split(lines[2], " ")
+		assert.Equal(t, checktup[3], "successfully")
+		checkpoint := checktup[1]
+
+		x("dd", "if=/dev/random", "of=/data/test.file", "count=1", "bs=512", "seek=1024")
+
+		ns, ok := csum("/data/test.file")
+		assert.True(t, ok)
+		assert.NotEqual(t, sum, ns)
+
+		run("restore", checkpoint)
+
+		waitup()
+
+		fsum, ok := csum("/data/test.file")
+		assert.True(t, ok)
+		assert.Equal(t, sum, fsum)
+	})
+
+	t.Run("LoopRollback", func(t *testing.T) {
+		x("dd", "if=/dev/random", "of=/data/test.file", "bs=4k", "count=200")
+
+		sum, ok := csum("/data/test.file")
+		assert.True(t, ok)
+
+		result := run("checkpoint", "create")
+		lines := strings.Split(result, "\n")
+		assert.True(t, len(lines) >= 3)
+		checktup := strings.Split(lines[2], " ")
+		assert.Equal(t, checktup[3], "successfully")
+		checkpoint := checktup[1]
+
+		x("dd", "if=/dev/random", "of=/dev/loop0", "count=6", "bs=1M", "seek=1024")
+		x("dd", "if=/dev/random", "of=/data/test2.file", "bs=4k", "count=200")
+
+		run("restore", checkpoint)
+
+		waitup()
+
+		fsum, ok := csum("/data/test.file")
+		assert.True(t, ok)
+		assert.Equal(t, sum, fsum)
+	})
 }
 
 // TestDeployAndFunctionality tests the full deployment and sprite functionality
