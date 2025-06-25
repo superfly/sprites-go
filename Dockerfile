@@ -75,7 +75,7 @@ RUN cd server && \
 # Download crun binary
 FROM alpine:latest AS crun
 RUN apk add --no-cache curl
-RUN curl -L https://github.com/containers/crun/releases/download/1.21/crun-1.21-linux-amd64 -o /crun && \
+RUN curl -L https://github.com/containers/crun/releases/download/1.21/crun-1.21-linux-amd64-disable-systemd -o /crun && \
     chmod +x /crun
 
 # Get litestream binary
