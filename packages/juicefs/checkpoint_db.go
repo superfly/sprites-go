@@ -3,6 +3,8 @@ package juicefs
 import (
 	"database/sql"
 	"fmt"
+	"io"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"time"
@@ -38,16 +40,38 @@ type CheckpointRecord struct {
 	CreatedAt time.Time
 }
 
+// CheckpointDBConfig contains configuration for CheckpointDB
+type CheckpointDBConfig struct {
+	// BaseDir is the base directory where the database file will be stored
+	BaseDir string
+	// DBPath is an optional custom path for the database file
+	// If empty, defaults to {BaseDir}/checkpoints.db
+	DBPath string
+	// Logger for logging operations
+	Logger *slog.Logger
+}
+
 // CheckpointDB manages checkpoint records in SQLite
 type CheckpointDB struct {
 	db     *sql.DB
 	dbPath string
+	logger *slog.Logger
 }
 
-// NewCheckpointDB creates a new checkpoint database manager in the baseDir (outside JuiceFS partition)
-func NewCheckpointDB(baseDir string) (*CheckpointDB, error) {
-	// Use a separate checkpoints.db file in baseDir (not inside the JuiceFS partition)
-	dbPath := filepath.Join(baseDir, "checkpoints.db")
+// NewCheckpointDB creates a new checkpoint database manager
+func NewCheckpointDB(config CheckpointDBConfig) (*CheckpointDB, error) {
+	// Create a no-op logger if none provided
+	if config.Logger == nil {
+		config.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+
+	// Determine database path
+	var dbPath string
+	if config.DBPath != "" {
+		dbPath = config.DBPath
+	} else {
+		dbPath = filepath.Join(config.BaseDir, "checkpoints.db")
+	}
 
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -63,6 +87,7 @@ func NewCheckpointDB(baseDir string) (*CheckpointDB, error) {
 	cdb := &CheckpointDB{
 		db:     db,
 		dbPath: dbPath,
+		logger: config.Logger,
 	}
 
 	if err := cdb.initialize(); err != nil {
@@ -187,7 +212,7 @@ func (c *CheckpointDB) CreateCheckpoint(cloneFn func(src, dst string) error, ren
 			strings.Contains(err.Error(), "(5)") || strings.Contains(err.Error(), "(6)") ||
 			strings.Contains(err.Error(), "(517)") { // SQLITE_BUSY_SNAPSHOT
 			if retry < maxRetries-1 {
-				fmt.Printf("Database locked, retrying checkpoint creation (attempt %d/%d)...\n", retry+2, maxRetries)
+				c.logger.Warn("Database locked, retrying checkpoint creation", "attempt", retry+2, "maxAttempts", maxRetries)
 				continue
 			}
 		}

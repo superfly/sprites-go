@@ -3,6 +3,8 @@ package juicefs
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,19 +18,29 @@ type CheckpointManager struct {
 	baseDir    string
 	db         *CheckpointDB
 	overlayMgr *OverlayManager
+	logger     *slog.Logger
 }
 
 // NewCheckpointManager creates a new checkpoint manager
-func NewCheckpointManager(baseDir string, overlayMgr *OverlayManager) *CheckpointManager {
+func NewCheckpointManager(baseDir string, overlayMgr *OverlayManager, logger *slog.Logger) *CheckpointManager {
+	// Create a no-op logger if none provided
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+
 	return &CheckpointManager{
 		baseDir:    baseDir,
 		overlayMgr: overlayMgr,
+		logger:     logger,
 	}
 }
 
 // Initialize sets up the checkpoint database
 func (cm *CheckpointManager) Initialize(mountPath string) error {
-	db, err := NewCheckpointDB(mountPath)
+	db, err := NewCheckpointDB(CheckpointDBConfig{
+		BaseDir: mountPath,
+		Logger:  cm.logger,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize checkpoint database: %w", err)
 	}
@@ -70,7 +82,7 @@ func (cm *CheckpointManager) Checkpoint(ctx context.Context, checkpointID string
 		// Ensure we unfreeze the overlay even if the clone fails
 		defer func() {
 			if unfreezeErr := cm.overlayMgr.UnfreezeAfterCheckpoint(ctx); unfreezeErr != nil {
-				fmt.Printf("Warning: failed to unfreeze overlay: %v\n", unfreezeErr)
+				cm.logger.Warn("Failed to unfreeze overlay", "error", unfreezeErr)
 			}
 		}()
 	}
@@ -83,7 +95,7 @@ func (cm *CheckpointManager) Checkpoint(ctx context.Context, checkpointID string
 			srcPath := filepath.Join(mountPath, src)
 			dstPath := filepath.Join(mountPath, dst)
 
-			fmt.Printf("Creating checkpoint: cloning %s to %s...\n", src, dst)
+			cm.logger.Info("Creating checkpoint", "src", src, "dst", dst)
 			cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", srcPath, dstPath)
 			if output, err := cloneCmd.CombinedOutput(); err != nil {
 				return fmt.Errorf("failed to clone: %w, output: %s", err, string(output))
@@ -96,12 +108,12 @@ func (cm *CheckpointManager) Checkpoint(ctx context.Context, checkpointID string
 
 			if dst == "" {
 				// Cleanup request
-				fmt.Printf("Cleaning up temporary checkpoint directory: %s\n", srcPath)
+				cm.logger.Debug("Cleaning up temporary checkpoint directory", "path", srcPath)
 				return os.RemoveAll(srcPath)
 			}
 
 			dstPath := filepath.Join(mountPath, dst)
-			fmt.Printf("Finalizing checkpoint: renaming %s to %s\n", src, dst)
+			cm.logger.Debug("Finalizing checkpoint", "src", src, "dst", dst)
 			return os.Rename(srcPath, dstPath)
 		},
 	)
@@ -110,7 +122,7 @@ func (cm *CheckpointManager) Checkpoint(ctx context.Context, checkpointID string
 		return fmt.Errorf("failed to create checkpoint: %w", err)
 	}
 
-	fmt.Printf("Checkpoint created successfully: ID=%d, Path=%s\n", record.ID, record.Path)
+	cm.logger.Info("Checkpoint created successfully", "id", record.ID, "path", record.Path)
 	return nil
 }
 
@@ -170,17 +182,17 @@ func (cm *CheckpointManager) Restore(ctx context.Context, checkpointID string) e
 		// First sync and freeze the overlay (same as checkpoint)
 		if err := cm.overlayMgr.PrepareForCheckpoint(ctx); err != nil {
 			// If prepare fails, it might be because overlay is not mounted, which is ok
-			fmt.Printf("Note: could not prepare overlay for restore: %v\n", err)
+			cm.logger.Debug("Could not prepare overlay for restore", "error", err)
 		} else {
 			// Unfreeze after sync
 			if err := cm.overlayMgr.UnfreezeAfterCheckpoint(ctx); err != nil {
-				fmt.Printf("Warning: failed to unfreeze overlay: %v\n", err)
+				cm.logger.Warn("Failed to unfreeze overlay", "error", err)
 			}
 		}
 
 		// Unmount the overlay before restore
 		if err := cm.overlayMgr.Unmount(ctx); err != nil {
-			fmt.Printf("Warning: failed to unmount overlay: %v\n", err)
+			cm.logger.Warn("Failed to unmount overlay", "error", err)
 		}
 	}
 
@@ -190,15 +202,15 @@ func (cm *CheckpointManager) Restore(ctx context.Context, checkpointID string) e
 		backupName := fmt.Sprintf("pre-restore-v%d-%d", record.ID, timestamp)
 		backupPath := filepath.Join(checkpointsDir, backupName)
 
-		fmt.Printf("Backing up current active directory to %s...\n", backupPath)
+		cm.logger.Info("Backing up current active directory", "backupPath", backupPath)
 		if err := os.Rename(activeDir, backupPath); err != nil {
 			return fmt.Errorf("failed to backup active directory: %w", err)
 		}
-		fmt.Println("Backup completed")
+		cm.logger.Info("Backup completed")
 	}
 
 	// Clone checkpoint to active directory
-	fmt.Printf("Restoring from checkpoint v%d (path: %s)...\n", record.ID, checkpointPath)
+	cm.logger.Info("Restoring from checkpoint", "id", record.ID, "path", checkpointPath)
 	cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", fullCheckpointPath, activeDir)
 	if output, err := cloneCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to restore from checkpoint: %w, output: %s", err, string(output))
@@ -209,20 +221,19 @@ func (cm *CheckpointManager) Restore(ctx context.Context, checkpointID string) e
 		// Update the image path to point to the restored active directory
 		cm.overlayMgr.UpdateImagePath()
 
-		fmt.Printf("Mounting overlay from restored checkpoint...\n")
-		fmt.Printf("  New image path: %s\n", cm.overlayMgr.GetImagePath())
+		cm.logger.Info("Mounting overlay from restored checkpoint", "imagePath", cm.overlayMgr.GetImagePath())
 
 		// Mount the overlay
 		if err := cm.overlayMgr.Mount(ctx); err != nil {
 			// Log error but don't fail the restore
-			fmt.Printf("Warning: failed to mount overlay after restore: %v\n", err)
+			cm.logger.Warn("Failed to mount overlay after restore", "error", err)
 		}
 	}
 
 	// Apply quota asynchronously after restore
 	go cm.applyActiveFsQuotaAsync()
 
-	fmt.Printf("Restore from checkpoint v%d complete\n", record.ID)
+	cm.logger.Info("Restore from checkpoint complete", "id", record.ID)
 	return nil
 }
 
@@ -237,7 +248,7 @@ func (cm *CheckpointManager) applyActiveFsQuotaAsync() {
 	// Wait a moment for the mount to stabilize
 	time.Sleep(2 * time.Second)
 
-	fmt.Println("Applying 10TB quota to /active/fs directory...")
+	cm.logger.Info("Applying 10TB quota to /active/fs directory")
 
 	// Apply 10TB quota using juicefs quota command
 	// 10TB = 10240 GiB
@@ -249,14 +260,14 @@ func (cm *CheckpointManager) applyActiveFsQuotaAsync() {
 	if err != nil {
 		// Check if quota already exists
 		if strings.Contains(string(output), "already exists") {
-			fmt.Println("Quota already exists for /active/fs directory")
+			cm.logger.Info("Quota already exists for /active/fs directory")
 		} else {
-			fmt.Printf("Warning: failed to apply quota to /active/fs: %v, output: %s\n", err, string(output))
+			cm.logger.Warn("Failed to apply quota to /active/fs", "error", err, "output", string(output))
 		}
 	} else {
-		fmt.Printf("Successfully applied 10TB quota to /active/fs directory\n")
+		cm.logger.Info("Successfully applied 10TB quota to /active/fs directory")
 		if len(output) > 0 {
-			fmt.Printf("Quota info: %s\n", string(output))
+			cm.logger.Debug("Quota info", "output", string(output))
 		}
 	}
 }

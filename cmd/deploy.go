@@ -47,7 +47,7 @@ func waitForMachineStarted(ctx context.Context, client *flaps.Client, machineID 
 			}
 
 			// Check for other terminal states
-			if machine.State == "stopped" || machine.State == "destroyed" {
+			if machine.State == "destroyed" {
 				return fmt.Errorf("machine entered unexpected state: %s", machine.State)
 			}
 
@@ -245,7 +245,7 @@ func main() {
 
 	// Wait for machine to be started
 	log.Printf("Waiting for machine to start...")
-	if err := waitForMachineStarted(ctx, flapsClient, machineID, 10*time.Second); err != nil {
+	if err := waitForMachineStarted(ctx, flapsClient, machineID, 30*time.Second); err != nil {
 		// If machine is stuck in creating/updating, force delete it
 		if strings.Contains(err.Error(), "stuck in") {
 			log.Printf("Machine is stuck, attempting to force delete...")

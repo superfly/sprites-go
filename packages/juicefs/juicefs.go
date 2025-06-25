@@ -5,6 +5,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -50,6 +52,7 @@ type JuiceFS struct {
 	overlayMgr    *OverlayManager
 	checkpointDB  *CheckpointDB
 	leaseMgr      LeaseManager
+	logger        *slog.Logger
 }
 
 // Config holds the configuration for JuiceFS
@@ -78,6 +81,9 @@ type Config struct {
 
 	// LeaseManager for distributed coordination (optional, only used if not LocalMode)
 	LeaseManager LeaseManager
+
+	// Logger for logging (optional, defaults to no-op logger)
+	Logger *slog.Logger
 }
 
 // New creates a new JuiceFS instance
@@ -98,12 +104,20 @@ func New(config Config) (*JuiceFS, error) {
 		}
 	}
 
+	// Set up logger
+	logger := config.Logger
+	if logger == nil {
+		// Create a no-op logger that discards all output
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+
 	j := &JuiceFS{
 		config:     config,
 		mountReady: make(chan error, 1),
 		stopCh:     make(chan struct{}),
 		stoppedCh:  make(chan struct{}),
 		signalCh:   make(chan os.Signal, 1),
+		logger:     logger,
 	}
 
 	// Use provided lease manager for non-local mode
@@ -113,7 +127,7 @@ func New(config Config) (*JuiceFS, error) {
 
 	// Initialize the overlay manager if enabled
 	if config.OverlayEnabled {
-		j.overlayMgr = NewOverlay(j)
+		j.overlayMgr = NewOverlay(j, logger)
 
 		// Apply overlay configuration
 		if config.OverlayImageSize != "" {
@@ -141,7 +155,7 @@ func (j *JuiceFS) GetOverlay() *OverlayManager {
 // Start initializes and starts JuiceFS with Litestream replication
 func (j *JuiceFS) Start(ctx context.Context) error {
 	startTime := time.Now()
-	fmt.Printf("[DEBUG] JuiceFS Start beginning at %s\n", startTime.Format(time.RFC3339))
+	j.logger.Debug("JuiceFS Start beginning", "startTime", startTime.Format(time.RFC3339))
 
 	// Create necessary directories
 	stepStart := time.Now()
@@ -169,7 +183,7 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 			return fmt.Errorf("failed to create directory %s: %w", dir, err)
 		}
 	}
-	fmt.Printf("[DEBUG] Directory creation completed in %.3fs\n", time.Since(stepStart).Seconds())
+	j.logger.Debug("Directory creation completed", "duration", time.Since(stepStart).Seconds())
 
 	// Create litestream configuration
 	stepStart = time.Now()
@@ -177,7 +191,7 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	if err := j.createLitestreamConfig(litestreamConfigPath, metaDB, checkpointDB); err != nil {
 		return fmt.Errorf("failed to create litestream config: %w", err)
 	}
-	fmt.Printf("[DEBUG] Litestream config creation completed in %.3fs\n", time.Since(stepStart).Seconds())
+	j.logger.Debug("Litestream config creation completed", "duration", time.Since(stepStart).Seconds())
 
 	// Handle lease acquisition and determine if we need to restore
 	stepStart = time.Now()
@@ -188,10 +202,10 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 		if _, err := os.Stat(backupPath); err == nil {
 			needsRestore = true
 		}
-		fmt.Printf("[DEBUG] Local mode backup check completed in %.3fs (needsRestore: %v)\n", time.Since(stepStart).Seconds(), needsRestore)
+		j.logger.Debug("Local mode backup check completed", "duration", time.Since(stepStart).Seconds(), "needsRestore", needsRestore)
 	} else if j.leaseMgr != nil {
 		// S3 mode - use lease manager
-		fmt.Println("Acquiring JuiceFS database lease...")
+		j.logger.Info("Acquiring JuiceFS database lease...")
 		err := j.leaseMgr.Wait(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to acquire lease: %w", err)
@@ -201,36 +215,38 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 		if j.leaseMgr.LeaseAttemptCount() > 1 {
 			// We had to wait or retry, need to restore
 			needsRestore = true
-			fmt.Printf("Acquired lease after %d attempts, will restore from litestream\n", j.leaseMgr.LeaseAttemptCount())
+			j.logger.Info("Acquired lease after multiple attempts, will restore from litestream", "attempts", j.leaseMgr.LeaseAttemptCount())
 		} else {
 			// We got the lease immediately, check if we can use existing data
 			existingBucket, err := j.getExistingBucket(metaDB)
 			if err != nil {
-				fmt.Printf("Acquired lease but no existing metadata DB found (%v), will restore\n", err)
+				j.logger.Info("Acquired lease but no existing metadata DB found, will restore", "error", err)
 				needsRestore = true
 			} else if existingBucket != j.config.S3Bucket {
-				fmt.Printf("Acquired lease but bucket mismatch (existing: %s, current: %s), will restore\n", existingBucket, j.config.S3Bucket)
+				j.logger.Info("Acquired lease but bucket mismatch, will restore", "existingBucket", existingBucket, "currentBucket", j.config.S3Bucket)
 				needsRestore = true
 			} else {
-				fmt.Printf("Acquired lease on first attempt and bucket matches (%s), using existing databases on disk\n", existingBucket)
+				j.logger.Info("Acquired lease on first attempt and bucket matches, using existing databases on disk", "bucket", existingBucket)
 				needsRestore = false
 			}
 		}
-		fmt.Printf("[DEBUG] Lease acquisition completed in %.3fs (attempts: %d, needsRestore: %v)\n",
-			time.Since(stepStart).Seconds(), j.leaseMgr.LeaseAttemptCount(), needsRestore)
+		j.logger.Debug("Lease acquisition completed",
+			"duration", time.Since(stepStart).Seconds(),
+			"attempts", j.leaseMgr.LeaseAttemptCount(),
+			"needsRestore", needsRestore)
 	}
 
 	// Perform restore if needed
 	if needsRestore {
 		stepStart = time.Now()
 		if j.config.LocalMode {
-			fmt.Println("Restoring from local litestream backup")
+			j.logger.Info("Restoring from local litestream backup")
 		} else {
 			// Remove existing databases and cache before restore
 			os.Remove(metaDB)
 			os.Remove(checkpointDB)
 			os.RemoveAll(cacheDir)
-			fmt.Printf("Restoring databases from %s\n", j.config.S3Bucket)
+			j.logger.Info("Restoring databases from S3", "bucket", j.config.S3Bucket)
 		}
 
 		// Restore metadata database
@@ -253,9 +269,9 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 
 		if output, err := restoreCmd.CombinedOutput(); err != nil {
 			// If restore fails, it's okay - we'll format a new filesystem
-			fmt.Printf("Litestream restore output for metadata: %s\n", string(output))
+			j.logger.Debug("Litestream restore output for metadata", "output", string(output))
 		}
-		fmt.Printf("[DEBUG] Metadata database restore completed in %.3fs\n", time.Since(metaRestoreStart).Seconds())
+		j.logger.Debug("Metadata database restore completed", "duration", time.Since(metaRestoreStart).Seconds())
 
 		// Restore checkpoint database
 		checkpointRestoreStart := time.Now()
@@ -270,36 +286,38 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 
 		if output, err := restoreCheckpointCmd.CombinedOutput(); err != nil {
 			// If restore fails, it's okay - checkpoint DB will be created fresh
-			fmt.Printf("Litestream restore output for checkpoints: %s\n", string(output))
+			j.logger.Debug("Litestream restore output for checkpoints", "output", string(output))
 		}
-		fmt.Printf("[DEBUG] Checkpoint database restore completed in %.3fs\n", time.Since(checkpointRestoreStart).Seconds())
-		fmt.Printf("[DEBUG] Total restore process completed in %.3fs\n", time.Since(stepStart).Seconds())
+		j.logger.Debug("Checkpoint database restore completed", "duration", time.Since(checkpointRestoreStart).Seconds())
+		j.logger.Debug("Total restore process completed", "duration", time.Since(stepStart).Seconds())
 	}
 
 	// Ensure cache directory exists (might have been removed)
 	stepStart = time.Now()
 	os.MkdirAll(cacheDir, 0755)
-	fmt.Printf("[DEBUG] Cache directory recreation completed in %.3fs\n", time.Since(stepStart).Seconds())
+	j.logger.Debug("Cache directory recreation completed", "duration", time.Since(stepStart).Seconds())
 
 	// Format JuiceFS if needed
 	stepStart = time.Now()
 	metaURL := fmt.Sprintf("sqlite3://%s", metaDB)
 	if !j.isFormatted(metaURL) {
-		fmt.Printf("[DEBUG] JuiceFS not formatted, formatting...\n")
+		j.logger.Debug("JuiceFS not formatted, formatting...")
 		if err := j.formatJuiceFS(ctx, metaURL); err != nil {
 			return fmt.Errorf("failed to format JuiceFS: %w", err)
 		}
-		fmt.Printf("[DEBUG] JuiceFS formatting completed in %.3fs\n", time.Since(stepStart).Seconds())
+		j.logger.Debug("JuiceFS formatting completed", "duration", time.Since(stepStart).Seconds())
 	} else {
-		fmt.Printf("[DEBUG] JuiceFS already formatted, skipped formatting in %.3fs\n", time.Since(stepStart).Seconds())
+		j.logger.Debug("JuiceFS already formatted, skipped formatting", "duration", time.Since(stepStart).Seconds())
 	}
 
 	// Calculate cache and buffer sizes
 	stepStart = time.Now()
 	cacheSizeMB := j.calculateCacheSize(cacheDir)
 	bufferSizeMB := j.calculateBufferSize()
-	fmt.Printf("[DEBUG] Cache and buffer size calculation completed in %.3fs (cache: %dMB, buffer: %dMB)\n",
-		time.Since(stepStart).Seconds(), cacheSizeMB, bufferSizeMB)
+	j.logger.Debug("Cache and buffer size calculation completed",
+		"duration", time.Since(stepStart).Seconds(),
+		"cacheMB", cacheSizeMB,
+		"bufferMB", bufferSizeMB)
 
 	// Start litestream replication in parallel
 	stepStart = time.Now()
@@ -320,7 +338,7 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	if err := j.litestreamCmd.Start(); err != nil {
 		return fmt.Errorf("failed to start litestream: %w", err)
 	}
-	fmt.Printf("[DEBUG] Litestream startup completed in %.3fs\n", time.Since(stepStart).Seconds())
+	j.logger.Debug("Litestream startup completed", "duration", time.Since(stepStart).Seconds())
 
 	// Mount JuiceFS
 	stepStart = time.Now()
@@ -348,7 +366,7 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	if err := j.mountCmd.Start(); err != nil {
 		return fmt.Errorf("failed to start JuiceFS mount: %w", err)
 	}
-	fmt.Printf("[DEBUG] JuiceFS mount command startup completed in %.3fs\n", time.Since(stepStart).Seconds())
+	j.logger.Debug("JuiceFS mount command startup completed", "duration", time.Since(stepStart).Seconds())
 
 	// Start watching for ready signal
 	go j.watchForReady(mountPath, time.Now())
@@ -359,10 +377,10 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 
 	// Start the process monitor
 	go j.monitorProcess()
-	fmt.Printf("[DEBUG] Signal handling and process monitor setup completed in %.3fs\n", time.Since(stepStart).Seconds())
+	j.logger.Debug("Signal handling and process monitor setup completed", "duration", time.Since(stepStart).Seconds())
 
 	// Wait for mount to be ready or timeout
-	fmt.Printf("[DEBUG] Waiting for JuiceFS mount to be ready...\n")
+	j.logger.Debug("Waiting for JuiceFS mount to be ready...")
 	waitStart := time.Now()
 	select {
 	case err := <-j.mountReady:
@@ -372,8 +390,8 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 			// Don't call Wait() here - monitorProcess will handle it
 			return err
 		}
-		fmt.Printf("[DEBUG] JuiceFS mount ready in %.3fs\n", time.Since(waitStart).Seconds())
-		fmt.Printf("[DEBUG] Total JuiceFS Start completed in %.3fs\n", time.Since(startTime).Seconds())
+		j.logger.Debug("JuiceFS mount ready", "duration", time.Since(waitStart).Seconds())
+		j.logger.Debug("Total JuiceFS Start completed", "duration", time.Since(startTime).Seconds())
 		return nil
 	case <-ctx.Done():
 		// Kill mount process
@@ -415,7 +433,7 @@ func (j *JuiceFS) Stop(ctx context.Context) error {
 	// to allow for proper flushing of all writes
 	select {
 	case <-j.stoppedCh:
-		fmt.Printf("JuiceFS shutdown completed in %v\n", time.Since(startTime))
+		j.logger.Info("JuiceFS shutdown completed", "duration", time.Since(startTime))
 		return nil
 	case <-ctx.Done():
 		return fmt.Errorf("shutdown timed out after %v: %w", time.Since(startTime), ctx.Err())
@@ -430,7 +448,7 @@ func (j *JuiceFS) monitorProcess() {
 	defer func() {
 		if j.checkpointDB != nil {
 			if err := j.checkpointDB.Close(); err != nil {
-				fmt.Printf("Warning: failed to close checkpoint database: %v\n", err)
+				j.logger.Warn("Failed to close checkpoint database", "error", err)
 			}
 		}
 	}()
@@ -451,30 +469,30 @@ func (j *JuiceFS) monitorProcess() {
 	case <-j.stopCh:
 		// Stop requested, first unmount the overlay
 		if j.overlayMgr != nil {
-			fmt.Println("Unmounting root overlay...")
+			j.logger.Info("Unmounting root overlay...")
 			ctx := context.Background()
 			if err := j.overlayMgr.Unmount(ctx); err != nil {
-				fmt.Printf("Warning: error unmounting overlay: %v\n", err)
+				j.logger.Warn("Error unmounting overlay", "error", err)
 			}
 		}
 
 		// Then unmount dependent mounts
-		fmt.Println("Looking for dependent mounts to unmount...")
+		j.logger.Info("Looking for dependent mounts to unmount...")
 		if err := j.findAndUnmountDependentMounts(mountPath); err != nil {
-			fmt.Printf("Warning: error finding/unmounting dependent mounts: %v\n", err)
+			j.logger.Warn("Error finding/unmounting dependent mounts", "error", err)
 		}
 
 		// Sync the JuiceFS filesystem to flush pending writes
-		fmt.Println("Syncing JuiceFS filesystem...")
+		j.logger.Info("Syncing JuiceFS filesystem...")
 		syncStart := time.Now()
 		syncCmd := exec.Command("sync", "-f", mountPath)
 		if output, err := syncCmd.CombinedOutput(); err != nil {
-			fmt.Printf("Warning: sync failed for JuiceFS mount: %v\n", err)
+			j.logger.Warn("Sync failed for JuiceFS mount", "error", err)
 			if len(output) > 0 {
-				fmt.Printf("  Sync stderr/stdout: %s\n", string(output))
+				j.logger.Debug("Sync stderr/stdout", "output", string(output))
 			}
 		} else {
-			fmt.Printf("Sync completed in %v\n", time.Since(syncStart))
+			j.logger.Info("Sync completed", "duration", time.Since(syncStart))
 		}
 
 		// First try graceful unmount without --force to allow JuiceFS to flush its cache
@@ -482,7 +500,7 @@ func (j *JuiceFS) monitorProcess() {
 		// - Flush write-back cache
 		// - Complete pending uploads (up to --upload-delay=1m)
 		// - Close file handles properly
-		fmt.Println("Attempting graceful JuiceFS unmount (this may take several minutes)...")
+		j.logger.Info("Attempting graceful JuiceFS unmount (this may take several minutes)...")
 		unmountStart := time.Now()
 
 		// Create a context with a generous timeout for graceful unmount
@@ -492,25 +510,27 @@ func (j *JuiceFS) monitorProcess() {
 
 		unmountCmd := exec.CommandContext(gracefulCtx, "juicefs", "umount", mountPath)
 		if output, err := unmountCmd.CombinedOutput(); err != nil {
-			fmt.Printf("Graceful unmount failed after %v: %v\n", time.Since(unmountStart), err)
+			j.logger.Warn("Graceful unmount failed", "duration", time.Since(unmountStart), "error", err)
 
 			// If graceful unmount fails or times out, try with --force
-			fmt.Println("Attempting force unmount...")
+			j.logger.Info("Attempting force unmount...")
 			forceCmd := exec.Command("juicefs", "umount", "--force", mountPath)
 			if output2, err2 := forceCmd.CombinedOutput(); err2 != nil {
 				// Check if it's exit status 3 (not mounted) - this is OK
 				if exitErr, ok := err2.(*exec.ExitError); ok && exitErr.ExitCode() == 3 {
-					fmt.Printf("JuiceFS already unmounted at %s\n", mountPath)
+					j.logger.Info("JuiceFS already unmounted", "path", mountPath)
 				} else {
 					// Log but don't fail on other unmount errors
-					fmt.Printf("Warning: failed to unmount JuiceFS: %v (graceful output: %s, force output: %s)\n",
-						err2, string(output), string(output2))
+					j.logger.Warn("Failed to unmount JuiceFS",
+						"error", err2,
+						"gracefulOutput", string(output),
+						"forceOutput", string(output2))
 				}
 			} else {
-				fmt.Printf("Force unmount succeeded after %v\n", time.Since(unmountStart))
+				j.logger.Info("Force unmount succeeded", "duration", time.Since(unmountStart))
 			}
 		} else {
-			fmt.Printf("Graceful unmount succeeded after %v\n", time.Since(unmountStart))
+			j.logger.Info("Graceful unmount succeeded", "duration", time.Since(unmountStart))
 		}
 
 		// Wait for mount process to exit
@@ -549,7 +569,7 @@ func (j *JuiceFS) monitorProcess() {
 	case err := <-processDone:
 		// Mount process exited unexpectedly
 		if err != nil {
-			fmt.Printf("JuiceFS mount process exited with error: %v\n", err)
+			j.logger.Error("JuiceFS mount process exited with error", "error", err)
 		}
 
 		// Stop litestream
@@ -791,15 +811,17 @@ func (j *JuiceFS) watchForReady(mountPath string, startTime time.Time) {
 	interval := 10 * time.Millisecond
 	deadline := time.Now().Add(timeout)
 
-	fmt.Printf("[DEBUG] Starting mount readiness polling with %.0fms interval (%.3fs since start)\n",
-		interval.Seconds()*1000, time.Since(startTime).Seconds())
+	j.logger.Debug("Starting mount readiness polling",
+		"intervalMs", interval.Seconds()*1000,
+		"timeSinceStart", time.Since(startTime).Seconds())
 
 	for time.Now().Before(deadline) {
 		var stat syscall.Stat_t
 		if err := syscall.Stat(mountPath, &stat); err == nil {
 			if stat.Ino == 1 {
-				fmt.Printf("[DEBUG] Mount detected as ready (inode=1) after %.3fs of polling (%.3fs since start)\n",
-					time.Since(deadline.Add(-timeout)).Seconds(), time.Since(startTime).Seconds())
+				j.logger.Debug("Mount detected as ready (inode=1)",
+					"pollingDuration", time.Since(deadline.Add(-timeout)).Seconds(),
+					"timeSinceStart", time.Since(startTime).Seconds())
 
 				// Now perform post-mount setup tasks
 				if err := j.performPostMountSetup(mountPath, startTime); err != nil {
@@ -824,35 +846,38 @@ func (j *JuiceFS) performPostMountSetup(mountPath string, startTime time.Time) e
 	if err := os.MkdirAll(activeDir, 0755); err != nil {
 		return fmt.Errorf("failed to create active directory: %w", err)
 	}
-	fmt.Printf("JuiceFS ready: created active directory at %s\n", filepath.Dir(activeDir))
-	fmt.Printf("[DEBUG] Active directory creation completed in %.3fs\n", time.Since(stepStart).Seconds())
+	j.logger.Info("JuiceFS ready: created active directory", "path", filepath.Dir(activeDir))
+	j.logger.Debug("Active directory creation completed", "duration", time.Since(stepStart).Seconds())
 
 	// Initialize checkpoint database using the base directory (where metadata.db is located)
 	stepStart = time.Now()
-	db, err := NewCheckpointDB(j.config.BaseDir)
+	db, err := NewCheckpointDB(CheckpointDBConfig{
+		BaseDir: j.config.BaseDir,
+		Logger:  j.logger,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize checkpoint database: %w", err)
 	}
 	j.checkpointDB = db
-	fmt.Println("Checkpoint database initialized")
-	fmt.Printf("[DEBUG] Checkpoint database initialization completed in %.3fs\n", time.Since(stepStart).Seconds())
+	j.logger.Info("Checkpoint database initialized")
+	j.logger.Debug("Checkpoint database initialization completed", "duration", time.Since(stepStart).Seconds())
 
 	// Apply quota asynchronously
-	fmt.Printf("[DEBUG] Starting async quota application\n")
+	j.logger.Debug("Starting async quota application")
 	go j.applyActiveFsQuota()
 
 	// Mount the overlay
 	if j.overlayMgr != nil {
 		stepStart = time.Now()
-		fmt.Printf("[DEBUG] Starting overlay mount\n")
+		j.logger.Debug("Starting overlay mount")
 		ctx := context.Background()
 		if err := j.overlayMgr.Mount(ctx); err != nil {
 			return fmt.Errorf("failed to mount overlay: %w", err)
 		}
-		fmt.Printf("[DEBUG] Overlay mount completed in %.3fs\n", time.Since(stepStart).Seconds())
+		j.logger.Debug("Overlay mount completed", "duration", time.Since(stepStart).Seconds())
 	}
 
-	fmt.Printf("[DEBUG] Post-mount setup completed (%.3fs since start)\n", time.Since(startTime).Seconds())
+	j.logger.Debug("Post-mount setup completed", "timeSinceStart", time.Since(startTime).Seconds())
 	return nil
 }
 
@@ -867,7 +892,7 @@ func (j *JuiceFS) applyActiveFsQuota() {
 	// Wait a moment for the mount to stabilize
 	time.Sleep(2 * time.Second)
 
-	fmt.Println("Applying 10TB quota to /active/fs directory...")
+	j.logger.Info("Applying 10TB quota to /active/fs directory...")
 
 	// Apply 10TB quota using juicefs quota command
 	// 10TB = 10240 GiB
@@ -879,14 +904,14 @@ func (j *JuiceFS) applyActiveFsQuota() {
 	if err != nil {
 		// Check if quota already exists
 		if strings.Contains(string(output), "already exists") {
-			fmt.Println("Quota already exists for /active/fs directory")
+			j.logger.Info("Quota already exists for /active/fs directory")
 		} else {
-			fmt.Printf("Warning: failed to apply quota to /active/fs: %v, output: %s\n", err, string(output))
+			j.logger.Warn("Failed to apply quota to /active/fs", "error", err, "output", string(output))
 		}
 	} else {
-		fmt.Printf("Successfully applied 10TB quota to /active/fs directory\n")
+		j.logger.Info("Successfully applied 10TB quota to /active/fs directory")
 		if len(output) > 0 {
-			fmt.Printf("Quota info: %s\n", string(output))
+			j.logger.Debug("Quota info", "output", string(output))
 		}
 	}
 }
@@ -894,7 +919,7 @@ func (j *JuiceFS) applyActiveFsQuota() {
 func (j *JuiceFS) handleSignals() {
 	select {
 	case sig := <-j.signalCh:
-		fmt.Printf("Received signal %v, stopping JuiceFS...\n", sig)
+		j.logger.Info("Received signal, stopping JuiceFS...", "signal", sig)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		j.Stop(ctx)
@@ -996,8 +1021,10 @@ func (j *JuiceFS) findAndUnmountDependentMounts(juicefsMountPath string) error {
 
 	// Unmount each dependent mount
 	for _, mount := range mounts {
-		fmt.Printf("Unmounting dependent mount: %s (device: %s, type: %s)\n",
-			mount.mountPoint, mount.device, mount.fsType)
+		j.logger.Info("Unmounting dependent mount",
+			"mountPoint", mount.mountPoint,
+			"device", mount.device,
+			"fsType", mount.fsType)
 
 		// First, try to sync the filesystem to flush any pending writes
 		syncStart := time.Now()
@@ -1008,13 +1035,15 @@ func (j *JuiceFS) findAndUnmountDependentMounts(juicefsMountPath string) error {
 
 		if syncErr != nil {
 			// sync might fail for some mount types, but we should still try to unmount
-			fmt.Printf("  Warning: sync failed for %s after %v: %v\n",
-				mount.mountPoint, time.Since(syncStart), syncErr)
+			j.logger.Warn("Sync failed for mount",
+				"mountPoint", mount.mountPoint,
+				"duration", time.Since(syncStart),
+				"error", syncErr)
 			if len(syncOutput) > 0 {
-				fmt.Printf("    Sync stderr/stdout: %s\n", string(syncOutput))
+				j.logger.Debug("Sync stderr/stdout", "output", string(syncOutput))
 			}
 		} else {
-			fmt.Printf("  Sync completed in %v\n", time.Since(syncStart))
+			j.logger.Debug("Sync completed", "duration", time.Since(syncStart))
 		}
 
 		// First try normal unmount
@@ -1022,23 +1051,29 @@ func (j *JuiceFS) findAndUnmountDependentMounts(juicefsMountPath string) error {
 		cmd := exec.Command("umount", mount.mountPoint)
 		if _, err := cmd.CombinedOutput(); err != nil {
 			// If normal unmount fails, try with --force
-			fmt.Printf("  Normal unmount failed, trying force unmount...\n")
+			j.logger.Debug("Normal unmount failed, trying force unmount...")
 			cmd = exec.Command("umount", "--force", mount.mountPoint)
 			if output2, err2 := cmd.CombinedOutput(); err2 != nil {
 				// Try lazy unmount as last resort
-				fmt.Printf("  Force unmount failed, trying lazy unmount...\n")
+				j.logger.Debug("Force unmount failed, trying lazy unmount...")
 				cmd = exec.Command("umount", "--lazy", mount.mountPoint)
 				if output3, err3 := cmd.CombinedOutput(); err3 != nil {
-					fmt.Printf("  Warning: all unmount attempts failed for %s after %v\n    Normal: %v\n    Force: %v (output: %s)\n    Lazy: %v (output: %s)\n",
-						mount.mountPoint, time.Since(unmountStart), err, err2, string(output2), err3, string(output3))
+					j.logger.Warn("All unmount attempts failed",
+						"mountPoint", mount.mountPoint,
+						"duration", time.Since(unmountStart),
+						"normalError", err,
+						"forceError", err2,
+						"forceOutput", string(output2),
+						"lazyError", err3,
+						"lazyOutput", string(output3))
 				} else {
-					fmt.Printf("  Lazy unmount succeeded after %v\n", time.Since(unmountStart))
+					j.logger.Debug("Lazy unmount succeeded", "duration", time.Since(unmountStart))
 				}
 			} else {
-				fmt.Printf("  Force unmount succeeded after %v\n", time.Since(unmountStart))
+				j.logger.Debug("Force unmount succeeded", "duration", time.Since(unmountStart))
 			}
 		} else {
-			fmt.Printf("  Unmounted successfully in %v\n", time.Since(unmountStart))
+			j.logger.Debug("Unmounted successfully", "duration", time.Since(unmountStart))
 		}
 	}
 

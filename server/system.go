@@ -90,6 +90,7 @@ func NewSystem(config SystemConfig, logger *slog.Logger, reaper *Reaper) (*Syste
 			OverlayLowerPath:     config.OverlayLowerPath,
 			OverlayTargetPath:    config.OverlayTargetPath,
 			OverlaySkipOverlayFS: config.OverlaySkipOverlayFS,
+			Logger:               logger,
 		}
 
 		// Create leaser for S3 mode (non-local mode)
@@ -101,6 +102,7 @@ func NewSystem(config SystemConfig, logger *slog.Logger, reaper *Reaper) (*Syste
 				S3EndpointURL:     config.S3EndpointURL,
 				S3Bucket:          config.S3Bucket,
 				BaseDir:           config.JuiceFSBaseDir,
+				Logger:            logger,
 			}
 
 			leaserInstance := leaser.New(leaserConfig)
@@ -206,6 +208,7 @@ func (s *System) StartProcess() error {
 		GracePeriod: s.config.ProcessGracefulShutdownTimeout,
 		Env:         append(os.Environ(), s.config.ProcessEnvironment...),
 		Dir:         workingDir,
+		Logger:      s.logger,
 	}
 
 	s.logger.Info("StartProcess: Creating supervisor",

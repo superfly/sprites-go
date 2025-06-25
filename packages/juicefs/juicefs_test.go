@@ -327,7 +327,9 @@ func TestCheckpointValidation(t *testing.T) {
 		t.Fatalf("Failed to create mount path: %v", err)
 	}
 
-	db, err := NewCheckpointDB(tmpDir) // Use BaseDir, not mountPath
+	db, err := NewCheckpointDB(CheckpointDBConfig{
+		BaseDir: tmpDir,
+	}) // Use BaseDir, not mountPath
 	if err != nil {
 		t.Fatalf("Failed to create checkpoint database: %v", err)
 	}
@@ -365,7 +367,9 @@ func TestRestoreValidation(t *testing.T) {
 		t.Fatalf("Failed to create mount path: %v", err)
 	}
 
-	db, err := NewCheckpointDB(tmpDir) // Use BaseDir, not mountPath
+	db, err := NewCheckpointDB(CheckpointDBConfig{
+		BaseDir: tmpDir,
+	}) // Use BaseDir, not mountPath
 	if err != nil {
 		t.Fatalf("Failed to create checkpoint database: %v", err)
 	}

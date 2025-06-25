@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"sync"
@@ -28,6 +29,7 @@ type Supervisor struct {
 	stderrMultiPipe *MultiPipe
 	waitErr         error
 	waitOnce        sync.Once
+	logger          *slog.Logger
 }
 
 // Config holds configuration for the supervisor
@@ -37,6 +39,7 @@ type Config struct {
 	GracePeriod time.Duration
 	Env         []string
 	Dir         string
+	Logger      *slog.Logger // Optional logger
 }
 
 // New creates a new supervisor instance
@@ -47,6 +50,13 @@ func New(config Config) (*Supervisor, error) {
 
 	if config.GracePeriod <= 0 {
 		config.GracePeriod = 10 * time.Second
+	}
+
+	// Set up logger
+	logger := config.Logger
+	if logger == nil {
+		// Create a no-op logger that discards all output
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -84,6 +94,7 @@ func New(config Config) (*Supervisor, error) {
 		cancel:          cancel,
 		stdoutMultiPipe: stdoutMultiPipe,
 		stderrMultiPipe: stderrMultiPipe,
+		logger:          logger,
 	}, nil
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,6 +40,7 @@ type Leaser struct {
 	stopCh        chan struct{}
 	stoppedCh     chan struct{}
 	currentETag   string
+	logger        *slog.Logger
 }
 
 // Config holds the configuration for the Leaser
@@ -47,8 +49,9 @@ type Config struct {
 	S3SecretAccessKey string
 	S3EndpointURL     string
 	S3Bucket          string
-	BaseDir           string // Base directory for storing etag file
-	LeaseKey          string // Optional custom lease key (defaults to "sprite.lock")
+	BaseDir           string       // Base directory for storing etag file
+	LeaseKey          string       // Optional custom lease key (defaults to "sprite.lock")
+	Logger            *slog.Logger // Optional logger (defaults to no-op logger)
 }
 
 // LeaseInfo represents the lease data stored in S3
@@ -77,6 +80,13 @@ func New(config Config) *Leaser {
 		leaseKey = "sprite.lock"
 	}
 
+	// Set up logger
+	logger := config.Logger
+	if logger == nil {
+		// Create a no-op logger that discards all output
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+
 	// Create AWS config
 	awsCfg := aws.Config{
 		Region: primaryRegion,
@@ -102,6 +112,7 @@ func New(config Config) *Leaser {
 		etagFilePath:  filepath.Join(config.BaseDir, ".sprite-lease-etag"),
 		stopCh:        make(chan struct{}),
 		stoppedCh:     make(chan struct{}),
+		logger:        logger,
 	}
 }
 
@@ -117,6 +128,7 @@ func NewWithS3Client(s3Client S3API, bucketName, leaseKey, machineID, baseDir st
 		etagFilePath:  filepath.Join(baseDir, ".sprite-lease-etag"),
 		stopCh:        make(chan struct{}),
 		stoppedCh:     make(chan struct{}),
+		logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }
 
@@ -131,13 +143,13 @@ func (l *Leaser) Wait(ctx context.Context) error {
 	if acquired {
 		// Success! No need to wait
 		l.currentETag = etag
-		fmt.Printf("Successfully acquired lease with etag: %s\n", etag)
+		l.logger.Info("Successfully acquired lease", "etag", etag)
 		l.startLeaseRefresh()
 		return nil
 	}
 
 	// 2. If there's a conflict, read current lease info
-	fmt.Println("Lease acquisition failed, reading current lease info...")
+	l.logger.Info("Lease acquisition failed, reading current lease info...")
 	currentLease, expired, err := l.checkCurrentLease(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to check current lease: %w", err)
@@ -145,7 +157,7 @@ func (l *Leaser) Wait(ctx context.Context) error {
 
 	// 3. If expired, or held by the same machine, use current etag for acquisition
 	if expired || (currentLease != nil && currentLease.MachineID == l.machineID) {
-		fmt.Printf("Lease is expired or held by us (%s), attempting acquisition with current etag\n", l.machineID)
+		l.logger.Info("Lease is expired or held by us, attempting acquisition with current etag", "machineID", l.machineID)
 
 		// Get current etag for the object
 		currentETag, err := l.getCurrentETag(ctx)
@@ -160,7 +172,7 @@ func (l *Leaser) Wait(ctx context.Context) error {
 
 		if acquired {
 			l.currentETag = etag
-			fmt.Printf("Successfully acquired lease with current etag: %s\n", etag)
+			l.logger.Info("Successfully acquired lease with current etag", "etag", etag)
 			l.startLeaseRefresh()
 			return nil
 		}
@@ -168,7 +180,7 @@ func (l *Leaser) Wait(ctx context.Context) error {
 
 	// 4. If not expired AND held by a different machine, wait for lease
 	if currentLease != nil && !expired && currentLease.MachineID != l.machineID {
-		fmt.Printf("Lease held by different machine (%s), waiting for lease to expire...\n", currentLease.MachineID)
+		l.logger.Info("Lease held by different machine, waiting for lease to expire...", "currentHolder", currentLease.MachineID)
 		return l.waitForLease(ctx)
 	}
 
@@ -213,11 +225,11 @@ func (l *Leaser) tryAcquireLease(ctx context.Context, ifMatch string) (bool, str
 	if actualIfMatch == "" {
 		if data, err := os.ReadFile(l.etagFilePath); err == nil {
 			actualIfMatch = string(bytes.TrimSpace(data))
-			fmt.Printf("Read existing etag from file: %s\n", actualIfMatch)
+			l.logger.Debug("Read existing etag from file", "etag", actualIfMatch)
 		} else {
 			// File doesn't exist, use empty string (will use IfNoneMatch)
 			actualIfMatch = ""
-			fmt.Printf("No existing etag file found, using empty etag\n")
+			l.logger.Debug("No existing etag file found, using empty etag")
 		}
 	}
 
@@ -274,7 +286,7 @@ func (l *Leaser) tryAcquireLease(ctx context.Context, ifMatch string) (bool, str
 			strings.Contains(errStr, "ConditionalRequestConflict") ||
 			strings.Contains(errStr, "409") {
 			// Conditional check failed - someone else has the lease or it changed
-			fmt.Printf("Lease acquisition failed: conditional check failed\n")
+			l.logger.Debug("Lease acquisition failed: conditional check failed")
 			return false, "", nil
 		}
 		return false, "", fmt.Errorf("failed to put lease object: %w", err)
@@ -288,13 +300,13 @@ func (l *Leaser) tryAcquireLease(ctx context.Context, ifMatch string) (bool, str
 
 	// Write etag to file immediately upon successful acquisition
 	if err := os.WriteFile(l.etagFilePath, []byte(etag), 0644); err != nil {
-		fmt.Printf("Warning: failed to write etag file: %v\n", err)
+		l.logger.Warn("Failed to write etag file", "error", err)
 		// Don't fail the lease acquisition for file write errors
 	} else {
-		fmt.Printf("Successfully wrote etag to file: %s\n", l.etagFilePath)
+		l.logger.Debug("Successfully wrote etag to file", "path", l.etagFilePath)
 	}
 
-	fmt.Printf("Successfully acquired/updated lease with new ETag: %s\n", etag)
+	l.logger.Info("Successfully acquired/updated lease", "etag", etag)
 	return true, etag, nil
 }
 
@@ -330,11 +342,13 @@ func (l *Leaser) checkCurrentLease(ctx context.Context) (*LeaseInfo, bool, error
 	// Check if lease is expired
 	expired := time.Now().After(leaseInfo.ExpiresAt)
 	if expired {
-		fmt.Printf("Current lease held by %s has expired (expired at %s)\n",
-			leaseInfo.MachineID, leaseInfo.ExpiresAt.Format(time.RFC3339))
+		l.logger.Info("Current lease has expired",
+			"holder", leaseInfo.MachineID,
+			"expiredAt", leaseInfo.ExpiresAt.Format(time.RFC3339))
 	} else {
-		fmt.Printf("Current lease held by %s, expires at %s\n",
-			leaseInfo.MachineID, leaseInfo.ExpiresAt.Format(time.RFC3339))
+		l.logger.Info("Current lease is active",
+			"holder", leaseInfo.MachineID,
+			"expiresAt", leaseInfo.ExpiresAt.Format(time.RFC3339))
 	}
 
 	return &leaseInfo, expired, nil
@@ -368,10 +382,10 @@ func (l *Leaser) waitForLease(ctx context.Context) error {
 	for {
 		currentLease, expired, err := l.checkCurrentLease(ctx)
 		if err != nil {
-			fmt.Printf("Error checking current lease: %v\n", err)
+			l.logger.Error("Error checking current lease", "error", err)
 		} else {
 			if currentLease == nil || expired {
-				fmt.Println("Lease is now available, attempting to acquire...")
+				l.logger.Info("Lease is now available, attempting to acquire...")
 
 				// Get current etag and try to acquire with it
 				var ifMatch string
@@ -379,7 +393,7 @@ func (l *Leaser) waitForLease(ctx context.Context) error {
 					// Lease exists but is expired, use current ETag
 					currentETag, err := l.getCurrentETag(ctx)
 					if err != nil {
-						fmt.Printf("Error getting current etag: %v\n", err)
+						l.logger.Error("Error getting current etag", "error", err)
 					} else {
 						ifMatch = currentETag
 					}
@@ -388,10 +402,10 @@ func (l *Leaser) waitForLease(ctx context.Context) error {
 
 				acquired, etag, err := l.tryAcquireLease(ctx, ifMatch)
 				if err != nil {
-					fmt.Printf("Error trying to acquire lease: %v\n", err)
+					l.logger.Error("Error trying to acquire lease", "error", err)
 				} else if acquired {
 					l.currentETag = etag
-					fmt.Printf("Successfully acquired lease after waiting with etag: %s\n", etag)
+					l.logger.Info("Successfully acquired lease after waiting", "etag", etag)
 					l.startLeaseRefresh()
 					return nil
 				}
@@ -414,8 +428,10 @@ func (l *Leaser) waitForLease(ctx context.Context) error {
 					}
 				}
 
-				fmt.Printf("Lease held by %s, expires in %v. Checking again in %v\n",
-					currentLease.MachineID, timeUntilExpiry.Round(time.Second), checkInterval)
+				l.logger.Info("Lease held by another machine, waiting",
+					"holder", currentLease.MachineID,
+					"expiresIn", timeUntilExpiry.Round(time.Second),
+					"nextCheckIn", checkInterval)
 			}
 		}
 
@@ -442,12 +458,12 @@ func (l *Leaser) startLeaseRefresh() {
 				cancel()
 
 				if err != nil {
-					fmt.Printf("Error refreshing lease: %v\n", err)
+					l.logger.Error("Error refreshing lease", "error", err)
 				} else if !acquired {
-					fmt.Println("WARNING: Failed to refresh lease, another instance may have taken over")
+					l.logger.Warn("Failed to refresh lease, another instance may have taken over")
 				} else {
 					l.currentETag = etag
-					fmt.Printf("Successfully refreshed lease with etag: %s\n", etag)
+					l.logger.Debug("Successfully refreshed lease", "etag", etag)
 				}
 			case <-l.stopCh:
 				return

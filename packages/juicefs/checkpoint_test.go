@@ -32,7 +32,9 @@ func TestListCheckpoints(t *testing.T) {
 		t.Fatalf("Failed to create mount path: %v", err)
 	}
 
-	db, err := NewCheckpointDB(mountPath)
+	db, err := NewCheckpointDB(CheckpointDBConfig{
+		BaseDir: mountPath,
+	})
 	if err != nil {
 		t.Fatalf("Failed to create checkpoint database: %v", err)
 	}
@@ -133,7 +135,9 @@ func TestGetCheckpoint(t *testing.T) {
 		t.Fatalf("Failed to create mount path: %v", err)
 	}
 
-	db, err := NewCheckpointDB(mountPath)
+	db, err := NewCheckpointDB(CheckpointDBConfig{
+		BaseDir: mountPath,
+	})
 	if err != nil {
 		t.Fatalf("Failed to create checkpoint database: %v", err)
 	}
@@ -197,7 +201,9 @@ func TestListCheckpointsWithActive(t *testing.T) {
 		t.Fatalf("Failed to create mount path: %v", err)
 	}
 
-	db, err := NewCheckpointDB(mountPath)
+	db, err := NewCheckpointDB(CheckpointDBConfig{
+		BaseDir: mountPath,
+	})
 	if err != nil {
 		t.Fatalf("Failed to create checkpoint database: %v", err)
 	}
@@ -287,7 +293,9 @@ func TestGetCheckpointActive(t *testing.T) {
 		t.Fatalf("Failed to create mount path: %v", err)
 	}
 
-	db, err := NewCheckpointDB(mountPath)
+	db, err := NewCheckpointDB(CheckpointDBConfig{
+		BaseDir: mountPath,
+	})
 	if err != nil {
 		t.Fatalf("Failed to create checkpoint database: %v", err)
 	}

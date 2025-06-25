@@ -15,7 +15,9 @@ func TestCheckpointDB(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	// Create checkpoint database
-	db, err := NewCheckpointDB(tmpDir)
+	db, err := NewCheckpointDB(CheckpointDBConfig{
+		BaseDir: tmpDir,
+	})
 	if err != nil {
 		t.Fatalf("Failed to create checkpoint database: %v", err)
 	}

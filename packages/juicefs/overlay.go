@@ -3,6 +3,7 @@ package juicefs
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +27,7 @@ type OverlayManager struct {
 	imagePath string
 	mountPath string
 	imageSize string
+	logger    *slog.Logger
 
 	// Overlayfs configuration
 	lowerPath         string // Lower directory (e.g., /mnt/app-image)
@@ -34,7 +36,7 @@ type OverlayManager struct {
 }
 
 // NewOverlay creates a new overlay manager instance
-func NewOverlay(j *JuiceFS) *OverlayManager {
+func NewOverlay(j *JuiceFS, logger *slog.Logger) *OverlayManager {
 	mountPath := filepath.Join(j.config.BaseDir, "data")
 	return &OverlayManager{
 		juiceFS:           j,
@@ -44,6 +46,7 @@ func NewOverlay(j *JuiceFS) *OverlayManager {
 		lowerPath:         "/mnt/app-image", // Default lower directory
 		overlayTargetPath: "/mnt/newroot",   // Default overlay mount point
 		skipOverlayFS:     false,            // Default to mounting overlayfs
+		logger:            logger,
 	}
 }
 
@@ -107,7 +110,7 @@ func (om *OverlayManager) EnsureImage() error {
 		return fmt.Errorf("failed to create image directory: %w", err)
 	}
 
-	fmt.Printf("Creating %s sparse image at %s...\n", om.imageSize, om.imagePath)
+	om.logger.Info("Creating sparse image", "size", om.imageSize, "path", om.imagePath)
 
 	// Create sparse image using dd
 	cmd := exec.Command("dd", "if=/dev/zero", fmt.Sprintf("of=%s", om.imagePath),
@@ -117,7 +120,7 @@ func (om *OverlayManager) EnsureImage() error {
 	}
 
 	// Format with ext4
-	fmt.Println("Formatting image with ext4...")
+	om.logger.Info("Formatting image with ext4...")
 	cmd = exec.Command("mkfs.ext4", om.imagePath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		// Clean up the image file if formatting fails
@@ -125,7 +128,7 @@ func (om *OverlayManager) EnsureImage() error {
 		return fmt.Errorf("failed to format image: %w, output: %s", err, string(output))
 	}
 
-	fmt.Printf("Root overlay image created successfully at %s\n", om.imagePath)
+	om.logger.Info("Root overlay image created successfully", "path", om.imagePath)
 	return nil
 }
 
@@ -138,7 +141,7 @@ func (om *OverlayManager) Mount(ctx context.Context) error {
 
 	// Check if already mounted
 	if om.isMounted() {
-		fmt.Printf("Root overlay already mounted at %s\n", om.mountPath)
+		om.logger.Info("Root overlay already mounted", "path", om.mountPath)
 
 		// Skip overlayfs if configured
 		if om.skipOverlayFS {
@@ -147,7 +150,7 @@ func (om *OverlayManager) Mount(ctx context.Context) error {
 
 		// Check if overlayfs is also mounted
 		if om.isOverlayFSMounted() {
-			fmt.Printf("OverlayFS already mounted at %s\n", om.overlayTargetPath)
+			om.logger.Info("OverlayFS already mounted", "path", om.overlayTargetPath)
 			return nil
 		}
 
@@ -164,12 +167,12 @@ func (om *OverlayManager) Mount(ctx context.Context) error {
 	if info, err := os.Stat(om.imagePath); err != nil {
 		return fmt.Errorf("overlay image not accessible at %s: %w", om.imagePath, err)
 	} else {
-		fmt.Printf("Overlay image verified: %s (size: %d bytes)\n", om.imagePath, info.Size())
+		om.logger.Debug("Overlay image verified", "path", om.imagePath, "size", info.Size())
 	}
 
 	// Try to mount the image with a timeout
-	fmt.Printf("Mounting root overlay at %s...\n", om.mountPath)
-	fmt.Printf("  Source: %s\n", om.imagePath)
+	om.logger.Info("Mounting root overlay", "mountPath", om.mountPath)
+	om.logger.Debug("Source image", "path", om.imagePath)
 
 	// Create a context with timeout for the mount command
 	mountCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -180,7 +183,7 @@ func (om *OverlayManager) Mount(ctx context.Context) error {
 
 	// Check if it was a timeout
 	if mountCtx.Err() == context.DeadlineExceeded {
-		fmt.Printf("Mount command timed out after 10 seconds, likely due to I/O error\n")
+		om.logger.Error("Mount command timed out after 10 seconds, likely due to I/O error")
 		err = fmt.Errorf("mount timeout")
 	}
 
@@ -188,26 +191,25 @@ func (om *OverlayManager) Mount(ctx context.Context) error {
 	if err != nil && (stringContains(string(output), "I/O error") ||
 		stringContains(string(output), "can't read superblock") ||
 		err.Error() == "mount timeout") {
-		fmt.Printf("Mount failed with I/O error, attempting recovery...\n")
-		fmt.Printf("  Error: %v\n", err)
+		om.logger.Error("Mount failed with I/O error, attempting recovery...", "error", err)
 		if len(output) > 0 {
-			fmt.Printf("  Output: %s\n", string(output))
+			om.logger.Debug("Mount output", "output", string(output))
 		}
 
 		// Delete the corrupted image
-		fmt.Printf("Removing corrupted image at %s...\n", om.imagePath)
+		om.logger.Info("Removing corrupted image", "path", om.imagePath)
 		if removeErr := os.Remove(om.imagePath); removeErr != nil {
-			fmt.Printf("Warning: failed to remove corrupted image: %v\n", removeErr)
+			om.logger.Warn("Failed to remove corrupted image", "error", removeErr)
 		}
 
 		// Recreate the image
-		fmt.Printf("Recreating overlay image...\n")
+		om.logger.Info("Recreating overlay image...")
 		if createErr := om.EnsureImage(); createErr != nil {
 			return fmt.Errorf("failed to recreate overlay image after I/O error: %w", createErr)
 		}
 
 		// Try mounting again with fresh timeout
-		fmt.Printf("Retrying mount after recreating image...\n")
+		om.logger.Info("Retrying mount after recreating image...")
 		mountCtx2, cancel2 := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel2()
 
@@ -219,7 +221,7 @@ func (om *OverlayManager) Mount(ctx context.Context) error {
 		return fmt.Errorf("failed to mount overlay: %w, output: %s", err, string(output))
 	}
 
-	fmt.Printf("Root overlay mounted successfully at %s\n", om.mountPath)
+	om.logger.Info("Root overlay mounted successfully", "path", om.mountPath)
 
 	// Skip overlayfs if configured
 	if om.skipOverlayFS {
@@ -255,10 +257,11 @@ func (om *OverlayManager) mountOverlayFS(ctx context.Context) error {
 	}
 
 	// Mount the overlay
-	fmt.Printf("Mounting OverlayFS at %s...\n", om.overlayTargetPath)
-	fmt.Printf("  Lower: %s\n", om.lowerPath)
-	fmt.Printf("  Upper: %s\n", upperDir)
-	fmt.Printf("  Work: %s\n", workDir)
+	om.logger.Info("Mounting OverlayFS", "targetPath", om.overlayTargetPath)
+	om.logger.Debug("OverlayFS paths",
+		"lower", om.lowerPath,
+		"upper", upperDir,
+		"work", workDir)
 
 	mountOptions := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s",
 		om.lowerPath, upperDir, workDir)
@@ -270,7 +273,7 @@ func (om *OverlayManager) mountOverlayFS(ctx context.Context) error {
 		return fmt.Errorf("failed to mount overlayfs: %w, output: %s", err, string(output))
 	}
 
-	fmt.Printf("OverlayFS mounted successfully at %s\n", om.overlayTargetPath)
+	om.logger.Info("OverlayFS mounted successfully", "path", om.overlayTargetPath)
 	return nil
 }
 
@@ -278,19 +281,19 @@ func (om *OverlayManager) mountOverlayFS(ctx context.Context) error {
 func (om *OverlayManager) Unmount(ctx context.Context) error {
 	// First unmount overlayfs if it's mounted
 	if om.isOverlayFSMounted() {
-		fmt.Printf("Unmounting OverlayFS at %s...\n", om.overlayTargetPath)
+		om.logger.Info("Unmounting OverlayFS", "path", om.overlayTargetPath)
 
 		// Try normal unmount first
 		cmd := exec.CommandContext(ctx, "umount", om.overlayTargetPath)
 		if output, err := cmd.CombinedOutput(); err != nil {
 			// Try force unmount
-			fmt.Println("Normal overlayfs unmount failed, trying force unmount...")
+			om.logger.Debug("Normal overlayfs unmount failed, trying force unmount...")
 			cmd = exec.CommandContext(ctx, "umount", "-f", om.overlayTargetPath)
 			if output2, err2 := cmd.CombinedOutput(); err2 != nil {
 				return fmt.Errorf("failed to unmount overlayfs: %w, outputs: %s, %s", err2, string(output), string(output2))
 			}
 		}
-		fmt.Printf("OverlayFS unmounted successfully\n")
+		om.logger.Info("OverlayFS unmounted successfully")
 	}
 
 	// Then unmount the loopback mount
@@ -298,25 +301,25 @@ func (om *OverlayManager) Unmount(ctx context.Context) error {
 		return nil
 	}
 
-	fmt.Printf("Unmounting root overlay at %s...\n", om.mountPath)
+	om.logger.Info("Unmounting root overlay", "path", om.mountPath)
 
 	// Sync first
 	if err := om.sync(ctx); err != nil {
-		fmt.Printf("Warning: sync failed: %v\n", err)
+		om.logger.Warn("Sync failed", "error", err)
 	}
 
 	// Try normal unmount first
 	cmd := exec.CommandContext(ctx, "umount", om.mountPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		// Try force unmount
-		fmt.Println("Normal unmount failed, trying force unmount...")
+		om.logger.Debug("Normal unmount failed, trying force unmount...")
 		cmd = exec.CommandContext(ctx, "umount", "-f", om.mountPath)
 		if output2, err2 := cmd.CombinedOutput(); err2 != nil {
 			return fmt.Errorf("failed to unmount overlay: %w, outputs: %s, %s", err2, string(output), string(output2))
 		}
 	}
 
-	fmt.Printf("Root overlay unmounted successfully\n")
+	om.logger.Info("Root overlay unmounted successfully")
 	return nil
 }
 
@@ -328,12 +331,12 @@ func (om *OverlayManager) PrepareForCheckpoint(ctx context.Context) error {
 			return fmt.Errorf("loopback mount not mounted")
 		}
 
-		fmt.Printf("Syncing loopback mount at %s...\n", om.mountPath)
+		om.logger.Info("Syncing loopback mount", "path", om.mountPath)
 		if err := om.sync(ctx); err != nil {
 			return fmt.Errorf("failed to sync loopback mount: %w", err)
 		}
 
-		fmt.Printf("Freezing ext4 filesystem at %s...\n", om.mountPath)
+		om.logger.Info("Freezing ext4 filesystem", "path", om.mountPath)
 		freezeCmd := exec.CommandContext(ctx, "fsfreeze", "--freeze", om.mountPath)
 		if output, err := freezeCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("failed to freeze ext4 filesystem: %w, output: %s", err, string(output))
@@ -348,21 +351,21 @@ func (om *OverlayManager) PrepareForCheckpoint(ctx context.Context) error {
 	}
 
 	// Sync the overlayfs filesystem (where actual writes occur)
-	fmt.Printf("Syncing OverlayFS filesystem at %s...\n", om.overlayTargetPath)
+	om.logger.Info("Syncing OverlayFS filesystem", "path", om.overlayTargetPath)
 	syncCmd := exec.CommandContext(ctx, "sync", "-f", om.overlayTargetPath)
 	if output, err := syncCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to sync overlayfs: %w, output: %s", err, string(output))
 	}
 
 	// Also sync the underlying loopback mount to ensure all data is flushed
-	fmt.Printf("Syncing underlying ext4 filesystem at %s...\n", om.mountPath)
+	om.logger.Info("Syncing underlying ext4 filesystem", "path", om.mountPath)
 	syncCmd = exec.CommandContext(ctx, "sync", "-f", om.mountPath)
 	if output, err := syncCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to sync loopback mount: %w, output: %s", err, string(output))
 	}
 
 	// Freeze the underlying ext4 filesystem (not the overlayfs)
-	fmt.Printf("Freezing underlying ext4 filesystem at %s...\n", om.mountPath)
+	om.logger.Info("Freezing underlying ext4 filesystem", "path", om.mountPath)
 	freezeCmd := exec.CommandContext(ctx, "fsfreeze", "--freeze", om.mountPath)
 	if output, err := freezeCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to freeze ext4 filesystem: %w, output: %s", err, string(output))
@@ -377,7 +380,7 @@ func (om *OverlayManager) UnfreezeAfterCheckpoint(ctx context.Context) error {
 		return nil // Not an error if not mounted
 	}
 
-	fmt.Printf("Unfreezing underlying ext4 filesystem at %s...\n", om.mountPath)
+	om.logger.Info("Unfreezing underlying ext4 filesystem", "path", om.mountPath)
 	unfreezeCmd := exec.CommandContext(ctx, "fsfreeze", "--unfreeze", om.mountPath)
 	if output, err := unfreezeCmd.CombinedOutput(); err != nil {
 		// Check if it's already unfrozen by trying to write to the underlying mount
