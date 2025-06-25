@@ -285,6 +285,9 @@ func executeDirectWebSocket(baseURL, token string, cmd []string, workingDir stri
 		// Don't print error here - it's usually just context cancelled
 	}
 
+	// Gracefully close the WebSocket connection
+	wsCmd.Close()
+
 	// Get exit code
 	exitCode := wsCmd.ExitCode()
 	if debug {

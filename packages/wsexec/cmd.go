@@ -140,8 +140,8 @@ func (c *Cmd) runIO() {
 		return
 	}
 
-	defer adapter.Close()
-	defer conn.Close()
+	// Gracefully close the connection when the I/O loop finishes
+	defer c.Close()
 
 	// Get output writers
 	stdout := c.Stdout
