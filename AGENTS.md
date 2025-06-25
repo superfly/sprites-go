@@ -1,6 +1,7 @@
 ### project-specific
 
 * don't run "make test-machine"; only i get to run that.
+* don't bother with "make test" unless I ask you to
 
 ### general stuff
 
