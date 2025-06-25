@@ -1,6 +1,56 @@
-tests
+# Git
+.git
+.gitignore
+
 cmd
+spec
 scripts
-spec
-dist
-spec
+
+# Go build artifacts
+tmp/
+dist/
+sprite-env
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test files
+*_test.go
+test-scripts/
+tests/
+*.test
+
+# Documentation
+*.md
+examples/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cursor/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Docker files
+Dockerfile*
+.dockerignore
+
+# GitHub
+.github/
+
+# Issue tracking
+issues/
+
+# Config examples (but keep actual configs)
+config.example.json

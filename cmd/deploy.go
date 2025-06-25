@@ -89,12 +89,14 @@ func main() {
 	ctx := context.Background()
 
 	// Build and push Docker image
-	imageRef := fmt.Sprintf("registry.fly.io/%s:latest", appName)
+	label := fmt.Sprintf("%d", time.Now().Unix())
+	imageRef := fmt.Sprintf("registry.fly.io/%s:%s", appName, label)
 
 	if !skipBuild {
 		log.Println("Building Docker image...")
 		// Use buildx for better cross-platform support
-		buildCmd := exec.Command("docker", "buildx", "build", "--platform", "linux/amd64", "--load", "-t", imageRef, "..")
+		buildCmd := exec.Command("fly", "deploy", "-a", appName, "--build-only", "--push", "--image-label", label)
+		buildCmd.Dir = "../"
 		buildCmd.Stdout = os.Stdout
 		buildCmd.Stderr = os.Stderr
 		if err := buildCmd.Run(); err != nil {
@@ -102,22 +104,6 @@ func main() {
 		}
 	} else {
 		log.Println("Skipping docker image build.")
-	}
-
-	log.Println("Authenticating with Docker...")
-	authCmd := exec.Command("flyctl", "auth", "docker")
-	authCmd.Stdout = os.Stdout
-	authCmd.Stderr = os.Stderr
-	if err := authCmd.Run(); err != nil {
-		log.Fatal("Failed to authenticate with Docker: ", err)
-	}
-
-	log.Println("Pushing Docker image...")
-	pushCmd := exec.Command("docker", "push", imageRef)
-	pushCmd.Stdout = os.Stdout
-	pushCmd.Stderr = os.Stderr
-	if err := pushCmd.Run(); err != nil {
-		log.Fatal("Failed to push Docker image: ", err)
 	}
 
 	// Create flaps client for machine management

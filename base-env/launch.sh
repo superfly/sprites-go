@@ -21,6 +21,8 @@ if ! mount | grep -q "^overlay on /mnt/newroot type overlay"; then
   exit 1
 fi
 
+mkdir -p /tmp/sprite
+
 # Store base config in a variable
 CONFIG_JSON='{
   "ociVersion": "1.0.2",
@@ -129,11 +131,11 @@ CONFIG_JSON='{
     "rlimits": [
       {
         "type": "RLIMIT_NOFILE",
-        "hard": 1024,
-        "soft": 1024
+        "hard": 10240,
+        "soft": 10240
       }
     ],
-    "noNewPrivileges": true
+    "noNewPrivileges": false
   },
   "root": {
     "path": "/mnt/newroot",
@@ -174,7 +176,7 @@ CONFIG_JSON='{
       "destination": "/sys",
       "type": "sysfs",
       "source": "sysfs",
-      "options": ["nosuid", "noexec", "nodev", "ro"]
+      "options": ["nosuid", "noexec", "nodev"]
     },
     {
       "destination": "/sys/fs/cgroup",
@@ -184,8 +186,7 @@ CONFIG_JSON='{
         "nosuid",
         "noexec",
         "nodev",
-        "relatime",
-        "ro"
+        "relatime"
       ]
     },
     {
@@ -205,6 +206,12 @@ CONFIG_JSON='{
         "type": "bind",
         "source": "/dev/fly_vol/juicefs/data/active/fs",
         "options": ["rbind"]
+    },
+    {
+        "destination": "/tmp",
+        "type": "bind",
+        "source": "/tmp/sprite",
+        "options": ["rbind", "nosuid", "nodev"]
     },
     {
       "destination": "/.pilot/swapon",
@@ -407,8 +414,6 @@ else
     entrypoint_jq=$json_entrypoint_jq
 fi
 
-# No additional mounts needed - the overlay provides the writable filesystem
-
 # Check if the variable is SET (even if empty) using +x parameter expansion
 if [ -n "${APP_RUNNER_CMD+x}" ]; then
     # Use environment variable, splitting by space
@@ -487,15 +492,4 @@ fi
 mkdir -p "${SPRITE_WRITE_DIR}/tmp"
 echo "$CONFIG_JSON" > "${SPRITE_WRITE_DIR}/tmp/config.json"
 
-crun run -f "${SPRITE_WRITE_DIR}/tmp/config.json" app &
-pid=$!
-
-# Trap SIGTERM and SIGINT to handle clean unmount
-cleanup() {
-  kill $pid 2>/dev/null
-  umount /mnt/newroot
-  umount /mnt/app-storage
-  exit 0
-}
-
-trap cleanup SIGTERM SIGINT
+exec crun --debug run -f "${SPRITE_WRITE_DIR}/tmp/config.json" app
