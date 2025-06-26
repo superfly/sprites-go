@@ -34,6 +34,11 @@
 - Add a `sprite logs` command for CLI access to logs
 - Consider adding tail functionality to `sprite logs` for real-time log streaming
 - Store process output, API calls, checkpoint events, and system events
+- [ ] Define SQLite schema for sprite session logs
+- [ ] Implement SQLiteLogCollector
+- [ ] Wire SQLiteLogCollector into the abstraction
+- [ ] Migrate existing file logs into SQLite
+- [ ] Expose query API, etc.
 
 ### Language SDKs
 **Goal**: Easy programmatic access to sprite functionality from multiple languages

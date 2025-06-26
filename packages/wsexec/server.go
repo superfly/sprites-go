@@ -61,7 +61,7 @@ type ServerCommand struct {
 
 	// Console socket path for receiving PTY from crun
 	ConsoleSocketPath string
-	LogPath           string
+	LogCollector      LogCollector
 
 	// Wrapper commands (optional)
 	WrapperCommand []string
@@ -115,8 +115,8 @@ func (c *ServerCommand) SetConsoleSocketPath(path string) *ServerCommand {
 	return c
 }
 
-func (c *ServerCommand) SetLogPath(path string) *ServerCommand {
-	c.LogPath = path
+func (c *ServerCommand) SetLogCollector(l LogCollector) *ServerCommand {
+	c.LogCollector = l
 	return c
 }
 
@@ -236,28 +236,10 @@ func (c *ServerCommand) Handle(w http.ResponseWriter, r *http.Request) error {
 
 // run executes the command and handles I/O
 func (c *ServerCommand) run(ctx context.Context, ws *Adapter) int {
-	var (
-		inLog, outLog, errLog *lineLogger
-		logFile               *os.File
-		err                   error
-	)
-
-	if c.LogPath != "" {
-		logFile, err = os.OpenFile(c.LogPath,
-			os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err == nil {
-			logger := slog.New(slog.NewTextHandler(logFile, nil))
-			inLog = newLogger("stdin", logger)
-			outLog = newLogger("stdout", logger)
-			errLog = newLogger("stderr", logger)
-		}
+	collector := c.LogCollector
+	if collector != nil {
+		defer collector.Close()
 	}
-	defer func() {
-		inLog.Close()
-		outLog.Close()
-		errLog.Close()
-		logFile.Close()
-	}()
 
 	// Build command
 	var cmdArgs []string
@@ -320,15 +302,17 @@ func (c *ServerCommand) run(ctx context.Context, ws *Adapter) int {
 	// Handle TTY mode
 	if c.Tty {
 		if c.ConsoleSocketPath != "" {
-			return c.runWithConsoleSocket(ctx, cmd, ws, inLog, outLog)
+			return c.runWithConsoleSocket(ctx, cmd, ws, collector)
 		}
-		return c.runWithNewPTY(ctx, cmd, ws, inLog, outLog)
+		return c.runWithNewPTY(ctx, cmd, ws, collector)
 	}
-	return c.runWithoutPTY(ctx, cmd, ws, inLog, outLog, errLog)
+	return c.runWithoutPTY(ctx, cmd, ws, collector)
 }
 
 // handlePTYIO handles the I/O between WebSocket and PTY
-func (c *ServerCommand) handlePTYIO(ctx context.Context, ptmx *os.File, ws *Adapter, inLog io.Writer, outLog io.Writer) {
+func (c *ServerCommand) handlePTYIO(ctx context.Context, ptmx *os.File, ws *Adapter, collector LogCollector) {
+	inLog := stream(collector, "stdin")
+	outLog := stream(collector, "stdout")
 	// Create channels to signal completion
 	wsDone := make(chan struct{})
 	ptyDone := make(chan struct{})
@@ -393,7 +377,7 @@ func (c *ServerCommand) handlePTYIO(ctx context.Context, ptmx *os.File, ws *Adap
 }
 
 // runWithNewPTY runs command with newly allocated PTY
-func (c *ServerCommand) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, ws *Adapter, inLog io.Writer, outLog io.Writer) int {
+func (c *ServerCommand) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, ws *Adapter, collector LogCollector) int {
 	// Ensure TERM is set for PTY mode
 	if cmd.Env == nil {
 		cmd.Env = os.Environ()
@@ -444,7 +428,7 @@ func (c *ServerCommand) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, ws *Ad
 		c.Logger.Debug("PTY created successfully")
 	}
 
-	c.handlePTYIO(ctx, ptmx, ws, inLog, outLog)
+	c.handlePTYIO(ctx, ptmx, ws, collector)
 
 	// Wait for command
 	cmdErr := cmd.Wait()
@@ -460,7 +444,7 @@ func (c *ServerCommand) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, ws *Ad
 }
 
 // runWithConsoleSocket runs command using crun's --console-socket feature
-func (c *ServerCommand) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd, ws *Adapter, inLog io.Writer, outLog io.Writer) int {
+func (c *ServerCommand) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd, ws *Adapter, collector LogCollector) int {
 	// Create TTY manager with the specified socket path
 	tty, err := container.NewWithPath(c.ConsoleSocketPath)
 	if err != nil {
@@ -534,7 +518,7 @@ func (c *ServerCommand) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd,
 		}
 	}
 
-	c.handlePTYIO(ctx, ptyFile, ws, inLog, outLog)
+	c.handlePTYIO(ctx, ptyFile, ws, collector)
 
 	// Wait for command
 	cmdErr := cmd.Wait()
@@ -550,7 +534,7 @@ func (c *ServerCommand) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd,
 }
 
 // runWithoutPTY runs command without PTY
-func (c *ServerCommand) runWithoutPTY(ctx context.Context, cmd *exec.Cmd, ws *Adapter, inLog io.Writer, outLog io.Writer, errLog io.Writer) int {
+func (c *ServerCommand) runWithoutPTY(ctx context.Context, cmd *exec.Cmd, ws *Adapter, collector LogCollector) int {
 	// Set up pipes
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -577,17 +561,17 @@ func (c *ServerCommand) runWithoutPTY(ctx context.Context, cmd *exec.Cmd, ws *Ad
 
 	go func() {
 		defer stdin.Close()
-		r := io.TeeReader(stdinReader, inLog)
+		r := io.TeeReader(stdinReader, stream(collector, "stdin"))
 		io.Copy(stdin, r)
 	}()
 
 	go func() {
-		w := io.MultiWriter(stdoutWriter, outLog)
+		w := io.MultiWriter(stdoutWriter, stream(collector, "stdout"))
 		io.Copy(w, stdout)
 	}()
 
 	go func() {
-		w := io.MultiWriter(stderrWriter, errLog)
+		w := io.MultiWriter(stderrWriter, stream(collector, "stderr"))
 		io.Copy(w, stderr)
 	}()
 
@@ -649,4 +633,16 @@ func (l *lineLogger) Close() {
 		l.logger.Info("io", "stream", l.stream, "line", line)
 	}
 	l.buf.Reset()
+}
+
+type LogCollector interface {
+	Stream(name string) io.Writer
+	Close() error
+}
+
+func stream(l LogCollector, name string) io.Writer {
+	if l == nil {
+		return io.Discard
+	}
+	return l.Stream(name)
 }
