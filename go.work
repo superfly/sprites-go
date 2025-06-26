@@ -3,6 +3,7 @@ go 1.24.4
 use (
 	./client
 	./lib
+	./packages/container
 	./packages/juicefs
 	./packages/leaser
 	./packages/supervisor

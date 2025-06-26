@@ -11,7 +11,7 @@ function debug() {
 # Check if cgroup2 is mounted, if not mount it
 if ! mountpoint -q /sys/fs/cgroup; then
     mkdir -p /sys/fs/cgroup
-    mount -t cgroup2 none /sys/fs/cgroup
+    mount -t cgroup2 -o nsdelegate,memory_recursiveprot cgroup2 /sys/fs/cgroup
 fi
 
 # This is a prerun script to do the overlay + loopback inside the namespace
@@ -31,6 +31,7 @@ CONFIG_JSON='{
       "uid": 0,
       "gid": 0
     },
+    "terminal": true,
     "args": [],
     "cwd": "/",
     "env": [
@@ -183,10 +184,8 @@ CONFIG_JSON='{
       "type": "cgroup2",
       "source": "cgroup2",
       "options": [
-        "nosuid",
-        "noexec",
-        "nodev",
-        "relatime"
+        "nosuid", "noexec", "nodev", "relatime",
+        "nsdelegate", "memory_recursiveprot"
       ]
     },
     {
@@ -231,6 +230,7 @@ CONFIG_JSON='{
     }
   ],
   "linux": {
+    "cgroupsPath": "/sprite-container",
     "devices": [
       {
         "path": "/dev/fuse",
@@ -362,10 +362,6 @@ CONFIG_JSON='{
       "/proc/scsi"
     ],
     "readonlyPaths": [
-      "/proc/bus",
-      "/proc/fs",
-      "/proc/irq",
-      "/proc/sysrq-trigger"
     ]
   }
 }'
@@ -492,4 +488,8 @@ fi
 mkdir -p "${SPRITE_WRITE_DIR}/tmp"
 echo "$CONFIG_JSON" > "${SPRITE_WRITE_DIR}/tmp/config.json"
 
-exec crun --debug run -f "${SPRITE_WRITE_DIR}/tmp/config.json" app
+if [ -n "${CONSOLE_SOCKET:-}" ]; then
+    exec crun --debug run --console-socket="${CONSOLE_SOCKET}" -f "${SPRITE_WRITE_DIR}/tmp/config.json" app
+else
+    exec crun --debug run -f "${SPRITE_WRITE_DIR}/tmp/config.json" app
+fi

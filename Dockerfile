@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Build stage for AMD64
-FROM --platform=linux/amd64 golang:1.24-bookworm AS builder-amd64
+FROM golang:1.24-bookworm AS builder
 ENV CGO_ENABLED=1
 
 RUN apt-get update \
@@ -18,6 +18,7 @@ COPY go.work go.work.sum ./
 COPY server/go.mod server/go.sum* ./server/
 COPY lib/go.mod lib/go.sum* ./lib/
 COPY client/go.mod client/go.sum* ./client/
+COPY packages/container/go.mod packages/container/go.sum* ./packages/container/
 COPY packages/juicefs/go.mod packages/juicefs/go.sum* ./packages/juicefs/
 COPY packages/supervisor/go.mod packages/supervisor/go.sum* ./packages/supervisor/
 COPY packages/wsexec/go.mod packages/wsexec/go.sum* ./packages/wsexec/
@@ -31,46 +32,11 @@ COPY . .
 
 ARG VERSION=dev
 RUN cd server && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    CGO_ENABLED=0 GOOS=linux go build \
     -ldflags="-w -s -X main.version=${VERSION} -extldflags '-static'" \
     -tags 'netgo osusergo' \
     -o ../spritectl .
 
-# Build stage for ARM64
-FROM --platform=linux/arm64 golang:1.24-bookworm AS builder-arm64
-ENV CGO_ENABLED=1
-
-RUN apt-get update \
- && DEBIAN_FRONTEND=noninteractive \
-    apt-get install --no-install-recommends --assume-yes \
-      build-essential \
-      libsqlite3-dev
-WORKDIR /build
-
-# Copy go.work files first
-COPY go.work go.work.sum ./
-
-# Copy all go.mod files from each module
-COPY server/go.mod server/go.sum* ./server/
-COPY lib/go.mod lib/go.sum* ./lib/
-COPY client/go.mod client/go.sum* ./client/
-COPY packages/juicefs/go.mod packages/juicefs/go.sum* ./packages/juicefs/
-COPY packages/supervisor/go.mod packages/supervisor/go.sum* ./packages/supervisor/
-COPY packages/wsexec/go.mod packages/wsexec/go.sum* ./packages/wsexec/
-COPY packages/leaser/go.mod packages/leaser/go.sum* ./packages/leaser/
-
-# Download dependencies for all modules in the workspace
-RUN go mod download -x
-
-# Copy all source code
-COPY . .
-
-ARG VERSION=dev
-RUN cd server && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
-    -ldflags="-w -s -X main.version=${VERSION} -extldflags '-static'" \
-    -tags 'netgo osusergo' \
-    -o ../spritectl .
 
 # Download crun binary
 FROM alpine:latest AS crun
@@ -102,13 +68,7 @@ COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
 
 # Copy the appropriate binary based on target platform
 ARG TARGETPLATFORM
-COPY --from=builder-amd64 /build/spritectl /usr/local/bin/spritectl.amd64
-COPY --from=builder-arm64 /build/spritectl /usr/local/bin/spritectl.arm64
-RUN if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
-        mv /usr/local/bin/spritectl.amd64 /usr/local/bin/spritectl && rm -f /usr/local/bin/spritectl.arm64; \
-    else \
-        mv /usr/local/bin/spritectl.arm64 /usr/local/bin/spritectl && rm -f /usr/local/bin/spritectl.amd64; \
-    fi
+COPY --from=builder /build/spritectl /usr/local/bin/spritectl
 
 # Define environment variables for paths
 ENV SPRITE_WRITE_DIR=/dev/fly_vol \

@@ -36,6 +36,11 @@ type Config struct {
 	ProcessEnvironment             []string
 	ProcessGracefulShutdownTimeout time.Duration
 
+	// Container configuration
+	ContainerEnabled    bool
+	ContainerSocketDir  string
+	ContainerTTYTimeout time.Duration
+
 	// JuiceFS
 	JuiceFSBaseDir    string
 	S3AccessKey       string
@@ -105,6 +110,9 @@ func NewApplication(config Config) (*Application, error) {
 		ProcessWorkingDir:              config.ProcessWorkingDir,
 		ProcessEnvironment:             config.ProcessEnvironment,
 		ProcessGracefulShutdownTimeout: config.ProcessGracefulShutdownTimeout,
+		ContainerEnabled:               config.ContainerEnabled,
+		ContainerSocketDir:             config.ContainerSocketDir,
+		ContainerTTYTimeout:            config.ContainerTTYTimeout,
 		JuiceFSBaseDir:                 config.JuiceFSBaseDir,
 		S3AccessKey:                    config.S3AccessKey,
 		S3SecretAccessKey:              config.S3SecretAccessKey,
@@ -315,6 +323,10 @@ func parseCommandLine() (Config, error) {
 			return config, fmt.Errorf("failed to read config file: %w", err)
 		}
 
+		// Debug: Show what's in the config file
+		fmt.Printf("DEBUG: Loading config from %s\n", configFile)
+		fmt.Printf("DEBUG: Config file contents: %s\n", string(data))
+
 		var fileConfig struct {
 			LogLevel           string   `json:"log_level"`
 			LogJSON            bool     `json:"log_json"`
@@ -323,6 +335,11 @@ func parseCommandLine() (Config, error) {
 			ProcessDir         string   `json:"process_working_dir"`
 			ProcessEnv         []string `json:"process_environment"`
 			ExecWrapperCommand []string `json:"exec_wrapper_command"`
+
+			// Container configuration
+			ContainerEnabled    bool   `json:"container_enabled"`
+			ContainerSocketDir  string `json:"container_socket_dir"`
+			ContainerTTYTimeout string `json:"container_tty_timeout"`
 
 			// JuiceFS configuration
 			JuiceFSEnabled    bool   `json:"juicefs_enabled"`
@@ -364,6 +381,20 @@ func parseCommandLine() (Config, error) {
 		config.ProcessWorkingDir = fileConfig.ProcessDir
 		config.ProcessEnvironment = fileConfig.ProcessEnv
 		config.ExecWrapperCommand = fileConfig.ExecWrapperCommand
+
+		// Container configuration
+		config.ContainerEnabled = fileConfig.ContainerEnabled
+		config.ContainerSocketDir = fileConfig.ContainerSocketDir
+		if fileConfig.ContainerTTYTimeout != "" {
+			if timeout, err := time.ParseDuration(fileConfig.ContainerTTYTimeout); err == nil {
+				config.ContainerTTYTimeout = timeout
+			}
+		}
+
+		// Debug: Log container config values parsed from file
+		fmt.Printf("DEBUG: Container config from file - enabled: %v, socket_dir: %s, tty_timeout: %v\n",
+			config.ContainerEnabled, config.ContainerSocketDir, config.ContainerTTYTimeout)
+
 		config.JuiceFSBaseDir = fileConfig.JuiceFSBaseDir
 		config.S3AccessKey = fileConfig.S3AccessKey
 		config.S3SecretAccessKey = fileConfig.S3SecretAccessKey

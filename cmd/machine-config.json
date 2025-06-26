@@ -2,7 +2,8 @@
   "guest": {
     "cpu_kind": "shared",
     "cpus": 4,
-    "memory_mb": 4096
+    "memory_mb": 4096,
+    "kernel_args": ["cgroup_enable=memory", "io cgroup_no_v1=all", "systemd.unified_cgroup_hierarchy=1"]
   },
   "mounts": [
     {
@@ -44,7 +45,7 @@
       ],
       "files":[{
         "guest_path": "/etc/app-image.json",
-        "image_config": "registry.fly.io/sprite-env-prime:ubuntu-s6-2"
+        "image_config": "registry.fly.io/sprite-env-prime:ubuntu-systemd-4"
       }],
       "mounts": [
         {
@@ -100,7 +101,7 @@
     },
     {
       "name": "app-image",
-      "image": "registry.fly.io/sprite-env-prime:ubuntu-s6-2"
+      "image": "registry.fly.io/sprite-env-prime:ubuntu-systemd-4"
     }
   ]
 }

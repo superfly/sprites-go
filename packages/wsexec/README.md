@@ -2,6 +2,10 @@
 
 A Go package for executing commands remotely over WebSocket connections with a simplified, efficient binary protocol.
 
+## Dependencies
+
+- Uses the `container` package for PTY acquisition from container runtimes (when using console socket feature)
+
 ## Features
 
 - **Client Interface**: Connect to remote WebSocket servers and execute commands
@@ -119,7 +123,7 @@ Available methods:
 - `SetWrapperCommand([]string)` - Set wrapper command (e.g., timeout, sudo)
 - `SetLogger(*slog.Logger)` - Set logger for debugging
 - `SetContext(context.Context)` - Set context for cancellation
-- `SetConsoleSocketPath(string)` - Use crun's console socket feature
+- `SetConsoleSocketPath(string)` - Use crun's console socket feature (uses the container package for PTY acquisition)
 
 Example:
 ```go

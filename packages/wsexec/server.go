@@ -16,6 +16,7 @@ import (
 
 	creackpty "github.com/creack/pty"
 	gorillaws "github.com/gorilla/websocket"
+	"github.com/superfly/sprite-env/packages/container"
 )
 
 // configurePTY sets up the PTY for proper interactive use
@@ -460,18 +461,15 @@ func (c *ServerCommand) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, ws *Ad
 
 // runWithConsoleSocket runs command using crun's --console-socket feature
 func (c *ServerCommand) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd, ws *Adapter, inLog io.Writer, outLog io.Writer) int {
-	// Create console socket
-	consoleSocket, err := NewConsoleSocket(c.ConsoleSocketPath)
+	// Create TTY manager with the specified socket path
+	tty, err := container.NewWithPath(c.ConsoleSocketPath)
 	if err != nil {
 		if c.Logger != nil {
-			c.Logger.Error("Failed to create console socket", "error", err)
+			c.Logger.Error("Failed to create TTY manager", "error", err)
 		}
 		return -1
 	}
-	defer consoleSocket.Close()
-
-	// Start listening for PTY FD
-	consoleSocket.Start()
+	defer tty.Close()
 
 	// Set environment to tell exec.sh to use console-socket
 	if cmd.Env == nil {
@@ -497,7 +495,7 @@ func (c *ServerCommand) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd,
 	}
 
 	// Wait for crun to send us the PTY
-	ptyFile, err := consoleSocket.WaitForPTY()
+	ptyFile, err := tty.Get()
 	if err != nil {
 		if c.Logger != nil {
 			c.Logger.Error("Failed to receive PTY from console socket", "error", err)

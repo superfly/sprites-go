@@ -10,6 +10,10 @@
   
   "exec_wrapper_command": ["/home/sprite/exec.sh", "app"],
   
+  "container_enabled": true,
+  "container_socket_dir": "/var/run/sprite",
+  "container_tty_timeout": "10s",
+  
   "overlay_enabled": true,
   "overlay_image_size": "100G",
   "overlay_lower_path": "/mnt/app-image",

@@ -16,16 +16,18 @@ import (
 	"github.com/sprite-env/packages/juicefs"
 	"github.com/sprite-env/packages/leaser"
 	"github.com/sprite-env/packages/supervisor"
+	"github.com/superfly/sprite-env/packages/container"
 )
 
 // System encapsulates the JuiceFS and supervised process management
 type System struct {
-	config         SystemConfig
-	logger         *slog.Logger
-	leaserInstance *leaser.Leaser
-	juicefs        *juicefs.JuiceFS
-	supervisor     *supervisor.Supervisor
-	reaper         *Reaper
+	config           SystemConfig
+	logger           *slog.Logger
+	leaserInstance   *leaser.Leaser
+	juicefs          *juicefs.JuiceFS
+	supervisor       *supervisor.Supervisor
+	containerProcess *container.Process // Optional container-wrapped process
+	reaper           *Reaper
 
 	// Channels for monitoring
 	processDoneCh chan error
@@ -48,6 +50,11 @@ type SystemConfig struct {
 	ProcessWorkingDir              string
 	ProcessEnvironment             []string
 	ProcessGracefulShutdownTimeout time.Duration
+
+	// Container configuration
+	ContainerEnabled    bool
+	ContainerSocketDir  string
+	ContainerTTYTimeout time.Duration
 
 	// JuiceFS configuration
 	JuiceFSBaseDir    string
@@ -73,6 +80,25 @@ func NewSystem(config SystemConfig, logger *slog.Logger, reaper *Reaper) (*Syste
 		processDoneCh:  make(chan error, 1),
 		processReadyCh: make(chan struct{}),
 		juicefsReadyCh: make(chan struct{}),
+	}
+
+	// Configure container package with system settings
+	logger.Info("Configuring container package",
+		"enabled", config.ContainerEnabled,
+		"socket_dir", config.ContainerSocketDir,
+		"tty_timeout", config.ContainerTTYTimeout)
+
+	container.Configure(container.Config{
+		Enabled:   config.ContainerEnabled,
+		SocketDir: config.ContainerSocketDir,
+	})
+
+	if config.ContainerEnabled {
+		logger.Info("Container features enabled",
+			"socket_dir", config.ContainerSocketDir,
+			"tty_timeout", config.ContainerTTYTimeout)
+	} else {
+		logger.Info("Container features disabled")
 	}
 
 	// Set up JuiceFS if base directory is configured
@@ -237,28 +263,70 @@ func (s *System) StartProcess() error {
 
 	s.logger.Info("StartProcess: Command validation successful")
 
-	sup, err := supervisor.New(supervisorConfig)
-	if err != nil {
-		s.logger.Error("StartProcess: Failed to create supervisor", "error", err)
-		return fmt.Errorf("failed to create supervisor: %w", err)
+	// Use container-wrapped process if containers are enabled, otherwise use basic supervisor
+	if s.config.ContainerEnabled {
+		s.logger.Info("StartProcess: Creating container-wrapped process")
+
+		processConfig := container.ProcessConfig{
+			Config: supervisor.Config{
+				Command:     s.config.ProcessCommand[0],
+				Args:        s.config.ProcessCommand[1:],
+				GracePeriod: s.config.ProcessGracefulShutdownTimeout,
+				Env:         append(os.Environ(), s.config.ProcessEnvironment...),
+				Dir:         workingDir,
+				Logger:      s.logger,
+			},
+			TTYTimeout: s.config.ContainerTTYTimeout,
+			TTYOutput:  os.Stdout, // Forward TTY output to logs
+		}
+
+		containerProcess, err := container.NewProcess(processConfig)
+		if err != nil {
+			s.logger.Error("StartProcess: Failed to create container process", "error", err)
+			return fmt.Errorf("failed to create container process: %w", err)
+		}
+
+		s.logger.Info("StartProcess: Container process created successfully, starting process")
+
+		pid, err := containerProcess.Start()
+		if err != nil {
+			s.logger.Error("StartProcess: Failed to start container process", "error", err)
+			return fmt.Errorf("failed to start container process: %w", err)
+		}
+
+		// Store the container process (which embeds the supervisor)
+		s.supervisor = containerProcess.Supervisor
+		s.containerProcess = containerProcess
+		s.processRunning = true
+
+		s.logger.Info("StartProcess: Container process started successfully", "pid", pid, "command", s.config.ProcessCommand)
+
+	} else {
+		s.logger.Info("StartProcess: Creating basic supervisor (containers disabled)")
+
+		sup, err := supervisor.New(supervisorConfig)
+		if err != nil {
+			s.logger.Error("StartProcess: Failed to create supervisor", "error", err)
+			return fmt.Errorf("failed to create supervisor: %w", err)
+		}
+
+		s.logger.Info("StartProcess: Supervisor created successfully, starting process")
+
+		pid, err := sup.Start()
+		if err != nil {
+			s.logger.Error("StartProcess: Failed to start process", "error", err)
+			return fmt.Errorf("failed to start process: %w", err)
+		}
+
+		s.supervisor = sup
+		s.processRunning = true
+
+		s.logger.Info("StartProcess: Process started successfully", "pid", pid, "command", s.config.ProcessCommand)
 	}
-
-	s.logger.Info("StartProcess: Supervisor created successfully, starting process")
-
-	pid, err := sup.Start()
-	if err != nil {
-		s.logger.Error("StartProcess: Failed to start process", "error", err)
-		return fmt.Errorf("failed to start process: %w", err)
-	}
-
-	s.supervisor = sup
-	s.processRunning = true
 
 	// Close the old channel and create a new one for future waits
 	close(s.processReadyCh)
 	s.processReadyCh = make(chan struct{})
-
-	s.logger.Info("StartProcess: Process started successfully", "pid", pid, "command", s.config.ProcessCommand)
 
 	// Monitor process in background
 	go func() {
@@ -287,8 +355,17 @@ func (s *System) StopProcess() error {
 	}
 
 	s.logger.Info("Stopping supervised process...")
-	if err := s.supervisor.Stop(); err != nil {
-		return fmt.Errorf("failed to stop process: %w", err)
+
+	// Stop container process if available, otherwise stop basic supervisor
+	if s.containerProcess != nil {
+		if err := s.containerProcess.Stop(); err != nil {
+			return fmt.Errorf("failed to stop container process: %w", err)
+		}
+		s.containerProcess = nil
+	} else {
+		if err := s.supervisor.Stop(); err != nil {
+			return fmt.Errorf("failed to stop process: %w", err)
+		}
 	}
 
 	s.processRunning = false

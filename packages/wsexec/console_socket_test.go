@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/superfly/sprite-env/packages/container"
 )
 
 func TestConsoleSocket(t *testing.T) {
@@ -15,15 +16,12 @@ func TestConsoleSocket(t *testing.T) {
 	socketPath := "/tmp/test-console-socket.sock"
 	defer os.Remove(socketPath)
 
-	// Create console socket
-	cs, err := NewConsoleSocket(socketPath)
+	// Create TTY manager
+	tty, err := container.NewWithPath(socketPath)
 	if err != nil {
-		t.Fatalf("Failed to create console socket: %v", err)
+		t.Fatalf("Failed to create TTY manager: %v", err)
 	}
-	defer cs.Close()
-
-	// Start listening
-	cs.Start()
+	defer tty.Close()
 
 	// Create a PTY pair for testing
 	master, slave, err := pty.Open()
@@ -44,7 +42,7 @@ func TestConsoleSocket(t *testing.T) {
 		// Connect to the socket
 		conn, err := net.Dial("unix", socketPath)
 		if err != nil {
-			t.Errorf("Failed to connect to console socket: %v", err)
+			t.Errorf("Failed to connect to socket: %v", err)
 			return
 		}
 		defer conn.Close()
@@ -63,7 +61,7 @@ func TestConsoleSocket(t *testing.T) {
 	}()
 
 	// Wait for PTY
-	receivedPty, err := cs.WaitForPTY()
+	receivedPty, err := tty.GetWithTimeout(2 * time.Second)
 	if err != nil {
 		t.Fatalf("Failed to receive PTY: %v", err)
 	}
