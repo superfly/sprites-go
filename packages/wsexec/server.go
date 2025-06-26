@@ -1,6 +1,7 @@
 package wsexec
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	creackpty "github.com/creack/pty"
@@ -58,6 +60,7 @@ type ServerCommand struct {
 
 	// Console socket path for receiving PTY from crun
 	ConsoleSocketPath string
+	LogPath           string
 
 	// Wrapper commands (optional)
 	WrapperCommand []string
@@ -108,6 +111,11 @@ func (c *ServerCommand) SetContext(ctx context.Context) *ServerCommand {
 // SetConsoleSocketPath sets the path for console socket to receive PTY from crun
 func (c *ServerCommand) SetConsoleSocketPath(path string) *ServerCommand {
 	c.ConsoleSocketPath = path
+	return c
+}
+
+func (c *ServerCommand) SetLogPath(path string) *ServerCommand {
+	c.LogPath = path
 	return c
 }
 
@@ -227,6 +235,28 @@ func (c *ServerCommand) Handle(w http.ResponseWriter, r *http.Request) error {
 
 // run executes the command and handles I/O
 func (c *ServerCommand) run(ctx context.Context, ws *Adapter) int {
+	var inLog, outLog, errLog lineLogger
+	var logFile os.File
+	if c.LogPath != "" {
+		lf, err := os.OpenFile(c.LogPath,
+			os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err == nil {
+			logFile = *lf
+			logger := slog.New(slog.NewTextHandler(&logFile, nil))
+			inLog.logger = logger
+			inLog.stream = "stdin"
+			outLog.logger = logger
+			outLog.stream = "stdout"
+			errLog.logger = logger
+			errLog.stream = "stderr"
+		}
+	}
+	defer func() {
+		inLog.Close()
+		outLog.Close()
+		errLog.Close()
+		logFile.Close()
+	}()
 	// Build command
 	var cmdArgs []string
 	if len(c.WrapperCommand) > 0 {
@@ -288,20 +318,15 @@ func (c *ServerCommand) run(ctx context.Context, ws *Adapter) int {
 	// Handle TTY mode
 	if c.Tty {
 		if c.ConsoleSocketPath != "" {
-			// Use console socket to receive PTY from crun
-			return c.runWithConsoleSocket(ctx, cmd, ws)
-		} else {
-			// Allocate new PTY ourselves
-			return c.runWithNewPTY(ctx, cmd, ws)
+			return c.runWithConsoleSocket(ctx, cmd, ws, &inLog, &outLog)
 		}
-	} else {
-		// No PTY
-		return c.runWithoutPTY(ctx, cmd, ws)
+		return c.runWithNewPTY(ctx, cmd, ws, &inLog, &outLog)
 	}
+	return c.runWithoutPTY(ctx, cmd, ws, &inLog, &outLog, &errLog)
 }
 
 // handlePTYIO handles the I/O between WebSocket and PTY
-func (c *ServerCommand) handlePTYIO(ctx context.Context, ptmx *os.File, ws *Adapter) {
+func (c *ServerCommand) handlePTYIO(ctx context.Context, ptmx *os.File, ws *Adapter, inLog io.Writer, outLog io.Writer) {
 	// Create channels to signal completion
 	wsDone := make(chan struct{})
 	ptyDone := make(chan struct{})
@@ -317,7 +342,7 @@ func (c *ServerCommand) handlePTYIO(ctx context.Context, ptmx *os.File, ws *Adap
 
 			switch messageType {
 			case gorillaws.BinaryMessage:
-				// Write binary data to PTY
+				inLog.Write(data)
 				ptmx.Write(data)
 			case gorillaws.TextMessage:
 				// Handle control messages
@@ -345,7 +370,8 @@ func (c *ServerCommand) handlePTYIO(ctx context.Context, ptmx *os.File, ws *Adap
 	// Handle PTY -> WebSocket
 	go func() {
 		defer close(ptyDone)
-		io.Copy(ws, ptmx)
+		writer := io.MultiWriter(ws, outLog)
+		io.Copy(writer, ptmx)
 		if c.Logger != nil {
 			c.Logger.Debug("PTY closed, stopping I/O copy")
 		}
@@ -365,7 +391,7 @@ func (c *ServerCommand) handlePTYIO(ctx context.Context, ptmx *os.File, ws *Adap
 }
 
 // runWithNewPTY runs command with newly allocated PTY
-func (c *ServerCommand) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, ws *Adapter) int {
+func (c *ServerCommand) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, ws *Adapter, inLog io.Writer, outLog io.Writer) int {
 	// Ensure TERM is set for PTY mode
 	if cmd.Env == nil {
 		cmd.Env = os.Environ()
@@ -416,8 +442,7 @@ func (c *ServerCommand) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, ws *Ad
 		c.Logger.Debug("PTY created successfully")
 	}
 
-	// Handle all PTY I/O
-	c.handlePTYIO(ctx, ptmx, ws)
+	c.handlePTYIO(ctx, ptmx, ws, inLog, outLog)
 
 	// Wait for command
 	cmdErr := cmd.Wait()
@@ -433,7 +458,7 @@ func (c *ServerCommand) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, ws *Ad
 }
 
 // runWithConsoleSocket runs command using crun's --console-socket feature
-func (c *ServerCommand) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd, ws *Adapter) int {
+func (c *ServerCommand) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd, ws *Adapter, inLog io.Writer, outLog io.Writer) int {
 	// Create console socket
 	consoleSocket, err := NewConsoleSocket(c.ConsoleSocketPath)
 	if err != nil {
@@ -510,8 +535,7 @@ func (c *ServerCommand) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd,
 		}
 	}
 
-	// Handle all PTY I/O
-	c.handlePTYIO(ctx, ptyFile, ws)
+	c.handlePTYIO(ctx, ptyFile, ws, inLog, outLog)
 
 	// Wait for command
 	cmdErr := cmd.Wait()
@@ -527,7 +551,7 @@ func (c *ServerCommand) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd,
 }
 
 // runWithoutPTY runs command without PTY
-func (c *ServerCommand) runWithoutPTY(ctx context.Context, cmd *exec.Cmd, ws *Adapter) int {
+func (c *ServerCommand) runWithoutPTY(ctx context.Context, cmd *exec.Cmd, ws *Adapter, inLog io.Writer, outLog io.Writer, errLog io.Writer) int {
 	// Set up pipes
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -552,20 +576,20 @@ func (c *ServerCommand) runWithoutPTY(ctx context.Context, cmd *exec.Cmd, ws *Ad
 	stdoutWriter := &streamWriter{ws: ws, streamID: StreamStdout}
 	stderrWriter := &streamWriter{ws: ws, streamID: StreamStderr}
 
-	// Handle stdin
 	go func() {
 		defer stdin.Close()
-		io.Copy(stdin, stdinReader)
+		r := io.TeeReader(stdinReader, inLog)
+		io.Copy(stdin, r)
 	}()
 
-	// Handle stdout
 	go func() {
-		io.Copy(stdoutWriter, stdout)
+		w := io.MultiWriter(stdoutWriter, outLog)
+		io.Copy(w, stdout)
 	}()
 
-	// Handle stderr
 	go func() {
-		io.Copy(stderrWriter, stderr)
+		w := io.MultiWriter(stderrWriter, errLog)
+		io.Copy(w, stderr)
 	}()
 
 	// Wait for command to complete
@@ -579,4 +603,40 @@ func (c *ServerCommand) runWithoutPTY(ctx context.Context, cmd *exec.Cmd, ws *Ad
 		return -1
 	}
 	return 0
+}
+
+type lineLogger struct {
+	logger *slog.Logger
+	stream string
+	mu     sync.Mutex
+	buf    bytes.Buffer
+}
+
+func (l *lineLogger) Write(p []byte) (int, error) {
+	if l.logger == nil {
+		return len(p), nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := len(p)
+	l.buf.Write(p)
+	for {
+		line, err := l.buf.ReadString('\n')
+		if err != nil {
+			break
+		}
+		line = strings.TrimSuffix(line, "\n")
+		l.logger.Info("io", "stream", l.stream, "line", line)
+	}
+	return n, nil
+}
+
+func (l *lineLogger) Close() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.logger != nil && l.buf.Len() > 0 {
+		line := strings.TrimRight(l.buf.String(), "\n")
+		l.logger.Info("io", "stream", l.stream, "line", line)
+	}
+	l.buf.Reset()
 }
