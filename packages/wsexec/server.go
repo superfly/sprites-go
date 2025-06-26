@@ -235,20 +235,20 @@ func (c *ServerCommand) Handle(w http.ResponseWriter, r *http.Request) error {
 
 // run executes the command and handles I/O
 func (c *ServerCommand) run(ctx context.Context, ws *Adapter) int {
-	var inLog, outLog, errLog lineLogger
-	var logFile os.File
+	var (
+		inLog, outLog, errLog *lineLogger
+		logFile               *os.File
+		err                   error
+	)
+
 	if c.LogPath != "" {
-		lf, err := os.OpenFile(c.LogPath,
+		logFile, err = os.OpenFile(c.LogPath,
 			os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if err == nil {
-			logFile = *lf
-			logger := slog.New(slog.NewTextHandler(&logFile, nil))
-			inLog.logger = logger
-			inLog.stream = "stdin"
-			outLog.logger = logger
-			outLog.stream = "stdout"
-			errLog.logger = logger
-			errLog.stream = "stderr"
+			logger := slog.New(slog.NewTextHandler(logFile, nil))
+			inLog = newLogger("stdin", logger)
+			outLog = newLogger("stdout", logger)
+			errLog = newLogger("stderr", logger)
 		}
 	}
 	defer func() {
@@ -257,6 +257,7 @@ func (c *ServerCommand) run(ctx context.Context, ws *Adapter) int {
 		errLog.Close()
 		logFile.Close()
 	}()
+
 	// Build command
 	var cmdArgs []string
 	if len(c.WrapperCommand) > 0 {
@@ -318,11 +319,11 @@ func (c *ServerCommand) run(ctx context.Context, ws *Adapter) int {
 	// Handle TTY mode
 	if c.Tty {
 		if c.ConsoleSocketPath != "" {
-			return c.runWithConsoleSocket(ctx, cmd, ws, &inLog, &outLog)
+			return c.runWithConsoleSocket(ctx, cmd, ws, inLog, outLog)
 		}
-		return c.runWithNewPTY(ctx, cmd, ws, &inLog, &outLog)
+		return c.runWithNewPTY(ctx, cmd, ws, inLog, outLog)
 	}
-	return c.runWithoutPTY(ctx, cmd, ws, &inLog, &outLog, &errLog)
+	return c.runWithoutPTY(ctx, cmd, ws, inLog, outLog, errLog)
 }
 
 // handlePTYIO handles the I/O between WebSocket and PTY
@@ -612,8 +613,15 @@ type lineLogger struct {
 	buf    bytes.Buffer
 }
 
+func newLogger(name string, l *slog.Logger) *lineLogger {
+	return &lineLogger{
+		logger: l,
+		stream: name,
+	}
+}
+
 func (l *lineLogger) Write(p []byte) (int, error) {
-	if l.logger == nil {
+	if l == nil {
 		return len(p), nil
 	}
 	l.mu.Lock()
@@ -632,6 +640,10 @@ func (l *lineLogger) Write(p []byte) (int, error) {
 }
 
 func (l *lineLogger) Close() {
+	if l == nil {
+		return
+	}
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.logger != nil && l.buf.Len() > 0 {
