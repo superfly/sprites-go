@@ -267,12 +267,43 @@ func TestProcessRunForever(t *testing.T) {
 		t.Fatalf("Failed to start process: %v", err)
 	}
 
-	// Read some output
+	// Read output with timeout until we find expected text
+	var output strings.Builder
+	var outputMutex sync.Mutex
 	buf := make([]byte, 1024)
-	n, _ := stdout.Read(buf)
-	output := string(buf[:n])
-	if !strings.Contains(output, "Entering infinite loop") {
-		t.Errorf("Expected 'Entering infinite loop' in output, got: %s", output)
+	done := make(chan bool, 1)
+
+	go func() {
+		for {
+			n, err := stdout.Read(buf)
+			if err != nil {
+				done <- false
+				return
+			}
+			if n > 0 {
+				outputMutex.Lock()
+				output.Write(buf[:n])
+				currentOutput := output.String()
+				outputMutex.Unlock()
+
+				if strings.Contains(currentOutput, "Entering infinite loop") {
+					done <- true
+					return
+				}
+			}
+		}
+	}()
+
+	select {
+	case success := <-done:
+		if !success {
+			t.Errorf("Error reading from stdout")
+		}
+	case <-time.After(1 * time.Second):
+		outputMutex.Lock()
+		currentOutput := output.String()
+		outputMutex.Unlock()
+		t.Errorf("Timeout waiting for 'Entering infinite loop' in output, got: %s", currentOutput)
 	}
 
 	// Stop the process

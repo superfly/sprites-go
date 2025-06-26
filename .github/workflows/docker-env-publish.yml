@@ -8,7 +8,38 @@ env:
   IMAGE_NAME: superfly/sprite-ubuntu
 
 jobs:
-  build-and-push:
+  build-amd64:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push AMD64 image
+      uses: docker/build-push-action@v5
+      with:
+        context: base-env/images/ubuntu-openrc
+        file: base-env/images/ubuntu-openrc/Dockerfile
+        platforms: linux/amd64
+        push: true
+        tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:openrc-25.04-amd64
+        cache-from: type=gha,scope=amd64
+        cache-to: type=gha,mode=max,scope=amd64
+
+  build-arm64:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -21,14 +52,10 @@ jobs:
     - name: Set up QEMU
       uses: docker/setup-qemu-action@v3
       with:
-        platforms: linux/amd64,linux/arm64
+        platforms: linux/arm64
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
-      with:
-        driver-opts: |
-          image=moby/buildkit:master
-          network=host
 
     - name: Log in to GitHub Container Registry
       uses: docker/login-action@v3
@@ -37,22 +64,34 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-        tags: |
-          type=raw,value=openrc-25.04
-
-    - name: Build and push Docker images
+    - name: Build and push ARM64 image
       uses: docker/build-push-action@v5
       with:
         context: base-env/images/ubuntu-openrc
         file: base-env/images/ubuntu-openrc/Dockerfile
-        platforms: linux/amd64,linux/arm64
+        platforms: linux/arm64
         push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+        tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:openrc-25.04-arm64
+        cache-from: type=gha,scope=arm64
+        cache-to: type=gha,mode=max,scope=arm64
+
+  create-manifest:
+    runs-on: ubuntu-latest
+    needs: [build-amd64, build-arm64]
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Create and push multi-platform manifest
+      run: |
+        docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:openrc-25.04 \
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:openrc-25.04-amd64 \
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:openrc-25.04-arm64
