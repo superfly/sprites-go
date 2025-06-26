@@ -157,6 +157,9 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// this implementation is stupid; it's a placeholder and this code should be
+// removed in a future iteration. We don't actually expect to log to files and
+// if we did we wouldn't wrap that in a slog.Logger.
 type lineWriter struct {
 	logger *slog.Logger
 	stream string
@@ -168,6 +171,8 @@ func newLineWriter(name string, l *slog.Logger) *lineWriter {
 	return &lineWriter{logger: l, stream: name}
 }
 
+// dubious about the concurrency requirements here b/c we create a new one of
+// these for every session, but w/ev for now
 func (l *lineWriter) Write(p []byte) (int, error) {
 	if l == nil {
 		return len(p), nil
