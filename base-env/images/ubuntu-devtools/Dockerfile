@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         file which less nano vim-tiny \
         procps htop tree \
         zip gzip bzip2 \
+        libffi-dev libyaml-dev \
     && apt-get clean && rm -rf /var/cache/apt/archives/partial
 
 # --- global asdf ---
@@ -24,6 +25,34 @@ RUN git clone https://github.com/asdf-vm/asdf.git --branch v0.14.0 --depth 1 "$A
  && echo '. /opt/asdf/asdf.sh'                 >  /etc/profile.d/asdf.sh \
  && echo '. /opt/asdf/completions/asdf.bash'  >> /etc/profile.d/asdf.sh
 
+# Install each language in separate layers for better caching
+COPY languages/erlang.sh /tmp/
+RUN chmod +x /tmp/erlang.sh && /tmp/erlang.sh && rm /tmp/erlang.sh
+
+COPY languages/elixir.sh /tmp/
+RUN chmod +x /tmp/elixir.sh && /tmp/elixir.sh && rm /tmp/elixir.sh
+
+COPY languages/nodejs.sh /tmp/
+RUN chmod +x /tmp/nodejs.sh && /tmp/nodejs.sh && rm /tmp/nodejs.sh
+
+COPY languages/golang.sh /tmp/
+RUN chmod +x /tmp/golang.sh && /tmp/golang.sh && rm /tmp/golang.sh
+
+COPY languages/ruby.sh /tmp/
+RUN chmod +x /tmp/ruby.sh && /tmp/ruby.sh && rm /tmp/ruby.sh
+
+COPY languages/rust.sh /tmp/
+RUN chmod +x /tmp/rust.sh && /tmp/rust.sh && rm /tmp/rust.sh
+
+COPY languages/bun.sh /tmp/
+RUN chmod +x /tmp/bun.sh && /tmp/bun.sh && rm /tmp/bun.sh
+
+COPY languages/deno.sh /tmp/
+RUN chmod +x /tmp/deno.sh && /tmp/deno.sh && rm /tmp/deno.sh
+
+COPY languages/java.sh /tmp/
+RUN chmod +x /tmp/java.sh && /tmp/java.sh && rm /tmp/java.sh
+
 # --- sprite user (uid can be overridden at build time) ---
 ARG USER=sprite UID=1001
 RUN useradd -ms /bin/bash -u $UID $USER \
@@ -31,29 +60,10 @@ RUN useradd -ms /bin/bash -u $UID $USER \
  && chmod 0440 /etc/sudoers.d/$USER
 
  # Don't chown /opt/asdf yet – we'll do that in the runtime stage
- 
-####################################################
-# STAGE 1 – install all the languages (langbuilder)
-####################################################
-FROM buildbase AS langbuilder
 
-# Switch to root (already root) and source asdf to install plugins & latest versions
-RUN bash -lc ". /opt/asdf/asdf.sh && \
-    asdf plugin-add erlang    https://github.com/asdf-vm/asdf-erlang.git && \
-    asdf plugin-add elixir    https://github.com/asdf-vm/asdf-elixir.git && \
-    asdf plugin-add nodejs    https://github.com/asdf-vm/asdf-nodejs.git && \
-    asdf plugin-add golang    https://github.com/kennyp/asdf-golang.git && \
-    asdf plugin-add ruby      https://github.com/asdf-vm/asdf-ruby.git && \
-    asdf plugin-add rust      https://github.com/code-lever/asdf-rust.git && \
-    asdf install erlang    latest && asdf global erlang    latest && \
-    asdf install elixir    latest && asdf global elixir    latest && \
-    asdf install nodejs    latest && asdf global nodejs    latest && \
-    asdf install golang    latest && asdf global golang    latest && \
-    asdf install ruby      latest && asdf global ruby      latest && \
-    asdf install rust      latest && asdf global rust      latest"
 
 ####################################################
-# STAGE 2 – final runtime
+# STAGE 1 – final runtime
 ####################################################
 FROM ubuntu:25.04 AS runtime
 
@@ -68,12 +78,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         file which less nano vim-tiny \
         procps htop tree \
         zip gzip bzip2 \
+        libffi-dev libyaml-dev \
     && apt-get clean
 
 # Bring in asdf + your pre-built languages
-COPY --from=langbuilder /opt/asdf          /opt/asdf
-COPY --from=langbuilder /etc/profile.d/asdf.sh /etc/profile.d/asdf.sh
-
+COPY --from=buildbase /opt/asdf          /opt/asdf
+COPY --from=buildbase /etc/profile.d/asdf.sh /etc/profile.d/asdf.sh
 
 # Copy the sudoers file and user skeleton, then fix ownership
 COPY --from=buildbase /etc/sudoers.d/sprite /etc/sudoers.d/sprite
@@ -101,4 +111,4 @@ USER sprite
 WORKDIR /home/sprite
 
 ENTRYPOINT ["/.sprite/entrypoint.sh"]
-CMD ["/bin/bash"]
+CMD ["tail", "-f", "/dev/null"]

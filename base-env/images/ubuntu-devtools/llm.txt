@@ -78,5 +78,5 @@ IMPORTANT NOTES
 1. /data/ is your safe space for persistent storage
 2. / overlay is experimental - backup important system changes to /data/
 3. sprite user has unrestricted system access via sudo
-4. This environment is designed for experimentation and development
+4. This environment is designed for rapid iteration
 5. Always consider data durability when choosing storage location 
