@@ -134,6 +134,33 @@ func TestRollback(t *testing.T) {
 		assert.True(t, ok)
 		assert.Equal(t, sum, fsum)
 	})
+
+	t.Run("LoopBigRollback", func(t *testing.T) {
+		x("dd", "if=/dev/random", "of=/data/test.file", "bs=4k", "count=200")
+
+		sum, ok := csum("/data/test.file")
+		assert.True(t, ok)
+
+		result := run("checkpoint", "create")
+		lines := strings.Split(result, "\n")
+		assert.True(t, len(lines) >= 3)
+		checktup := strings.Split(lines[2], " ")
+		assert.Equal(t, checktup[3], "successfully")
+		checkpoint := checktup[1]
+
+		x("dd", "if=/dev/random", "of=/dev/loop0", "count=6000", "bs=1M", "seek=1024")
+		x("dd", "if=/dev/random", "of=/data/test2.file", "bs=4k", "count=200")
+		t.Logf("%s\n", x("ls", "/tmp"))
+
+		run("restore", checkpoint)
+
+		waitup()
+
+		fsum, ok := csum("/data/test.file")
+		assert.True(t, ok)
+		assert.Equal(t, sum, fsum)
+	})
+
 }
 
 // TestDeployAndFunctionality tests the full deployment and sprite functionality
