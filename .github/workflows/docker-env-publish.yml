@@ -9,7 +9,7 @@ env:
 
 jobs:
   build-amd64:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-big
     permissions:
       contents: read
       packages: write
@@ -40,7 +40,7 @@ jobs:
         cache-to: type=gha,mode=max,scope=amd64
 
   build-arm64:
-    runs-on: ubuntu-latest-arm
+    runs-on: ubuntu-big-arm64
     permissions:
       contents: read
       packages: write
