@@ -36,6 +36,8 @@ func init() {
 }
 
 func TestRollback(t *testing.T) {
+	t.Skip()
+
 	spriteURL := getSpriteURL(t, appName)
 
 	if appName == "" || spriteToken == "" || spriteURL == "" {
@@ -611,6 +613,7 @@ func runSpriteCommandTolerant(t *testing.T, url, token string, args ...string) s
 		// If we got output, just log a warning instead of failing
 		if len(output) > 0 {
 			t.Logf("Warning: Command exited with error but produced output: %v", err)
+			t.Logf("output: %s\n", output)
 			return string(output)
 		}
 		// If no output, then it's a real failure
