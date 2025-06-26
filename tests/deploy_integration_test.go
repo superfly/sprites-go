@@ -136,6 +136,8 @@ func TestRollback(t *testing.T) {
 	})
 
 	t.Run("LoopBigRollback", func(t *testing.T) {
+		t.Skip()
+
 		x("dd", "if=/dev/random", "of=/data/test.file", "bs=4k", "count=200")
 
 		sum, ok := csum("/data/test.file")

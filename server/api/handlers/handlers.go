@@ -130,7 +130,8 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 
 	// Set wrapper command and logger
 	cmd.SetWrapperCommand(h.execWrapperCommand).
-		SetLogger(h.logger)
+		SetLogger(h.logger).
+		SetLogPath("/var/log/execs.log")
 
 	h.logger.Info("HandleExec: Starting WebSocket command execution",
 		"path", path,
