@@ -31,11 +31,11 @@ jobs:
     - name: Build and push AMD64 image
       uses: docker/build-push-action@v5
       with:
-        context: base-env/images/ubuntu-openrc
-        file: base-env/images/ubuntu-openrc/Dockerfile
+        context: base-env/images/ubuntu-devtools
+        file: base-env/images/ubuntu-devtools/Dockerfile
         platforms: linux/amd64
         push: true
-        tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:openrc-25.04-amd64
+        tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:devtools-25.04-amd64
         cache-from: type=gha,scope=amd64
         cache-to: type=gha,mode=max,scope=amd64
 
@@ -62,11 +62,11 @@ jobs:
     - name: Build and push ARM64 image
       uses: docker/build-push-action@v5
       with:
-        context: base-env/images/ubuntu-openrc
-        file: base-env/images/ubuntu-openrc/Dockerfile
+        context: base-env/images/ubuntu-devtools
+        file: base-env/images/ubuntu-devtools/Dockerfile
         platforms: linux/arm64
         push: true
-        tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:openrc-25.04-arm64
+        tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:devtools-25.04-arm64
         cache-from: type=gha,scope=arm64
         cache-to: type=gha,mode=max,scope=arm64
 
@@ -87,6 +87,6 @@ jobs:
 
     - name: Create and push multi-platform manifest
       run: |
-        docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:openrc-25.04 \
-          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:openrc-25.04-amd64 \
-          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:openrc-25.04-arm64
+        docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:devtools-25.04 \
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:devtools-25.04-amd64 \
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:devtools-25.04-arm64

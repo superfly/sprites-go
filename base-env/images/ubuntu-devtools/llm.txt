@@ -1,0 +1,82 @@
+=======================================================
+Ubuntu DevTools Container Documentation
+=======================================================
+
+This container provides a clean Ubuntu 25.04 development environment
+with experimental filesystem architecture for experimentation.
+
+FILESYSTEM ARCHITECTURE
+========================
+
+This system uses a dual-layer storage approach:
+
+/data/ - DURABLE FILESYSTEM
+- Backed by object storage
+- Data persists across container restarts and deployments
+- Use this for important files, projects, and persistent data
+- Recommended for: source code, databases, configuration files
+
+/ (Root) - EXPERIMENTAL OVERLAY
+- Uses experimental overlay setup with top layer backed by object storage
+- Semi-durable: changes may persist but not guaranteed
+- Top layer modifications are stored in object storage
+- Consider this experimental and potentially volatile
+- Use for: temporary files, system experiments, reproducible package installations
+
+STORAGE RECOMMENDATIONS
+=======================
+
+Store persistent data in /data/:
+  mkdir -p /data/projects
+  cd /data/projects
+  git clone <your-repo>
+
+System experiments in /:
+  sudo apt install <experimental-package>
+  # Changes may persist but treat as temporary
+
+USER CONFIGURATION
+==================
+
+User: sprite
+- Full passwordless sudo access via sudoers configuration
+- Home directory: /home/sprite (on experimental overlay)
+- Default shell: /bin/bash
+- Member of sudo group
+
+Sudo Access:
+- No password required for any sudo command
+- Can install packages: sudo apt install <package>
+- Can modify system files: sudo nano /etc/hosts
+- Can become root: sudo -s
+- Can run any privileged command without authentication
+
+SYSTEM TOOLS
+============
+
+Pre-installed tools:
+- build-essential (gcc, make, libc6-dev, etc.)
+- git (distributed version control)
+- curl (data transfer tool)
+- sudo (privilege escalation)
+
+USAGE PATTERNS
+==============
+
+For persistent work:
+  cd /data
+  # Your work here will survive container lifecycle
+
+For system experimentation:
+  sudo apt update
+  sudo apt install <experimental-tools>
+  # May persist but not guaranteed - use /data for important results
+
+IMPORTANT NOTES
+===============
+
+1. /data/ is your safe space for persistent storage
+2. / overlay is experimental - backup important system changes to /data/
+3. sprite user has unrestricted system access via sudo
+4. This environment is designed for experimentation and development
+5. Always consider data durability when choosing storage location 
