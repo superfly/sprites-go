@@ -45,7 +45,7 @@
       ],
       "files":[{
         "guest_path": "/etc/app-image.json",
-        "image_config": "registry.fly.io/sprite-env-prime:ubuntu-systemd-4"
+        "image_config": "registry.fly.io/sprite-env-prime:ubuntu-s6-2"
       }],
       "mounts": [
         {
@@ -101,7 +101,7 @@
     },
     {
       "name": "app-image",
-      "image": "registry.fly.io/sprite-env-prime:ubuntu-systemd-4"
+      "image": "registry.fly.io/sprite-env-prime:ubuntu-s6-2"
     }
   ]
 }
