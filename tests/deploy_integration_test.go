@@ -16,13 +16,156 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alecthomas/assert/v2"
 	"github.com/creack/pty"
 )
+
+var (
+	appName     string
+	spriteToken string
+)
+
+func init() {
+	appName = os.Getenv("FLY_APP_NAME")
+
+	if appName == "" {
+		fmt.Printf("warning: FLY_APP_NAME not set\n")
+	}
+
+	spriteToken = os.Getenv("SPRITE_TOKEN")
+}
+
+func TestRollback(t *testing.T) {
+	spriteURL := getSpriteURL(t, appName)
+
+	if appName == "" || spriteToken == "" || spriteURL == "" {
+		t.Logf("skipping TestRollback: missing FLY_APP_NAME or SPRITE_TOKEN or SPRITE_URL")
+		t.Skip()
+	}
+
+	run := func(args ...string) string {
+		return runSpriteCommandTolerant(t, spriteURL, spriteToken, args...)
+	}
+
+	x := func(args ...string) string {
+		return run(append([]string{"exec"}, args...)...)
+	}
+
+	csum := func(fn string) (sum string, ok bool) {
+		r := strings.TrimSpace(x("sum", "/data/test.file"))
+		sum, rest, _ := strings.Cut(r, " ")
+		if !strings.Contains(rest, "test.file") {
+			return "", false
+		}
+
+		return sum, true
+	}
+
+	ready := func(wait time.Duration) bool {
+		alive, _ := trySpriteCommandTolerant(spriteURL, spriteToken, "exec", "uname")
+		ok := strings.Contains(alive, "Linux")
+		if !ok {
+			time.Sleep(wait)
+		}
+		return ok
+	}
+
+	waitup := func() {
+		up := false
+		for i := 0; i < 10; i++ {
+			if ready(250 * time.Millisecond) {
+				up = true
+				break
+			}
+		}
+
+		assert.True(t, up)
+	}
+
+	t.Run("SimpleRollback", func(t *testing.T) {
+		x("dd", "if=/dev/random", "of=/data/test.file", "bs=4k", "count=200")
+
+		sum, ok := csum("/data/test.file")
+		assert.True(t, ok)
+
+		result := run("checkpoint", "create")
+		lines := strings.Split(result, "\n")
+		assert.True(t, len(lines) >= 3)
+		checktup := strings.Split(lines[2], " ")
+		assert.Equal(t, checktup[3], "successfully")
+		checkpoint := checktup[1]
+
+		x("dd", "if=/dev/random", "of=/data/test.file", "count=1", "bs=512", "seek=1024")
+
+		ns, ok := csum("/data/test.file")
+		assert.True(t, ok)
+		assert.NotEqual(t, sum, ns)
+
+		run("restore", checkpoint)
+
+		waitup()
+
+		fsum, ok := csum("/data/test.file")
+		assert.True(t, ok)
+		assert.Equal(t, sum, fsum)
+	})
+
+	t.Run("LoopRollback", func(t *testing.T) {
+		x("dd", "if=/dev/random", "of=/data/test.file", "bs=4k", "count=200")
+
+		sum, ok := csum("/data/test.file")
+		assert.True(t, ok)
+
+		result := run("checkpoint", "create")
+		lines := strings.Split(result, "\n")
+		assert.True(t, len(lines) >= 3)
+		checktup := strings.Split(lines[2], " ")
+		assert.Equal(t, checktup[3], "successfully")
+		checkpoint := checktup[1]
+
+		x("dd", "if=/dev/random", "of=/dev/loop0", "count=6", "bs=1M", "seek=1024")
+		x("dd", "if=/dev/random", "of=/data/test2.file", "bs=4k", "count=200")
+
+		run("restore", checkpoint)
+
+		waitup()
+
+		fsum, ok := csum("/data/test.file")
+		assert.True(t, ok)
+		assert.Equal(t, sum, fsum)
+	})
+
+	t.Run("LoopBigRollback", func(t *testing.T) {
+		x("dd", "if=/dev/random", "of=/data/test.file", "bs=4k", "count=200")
+
+		sum, ok := csum("/data/test.file")
+		assert.True(t, ok)
+
+		result := run("checkpoint", "create")
+		lines := strings.Split(result, "\n")
+		assert.True(t, len(lines) >= 3)
+		checktup := strings.Split(lines[2], " ")
+		assert.Equal(t, checktup[3], "successfully")
+		checkpoint := checktup[1]
+
+		x("dd", "if=/dev/random", "of=/dev/loop0", "count=6000", "bs=1M", "seek=1024")
+		x("dd", "if=/dev/random", "of=/data/test2.file", "bs=4k", "count=200")
+		t.Logf("%s\n", x("ls", "/tmp"))
+
+		run("restore", checkpoint)
+
+		waitup()
+
+		fsum, ok := csum("/data/test.file")
+		assert.True(t, ok)
+		assert.Equal(t, sum, fsum)
+	})
+
+}
 
 // TestDeployAndFunctionality tests the full deployment and sprite functionality
 func TestDeployAndFunctionality(t *testing.T) {
 	// Get app name from environment
-	appName := os.Getenv("FLY_APP_NAME")
 	if appName == "" {
 		t.Skip("FLY_APP_NAME not set, skipping integration test")
 	}
@@ -56,7 +199,6 @@ func TestDeployAndFunctionality(t *testing.T) {
 
 	// Get sprite URL from flyctl
 	spriteURL := getSpriteURL(t, appName)
-	spriteToken := os.Getenv("SPRITE_TOKEN")
 	if spriteToken == "" {
 		t.Fatal("SPRITE_TOKEN not set")
 	}
@@ -474,6 +616,26 @@ func runSpriteCommandTolerant(t *testing.T, url, token string, args ...string) s
 	}
 
 	return string(output)
+}
+
+// when we expect the test to fail
+func trySpriteCommandTolerant(url, token string, args ...string) (string, error) {
+	cmd := exec.Command("../dist/sprite", args...)
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("SPRITE_URL=%s", url),
+		fmt.Sprintf("SPRITE_TOKEN=%s", token),
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if len(output) > 0 {
+			return string(output), nil
+		}
+		// If no output, then it's a real failure
+		return "", fmt.Errorf("read command output: %w", err)
+	}
+
+	return string(output), nil
 }
 
 // Helper function to clean up after tests
