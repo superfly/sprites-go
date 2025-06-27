@@ -24,7 +24,6 @@ func execCommand(baseURL, token string, args []string) {
 		workingDir = execFlags.String("dir", "", "Working directory for the command")
 		tty        = execFlags.Bool("tty", false, "Allocate a pseudo-TTY")
 		envVars    = execFlags.String("env", "", "Environment variables (KEY=value,KEY2=value2)")
-		debug      = execFlags.Bool("debug", false, "Enable debug logging")
 		help       = execFlags.Bool("h", false, "Show help")
 	)
 
@@ -95,8 +94,156 @@ func execCommand(baseURL, token string, args []string) {
 		}
 	}
 
-	// Execute using direct WebSocket connection
-	exitCode := executeDirectWebSocket(baseURL, token, cmdArgs, *workingDir, envList, *tty, *debug)
+	// Capture initial terminal state for restoration at the end
+	var initialState *term.State
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		if state, err := term.GetState(int(os.Stdin.Fd())); err == nil {
+			initialState = state
+		}
+	}
+	defer func() {
+		if initialState != nil {
+			term.Restore(int(os.Stdin.Fd()), initialState)
+		}
+	}()
+
+	// Logger instance shared across client
+	logger := slog.Default()
+	logger.Debug("Starting WebSocket exec",
+		"baseURL", baseURL,
+		"cmd", cmdArgs,
+		"workingDir", *workingDir,
+		"env", envList,
+		"tty", *tty)
+
+	// Build WebSocket URL - directly to /exec endpoint
+	wsURL, err := buildExecWebSocketURL(baseURL)
+	if err != nil {
+		logger.Error("Failed to build WebSocket URL", "error", err)
+		fmt.Fprintf(os.Stderr, "Error: Failed to build WebSocket URL: %v\n", err)
+		return
+	}
+
+	logger.Debug("Built WebSocket URL", "url", wsURL.String())
+
+	// Add command arguments as query parameters
+	// This is how wsexec expects command configuration to be sent
+	query := wsURL.Query()
+	for i, arg := range cmdArgs {
+		query.Add("cmd", arg)
+		if i == 0 {
+			query.Set("path", arg) // Set the main command path
+		}
+	}
+	if *workingDir != "" {
+		query.Set("dir", *workingDir)
+		logger.Debug("Set working directory", "dir", *workingDir)
+	}
+	if *tty {
+		query.Set("tty", "true")
+		logger.Debug("Enabled TTY mode")
+
+		// Send initial terminal size as part of connection setup
+		if term.IsTerminal(int(os.Stdin.Fd())) {
+			if width, height, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
+				query.Set("cols", fmt.Sprintf("%d", width))
+				query.Set("rows", fmt.Sprintf("%d", height))
+				logger.Debug("Set initial terminal size", "cols", width, "rows", height)
+			}
+		}
+	}
+	for _, envVar := range envList {
+		query.Add("env", envVar)
+		logger.Debug("Added environment variable", "env", envVar)
+	}
+	wsURL.RawQuery = query.Encode()
+
+	logger.Debug("Final WebSocket URL with query parameters", "url", wsURL.String())
+
+	// Create HTTP request with auth header
+	req, err := http.NewRequest("GET", wsURL.String(), nil)
+	if err != nil {
+		logger.Error("Failed to create HTTP request", "error", err)
+		fmt.Fprintf(os.Stderr, "Error: Failed to create request: %v\n", err)
+		return
+	}
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+
+	logger.Debug("Created HTTP request", "method", req.Method, "url", req.URL.String())
+	// Log headers but redact Authorization for security
+	headersCopy := make(map[string][]string)
+	for k, v := range req.Header {
+		if k == "Authorization" {
+			headersCopy[k] = []string{"[REDACTED]"}
+		} else {
+			headersCopy[k] = v
+		}
+	}
+	logger.Debug("Request headers", "headers", headersCopy)
+
+	// Create wsexec command
+	wsCmd := wsexec.CommandContext(context.Background(), req, "placeholder")
+
+	// Set client-side I/O configuration
+	wsCmd.Stdin = os.Stdin
+	wsCmd.Stdout = os.Stdout
+	wsCmd.Stderr = os.Stderr
+	wsCmd.Tty = *tty
+
+	logger.Debug("Created wsexec command", "tty", wsCmd.Tty)
+
+	// Set up PTY mode if needed
+	var cleanup func()
+	if *tty {
+		var err error
+		cleanup, err = handlePTYMode(wsCmd)
+		if err != nil {
+			logger.Error("Failed to set up PTY mode", "error", err)
+			fmt.Fprintf(os.Stderr, "Warning: Failed to set up PTY mode: %v\n", err)
+			// Continue anyway - PTY will work but without raw mode
+		}
+		defer func() {
+			if cleanup != nil {
+				cleanup()
+			}
+		}()
+	}
+
+	logger.Info("Starting WebSocket command execution")
+
+	// Start the command
+	if err := wsCmd.Start(); err != nil {
+		logger.Error("Failed to start WebSocket command", "error", err)
+		fmt.Fprintf(os.Stderr, "Error: Failed to start command: %v\n", err)
+		return
+	}
+
+	// Wait for command to complete
+	if err := wsCmd.Wait(); err != nil {
+		logger.Error("WebSocket command wait failed", "error", err)
+		// Don't print error here - it's usually just context cancelled
+	}
+
+	// Gracefully close the WebSocket connection
+	wsCmd.Close()
+
+	// Get exit code
+	exitCode := wsCmd.ExitCode()
+	logger.Debug("Command completed", "exitCode", exitCode)
+
+	if exitCode == -1 {
+		logger.Warn("No proper exit code received, defaulting to 1")
+		// If we didn't get a proper exit code, default to 1
+		exitCode = 1
+	}
+
+	logger.Info("WebSocket exec completed", "finalExitCode", exitCode)
+
+	// Restore terminal state before exiting
+	if initialState != nil {
+		term.Restore(int(os.Stdin.Fd()), initialState)
+	}
+
 	os.Exit(exitCode)
 }
 
@@ -142,35 +289,33 @@ func handlePTYMode(wsCmd *wsexec.Cmd) (cleanup func(), err error) {
 	return cleanup, nil
 }
 
-func executeDirectWebSocket(baseURL, token string, cmd []string, workingDir string, env []string, tty bool, debug bool) int {
-	// Set up debug logging if enabled
-	var logger *slog.Logger
-	if debug {
-		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-			Level: slog.LevelDebug,
-		}))
-		logger.Info("Debug mode enabled")
-		logger.Debug("Starting WebSocket exec",
-			"baseURL", baseURL,
-			"cmd", cmd,
-			"workingDir", workingDir,
-			"env", env,
-			"tty", tty)
+func executeDirectWebSocket(baseURL, token string, cmd []string, workingDir string, env []string, tty bool) int {
+	// Capture initial terminal state for restoration at the end
+	var initialState *term.State
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		if state, err := term.GetState(int(os.Stdin.Fd())); err == nil {
+			initialState = state
+		}
 	}
+	defer func() {
+		if initialState != nil {
+			term.Restore(int(os.Stdin.Fd()), initialState)
+		}
+	}()
+
+	logger := slog.Default()
+	logger.Info("Debug mode enabled")
+	logger.Debug("Starting WebSocket exec", "baseURL", baseURL, "cmd", cmd, "workingDir", workingDir, "env", env, "tty", tty)
 
 	// Build WebSocket URL - directly to /exec endpoint
 	wsURL, err := buildExecWebSocketURL(baseURL)
 	if err != nil {
-		if debug {
-			logger.Error("Failed to build WebSocket URL", "error", err)
-		}
+		logger.Error("Failed to build WebSocket URL", "error", err)
 		fmt.Fprintf(os.Stderr, "Error: Failed to build WebSocket URL: %v\n", err)
 		return 1
 	}
 
-	if debug {
-		logger.Debug("Built WebSocket URL", "url", wsURL.String())
-	}
+	logger.Debug("Built WebSocket URL", "url", wsURL.String())
 
 	// Add command arguments as query parameters
 	// This is how wsexec expects command configuration to be sent
@@ -183,54 +328,49 @@ func executeDirectWebSocket(baseURL, token string, cmd []string, workingDir stri
 	}
 	if workingDir != "" {
 		query.Set("dir", workingDir)
-		if debug {
-			logger.Debug("Set working directory", "dir", workingDir)
-		}
+		logger.Debug("Set working directory", "dir", workingDir)
 	}
 	if tty {
 		query.Set("tty", "true")
-		if debug {
-			logger.Debug("Enabled TTY mode")
-		}
+		logger.Debug("Enabled TTY mode")
 
 		// Send initial terminal size as part of connection setup
 		if term.IsTerminal(int(os.Stdin.Fd())) {
 			if width, height, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
 				query.Set("cols", fmt.Sprintf("%d", width))
 				query.Set("rows", fmt.Sprintf("%d", height))
-				if debug {
-					logger.Debug("Set initial terminal size", "cols", width, "rows", height)
-				}
+				logger.Debug("Set initial terminal size", "cols", width, "rows", height)
 			}
 		}
 	}
 	for _, envVar := range env {
 		query.Add("env", envVar)
-		if debug {
-			logger.Debug("Added environment variable", "env", envVar)
-		}
+		logger.Debug("Added environment variable", "env", envVar)
 	}
 	wsURL.RawQuery = query.Encode()
 
-	if debug {
-		logger.Debug("Final WebSocket URL with query parameters", "url", wsURL.String())
-	}
+	logger.Debug("Final WebSocket URL with query parameters", "url", wsURL.String())
 
 	// Create HTTP request with auth header
 	req, err := http.NewRequest("GET", wsURL.String(), nil)
 	if err != nil {
-		if debug {
-			logger.Error("Failed to create HTTP request", "error", err)
-		}
+		logger.Error("Failed to create HTTP request", "error", err)
 		fmt.Fprintf(os.Stderr, "Error: Failed to create request: %v\n", err)
 		return 1
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 
-	if debug {
-		logger.Debug("Created HTTP request", "method", req.Method, "url", req.URL.String())
-		logger.Debug("Request headers", "headers", req.Header)
+	logger.Debug("Created HTTP request", "method", req.Method, "url", req.URL.String())
+	// Log headers but redact Authorization for security
+	headersCopy := make(map[string][]string)
+	for k, v := range req.Header {
+		if k == "Authorization" {
+			headersCopy[k] = []string{"[REDACTED]"}
+		} else {
+			headersCopy[k] = v
+		}
 	}
+	logger.Debug("Request headers", "headers", headersCopy)
 
 	// Create wsexec command
 	wsCmd := wsexec.CommandContext(context.Background(), req, "placeholder")
@@ -241,9 +381,7 @@ func executeDirectWebSocket(baseURL, token string, cmd []string, workingDir stri
 	wsCmd.Stderr = os.Stderr
 	wsCmd.Tty = tty
 
-	if debug {
-		logger.Debug("Created wsexec command", "tty", wsCmd.Tty)
-	}
+	logger.Debug("Created wsexec command", "tty", wsCmd.Tty)
 
 	// Set up PTY mode if needed
 	var cleanup func()
@@ -251,9 +389,7 @@ func executeDirectWebSocket(baseURL, token string, cmd []string, workingDir stri
 		var err error
 		cleanup, err = handlePTYMode(wsCmd)
 		if err != nil {
-			if debug {
-				logger.Error("Failed to set up PTY mode", "error", err)
-			}
+			logger.Error("Failed to set up PTY mode", "error", err)
 			fmt.Fprintf(os.Stderr, "Warning: Failed to set up PTY mode: %v\n", err)
 			// Continue anyway - PTY will work but without raw mode
 		}
@@ -264,24 +400,18 @@ func executeDirectWebSocket(baseURL, token string, cmd []string, workingDir stri
 		}()
 	}
 
-	if debug {
-		logger.Info("Starting WebSocket command execution")
-	}
+	logger.Info("Starting WebSocket command execution")
 
 	// Start the command
 	if err := wsCmd.Start(); err != nil {
-		if debug {
-			logger.Error("Failed to start WebSocket command", "error", err)
-		}
+		logger.Error("Failed to start WebSocket command", "error", err)
 		fmt.Fprintf(os.Stderr, "Error: Failed to start command: %v\n", err)
 		return 1
 	}
 
 	// Wait for command to complete
 	if err := wsCmd.Wait(); err != nil {
-		if debug {
-			logger.Error("WebSocket command wait failed", "error", err)
-		}
+		logger.Error("WebSocket command wait failed", "error", err)
 		// Don't print error here - it's usually just context cancelled
 	}
 
@@ -290,20 +420,19 @@ func executeDirectWebSocket(baseURL, token string, cmd []string, workingDir stri
 
 	// Get exit code
 	exitCode := wsCmd.ExitCode()
-	if debug {
-		logger.Debug("Command completed", "exitCode", exitCode)
-	}
+	logger.Debug("Command completed", "exitCode", exitCode)
 
 	if exitCode == -1 {
-		if debug {
-			logger.Warn("No proper exit code received, defaulting to 1")
-		}
+		logger.Warn("No proper exit code received, defaulting to 1")
 		// If we didn't get a proper exit code, default to 1
 		exitCode = 1
 	}
 
-	if debug {
-		logger.Info("WebSocket exec completed", "finalExitCode", exitCode)
+	logger.Info("WebSocket exec completed", "finalExitCode", exitCode)
+
+	// Restore terminal state before exiting
+	if initialState != nil {
+		term.Restore(int(os.Stdin.Fd()), initialState)
 	}
 
 	return exitCode
@@ -326,8 +455,13 @@ func buildExecWebSocketURL(baseURL string) (*url.URL, error) {
 		return nil, fmt.Errorf("unsupported scheme: %s", u.Scheme)
 	}
 
-	// Set path to simple /exec endpoint
-	u.Path = "/exec"
+	// Append /exec to any existing path while preserving prefix paths
+	cleanPath := strings.TrimRight(u.Path, "/")
+	if cleanPath == "" {
+		u.Path = "/exec"
+	} else {
+		u.Path = cleanPath + "/exec"
+	}
 
 	return u, nil
 }

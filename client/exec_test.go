@@ -71,7 +71,7 @@ func TestNonTTYCommands(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			exitCode := executeDirectWebSocket(baseURL, token, tt.cmd, tt.workingDir, tt.env, false, false)
+			exitCode := executeDirectWebSocket(baseURL, token, tt.cmd, tt.workingDir, tt.env, false)
 
 			if exitCode != tt.expectExit {
 				t.Errorf("Expected exit code %d, got %d", tt.expectExit, exitCode)
@@ -129,7 +129,7 @@ func TestTTYCommands(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			exitCode := executeDirectWebSocket(baseURL, token, tt.cmd, tt.workingDir, tt.env, true, false)
+			exitCode := executeDirectWebSocket(baseURL, token, tt.cmd, tt.workingDir, tt.env, true)
 
 			if exitCode != tt.expectExit {
 				t.Errorf("Expected exit code %d, got %d", tt.expectExit, exitCode)
@@ -144,7 +144,7 @@ func TestCommandTimeout(t *testing.T) {
 	defer server.Close()
 
 	// Test a command that should timeout (sleep for longer than our client timeout)
-	exitCode := executeDirectWebSocket(baseURL, token, []string{"sleep", "10"}, "", nil, false, false)
+	exitCode := executeDirectWebSocket(baseURL, token, []string{"sleep", "10"}, "", nil, false)
 
 	// Should return non-zero exit code due to timeout/cancellation
 	if exitCode == 0 {
@@ -159,7 +159,7 @@ func TestStdinHandling(t *testing.T) {
 
 	// Test a command that reads from stdin
 	// Note: This is a simplified test - in reality we'd need to set up stdin simulation
-	exitCode := executeDirectWebSocket(baseURL, token, []string{"cat"}, "", nil, false, false)
+	exitCode := executeDirectWebSocket(baseURL, token, []string{"cat"}, "", nil, false)
 
 	// cat without input should exit cleanly when stdin is closed
 	if exitCode != 0 {
@@ -188,7 +188,7 @@ func TestBuildExecWebSocketURL(t *testing.T) {
 		{
 			name:      "HTTP with path",
 			baseURL:   "http://localhost:8080/api",
-			expectURL: "ws://localhost:8080/exec",
+			expectURL: "ws://localhost:8080/api/exec",
 		},
 		{
 			name:      "invalid scheme",
@@ -340,7 +340,7 @@ func TestWebSocketConnectionErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			exitCode := executeDirectWebSocket(tt.baseURL, tt.token, tt.cmd, "", nil, false, false)
+			exitCode := executeDirectWebSocket(tt.baseURL, tt.token, tt.cmd, "", nil, false)
 
 			if tt.expectErr && exitCode == 0 {
 				t.Error("Expected non-zero exit code for error case")
@@ -355,7 +355,7 @@ func TestDebugMode(t *testing.T) {
 	defer server.Close()
 
 	// Test debug mode with a simple command
-	exitCode := executeDirectWebSocket(baseURL, token, []string{"echo", "debug test"}, "", nil, false, true)
+	exitCode := executeDirectWebSocket(baseURL, token, []string{"echo", "debug test"}, "", nil, false)
 
 	if exitCode != 0 {
 		t.Errorf("Expected exit code 0, got %d", exitCode)

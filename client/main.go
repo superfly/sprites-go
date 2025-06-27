@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -13,6 +14,22 @@ import (
 
 	"github.com/sprite-env/lib/api"
 )
+
+var clientLogger *slog.Logger
+
+func setupLogger(debug bool) {
+	level := slog.LevelInfo
+	if debug {
+		level = slog.LevelDebug
+	}
+	clientLogger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	slog.SetDefault(clientLogger)
+}
+
+// debugLog logs at Debug level; output depends on logger configuration.
+func debugLog(format string, a ...interface{}) {
+	slog.Debug(fmt.Sprintf(format, a...))
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -36,6 +53,19 @@ func main() {
 
 	// Ensure URL doesn't have trailing slash
 	url = strings.TrimRight(url, "/")
+
+	// Scan all args for --debug flag and remove it
+	debug := false
+	filtered := make([]string, 0, len(os.Args))
+	for _, arg := range os.Args {
+		if arg == "--debug" {
+			debug = true
+		} else {
+			filtered = append(filtered, arg)
+		}
+	}
+	os.Args = filtered
+	setupLogger(debug)
 
 	subcommand := os.Args[1]
 
@@ -136,6 +166,8 @@ func adminResetStateCommand(baseURL, token string, args []string) {
 
 	// Make HTTP request
 	url := fmt.Sprintf("%s/admin/reset-state", baseURL)
+	debugLog("HTTP request: %s %s", "POST", url)
+
 	httpReq, err := http.NewRequest("POST", url, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to create HTTP request: %v\n", err)
@@ -145,6 +177,7 @@ func adminResetStateCommand(baseURL, token string, args []string) {
 	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 
 	client := &http.Client{}
+	debugLog("Sending HTTP request")
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to make request: %v\n", err)
@@ -209,6 +242,8 @@ func checkpointCreateCommand(baseURL, token string, args []string) {
 
 	// Make HTTP request
 	url := fmt.Sprintf("%s/checkpoint", baseURL)
+	debugLog("HTTP request: %s %s", "POST", url)
+
 	httpReq, err := http.NewRequest("POST", url, bytes.NewReader(jsonData))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to create HTTP request: %v\n", err)
@@ -261,6 +296,7 @@ func checkpointListCommand(baseURL, token string, args []string) {
 
 	// Make HTTP request
 	url := fmt.Sprintf("%s/checkpoints", baseURL)
+	debugLog("HTTP request: %s %s", "GET", url)
 	if historyFilter != "" {
 		url += fmt.Sprintf("?history=%s", historyFilter)
 	}
@@ -329,6 +365,8 @@ func checkpointInfoCommand(baseURL, token string, args []string) {
 
 	// Make HTTP request
 	url := fmt.Sprintf("%s/checkpoints/%s", baseURL, checkpointID)
+	debugLog("HTTP request: %s %s", "GET", url)
+
 	httpReq, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to create HTTP request: %v\n", err)
@@ -392,6 +430,8 @@ func restoreCommand(baseURL, token string, args []string) {
 
 	// Make HTTP request to new endpoint
 	url := fmt.Sprintf("%s/checkpoints/%s/restore", baseURL, checkpointID)
+	debugLog("HTTP request: %s %s", "POST", url)
+
 	httpReq, err := http.NewRequest("POST", url, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to create HTTP request: %v\n", err)

@@ -53,9 +53,31 @@ func NewServer(config Config, system handlers.SystemManager, logger *slog.Logger
 	mux := http.NewServeMux()
 	s.setupEndpoints(mux)
 
+	// Allow proxied requests with path prefix "/v1/sprites/:id/" to reuse the same handlers.
+	// We wrap the mux with a small adapter that strips that prefix (and the dynamic ID)
+	// before delegating to the real router.
+	stripSpritePrefix := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			const prefix = "/v1/sprites/"
+			if strings.HasPrefix(r.URL.Path, prefix) {
+				// Remove the prefix, then strip the dynamic ID segment.
+				trimmed := strings.TrimPrefix(r.URL.Path, prefix) // gives "<id>/exec" etc
+				if idx := strings.IndexByte(trimmed, '/'); idx != -1 {
+					newPath := trimmed[idx:] // includes leading slash
+					// Clone request to avoid mutating original.
+					r2 := r.Clone(r.Context())
+					r2.URL.Path = newPath
+					next.ServeHTTP(w, r2)
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+
 	s.server = &http.Server{
 		Addr:    config.ListenAddr,
-		Handler: mux,
+		Handler: stripSpritePrefix(mux),
 	}
 
 	return s, nil
