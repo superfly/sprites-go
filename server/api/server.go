@@ -97,6 +97,9 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 	// Debug endpoints - require auth but don't wait for process or JuiceFS
 	mux.HandleFunc("/debug/create-zombie", s.authMiddleware(s.handlers.HandleDebugCreateZombie))
 	mux.HandleFunc("/debug/check-process", s.authMiddleware(s.handlers.HandleDebugCheckProcess))
+
+	// Admin endpoints - require admin auth
+	mux.HandleFunc("/admin/reset-state", s.adminAuthMiddleware(s.handlers.HandleAdminResetState))
 }
 
 // Start starts the API server
@@ -123,6 +126,35 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		if token != s.config.APIToken {
 			http.Error(w, "Invalid authentication token", http.StatusUnauthorized)
 			return
+		}
+
+		next(w, r)
+	}
+}
+
+// adminAuthMiddleware checks for admin authentication token
+// If AdminToken is set, it requires that specific token
+// Otherwise falls back to regular auth
+func (s *Server) adminAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token, err := s.extractToken(r)
+		if err != nil {
+			http.Error(w, "Missing or invalid authentication", http.StatusUnauthorized)
+			return
+		}
+
+		// If admin token is configured, require it
+		if s.config.AdminToken != "" {
+			if token != s.config.AdminToken {
+				http.Error(w, "Admin authentication required", http.StatusForbidden)
+				return
+			}
+		} else {
+			// Otherwise, accept regular API token
+			if token != s.config.APIToken {
+				http.Error(w, "Invalid authentication token", http.StatusUnauthorized)
+				return
+			}
 		}
 
 		next(w, r)

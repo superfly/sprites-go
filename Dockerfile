@@ -66,13 +66,12 @@ RUN apt-get update && \
 COPY --from=crun /crun /usr/local/bin/crun
 COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
 
-# Copy the appropriate binary based on target platform
-ARG TARGETPLATFORM
-COPY --from=builder /build/spritectl /usr/local/bin/spritectl
-
 # Define environment variables for paths
 ENV SPRITE_WRITE_DIR=/dev/fly_vol \
     SPRITE_HOME=/home/sprite
+
+# Copy the appropriate binary based on target platform
+COPY --from=builder /build/spritectl /usr/local/bin/spritectl
 
 # Set working directory for spritectl components
 WORKDIR ${SPRITE_HOME}
@@ -85,9 +84,6 @@ WORKDIR ${SPRITE_WRITE_DIR}
 
 # Expose the API port
 EXPOSE 7778
-
-# we want a fresh apt-get cache for each build
-RUN apt-get update
 
 # Use spritectl as entrypoint with config file
 # /usr/local/bin/spritectl -config /home/sprite/config.json -listen 0.0.0.0:7778

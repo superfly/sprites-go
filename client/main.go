@@ -43,6 +43,9 @@ func main() {
 	case "exec":
 		// Dispatch to exec command
 		execCommand(url, token, os.Args[2:])
+	case "admin":
+		// Handle admin commands
+		adminCommand(url, token, os.Args[2:])
 	case "checkpoint", "checkpoints", "c":
 		// Handle checkpoint command (accepts checkpoint, checkpoints, or c)
 		checkpointCommand(url, token, os.Args[2:])
@@ -76,6 +79,7 @@ Commands:
 Environment Variables:
   SPRITE_URL    Base URL of the Sprite API (required)
   SPRITE_TOKEN  Authentication token (required)
+  SPRITE_ADMIN_TOKEN  Admin authentication token (optional, for admin commands)
 
 Examples:
   # Execute a command
@@ -95,6 +99,72 @@ Examples:
 
 Use 'sprite-client exec -h' for exec command options.
 `)
+}
+
+func adminCommand(baseURL, token string, args []string) {
+	if len(args) < 1 {
+		fmt.Fprintf(os.Stderr, "Error: admin requires a subcommand\n")
+		fmt.Fprintf(os.Stderr, "Usage: sprite-client admin <reset-state> [arguments]\n")
+		os.Exit(1)
+	}
+
+	subcommand := args[0]
+	subArgs := args[1:]
+
+	switch subcommand {
+	case "reset-state":
+		adminResetStateCommand(baseURL, token, subArgs)
+	default:
+		fmt.Fprintf(os.Stderr, "Error: Unknown admin subcommand '%s'\n", subcommand)
+		fmt.Fprintf(os.Stderr, "Usage: sprite-client admin <reset-state> [arguments]\n")
+		os.Exit(1)
+	}
+}
+
+func adminResetStateCommand(baseURL, token string, args []string) {
+	if len(args) != 0 {
+		fmt.Fprintf(os.Stderr, "Error: admin reset-state takes no arguments\n")
+		fmt.Fprintf(os.Stderr, "Usage: sprite-client admin reset-state\n")
+		os.Exit(1)
+	}
+
+	// Check if admin token is set in environment
+	adminToken := os.Getenv("SPRITE_ADMIN_TOKEN")
+	if adminToken != "" {
+		token = adminToken
+	}
+
+	// Make HTTP request
+	url := fmt.Sprintf("%s/admin/reset-state", baseURL)
+	httpReq, err := http.NewRequest("POST", url, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to create HTTP request: %v\n", err)
+		os.Exit(1)
+	}
+
+	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+
+	client := &http.Client{}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to make request: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode == http.StatusForbidden {
+		fmt.Fprintf(os.Stderr, "Error: Admin authentication required. Set SPRITE_ADMIN_TOKEN environment variable.\n")
+		os.Exit(1)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "Error: API returned status %d: %s\n", resp.StatusCode, string(body))
+		os.Exit(1)
+	}
+
+	fmt.Print(string(body))
 }
 
 func checkpointCommand(baseURL, token string, args []string) {

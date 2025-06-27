@@ -8,6 +8,7 @@ import (
 type Config struct {
 	ListenAddr  string
 	APIToken    string
+	AdminToken  string // Optional admin-specific token for privileged operations
 	MaxWaitTime time.Duration
 
 	// Exec configuration

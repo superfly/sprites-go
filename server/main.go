@@ -29,6 +29,7 @@ type Config struct {
 	// API Server
 	APIListenAddr string
 	APIToken      string
+	AdminToken    string // Optional admin-specific token
 
 	// Process
 	ProcessCommand                 []string
@@ -136,6 +137,7 @@ func NewApplication(config Config) (*Application, error) {
 		apiConfig := serverapi.Config{
 			ListenAddr:         config.APIListenAddr,
 			APIToken:           config.APIToken,
+			AdminToken:         config.AdminToken,
 			MaxWaitTime:        30 * time.Second,
 			ExecWrapperCommand: config.ExecWrapperCommand,
 		}
@@ -428,6 +430,7 @@ func parseCommandLine() (Config, error) {
 
 	// Environment variables
 	config.APIToken = os.Getenv("SPRITE_HTTP_API_TOKEN")
+	config.AdminToken = os.Getenv("SPRITE_HTTP_ADMIN_TOKEN")
 
 	// JuiceFS configuration - environment overrides file config
 	juicefsBaseDir := os.Getenv("SPRITE_WRITE_DIR")

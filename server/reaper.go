@@ -171,3 +171,31 @@ func (r *Reaper) emitEvent(pid int) {
 		}
 	}
 }
+
+// Reaper delegation methods
+
+// SubscribeToReapEvents delegates to the reaper
+func (s *System) SubscribeToReapEvents() <-chan int {
+	if s.reaper != nil {
+		return s.reaper.SubscribeToEvents()
+	}
+	// Return a closed channel if no reaper
+	ch := make(chan int)
+	close(ch)
+	return ch
+}
+
+// UnsubscribeFromReapEvents delegates to the reaper
+func (s *System) UnsubscribeFromReapEvents(ch <-chan int) {
+	if s.reaper != nil {
+		s.reaper.UnsubscribeFromEvents(ch)
+	}
+}
+
+// WasProcessReaped checks if a process with given PID was reaped
+func (s *System) WasProcessReaped(pid int) (bool, time.Time) {
+	if s.reaper == nil {
+		return false, time.Time{}
+	}
+	return s.reaper.WasProcessReaped(pid)
+}
