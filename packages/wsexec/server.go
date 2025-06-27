@@ -235,9 +235,11 @@ func (c *ServerCommand) Handle(w http.ResponseWriter, r *http.Request) error {
 // run executes the command and handles I/O
 func (c *ServerCommand) run(ctx context.Context, ws *Adapter) int {
 	collector := c.LogCollector
-	if collector != nil {
-		defer collector.Close()
+	if collector == nil {
+		// Use no-op collector to prevent nil pointer dereference
+		collector = newNoopLogCollector()
 	}
+	defer collector.Close()
 
 	// Build command
 	var cmdArgs []string
@@ -589,4 +591,20 @@ func (c *ServerCommand) runWithoutPTY(ctx context.Context, cmd *exec.Cmd, ws *Ad
 type LogCollector interface {
 	Stream(name string) io.Writer
 	Close() error
+}
+
+// noopLogCollector is a LogCollector implementation that discards all output
+type noopLogCollector struct{}
+
+func (n *noopLogCollector) Stream(name string) io.Writer {
+	return io.Discard
+}
+
+func (n *noopLogCollector) Close() error {
+	return nil
+}
+
+// newNoopLogCollector creates a new no-op LogCollector
+func newNoopLogCollector() LogCollector {
+	return &noopLogCollector{}
 }
