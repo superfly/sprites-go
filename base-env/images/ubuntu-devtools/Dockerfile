@@ -86,11 +86,14 @@ COPY --from=buildbase /opt/asdf          /opt/asdf
 COPY --from=buildbase /etc/profile.d/asdf.sh /etc/profile.d/asdf.sh
 
 # Copy the sudoers file and user skeleton, then fix ownership
-COPY --from=buildbase /etc/sudoers.d/sprite /etc/sudoers.d/sprite
-RUN useradd -ms /bin/bash -u 1001 sprite \
- && usermod -aG sudo,users sprite \
- && chown -R sprite:sprite /opt/asdf \
- && chmod 0440 /etc/sudoers.d/sprite
+
+ARG USER=sprite UID=1001
+RUN useradd -ms /bin/bash -u $UID $USER \
+ && echo "$USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$USER \
+ && chmod 0440 /etc/sudoers.d/$USER \
+ && usermod -aG sudo,users $USER \
+ && chown -R $USER:$USER /opt/asdf \
+ && chmod 0440 /etc/sudoers.d/$USER
 
 ENV ASDF_DIR=/opt/asdf \
     ASDF_DATA_DIR=/opt/asdf \

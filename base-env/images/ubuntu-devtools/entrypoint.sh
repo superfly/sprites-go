@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 
+echo "127.0.0.1	sprite" >> /etc/hosts
+
 # Set up mounts using sudo (privileged operations)
 sudo /.sprite/setup-mounts.sh
 
