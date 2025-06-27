@@ -1,12 +1,12 @@
 package handlers
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
 	"io"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,17 +30,34 @@ type sqliteWriter struct {
 	c      *SQLiteLogCollector
 	stream string
 	buf    bytes.Buffer
+	r      *bufio.Reader
 }
 
 func (w *sqliteWriter) Write(p []byte) (int, error) {
 	w.buf.Write(p)
+
+	// fucking terminals
 	for {
-		line, err := w.buf.ReadString('\n')
-		if err != nil {
+		data := w.buf.Bytes()
+		idx := bytes.IndexAny(data, "\r\n")
+		if idx < 0 {
+			// partial line
 			break
 		}
-		w.c.insert(strings.TrimSuffix(line, "\n"), w.stream)
+
+		line := string(data[:idx])
+		w.c.insert(line, w.stream)
+
+		// chomp the delimiter
+
+		delimLen := 1
+		if data[idx] == '\r' && idx+1 < len(data) && data[idx+1] == '\n' {
+			delimLen = 2
+		}
+
+		w.buf.Next(idx + delimLen)
 	}
+
 	return len(p), nil
 }
 
@@ -136,7 +153,10 @@ func (s *SQLiteLogCollector) Stream(name string) io.Writer {
 		return io.Discard
 	}
 
-	w := &sqliteWriter{c: s, stream: name}
+	w := &sqliteWriter{
+		c:      s,
+		stream: name,
+	}
 	s.writers = append(s.writers, w)
 	return w
 }
