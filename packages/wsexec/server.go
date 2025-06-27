@@ -1,7 +1,6 @@
 package wsexec
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 	"time"
 
 	creackpty "github.com/creack/pty"
@@ -311,8 +309,8 @@ func (c *ServerCommand) run(ctx context.Context, ws *Adapter) int {
 
 // handlePTYIO handles the I/O between WebSocket and PTY
 func (c *ServerCommand) handlePTYIO(ctx context.Context, ptmx *os.File, ws *Adapter, collector LogCollector) {
-	inLog := stream(collector, "stdin")
-	outLog := stream(collector, "stdout")
+	inLog := collector.Stream("stdin")
+	outLog := collector.Stream("stdout")
 	// Create channels to signal completion
 	wsDone := make(chan struct{})
 	ptyDone := make(chan struct{})
@@ -561,17 +559,17 @@ func (c *ServerCommand) runWithoutPTY(ctx context.Context, cmd *exec.Cmd, ws *Ad
 
 	go func() {
 		defer stdin.Close()
-		r := io.TeeReader(stdinReader, stream(collector, "stdin"))
+		r := io.TeeReader(stdinReader, collector.Stream("stdin"))
 		io.Copy(stdin, r)
 	}()
 
 	go func() {
-		w := io.MultiWriter(stdoutWriter, stream(collector, "stdout"))
+		w := io.MultiWriter(stdoutWriter, collector.Stream("stdout"))
 		io.Copy(w, stdout)
 	}()
 
 	go func() {
-		w := io.MultiWriter(stderrWriter, stream(collector, "stderr"))
+		w := io.MultiWriter(stderrWriter, collector.Stream("stderr"))
 		io.Copy(w, stderr)
 	}()
 
@@ -588,61 +586,7 @@ func (c *ServerCommand) runWithoutPTY(ctx context.Context, cmd *exec.Cmd, ws *Ad
 	return 0
 }
 
-type lineLogger struct {
-	logger *slog.Logger
-	stream string
-	mu     sync.Mutex
-	buf    bytes.Buffer
-}
-
-func newLogger(name string, l *slog.Logger) *lineLogger {
-	return &lineLogger{
-		logger: l,
-		stream: name,
-	}
-}
-
-func (l *lineLogger) Write(p []byte) (int, error) {
-	if l == nil {
-		return len(p), nil
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	n := len(p)
-	l.buf.Write(p)
-	for {
-		line, err := l.buf.ReadString('\n')
-		if err != nil {
-			break
-		}
-		line = strings.TrimSuffix(line, "\n")
-		l.logger.Info("io", "stream", l.stream, "line", line)
-	}
-	return n, nil
-}
-
-func (l *lineLogger) Close() {
-	if l == nil {
-		return
-	}
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.logger != nil && l.buf.Len() > 0 {
-		line := strings.TrimRight(l.buf.String(), "\n")
-		l.logger.Info("io", "stream", l.stream, "line", line)
-	}
-	l.buf.Reset()
-}
-
 type LogCollector interface {
 	Stream(name string) io.Writer
 	Close() error
-}
-
-func stream(l LogCollector, name string) io.Writer {
-	if l == nil {
-		return io.Discard
-	}
-	return l.Stream(name)
 }
