@@ -85,6 +85,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=buildbase /opt/asdf          /opt/asdf
 COPY --from=buildbase /etc/profile.d/asdf.sh /etc/profile.d/asdf.sh
 
+RUN apt-get install -y gosu
+
 # Copy the sudoers file and user skeleton, then fix ownership
 
 ARG USER=sprite UID=1001

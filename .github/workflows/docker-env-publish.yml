@@ -2,6 +2,12 @@ name: Docker Publish Environment Images
 
 on:
   workflow_dispatch:
+    inputs:
+      tag_suffix:
+        description: 'Tag suffix to append to devtools-25.04 (e.g. "rc1" will create devtools-25.04-rc1)'
+        required: false
+        default: ''
+        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -35,7 +41,7 @@ jobs:
         file: base-env/images/ubuntu-devtools/Dockerfile
         platforms: linux/amd64
         push: true
-        tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:devtools-25.04-amd64
+        tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:devtools-25.04${{ inputs.tag_suffix && format('-{0}', inputs.tag_suffix) || '' }}-amd64
         cache-from: type=gha,scope=amd64
         cache-to: type=gha,mode=max,scope=amd64
 
@@ -66,7 +72,7 @@ jobs:
         file: base-env/images/ubuntu-devtools/Dockerfile
         platforms: linux/arm64
         push: true
-        tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:devtools-25.04-arm64
+        tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:devtools-25.04${{ inputs.tag_suffix && format('-{0}', inputs.tag_suffix) || '' }}-arm64
         cache-from: type=gha,scope=arm64
         cache-to: type=gha,mode=max,scope=arm64
 
@@ -87,6 +93,6 @@ jobs:
 
     - name: Create and push multi-platform manifest
       run: |
-        docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:devtools-25.04 \
-          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:devtools-25.04-amd64 \
-          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:devtools-25.04-arm64
+        docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:devtools-25.04${{ inputs.tag_suffix && format('-{0}', inputs.tag_suffix) || '' }} \
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:devtools-25.04${{ inputs.tag_suffix && format('-{0}', inputs.tag_suffix) || '' }}-amd64 \
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:devtools-25.04${{ inputs.tag_suffix && format('-{0}', inputs.tag_suffix) || '' }}-arm64

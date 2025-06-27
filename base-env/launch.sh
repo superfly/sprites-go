@@ -451,7 +451,28 @@ CONFIG_JSON=$(echo "$CONFIG_JSON" | jq --arg dir "$working_dir" '.process.cwd = 
 user_info=$(echo "$APP_IMAGE_CONFIG" | jq -r '.Config.User // .config.User // "0:0"')
 
 # Parse UID and GID from user_info
-IFS=':' read -r uid gid <<< "$user_info"
+if [[ "$user_info" == *":"* ]]; then
+    # user_info is in "uid:gid" format
+    IFS=':' read -r uid gid <<< "$user_info"
+else
+    # user_info is just a username, look it up in /mnt/app-image/etc/passwd
+    if [[ -f "/mnt/app-image/etc/passwd" ]]; then
+        passwd_entry=$(grep "^${user_info}:" /mnt/app-image/etc/passwd || true)
+        if [[ -n "$passwd_entry" ]]; then
+            # Extract uid and gid from passwd entry format: username:x:uid:gid:...
+            uid=$(echo "$passwd_entry" | cut -d':' -f3)
+            gid=$(echo "$passwd_entry" | cut -d':' -f4)
+        else
+            # User not found in passwd, use defaults
+            uid=0
+            gid=0
+        fi
+    else
+        # passwd file not found, use defaults
+        uid=0
+        gid=0
+    fi
+fi
 
 # Update the config with the user
 CONFIG_JSON=$(echo "$CONFIG_JSON" | jq --argjson uid "$uid" --argjson gid "$gid" '.process.user = {"uid": $uid, "gid": $gid}')
