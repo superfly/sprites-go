@@ -85,7 +85,10 @@ func NewServer(config Config, system handlers.SystemManager, logger *slog.Logger
 
 // setupEndpoints configures HTTP endpoints for the API
 func (s *Server) setupEndpoints(mux *http.ServeMux) {
-	// All endpoints require authentication
+	// Public endpoints (no authentication required)
+	mux.HandleFunc("/v1/openapi.json", s.handlers.HandleOpenAPISpec)
+
+	// All other endpoints require authentication
 
 	// Exec endpoint - waits for process to be running
 	mux.HandleFunc("/exec", s.authMiddleware(s.waitForProcessMiddleware(s.handlers.HandleExec)))

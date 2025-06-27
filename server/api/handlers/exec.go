@@ -9,7 +9,26 @@ import (
 	"github.com/sprite-env/packages/wsexec"
 )
 
-// HandleExec handles GET/POST /exec - WebSocket upgrade endpoint
+// HandleExec handles GET/POST /sprites/{id}/exec - WebSocket upgrade endpoint for sprite execution
+// @public
+// @operation GET /v1/sprites/{id}/exec
+// @summary Execute commands in a sprite
+// @description Establish a WebSocket connection to execute commands in a specific sprite environment. Supports both TTY and non-TTY modes with real-time streaming.
+// @tags Sprites
+// @security Bearer
+// @param id path string true "Sprite ID"
+// @param cmd query string false "Command arguments to execute (defaults to 'bash -l')"
+// @param tty query boolean false "Enable TTY mode for interactive shell (default: false)"
+// @param dir query string false "Working directory for command execution"
+// @param env query string false "Environment variables (format: KEY=value)"
+// @param cols query integer false "Terminal columns (only used with tty=true)"
+// @param rows query integer false "Terminal rows (only used with tty=true)"
+// @response 101 {string} string "WebSocket connection established"
+// @response 200 {string} string "Command execution successful"
+// @response 400 {string} string "Bad request - invalid parameters"
+// @response 401 {string} string "Unauthorized - invalid or missing authentication"
+// @response 405 {string} string "Method not allowed - only GET/POST supported"
+// @response 503 {string} string "Service unavailable - sprite not running"
 func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 	h.logger.Debug("HandleExec called",
 		"method", r.Method,

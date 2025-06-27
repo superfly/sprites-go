@@ -11,7 +11,19 @@ import (
 	"github.com/sprite-env/lib/api"
 )
 
-// HandleListCheckpoints handles GET /checkpoints
+// HandleListCheckpoints handles GET /sprites/{id}/checkpoints
+// @public
+// @operation GET /v1/sprites/{id}/checkpoints
+// @summary List sprite checkpoints
+// @description Retrieve a list of all available checkpoints for a specific sprite
+// @tags Sprites
+// @security Bearer
+// @param id path string true "Sprite ID"
+// @param history query string false "Filter checkpoints by history version"
+// @response 200 {array} string "List of checkpoints"
+// @response 401 {string} string "Unauthorized - invalid or missing authentication"
+// @response 500 {string} string "Internal server error"
+// @response 503 {string} string "Service unavailable - JuiceFS not configured"
 func (h *Handlers) HandleListCheckpoints(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -75,7 +87,20 @@ func (h *Handlers) HandleListCheckpoints(w http.ResponseWriter, r *http.Request)
 	}
 }
 
-// HandleGetCheckpoint handles GET /checkpoints/:id
+// HandleGetCheckpoint handles GET /sprites/{id}/checkpoints/{checkpoint_id}
+// @public
+// @operation GET /v1/sprites/{id}/checkpoints/{checkpoint_id}
+// @summary Get sprite checkpoint details
+// @description Retrieve detailed information about a specific checkpoint for a sprite
+// @tags Sprites
+// @security Bearer
+// @param id path string true "Sprite ID"
+// @param checkpoint_id path string true "Checkpoint ID"
+// @response 200 {object} string "Checkpoint details"
+// @response 401 {string} string "Unauthorized - invalid or missing authentication"
+// @response 404 {string} string "Checkpoint not found"
+// @response 500 {string} string "Internal server error"
+// @response 503 {string} string "Service unavailable - JuiceFS not configured"
 func (h *Handlers) HandleGetCheckpoint(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -128,7 +153,20 @@ func (h *Handlers) HandleGetCheckpoint(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// HandleCheckpointRestore handles POST /checkpoints/:id/restore
+// HandleCheckpointRestore handles POST /sprites/{id}/checkpoints/{checkpoint_id}/restore
+// @public
+// @operation POST /v1/sprites/{id}/checkpoints/{checkpoint_id}/restore
+// @summary Restore sprite from checkpoint
+// @description Restore a sprite from a specific checkpoint with real-time streaming progress
+// @tags Sprites
+// @security Bearer
+// @param id path string true "Sprite ID"
+// @param checkpoint_id path string true "Checkpoint ID to restore from"
+// @response 200 {string} string "Streaming NDJSON with restore progress"
+// @response 401 {string} string "Unauthorized - invalid or missing authentication"
+// @response 404 {string} string "Checkpoint not found"
+// @response 500 {string} string "Internal server error"
+// @response 503 {string} string "Service unavailable - JuiceFS not configured"
 func (h *Handlers) HandleCheckpointRestore(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -198,7 +236,18 @@ func (h *Handlers) HandleCheckpointRestore(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-// HandleCheckpoint handles POST /checkpoint
+// HandleCheckpoint handles POST /sprites/{id}/checkpoint
+// @public
+// @operation POST /v1/sprites/{id}/checkpoint
+// @summary Create sprite checkpoint
+// @description Create a new checkpoint of the current sprite state with real-time streaming progress. Optionally accepts a JSON body with checkpoint_id field.
+// @tags Sprites
+// @security Bearer
+// @param id path string true "Sprite ID"
+// @response 200 {string} string "Streaming NDJSON with checkpoint progress"
+// @response 401 {string} string "Unauthorized - invalid or missing authentication"
+// @response 500 {string} string "Internal server error"
+// @response 503 {string} string "Service unavailable - no process running or JuiceFS not configured"
 func (h *Handlers) HandleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
