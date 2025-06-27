@@ -1,7 +1,6 @@
 package wsexec
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 	"time"
 
 	creackpty "github.com/creack/pty"
@@ -586,53 +584,6 @@ func (c *ServerCommand) runWithoutPTY(ctx context.Context, cmd *exec.Cmd, ws *Ad
 		return -1
 	}
 	return 0
-}
-
-type lineLogger struct {
-	logger *slog.Logger
-	stream string
-	mu     sync.Mutex
-	buf    bytes.Buffer
-}
-
-func newLogger(name string, l *slog.Logger) *lineLogger {
-	return &lineLogger{
-		logger: l,
-		stream: name,
-	}
-}
-
-func (l *lineLogger) Write(p []byte) (int, error) {
-	if l == nil {
-		return len(p), nil
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	n := len(p)
-	l.buf.Write(p)
-	for {
-		line, err := l.buf.ReadString('\n')
-		if err != nil {
-			break
-		}
-		line = strings.TrimSuffix(line, "\n")
-		l.logger.Info("io", "stream", l.stream, "line", line)
-	}
-	return n, nil
-}
-
-func (l *lineLogger) Close() {
-	if l == nil {
-		return
-	}
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.logger != nil && l.buf.Len() > 0 {
-		line := strings.TrimRight(l.buf.String(), "\n")
-		l.logger.Info("io", "stream", l.stream, "line", line)
-	}
-	l.buf.Reset()
 }
 
 type LogCollector interface {
