@@ -232,7 +232,7 @@ func (s *SQLiteLogCollector) flushBatch(batch []logLine) error {
                         stream,
                         line_num,
                         line_id,
-                        text,
+                        text
                 ) VALUES(?,?,?,?,?)`,
 	)
 	if err != nil {
