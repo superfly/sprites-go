@@ -95,7 +95,8 @@ RUN useradd -ms /bin/bash -u $UID $USER \
  && chmod 0440 /etc/sudoers.d/$USER \
  && usermod -aG sudo,users $USER \
  && chown -R $USER:$USER /opt/asdf \
- && chmod 0440 /etc/sudoers.d/$USER
+ && chmod 0440 /etc/sudoers.d/$USER \
+ && echo "127.0.0.1	sprite" >> /etc/hosts
 
 ENV ASDF_DIR=/opt/asdf \
     ASDF_DATA_DIR=/opt/asdf \
@@ -112,7 +113,7 @@ COPY llm.txt /llm.txt
 # Make scripts executable
 RUN chmod +x /.sprite/setup-mounts.sh /.sprite/entrypoint.sh
 
-USER root
+USER sprite
 WORKDIR /home/sprite
 
 ENTRYPOINT ["/.sprite/entrypoint.sh"]
