@@ -134,7 +134,7 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	collector, err := newFileCollector("/var/log/execs.log")
+	collector, err := NewSQLiteLogCollector("file:/var/log/exec-logs.db")
 	if err == nil {
 		cmd.SetLogCollector(collector)
 	} else {

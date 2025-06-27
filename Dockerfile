@@ -32,7 +32,7 @@ COPY . .
 
 ARG VERSION=dev
 RUN cd server && \
-    CGO_ENABLED=0 GOOS=linux go build \
+    CGO_ENABLED=1 GOOS=linux go build \
     -ldflags="-w -s -X main.version=${VERSION} -extldflags '-static'" \
     -tags 'netgo osusergo' \
     -o ../spritectl .
