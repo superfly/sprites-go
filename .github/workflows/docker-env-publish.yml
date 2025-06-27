@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag_suffix:
-        description: 'Tag suffix to append to devtools-25.04 (defaults to short commit ID)'
+        description: 'Tag suffix to append to 25.04 (defaults to short commit ID)'
         required: false
         default: ''
         type: string
@@ -45,8 +45,10 @@ jobs:
         file: base-env/images/ubuntu-devtools/Dockerfile
         platforms: linux/amd64
         push: true
-        tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:devtools-25.04-${{ inputs.tag_suffix || steps.short-sha.outputs.short-sha }}-amd64
-        cache-from: type=gha,scope=amd64
+        tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:25.04-${{ inputs.tag_suffix || steps.short-sha.outputs.short-sha }}-amd64
+        cache-from: | 
+          type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:25.04-latest
+          type=gha,scope=amd64
         cache-to: type=gha,mode=max,scope=amd64
 
   build-arm64:
@@ -80,17 +82,95 @@ jobs:
         file: base-env/images/ubuntu-devtools/Dockerfile
         platforms: linux/arm64
         push: true
-        tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:devtools-25.04-${{ inputs.tag_suffix || steps.short-sha.outputs.short-sha }}-arm64
-        cache-from: type=gha,scope=arm64
+        tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:25.04-${{ inputs.tag_suffix || steps.short-sha.outputs.short-sha }}-arm64
+        cache-from: | 
+          type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:25.04-latest
+          type=gha,scope=arm64
         cache-to: type=gha,mode=max,scope=arm64
 
-  create-manifest:
+  build-amd64-languages:
+    runs-on: ubuntu-big
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Generate short SHA
+      id: short-sha
+      run: echo "short-sha=${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push AMD64 languages image
+      uses: docker/build-push-action@v5
+      with:
+        context: base-env/images/ubuntu-devtools
+        file: base-env/images/ubuntu-devtools/Dockerfile
+        target: languages
+        platforms: linux/amd64
+        push: true
+        tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:25.04-languages-${{ inputs.tag_suffix || steps.short-sha.outputs.short-sha }}-amd64
+        cache-from: |
+          type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:25.04-languages-latest
+          type=gha,scope=amd64-languages
+        cache-to: type=gha,mode=max,scope=amd64-languages
+
+  build-arm64-languages:
+    runs-on: ubuntu-big-arm64
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Generate short SHA
+      id: short-sha
+      run: echo "short-sha=${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push ARM64 languages image
+      uses: docker/build-push-action@v5
+      with:
+        context: base-env/images/ubuntu-devtools
+        file: base-env/images/ubuntu-devtools/Dockerfile
+        target: languages
+        platforms: linux/arm64
+        push: true
+        tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:25.04-languages-${{ inputs.tag_suffix || steps.short-sha.outputs.short-sha }}-arm64
+        cache-from: |
+          type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:25.04-languages-latest
+          type=gha,scope=arm64-languages
+        cache-to: type=gha,mode=max,scope=arm64-languages
+
+  manifest-base:
     runs-on: ubuntu-latest
     needs: [build-amd64, build-arm64]
     permissions:
       contents: read
       packages: write
-    
+
     steps:
     - name: Generate short SHA
       id: short-sha
@@ -103,8 +183,37 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Create and push multi-platform manifest
+    - name: Create and push multi-platform manifest for base image
       run: |
-        docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:devtools-25.04-${{ inputs.tag_suffix || steps.short-sha.outputs.short-sha }} \
-          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:devtools-25.04-${{ inputs.tag_suffix || steps.short-sha.outputs.short-sha }}-amd64 \
-          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:devtools-25.04-${{ inputs.tag_suffix || steps.short-sha.outputs.short-sha }}-arm64
+        docker buildx imagetools create \
+          -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:25.04-${{ inputs.tag_suffix || steps.short-sha.outputs.short-sha }} \
+          -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:25.04-latest \
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:25.04-${{ inputs.tag_suffix || steps.short-sha.outputs.short-sha }}-amd64 \
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:25.04-${{ inputs.tag_suffix || steps.short-sha.outputs.short-sha }}-arm64
+
+  manifest-languages:
+    runs-on: ubuntu-latest
+    needs: [build-amd64-languages, build-arm64-languages]
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+    - name: Generate short SHA
+      id: short-sha
+      run: echo "short-sha=${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
+
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Create and push multi-platform manifest for languages image
+      run: |
+        docker buildx imagetools create \
+          -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:25.04-languages-${{ inputs.tag_suffix || steps.short-sha.outputs.short-sha }} \
+          -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:25.04-languages-latest \
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:25.04-languages-${{ inputs.tag_suffix || steps.short-sha.outputs.short-sha }}-amd64 \
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:25.04-languages-${{ inputs.tag_suffix || steps.short-sha.outputs.short-sha }}-arm64
