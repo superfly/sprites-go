@@ -309,8 +309,8 @@ func (c *ServerCommand) run(ctx context.Context, ws *Adapter) int {
 
 // handlePTYIO handles the I/O between WebSocket and PTY
 func (c *ServerCommand) handlePTYIO(ctx context.Context, ptmx *os.File, ws *Adapter, collector LogCollector) {
-	inLog := stream(collector, "stdin")
-	outLog := stream(collector, "stdout")
+	inLog := collector.Stream("stdin")
+	outLog := collector.Stream("stdout")
 	// Create channels to signal completion
 	wsDone := make(chan struct{})
 	ptyDone := make(chan struct{})
@@ -559,17 +559,17 @@ func (c *ServerCommand) runWithoutPTY(ctx context.Context, cmd *exec.Cmd, ws *Ad
 
 	go func() {
 		defer stdin.Close()
-		r := io.TeeReader(stdinReader, stream(collector, "stdin"))
+		r := io.TeeReader(stdinReader, collector.Stream("stdin"))
 		io.Copy(stdin, r)
 	}()
 
 	go func() {
-		w := io.MultiWriter(stdoutWriter, stream(collector, "stdout"))
+		w := io.MultiWriter(stdoutWriter, collector.Stream("stdout"))
 		io.Copy(w, stdout)
 	}()
 
 	go func() {
-		w := io.MultiWriter(stderrWriter, stream(collector, "stderr"))
+		w := io.MultiWriter(stderrWriter, collector.Stream("stderr"))
 		io.Copy(w, stderr)
 	}()
 
@@ -589,11 +589,4 @@ func (c *ServerCommand) runWithoutPTY(ctx context.Context, cmd *exec.Cmd, ws *Ad
 type LogCollector interface {
 	Stream(name string) io.Writer
 	Close() error
-}
-
-func stream(l LogCollector, name string) io.Writer {
-	if l == nil {
-		return io.Discard
-	}
-	return l.Stream(name)
 }
