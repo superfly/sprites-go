@@ -2,7 +2,9 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -10,6 +12,17 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 )
+
+const (
+	batchSize      = 100
+	flushInterval  = time.Second
+	logChannelSize = 1000
+)
+
+type logLine struct {
+	stream string
+	text   string
+}
 
 type sqliteWriter struct {
 	c      *SQLiteLogCollector
@@ -24,98 +37,199 @@ func (w *sqliteWriter) Write(p []byte) (int, error) {
 		if err != nil {
 			break
 		}
-		line = strings.TrimSuffix(line, "\n")
-		if err := w.c.insert(w.stream, line); err != nil {
-			return len(p), err
-		}
+		w.c.insert(strings.TrimSuffix(line, "\n"), w.stream)
 	}
 	return len(p), nil
 }
 
-func (w *sqliteWriter) flush() error {
-	if w.buf.Len() == 0 {
-		return nil
-	}
-	line := strings.TrimRight(w.buf.String(), "\n")
-	w.buf.Reset()
-	return w.c.insert(w.stream, line)
-}
-
 type SQLiteLogCollector struct {
 	db       *sql.DB
-	stmt     *sql.Stmt
 	ts       int64
-	mu       sync.Mutex
 	counters map[string]int
 	writers  []*sqliteWriter
+
+	linesCh chan logLine
+	wg      sync.WaitGroup
+	cancel  context.CancelFunc
+
+	mu     sync.Mutex
+	closed bool
 }
 
 func NewSQLiteLogCollector(dsn string) (*SQLiteLogCollector, error) {
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open db: %w", err)
 	}
-	table := `CREATE TABLE IF NOT EXISTS session_logs (
+
+	pragmas := []string{
+		"PRAGMA journal_mode = WAL",
+		"PRAGMA synchronous = NORMAL",
+		"PRAGMA temp_store = MEMORY",
+		"PRAGMA mmap_size = 1073741824",
+		"PRAGMA wal_autocheckpoint = 500",
+	}
+	for _, p := range pragmas {
+		if _, err := db.Exec(p); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("pragma %q: %w", p, err)
+		}
+	}
+
+	createTable := `CREATE TABLE IF NOT EXISTS session_logs (
         session_ts INTEGER,
         stream     TEXT,
         line_num   INTEGER,
         text       TEXT
     )`
-	if _, err = db.Exec(table); err != nil {
+	if _, err = db.Exec(createTable); err != nil {
 		db.Close()
-		return nil, err
+		return nil, fmt.Errorf("create table: %w", err)
 	}
-	idx := `CREATE INDEX IF NOT EXISTS idx_session_line ON session_logs(session_ts, line_num)`
-	if _, err = db.Exec(idx); err != nil {
+
+	createIndex := `CREATE INDEX IF NOT EXISTS idx_session_line ON session_logs(session_ts, line_num)`
+	if _, err = db.Exec(createIndex); err != nil {
 		db.Close()
-		return nil, err
+		return nil, fmt.Errorf("create index: %w", err)
 	}
-	stmt, err := db.Prepare(`INSERT INTO session_logs(session_ts,stream,line_num,text) VALUES(?,?,?,?)`)
-	if err != nil {
-		db.Close()
-		return nil, err
-	}
-	return &SQLiteLogCollector{
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	s := &SQLiteLogCollector{
 		db:       db,
-		stmt:     stmt,
 		ts:       time.Now().UnixNano(),
-		counters: map[string]int{},
-	}, nil
+		counters: make(map[string]int),
+		linesCh:  make(chan logLine, logChannelSize),
+		cancel:   cancel,
+	}
+
+	s.wg.Add(1)
+	go s.batchProcessor(ctx)
+
+	return s, nil
 }
 
-func (s *SQLiteLogCollector) insert(stream, line string) error {
+func (s *SQLiteLogCollector) closedp() bool {
 	s.mu.Lock()
-	n := s.counters[stream] + 1
-	s.counters[stream] = n
-	s.mu.Unlock()
-	_, err := s.stmt.Exec(s.ts, stream, n, line)
-	return err
+	defer s.mu.Unlock()
+	return s.closed
+}
+
+func (s *SQLiteLogCollector) insert(line, stream string) {
+	if s.closedp() {
+		return
+	}
+
+	s.linesCh <- logLine{stream: stream, text: line}
 }
 
 func (s *SQLiteLogCollector) Stream(name string) io.Writer {
-	w := &sqliteWriter{c: s, stream: name}
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return io.Discard
+	}
+
+	w := &sqliteWriter{c: s, stream: name}
 	s.writers = append(s.writers, w)
-	s.mu.Unlock()
 	return w
 }
 
 func (s *SQLiteLogCollector) Close() error {
-	var err error
-	for _, w := range s.writers {
-		if e := w.flush(); e != nil && err == nil {
-			err = e
+	if s.closedp() {
+		return nil
+	}
+
+	s.mu.Lock()
+	s.closed = true
+	writers := s.writers
+	s.writers = nil
+	s.mu.Unlock()
+
+	for _, w := range writers {
+		w.Write([]byte("\n"))
+	}
+
+	s.cancel()
+	s.wg.Wait()
+
+	if s.db == nil {
+		return nil
+	}
+
+	return s.db.Close()
+}
+
+func (s *SQLiteLogCollector) batchProcessor(ctx context.Context) {
+	defer s.wg.Done()
+
+	batch := make([]logLine, 0, batchSize)
+	ticker := time.NewTicker(flushInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			close(s.linesCh)
+			for line := range s.linesCh {
+				batch = append(batch, line)
+			}
+			if len(batch) > 0 {
+				s.flushBatch(batch)
+			}
+			return
+		case line := <-s.linesCh:
+			batch = append(batch, line)
+			if len(batch) >= batchSize {
+				s.flushBatch(batch)
+				batch = make([]logLine, 0, batchSize)
+			}
+		case <-ticker.C:
+			if len(batch) > 0 {
+				s.flushBatch(batch)
+				batch = make([]logLine, 0, batchSize)
+			}
 		}
 	}
-	if s.stmt != nil {
-		if e := s.stmt.Close(); e != nil && err == nil {
-			err = e
+}
+
+func (s *SQLiteLogCollector) flushBatch(batch []logLine) error {
+	type numberedLine struct {
+		stream string
+		text   string
+		num    int
+	}
+	numberedBatch := make([]numberedLine, len(batch))
+
+	s.mu.Lock()
+	for i, line := range batch {
+		s.counters[line.stream]++
+		numberedBatch[i] = numberedLine{
+			stream: line.stream,
+			text:   line.text,
+			num:    s.counters[line.stream],
 		}
 	}
-	if s.db != nil {
-		if e := s.db.Close(); e != nil && err == nil {
-			err = e
+	s.mu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`INSERT INTO session_logs(session_ts,stream,line_num,text) VALUES(?,?,?,?)`)
+	if err != nil {
+		return fmt.Errorf("prepare statement: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, line := range numberedBatch {
+		if _, err := stmt.Exec(s.ts, line.stream, line.num, line.text); err != nil {
+			return fmt.Errorf("exec statement for stream %q: %w", line.stream, err)
 		}
 	}
-	return err
+
+	return tx.Commit()
 }
