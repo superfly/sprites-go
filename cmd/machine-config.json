@@ -45,7 +45,7 @@
       ],
       "files":[{
         "guest_path": "/etc/app-image.json",
-        "image_config": "ghcr.io/superfly/sprite-ubuntu:devtools-25.04-c037995"
+        "image_config": "ghcr.io/superfly/sprite-ubuntu:25.04-e3748e0"
       }],
       "mounts": [
         {
@@ -101,7 +101,7 @@
     },
     {
       "name": "app-image",
-      "image": "ghcr.io/superfly/sprite-ubuntu:devtools-25.04-c037995"
+      "image": "ghcr.io/superfly/sprite-ubuntu:25.04-e3748e0"
     }
   ]
 }
