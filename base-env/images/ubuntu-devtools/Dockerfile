@@ -78,14 +78,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         file which less nano vim-tiny \
         procps htop tree \
         zip gzip bzip2 \
-        libffi-dev libyaml-dev \
+        libffi-dev libyaml-dev gosu \
     && apt-get clean
 
 # Bring in asdf + your pre-built languages
 COPY --from=buildbase /opt/asdf          /opt/asdf
 COPY --from=buildbase /etc/profile.d/asdf.sh /etc/profile.d/asdf.sh
-
-RUN apt-get install -y gosu
 
 # Copy the sudoers file and user skeleton, then fix ownership
 
@@ -94,9 +92,7 @@ RUN useradd -ms /bin/bash -u $UID $USER \
  && echo "$USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$USER \
  && chmod 0440 /etc/sudoers.d/$USER \
  && usermod -aG sudo,users $USER \
- && chown -R $USER:$USER /opt/asdf \
- && chmod 0440 /etc/sudoers.d/$USER \
- && echo "127.0.0.1	sprite" >> /etc/hosts
+ && chown -R $USER:$USER /opt/asdf
 
 ENV ASDF_DIR=/opt/asdf \
     ASDF_DATA_DIR=/opt/asdf \
@@ -105,13 +101,8 @@ ENV ASDF_DIR=/opt/asdf \
 # Create sprite scripts directory
 RUN mkdir -p /.sprite
 
-# Copy scripts and documentation
-COPY setup-mounts.sh /.sprite/setup-mounts.sh
-COPY entrypoint.sh /.sprite/entrypoint.sh
-COPY llm.txt /llm.txt
-
-# Make scripts executable
-RUN chmod +x /.sprite/setup-mounts.sh /.sprite/entrypoint.sh
+# Copy our stuff
+COPY root/ /
 
 USER sprite
 WORKDIR /home/sprite
