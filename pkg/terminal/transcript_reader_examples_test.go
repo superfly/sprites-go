@@ -14,7 +14,7 @@ import (
 // Example_postMortemReading demonstrates reading a completed transcript file.
 func Example_postMortemReading() {
 	// Open a completed transcript file
-	tr, err := terminal.OpenTranscript("session.log")
+	tr, err := terminal.OpenTranscriptFile("session.log")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -26,7 +26,7 @@ func Example_postMortemReading() {
 		if err != nil {
 			break // io.EOF when complete
 		}
-		fmt.Println(line)
+		fmt.Printf("[%s] %s: %s\n", line.Timestamp.Format("15:04:05"), line.Stream, line.Text)
 	}
 }
 
@@ -42,12 +42,13 @@ func Example_liveStreaming() {
 	}
 	defer tr.Close()
 
+	fmt.Printf("Session ID: %s\n", tr.SessionID())
 	for {
 		line, err := tr.NextLine(ctx)
 		if err != nil {
 			break // io.EOF when command completes
 		}
-		fmt.Println(line)
+		fmt.Printf("Line %d [%s]: %s\n", line.Sequence, line.Stream, line.Text)
 	}
 }
 
@@ -62,29 +63,30 @@ func Example_memoryTranscriptStreaming() {
 	stdoutWriter.Write([]byte("Line 1\n"))
 	stdoutWriter.Write([]byte("Line 2\n"))
 
-	// Create a reader that will stream new content as it's added
-	tr := terminal.StreamMemoryTranscript(ctx, transcript)
+	// Create a reader with a specific session ID
+	sessionID := "example-session-123"
+	tr := terminal.StreamMemoryTranscript(ctx, sessionID, transcript)
 	defer tr.Close()
 
-	// Read some lines
-	for i := 0; i < 2; i++ {
-		line, err := tr.NextLine(ctx)
-		if err != nil {
-			break
-		}
-		fmt.Println(line)
+	fmt.Printf("Session ID: %s\n", tr.SessionID())
+
+	// Use GetLines to read all available lines at once
+	query := terminal.LineQuery{
+		SessionID:     sessionID,
+		AfterSequence: 0,
+		Stream:        "all",
+		Limit:         10,
+		Follow:        false,
 	}
 
-	// Add more content to the transcript
-	stdoutWriter.Write([]byte("Line 3\n"))
+	lines, err := tr.GetLines(ctx, query)
+	if err != nil {
+		log.Printf("Error getting lines: %v", err)
+		return
+	}
 
-	// Wait a moment for the reader to pick up the new content
-	time.Sleep(time.Second)
-
-	// Continue reading
-	line, err := tr.NextLine(ctx)
-	if err == nil {
-		fmt.Println(line)
+	for _, line := range lines {
+		fmt.Printf("Line %d [%s]: %s\n", line.Sequence, line.Stream, line.Text)
 	}
 }
 
@@ -111,7 +113,7 @@ func Example_configuredReader() {
 		if err != nil {
 			break
 		}
-		fmt.Printf("STDERR: %s\n", line)
+		fmt.Printf("STDERR Line %d: %s\n", line.Sequence, line.Text)
 	}
 }
 
@@ -150,13 +152,15 @@ func Example_unifiedAPI() {
 		ctx := context.Background()
 		lineCount := 0
 
+		fmt.Printf("Processing session: %s\n", tr.SessionID())
+
 		for {
 			line, err := tr.NextLine(ctx)
 			if err != nil {
 				break
 			}
 			lineCount++
-			fmt.Printf("Line %d: %s\n", lineCount, line)
+			fmt.Printf("Line %d [seq=%d, %s]: %s\n", lineCount, line.Sequence, line.Stream, line.Text)
 		}
 
 		fmt.Printf("Total lines processed: %d\n", lineCount)
@@ -173,11 +177,68 @@ func Example_unifiedAPI() {
 	}
 
 	// Use with post-mortem (if file exists)
-	fileReader, err := terminal.OpenTranscript("session.log")
+	fileReader, err := terminal.OpenTranscriptFile("session.log")
 	if err == nil {
 		fmt.Println("=== Post-mortem Reading ===")
 		processTranscript(fileReader)
 		fileReader.Close()
+	}
+}
+
+// Example_httpPollingAPI demonstrates how to implement HTTP API polling for new log lines.
+func Example_httpPollingAPI() {
+	ctx := context.Background()
+
+	// Simulate a running session with some output
+	cmd := exec.Command("sh", "-c", "echo line1; sleep 1; echo line2; sleep 1; echo line3")
+	tr, err := terminal.StreamTranscript(ctx, cmd)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tr.Close()
+
+	sessionID := tr.SessionID()
+	fmt.Printf("Session ID: %s\n", sessionID)
+
+	// Simulate HTTP API polling pattern
+	lastSequence := int64(0)
+
+	// Poll 1: Get initial lines
+	query := terminal.LineQuery{
+		SessionID:     sessionID,
+		AfterSequence: lastSequence,
+		Stream:        "all",
+		Limit:         10,
+		Follow:        false, // Don't wait, return what's available
+	}
+
+	lines, err := tr.GetLines(ctx, query)
+	if err != nil {
+		log.Printf("Error: %v", err)
+		return
+	}
+
+	fmt.Printf("Poll 1: Found %d new lines\n", len(lines))
+	for _, line := range lines {
+		fmt.Printf("  Line %d: %s\n", line.Sequence, line.Text)
+		lastSequence = line.Sequence
+	}
+
+	// Wait a bit for more output
+	time.Sleep(2 * time.Second)
+
+	// Poll 2: Get only new lines since last poll
+	query.AfterSequence = lastSequence
+	lines, err = tr.GetLines(ctx, query)
+	if err != nil {
+		log.Printf("Error: %v", err)
+		return
+	}
+
+	fmt.Printf("Poll 2: Found %d new lines since sequence %d\n", len(lines), lastSequence)
+	for _, line := range lines {
+		fmt.Printf("  Line %d: %s\n", line.Sequence, line.Text)
+		lastSequence = line.Sequence
 	}
 }
 
@@ -204,7 +265,8 @@ func Example_terminalSessionIntegration() {
 	}()
 
 	// Stream the transcript as the session runs
-	tr := terminal.StreamMemoryTranscript(ctx, transcript)
+	sessionID := "integration-test-session"
+	tr := terminal.StreamMemoryTranscript(ctx, sessionID, transcript)
 	defer tr.Close()
 
 	// Small delay to let the session start
@@ -215,6 +277,6 @@ func Example_terminalSessionIntegration() {
 		if err != nil {
 			break
 		}
-		fmt.Printf("Session output: %s\n", line)
+		fmt.Printf("Session %s Line %d: %s\n", line.SessionID, line.Sequence, line.Text)
 	}
 }
