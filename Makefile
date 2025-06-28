@@ -26,11 +26,11 @@ test-machine: build
 # Test all SDKs
 test-sdks:
 	@echo "Building base sprite-env image..."
-	sudo docker build -t sprite-env-base:test .
+	docker build -t sprite-env-base:test .
 	@echo "Building SDK test Docker image..."
-	sudo docker build -f sdks/Dockerfile.test -t sprite-sdks-test .
+	docker build -f sdks/Dockerfile.test -t sprite-sdks-test .
 	@echo "Running all SDK tests..."
-	sudo docker run --rm --privileged sprite-sdks-test
+	docker run --rm --privileged sprite-sdks-test
 
 # Show available targets
 help:
