@@ -8,11 +8,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
-func TestFileTranscriptReader(t *testing.T) {
+func TestFileTranscriptBackend(t *testing.T) {
 	// Create a test transcript file
-	testFile := "/tmp/test-transcript-reader.log"
+	testFile := "/tmp/test-transcript-backend.log"
 	defer os.Remove(testFile)
 
 	// Create FileTranscript and write some test data
@@ -38,7 +40,7 @@ func TestFileTranscriptReader(t *testing.T) {
 
 	var actualFile string
 	for _, file := range files {
-		if strings.HasPrefix(file.Name(), "test-transcript-reader-") && strings.HasSuffix(file.Name(), ".log") {
+		if strings.HasPrefix(file.Name(), "test-transcript-backend-") && strings.HasSuffix(file.Name(), ".log") {
 			actualFile = "/tmp/" + file.Name()
 			break
 		}
@@ -49,39 +51,45 @@ func TestFileTranscriptReader(t *testing.T) {
 	}
 	defer os.Remove(actualFile)
 
-	// Test reading the transcript
-	reader, err := OpenTranscript(actualFile)
+	// Test the backend directly
+	backend, err := NewFileTranscriptBackend(actualFile)
 	if err != nil {
-		t.Fatalf("failed to open transcript: %v", err)
+		t.Fatalf("failed to create backend: %v", err)
 	}
-	defer reader.Close()
+	defer backend.Close()
 
-	ctx := context.Background()
-	var lines []string
-
-	for {
-		line, err := reader.NextLine(ctx)
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			t.Fatalf("unexpected error reading line: %v", err)
-		}
-		lines = append(lines, line)
+	sessionID := uuid.New().String()
+	query := LineQuery{
+		SessionID:     sessionID,
+		AfterSequence: 0,
+		Stream:        "all",
+		Limit:         10,
+		Follow:        false,
 	}
 
-	// Should have read all lines
+	lines, err := backend.GetLines(context.Background(), query)
+	if err != nil {
+		t.Fatalf("failed to get lines: %v", err)
+	}
+
+	// Should have parsed all lines
 	expected := []string{"stdout line 1", "stdout line 2", "stderr line 1"}
 	if len(lines) != len(expected) {
 		t.Errorf("expected %d lines, got %d", len(expected), len(lines))
 	}
 
-	for i, expectedLine := range expected {
+	for i, expectedText := range expected {
 		if i >= len(lines) {
 			break
 		}
-		if !strings.Contains(lines[i], expectedLine) {
-			t.Errorf("line %d: expected to contain %q, got %q", i, expectedLine, lines[i])
+		if lines[i].Text != expectedText {
+			t.Errorf("line %d: expected %q, got %q", i, expectedText, lines[i].Text)
+		}
+		if lines[i].SessionID != sessionID {
+			t.Errorf("line %d: expected session ID %q, got %q", i, sessionID, lines[i].SessionID)
+		}
+		if lines[i].Sequence != int64(i+1) {
+			t.Errorf("line %d: expected sequence %d, got %d", i, i+1, lines[i].Sequence)
 		}
 	}
 }
@@ -126,14 +134,14 @@ func TestFileTranscriptReaderWithStreamFilter(t *testing.T) {
 		Stream:        "stdout",
 	}
 
-	reader, err := OpenTranscriptWithConfig(actualFile, config)
+	reader, err := OpenTranscriptFileWithConfig(actualFile, config)
 	if err != nil {
 		t.Fatalf("failed to open transcript: %v", err)
 	}
 	defer reader.Close()
 
 	ctx := context.Background()
-	var lines []string
+	var lines []*TranscriptLine
 
 	for {
 		line, err := reader.NextLine(ctx)
@@ -150,8 +158,11 @@ func TestFileTranscriptReaderWithStreamFilter(t *testing.T) {
 	if len(lines) != 1 {
 		t.Errorf("expected 1 line, got %d", len(lines))
 	}
-	if len(lines) > 0 && !strings.Contains(lines[0], "stdout line") {
-		t.Errorf("expected stdout line, got %q", lines[0])
+	if len(lines) > 0 && lines[0].Text != "stdout line" {
+		t.Errorf("expected 'stdout line', got %q", lines[0].Text)
+	}
+	if len(lines) > 0 && lines[0].Stream != "stdout" {
+		t.Errorf("expected stream 'stdout', got %q", lines[0].Stream)
 	}
 }
 
@@ -167,7 +178,12 @@ func TestLiveTranscriptReader(t *testing.T) {
 	}
 	defer reader.Close()
 
-	var lines []string
+	// Verify session ID is set
+	if reader.SessionID() == "" {
+		t.Error("session ID should not be empty")
+	}
+
+	var lines []*TranscriptLine
 	for {
 		line, err := reader.NextLine(ctx)
 		if err == io.EOF {
@@ -188,8 +204,17 @@ func TestLiveTranscriptReader(t *testing.T) {
 		if i >= len(lines) {
 			break
 		}
-		if lines[i] != expectedLine {
-			t.Errorf("line %d: expected %q, got %q", i, expectedLine, lines[i])
+		if lines[i].Text != expectedLine {
+			t.Errorf("line %d: expected %q, got %q", i, expectedLine, lines[i].Text)
+		}
+		if lines[i].SessionID != reader.SessionID() {
+			t.Errorf("line %d: session ID mismatch", i)
+		}
+		if lines[i].Sequence != int64(i+1) {
+			t.Errorf("line %d: expected sequence %d, got %d", i, i+1, lines[i].Sequence)
+		}
+		if lines[i].Stream != "stdout" {
+			t.Errorf("line %d: expected stream 'stdout', got %q", i, lines[i].Stream)
 		}
 	}
 }
@@ -214,7 +239,7 @@ func TestLiveTranscriptReaderWithStderr(t *testing.T) {
 	}
 	defer reader.Close()
 
-	var lines []string
+	var lines []*TranscriptLine
 	for {
 		line, err := reader.NextLine(ctx)
 		if err == io.EOF {
@@ -230,12 +255,15 @@ func TestLiveTranscriptReaderWithStderr(t *testing.T) {
 	if len(lines) != 1 {
 		t.Errorf("expected 1 line, got %d", len(lines))
 	}
-	if len(lines) > 0 && lines[0] != "stderr message" {
-		t.Errorf("expected 'stderr message', got %q", lines[0])
+	if len(lines) > 0 && lines[0].Text != "stderr message" {
+		t.Errorf("expected 'stderr message', got %q", lines[0].Text)
+	}
+	if len(lines) > 0 && lines[0].Stream != "stderr" {
+		t.Errorf("expected stream 'stderr', got %q", lines[0].Stream)
 	}
 }
 
-func TestMemoryTranscriptReader(t *testing.T) {
+func TestMemoryTranscriptBackend(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
@@ -246,45 +274,42 @@ func TestMemoryTranscriptReader(t *testing.T) {
 	stdoutWriter.Write([]byte("initial line 1\n"))
 	stdoutWriter.Write([]byte("initial line 2\n"))
 
-	// Create reader with faster flush interval for testing
-	config := TranscriptReaderConfig{
-		BufferSize:    100,
-		FlushInterval: 100 * time.Millisecond,
+	// Test the backend directly
+	sessionID := uuid.New().String()
+	backend := NewMemoryTranscriptBackend(sessionID, transcript)
+	defer backend.Close()
+
+	query := LineQuery{
+		SessionID:     sessionID,
+		AfterSequence: 0,
 		Stream:        "stdout",
+		Limit:         10,
+		Follow:        false,
 	}
 
-	reader := StreamMemoryTranscriptWithConfig(ctx, transcript, config)
-	defer reader.Close()
-
-	// Read initial lines
-	line1, err := reader.NextLine(ctx)
+	lines, err := backend.GetLines(ctx, query)
 	if err != nil {
-		t.Fatalf("failed to read line 1: %v", err)
-	}
-	if line1 != "initial line 1" {
-		t.Errorf("expected 'initial line 1', got %q", line1)
+		t.Fatalf("failed to get lines: %v", err)
 	}
 
-	line2, err := reader.NextLine(ctx)
-	if err != nil {
-		t.Fatalf("failed to read line 2: %v", err)
-	}
-	if line2 != "initial line 2" {
-		t.Errorf("expected 'initial line 2', got %q", line2)
+	expected := []string{"initial line 1", "initial line 2"}
+	if len(lines) != len(expected) {
+		t.Errorf("expected %d lines, got %d", len(expected), len(lines))
 	}
 
-	// Add more data while reader is active
-	stdoutWriter.Write([]byte("new line 1\n"))
-
-	// Wait for flush interval and read new line
-	time.Sleep(200 * time.Millisecond)
-
-	line3, err := reader.NextLine(ctx)
-	if err != nil {
-		t.Fatalf("failed to read line 3: %v", err)
-	}
-	if line3 != "new line 1" {
-		t.Errorf("expected 'new line 1', got %q", line3)
+	for i, expectedText := range expected {
+		if i >= len(lines) {
+			break
+		}
+		if lines[i].Text != expectedText {
+			t.Errorf("line %d: expected %q, got %q", i, expectedText, lines[i].Text)
+		}
+		if lines[i].SessionID != sessionID {
+			t.Errorf("line %d: expected session ID %q, got %q", i, sessionID, lines[i].SessionID)
+		}
+		if lines[i].Stream != "stdout" {
+			t.Errorf("line %d: expected stream 'stdout', got %q", i, lines[i].Stream)
+		}
 	}
 }
 
@@ -326,11 +351,11 @@ func TestTranscriptReaderClose(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to create temp file: %v", err)
 		}
-		file.WriteString("test line\n")
+		file.WriteString(`time=2024-01-01T00:00:00Z level=INFO msg=io stream=stdout line="test line"` + "\n")
 		file.Close()
 		defer os.Remove(tmpFile)
 
-		reader, err := OpenTranscript(tmpFile)
+		reader, err := OpenTranscriptFile(tmpFile)
 		if err != nil {
 			t.Fatalf("failed to open transcript: %v", err)
 		}
@@ -363,6 +388,75 @@ func TestTranscriptReaderClose(t *testing.T) {
 		_, err = reader.NextLine(ctx)
 		if err != io.EOF {
 			t.Errorf("expected io.EOF after close, got %v", err)
+		}
+	}
+}
+
+func TestNextLineAfter(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Create command with multiple lines
+	cmd := exec.Command("sh", "-c", "echo line1; echo line2; echo line3")
+	reader, err := StreamTranscript(ctx, cmd)
+	if err != nil {
+		t.Fatalf("failed to create stream transcript: %v", err)
+	}
+	defer reader.Close()
+
+	// Read first line
+	firstLine, err := reader.NextLine(ctx)
+	if err != nil {
+		t.Fatalf("failed to read first line: %v", err)
+	}
+
+	// Get line after the first one
+	nextLine, err := reader.NextLineAfter(ctx, firstLine.Sequence)
+	if err != nil && err != io.EOF {
+		t.Fatalf("failed to read next line: %v", err)
+	}
+
+	if err != io.EOF && nextLine.Sequence <= firstLine.Sequence {
+		t.Errorf("next line sequence %d should be > %d", nextLine.Sequence, firstLine.Sequence)
+	}
+}
+
+func TestGetLines(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Create command with multiple lines
+	cmd := exec.Command("sh", "-c", "echo line1; echo line2; echo line3")
+	reader, err := StreamTranscript(ctx, cmd)
+	if err != nil {
+		t.Fatalf("failed to create stream transcript: %v", err)
+	}
+	defer reader.Close()
+
+	// Small delay to let command produce output
+	time.Sleep(100 * time.Millisecond)
+
+	query := LineQuery{
+		SessionID:     reader.SessionID(),
+		AfterSequence: 0,
+		Stream:        "all",
+		Limit:         10,
+		Follow:        false,
+	}
+
+	lines, err := reader.GetLines(ctx, query)
+	if err != nil {
+		t.Fatalf("failed to get lines: %v", err)
+	}
+
+	if len(lines) == 0 {
+		t.Error("expected at least some lines")
+	}
+
+	// Verify sequence ordering
+	for i := 1; i < len(lines); i++ {
+		if lines[i].Sequence <= lines[i-1].Sequence {
+			t.Errorf("line %d sequence %d should be > line %d sequence %d", i, lines[i].Sequence, i-1, lines[i-1].Sequence)
 		}
 	}
 }
