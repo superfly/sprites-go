@@ -11,7 +11,7 @@ import (
 
 // HandleExecRefactored demonstrates the new simplified exec handler using pkg/terminal.
 // This will replace HandleExec once testing is complete.
-func (h *Handlers) HandleExecRefactored(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 	h.logger.Debug("HandleExecRefactored called",
 		"method", r.Method,
 		"url", r.URL.String(),
