@@ -4,7 +4,23 @@ on:
   push:
     branches:
       - main
+    paths:
+      - 'go.*'
+      - 'Dockerfile'
+      - 'tests/**'
+      - 'server/**'
+      - 'lib/**'
+      - 'packages/**'
+      - 'client/**'
   pull_request:
+    paths:
+      - 'go.*'
+      - 'Dockerfile'
+      - 'tests/**'
+      - 'server/**'
+      - 'lib/**'
+      - 'packages/**'
+      - 'client/**'
   workflow_call:  # This allows other workflows to call this one
 
 jobs:
