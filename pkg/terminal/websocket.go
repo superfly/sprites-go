@@ -1,7 +1,6 @@
 package terminal
 
 import (
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -122,11 +121,6 @@ func newWebSocketStreams(conn *gorillaws.Conn, isPTY bool) *webSocketStreams {
 	// Start the write loop
 	go ws.writeLoop()
 
-	// Start resize handling for PTY mode
-	if isPTY {
-		go ws.handleControlMessages()
-	}
-
 	return ws
 }
 
@@ -141,32 +135,6 @@ func (ws *webSocketStreams) writeLoop() {
 			}
 		case <-ws.done:
 			return
-		}
-	}
-}
-
-// handleControlMessages processes control messages for PTY mode
-func (ws *webSocketStreams) handleControlMessages() {
-	for {
-		select {
-		case <-ws.done:
-			return
-		default:
-			messageType, data, err := ws.conn.ReadMessage()
-			if err != nil {
-				return
-			}
-
-			if messageType == gorillaws.TextMessage {
-				// Handle control messages (like resize)
-				var msg ControlMessage
-				if err := json.Unmarshal(data, &msg); err == nil {
-					if msg.Type == "resize" && msg.Cols > 0 && msg.Rows > 0 {
-						// Note: Resize handling would need to be implemented by the caller
-						// since we don't have direct access to the PTY here
-					}
-				}
-			}
 		}
 	}
 }
