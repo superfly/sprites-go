@@ -1,0 +1,28 @@
+name: Test SDKs
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'sdks/**'
+      - '.github/workflows/test-sdks.yml'
+  pull_request:
+    paths:
+      - 'sdks/**'
+      - '.github/workflows/test-sdks.yml'
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: 'Enable debug output'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  test-sdks:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Test all SDKs
+      run: make test-sdks 
