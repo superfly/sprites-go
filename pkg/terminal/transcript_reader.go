@@ -499,21 +499,38 @@ func (b *fileTranscriptBackend) GetLines(ctx context.Context, query LineQuery) (
 
 func (b *fileTranscriptBackend) parseLogLine(line, sessionID string, sequence int64) *TranscriptLine {
 	// Parse structured log format: time=... level=... msg=io stream=... line=...
-	parts := strings.Fields(line)
+	// Handle quoted line content that may contain spaces
 	var stream, content, timeStr string
+
+	// Find line= field which may be quoted
+	lineIndex := strings.Index(line, "line=")
+	if lineIndex == -1 {
+		return nil
+	}
+
+	// Parse fields before line= field
+	beforeLine := line[:lineIndex]
+	parts := strings.Fields(beforeLine)
 
 	for _, part := range parts {
 		if strings.HasPrefix(part, "time=") {
 			timeStr = strings.TrimPrefix(part, "time=")
 		} else if strings.HasPrefix(part, "stream=") {
 			stream = strings.TrimPrefix(part, "stream=")
-		} else if strings.HasPrefix(part, "line=") {
-			content = strings.TrimPrefix(part, "line=")
-			// Handle quoted content
-			if strings.HasPrefix(content, `"`) && strings.HasSuffix(content, `"`) {
-				content = content[1 : len(content)-1]
-			}
 		}
+	}
+
+	// Extract line content (handle quotes)
+	lineContent := line[lineIndex+5:] // Skip "line="
+	if strings.HasPrefix(lineContent, `"`) {
+		// Find closing quote
+		if endQuote := strings.LastIndex(lineContent, `"`); endQuote > 0 {
+			content = lineContent[1:endQuote]
+		} else {
+			content = strings.TrimPrefix(lineContent, `"`)
+		}
+	} else {
+		content = lineContent
 	}
 
 	if stream == "" || content == "" {
@@ -538,8 +555,13 @@ func (b *fileTranscriptBackend) parseLogLine(line, sessionID string, sequence in
 }
 
 func (b *fileTranscriptBackend) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	if b.file != nil {
-		return b.file.Close()
+		err := b.file.Close()
+		b.file = nil // Prevent double close
+		return err
 	}
 	return nil
 }
