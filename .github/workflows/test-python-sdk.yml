@@ -1,0 +1,32 @@
+name: Test Python SDK
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'sdks/python/**'
+      - '.github/workflows/test-python-sdk.yml'
+  pull_request:
+    paths:
+      - 'sdks/python/**'
+      - '.github/workflows/test-python-sdk.yml'
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: 'Enable debug output'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  docker-test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Build server binary
+      run: make build
+    
+    - name: Run Docker tests with privileged access
+      working-directory: sdks/python
+      run: make test-docker 

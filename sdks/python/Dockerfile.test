@@ -1,0 +1,62 @@
+# syntax=docker/dockerfile:1
+
+FROM python:3.11-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    make \
+    git \
+    curl \
+    wget \
+    fuse3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install JuiceFS for checkpoint/restore functionality
+RUN wget -q https://github.com/juicedata/juicefs/releases/download/v1.1.0/juicefs-1.1.0-linux-amd64.tar.gz \
+    && tar -xzf juicefs-1.1.0-linux-amd64.tar.gz \
+    && mv juicefs /usr/local/bin/ \
+    && rm juicefs-1.1.0-linux-amd64.tar.gz \
+    && chmod +x /usr/local/bin/juicefs
+
+# Install Litestream for JuiceFS database replication
+RUN wget -q https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-amd64.tar.gz \
+    && tar -xzf litestream-v0.3.13-linux-amd64.tar.gz \
+    && mv litestream /usr/local/bin/ \
+    && rm litestream-v0.3.13-linux-amd64.tar.gz \
+    && chmod +x /usr/local/bin/litestream
+
+WORKDIR /app
+
+# Copy the Linux server binary from the symlinked dist directory
+COPY dist/server /app/dist/server
+RUN chmod +x /app/dist/server
+
+# Copy fly-env config file for JuiceFS LocalMode
+COPY fly-env.json /app/config/fly-env.json
+
+# Copy SDK files
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install test dependencies
+RUN pip install --no-cache-dir pytest pytest-cov pytest-timeout
+
+# Copy the SDK source
+COPY . /app
+
+# Install the SDK in development mode
+RUN pip install -e .
+
+# Set environment for tests
+ENV SPRITE_SERVER_BINARY=/app/dist/server
+ENV PYTHONPATH=/app
+
+# Server configuration
+ENV SPRITE_HTTP_API_TOKEN=f0e4c2f76c58916ec258f246851bea091d14d4247a2fc3e18694461b1816e13b
+
+# Create directories for the server and JuiceFS
+RUN mkdir -p /tmp/sprite-data/juicefs
+
+# Start server and run tests
+ENTRYPOINT ["/app/dist/server", "-config", "/app/config/fly-env.json"]
+CMD ["python3", "-m", "pytest", "/app/tests/", "-v", "--tb=short", "--timeout=60"]

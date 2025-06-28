@@ -44,6 +44,7 @@ type Config struct {
 
 	// JuiceFS
 	JuiceFSBaseDir    string
+	JuiceFSLocalMode  bool
 	S3AccessKey       string
 	S3SecretAccessKey string
 	S3EndpointURL     string
@@ -115,6 +116,7 @@ func NewApplication(config Config) (*Application, error) {
 		ContainerSocketDir:             config.ContainerSocketDir,
 		ContainerTTYTimeout:            config.ContainerTTYTimeout,
 		JuiceFSBaseDir:                 config.JuiceFSBaseDir,
+		JuiceFSLocalMode:               config.JuiceFSLocalMode,
 		S3AccessKey:                    config.S3AccessKey,
 		S3SecretAccessKey:              config.S3SecretAccessKey,
 		S3EndpointURL:                  config.S3EndpointURL,
@@ -346,6 +348,7 @@ func parseCommandLine() (Config, error) {
 			// JuiceFS configuration
 			JuiceFSEnabled    bool   `json:"juicefs_enabled"`
 			JuiceFSBaseDir    string `json:"juicefs_base_dir"`
+			JuiceFSLocalMode  bool   `json:"juicefs_local_mode"`
 			JuiceFSVolumeName string `json:"juicefs_volume_name"`
 			S3AccessKey       string `json:"s3_access_key"`
 			S3SecretAccessKey string `json:"s3_secret_access_key"`
@@ -398,6 +401,7 @@ func parseCommandLine() (Config, error) {
 			config.ContainerEnabled, config.ContainerSocketDir, config.ContainerTTYTimeout)
 
 		config.JuiceFSBaseDir = fileConfig.JuiceFSBaseDir
+		config.JuiceFSLocalMode = fileConfig.JuiceFSLocalMode
 		config.S3AccessKey = fileConfig.S3AccessKey
 		config.S3SecretAccessKey = fileConfig.S3SecretAccessKey
 		config.S3EndpointURL = fileConfig.S3EndpointURL

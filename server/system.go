@@ -52,6 +52,7 @@ type SystemConfig struct {
 
 	// JuiceFS configuration
 	JuiceFSBaseDir    string
+	JuiceFSLocalMode  bool
 	S3AccessKey       string
 	S3SecretAccessKey string
 	S3EndpointURL     string
@@ -99,6 +100,7 @@ func NewSystem(config SystemConfig, logger *slog.Logger, reaper *Reaper) (*Syste
 	if config.JuiceFSBaseDir != "" {
 		juicefsConfig := juicefs.Config{
 			BaseDir:           config.JuiceFSBaseDir,
+			LocalMode:         config.JuiceFSLocalMode,
 			S3AccessKey:       config.S3AccessKey,
 			S3SecretAccessKey: config.S3SecretAccessKey,
 			S3EndpointURL:     config.S3EndpointURL,
@@ -114,7 +116,7 @@ func NewSystem(config SystemConfig, logger *slog.Logger, reaper *Reaper) (*Syste
 		}
 
 		// Create leaser for S3 mode (non-local mode)
-		if config.S3AccessKey != "" && config.S3SecretAccessKey != "" &&
+		if !config.JuiceFSLocalMode && config.S3AccessKey != "" && config.S3SecretAccessKey != "" &&
 			config.S3EndpointURL != "" && config.S3Bucket != "" {
 			leaserConfig := leaser.Config{
 				S3AccessKey:       config.S3AccessKey,
