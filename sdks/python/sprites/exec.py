@@ -134,7 +134,21 @@ class SpriteExec:
         # Small delay to allow any remaining WebSocket messages to be processed
         # This prevents race conditions where stdout/stderr messages arrive after
         # the exit code
-        time.sleep(0.1)  # 100ms delay
+        time.sleep(0.3)  # 300ms delay for parallel execution reliability
+        
+        # Process any remaining queued messages (just drain them, don't accumulate)
+        # The data has already been added to self.stdout/stderr in _on_message
+        while not self._stdout_queue.empty():
+            try:
+                self._stdout_queue.get_nowait()
+            except queue.Empty:
+                break
+                
+        while not self._stderr_queue.empty():
+            try:
+                self._stderr_queue.get_nowait()
+            except queue.Empty:
+                break
         
         return self
     

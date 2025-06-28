@@ -37,6 +37,12 @@ RUN cd server && \
     -tags 'netgo osusergo' \
     -o ../spritectl .
 
+# Also build the client
+RUN cd client && \
+    CGO_ENABLED=0 GOOS=linux go build \
+    -ldflags="-w -s" \
+    -o ../sprite .
+
 
 # Download crun binary
 FROM alpine:latest AS crun
@@ -70,8 +76,9 @@ COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
 ENV SPRITE_WRITE_DIR=/dev/fly_vol \
     SPRITE_HOME=/home/sprite
 
-# Copy the appropriate binary based on target platform
+# Copy the appropriate binaries based on target platform
 COPY --from=builder /build/spritectl /usr/local/bin/spritectl
+COPY --from=builder /build/sprite /usr/local/bin/sprite
 
 # Set working directory for spritectl components
 WORKDIR ${SPRITE_HOME}

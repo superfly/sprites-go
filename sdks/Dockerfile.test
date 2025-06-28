@@ -1,0 +1,51 @@
+# syntax=docker/dockerfile:1
+
+# Use the base sprite-env image built from the top-level Dockerfile
+FROM sprite-env-base:test
+
+# Install Python and test dependencies
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    python3-venv \
+    golang-go \
+    git \
+    curl \
+    netcat-openbsd \
+    net-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory for SDKs
+WORKDIR /sdks
+
+# Copy all SDK files
+COPY sdks/ /sdks
+
+# Make Python CLI executable
+RUN chmod +x /sdks/python/sprite-cli
+
+# Create test config for spritectl
+RUN mkdir -p /etc/sprite && \
+    echo '{ \
+  "log_level": "debug", \
+  "log_json": false, \
+  "api_listen_addr": "0.0.0.0:28080", \
+  "juicefs_enabled": true, \
+  "juicefs_base_dir": "/tmp/sprite-data/juicefs", \
+  "juicefs_volume_name": "sprite-test-volume", \
+  "juicefs_local_mode": true \
+}' > /etc/sprite/test-config.json
+
+# Set environment for tests
+ENV SPRITE_URL=http://localhost:28080
+ENV SPRITE_TOKEN=f0e4c2f76c58916ec258f246851bea091d14d4247a2fc3e18694461b1816e13b
+ENV SPRITE_HTTP_API_TOKEN=f0e4c2f76c58916ec258f246851bea091d14d4247a2fc3e18694461b1816e13b
+ENV SPRITE_ADMIN_TOKEN=admin-f0e4c2f76c58916ec258f246851bea091d14d4247a2fc3e18694461b1816e13b
+
+# Copy the run-tests script
+COPY sdks/run-tests.sh /sdks/run-tests.sh
+RUN chmod +x /sdks/run-tests.sh
+
+# Run all tests
+ENTRYPOINT ["/bin/bash", "-c"]
+CMD ["/sdks/run-tests.sh"]

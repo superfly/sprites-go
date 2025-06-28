@@ -160,23 +160,14 @@ class TestSprite:
         mock_response.raise_for_status = Mock()
         mock_post.return_value = mock_response
         
-        # Mock get checkpoint details
-        with patch.object(sprite, '_get_checkpoint') as mock_get:
-            mock_get.return_value = Checkpoint(
-                id="cp-123",
-                create_time=datetime.now(),
-                source_id="",
-                history=[]
-            )
-            
-            # Create checkpoint
-            messages = []
-            checkpoint = sprite.checkpoint(on_message=lambda m: messages.append(m))
-            
-            assert checkpoint.id == "cp-123"
-            assert len(messages) == 2
-            assert messages[0].type == "info"
-            assert messages[1].type == "complete"
+        # Create checkpoint
+        messages = []
+        success = sprite.checkpoint(on_message=lambda m: messages.append(m))
+        
+        assert success is True
+        assert len(messages) == 2
+        assert messages[0].type == "info"
+        assert messages[1].type == "complete"
     
     @patch('requests.post')
     def test_restore(self, mock_post, sprite):
@@ -198,8 +189,9 @@ class TestSprite:
         
         # Restore
         messages = []
-        sprite.restore("cp-123", on_message=lambda m: messages.append(m))
+        success = sprite.restore("cp-123", on_message=lambda m: messages.append(m))
         
+        assert success is True
         assert len(messages) == 2
         assert messages[0].type == "progress"
         assert messages[1].type == "complete"

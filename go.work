@@ -3,7 +3,6 @@ go 1.24.4
 use (
 	./client
 	./lib
-	./packages/api-docs
 	./packages/container
 	./packages/juicefs
 	./packages/leaser

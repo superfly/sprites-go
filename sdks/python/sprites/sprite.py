@@ -8,10 +8,63 @@ from typing import Optional, Union, List, Dict, Callable, Iterator
 from urllib.parse import urlparse, urlencode, quote, quote_plus
 from datetime import datetime
 import shlex
+import re
 
 from .exec import SpriteExec
 from .types import Checkpoint, StreamMessage
 from .exceptions import CheckpointError, RestoreError
+
+
+def parse_datetime(dt_string):
+    """
+    Parse various ISO 8601 datetime formats flexibly.
+    
+    Handles:
+    - RFC 3339 / ISO 8601 with 'Z' suffix
+    - ISO 8601 with timezone offset (+00:00)
+    - Microseconds with various precisions
+    - Missing timezone (assumes UTC)
+    """
+    if not dt_string:
+        return datetime.now()
+    
+    # Handle 'Z' suffix by replacing with '+00:00'
+    dt_string = dt_string.replace('Z', '+00:00')
+    
+    # Try parsing with fromisoformat first (works for most standard formats)
+    try:
+        return datetime.fromisoformat(dt_string)
+    except (ValueError, AttributeError):
+        pass
+    
+    # Handle microseconds with more than 6 digits by truncating
+    # Match pattern: 2025-06-28T19:08:52.11605474+00:00
+    pattern = r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.(\d+)([\+\-]\d{2}:\d{2}|Z)?'
+    match = re.match(pattern, dt_string)
+    if match:
+        base_time, microseconds, tz_offset = match.groups()
+        # Truncate microseconds to 6 digits
+        microseconds = microseconds[:6].ljust(6, '0')
+        # Reconstruct the datetime string
+        dt_string = f"{base_time}.{microseconds}"
+        if tz_offset:
+            dt_string += tz_offset if tz_offset != 'Z' else '+00:00'
+        else:
+            dt_string += '+00:00'  # Assume UTC if no timezone
+        
+        try:
+            return datetime.fromisoformat(dt_string)
+        except (ValueError, AttributeError):
+            pass
+    
+    # Last resort: try parsing without microseconds
+    try:
+        # Remove microseconds entirely
+        dt_string = re.sub(r'\.\d+', '', dt_string)
+        return datetime.fromisoformat(dt_string)
+    except (ValueError, AttributeError):
+        # If all parsing fails, return current time
+        return datetime.now()
 
 
 class Sprite:
@@ -107,7 +160,7 @@ class Sprite:
             tty=tty
         )
     
-    def checkpoint(self, on_message: Optional[Callable[[StreamMessage], None]] = None) -> Checkpoint:
+    def checkpoint(self, on_message: Optional[Callable[[StreamMessage], None]] = None) -> bool:
         """
         Create a checkpoint of the current Sprite state.
         
@@ -119,20 +172,21 @@ class Sprite:
                 streaming messages during the checkpoint operation.
                 
         Returns:
-            Checkpoint: The created checkpoint.
+            bool: True if checkpoint was created successfully.
             
         Raises:
             CheckpointError: If the checkpoint operation fails.
             
         Example:
             >>> # Simple checkpoint
-            >>> checkpoint = sprite.checkpoint()
-            >>> print(f"Created checkpoint: {checkpoint.id}")
+            >>> success = sprite.checkpoint()
+            >>> if success:
+            ...     print("Checkpoint created successfully")
             
             >>> # Checkpoint with progress monitoring
             >>> def on_progress(msg):
             ...     print(f"{msg.type}: {msg.message}")
-            >>> checkpoint = sprite.checkpoint(on_message=on_progress)
+            >>> success = sprite.checkpoint(on_message=on_progress)
         """
         url = f"{self.client.endpoint}/v1/sprites/{self.sprite_id}/checkpoint"
         headers = {"Authorization": f"Bearer {self.client.token}"}
@@ -141,7 +195,8 @@ class Sprite:
             response = requests.post(url, headers=headers, stream=True)
             response.raise_for_status()
             
-            checkpoint_info = None
+            completed = False
+            had_error = False
             
             # Process streaming response
             for line in response.iter_lines():
@@ -153,14 +208,18 @@ class Sprite:
                     msg = StreamMessage(
                         type=data.get("type", ""),
                         message=data.get("message", ""),
-                        time=datetime.fromisoformat(data["time"]) if "time" in data else datetime.now(),
+                        time=parse_datetime(data.get("time")),
                         error=data.get("error", ""),
                         data=data.get("data", {})
                     )
                     
-                    # Extract checkpoint info from completion message
-                    if msg.type == "complete" and "checkpoint_id" in msg.data:
-                        checkpoint_info = msg.data
+                    # Check for completion
+                    if msg.type == "complete":
+                        completed = True
+                    
+                    # Check for errors
+                    if msg.type == "error":
+                        had_error = True
                     
                     # Call user callback if provided
                     if on_message:
@@ -170,16 +229,18 @@ class Sprite:
                     # Skip invalid JSON lines
                     pass
             
-            if not checkpoint_info:
-                raise CheckpointError("No checkpoint information received")
+            if had_error:
+                raise CheckpointError("Checkpoint operation failed")
             
-            # Get full checkpoint details
-            return self._get_checkpoint(checkpoint_info["checkpoint_id"])
+            if not completed:
+                raise CheckpointError("Checkpoint operation did not complete")
+            
+            return True
             
         except requests.RequestException as e:
             raise CheckpointError(f"Failed to create checkpoint: {e}")
     
-    def restore(self, checkpoint_id: str, on_message: Optional[Callable[[StreamMessage], None]] = None):
+    def restore(self, checkpoint_id: str, on_message: Optional[Callable[[StreamMessage], None]] = None) -> bool:
         """
         Restore the Sprite to a previous checkpoint state.
         
@@ -191,17 +252,22 @@ class Sprite:
             on_message (callable, optional): Callback function that receives
                 streaming messages during the restore operation.
                 
+        Returns:
+            bool: True if restore was successful.
+                
         Raises:
             RestoreError: If the restore operation fails.
             
         Example:
             >>> # Simple restore
-            >>> sprite.restore("checkpoint-123")
+            >>> success = sprite.restore("checkpoint-123")
+            >>> if success:
+            ...     print("Restore completed successfully")
             
             >>> # Restore with progress monitoring
             >>> def on_progress(msg):
             ...     print(f"{msg.type}: {msg.message}")
-            >>> sprite.restore("checkpoint-123", on_message=on_progress)
+            >>> success = sprite.restore("checkpoint-123", on_message=on_progress)
         """
         url = f"{self.client.endpoint}/v1/sprites/{self.sprite_id}/checkpoints/{checkpoint_id}/restore"
         headers = {"Authorization": f"Bearer {self.client.token}"}
@@ -209,6 +275,10 @@ class Sprite:
         try:
             response = requests.post(url, headers=headers, stream=True)
             response.raise_for_status()
+            
+            completed = False
+            had_error = False
+            error_message = ""
             
             # Process streaming response
             for line in response.iter_lines():
@@ -220,22 +290,35 @@ class Sprite:
                     msg = StreamMessage(
                         type=data.get("type", ""),
                         message=data.get("message", ""),
-                        time=datetime.fromisoformat(data["time"]) if "time" in data else datetime.now(),
+                        time=parse_datetime(data.get("time")),
                         error=data.get("error", ""),
                         data=data.get("data", {})
                     )
+                    
+                    # Check for completion
+                    if msg.type == "complete":
+                        completed = True
+                    
+                    # Check for errors
+                    if msg.type == "error":
+                        had_error = True
+                        error_message = msg.error or msg.message
                     
                     # Call user callback if provided
                     if on_message:
                         on_message(msg)
                         
-                    # Check for errors
-                    if msg.type == "error":
-                        raise RestoreError(f"Restore failed: {msg.error or msg.message}")
-                        
                 except json.JSONDecodeError:
                     # Skip invalid JSON lines
                     pass
+            
+            if had_error:
+                raise RestoreError(f"Restore failed: {error_message}")
+            
+            if not completed:
+                raise RestoreError("Restore operation did not complete")
+            
+            return True
                     
         except requests.RequestException as e:
             raise RestoreError(f"Failed to restore checkpoint: {e}")
@@ -289,7 +372,7 @@ class Sprite:
                 for item in data:
                     checkpoints.append(Checkpoint(
                         id=item["id"],
-                        create_time=datetime.fromisoformat(item["create_time"]),
+                        create_time=parse_datetime(item.get("create_time")),
                         source_id=item.get("source_id", ""),
                         history=[]  # Not included in list response
                     ))
@@ -327,7 +410,7 @@ class Sprite:
             
             return Checkpoint(
                 id=data["id"],
-                create_time=datetime.fromisoformat(data["create_time"]),
+                create_time=parse_datetime(data.get("create_time")),
                 source_id=data.get("source_id", ""),
                 history=data.get("history", [])
             )

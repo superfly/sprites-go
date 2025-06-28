@@ -4,7 +4,7 @@ test:
 	./scripts/run-tests.sh
 
 # Build client and server binaries
-build: docs
+build:
 	@echo "Building server..."
 	go build -o dist/server ./server
 	@echo "Building client..."
@@ -24,14 +24,13 @@ test-machine: build
 	cd tests && make test
 
 # Test all SDKs
-test-sdks: build-linux
-	@echo "Testing SDKs..."
-	@echo "Copying Linux binaries for Docker build..."
-	@mkdir -p sdks/python/dist
-	@cp dist/server-linux sdks/python/dist/server
-	@cp dist/sprite-linux sdks/python/dist/sprite
-	@echo "Running Python SDK tests..."
-	cd sdks/python && make test-docker
+test-sdks:
+	@echo "Building base sprite-env image..."
+	sudo docker build -t sprite-env-base:test .
+	@echo "Building SDK test Docker image..."
+	sudo docker build -f sdks/Dockerfile.test -t sprite-sdks-test .
+	@echo "Running all SDK tests..."
+	sudo docker run --rm --privileged sprite-sdks-test
 
 # Show available targets
 help:
@@ -42,15 +41,3 @@ help:
 	@echo "  test-machine - Run machine integration tests (requires FLY_APP_NAME and SPRITE_TOKEN)"
 	@echo "  test-sdks    - Test all SDKs in Docker"
 	@echo "  help         - Show this help message"
-
-# Generate OpenAPI documentation
-docs:
-	@echo "🔨 Generating OpenAPI documentation..."
-	@mkdir -p server/api/handlers/static
-	@go run packages/api-docs/cmd/generate/main.go \
-		-source ./server \
-		-output ./server/api/handlers/static/openapi.json \
-		-title "Sprites API" \
-		-version "1.0.0" \
-		-server "https://api.sprites.dev/v1"
-	@echo "✅ OpenAPI spec generated at ./server/api/handlers/static/openapi.json"
