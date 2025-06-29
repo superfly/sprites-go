@@ -1,3 +1,6 @@
+# Get JuiceFS binary from the custom superfly image
+FROM ghcr.io/superfly/juicefs:fname as juicefs
+
 # Test image for JuiceFS package
 FROM golang:1.24.4-alpine AS builder
 
@@ -14,12 +17,8 @@ RUN apk add --no-cache \
     e2fsprogs \
     util-linux
 
-# Install JuiceFS
-RUN wget -q https://github.com/juicedata/juicefs/releases/download/v1.2.3/juicefs-1.2.3-linux-amd64.tar.gz && \
-    tar -xzf juicefs-1.2.3-linux-amd64.tar.gz && \
-    mv juicefs /usr/local/bin/ && \
-    rm -f juicefs-1.2.3-linux-amd64.tar.gz && \
-    chmod +x /usr/local/bin/juicefs
+# Copy JuiceFS binary from the custom image
+COPY --from=juicefs /usr/local/bin/juicefs /usr/local/bin/juicefs
 
 # Install Litestream
 RUN wget -q https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-amd64.tar.gz && \
