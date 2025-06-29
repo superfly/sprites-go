@@ -65,6 +65,24 @@ Restore the system from a checkpoint:
 sprite-client restore my-checkpoint-id
 ```
 
+### Port Forwarding (Proxy)
+
+Forward local ports through the remote server's proxy:
+
+```bash
+# Forward a single port
+sprite-client proxy 8080
+
+# Forward multiple ports
+sprite-client proxy 8080 3000 5432
+
+# This will:
+# - Listen on localhost:8080, localhost:3000, and localhost:5432
+# - Forward connections through the remote server to its localhost on the same ports
+```
+
+This is useful for accessing services running in the sprite environment from your local machine.
+
 ## Examples
 
 ```bash

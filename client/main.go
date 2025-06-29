@@ -82,6 +82,9 @@ func main() {
 	case "restore":
 		// Handle restore command
 		restoreCommand(url, token, os.Args[2:])
+	case "proxy":
+		// Handle proxy command
+		proxyCommand(url, token, os.Args[2:])
 	case "help", "-h", "--help":
 		printUsage()
 		os.Exit(0)
@@ -105,6 +108,7 @@ Commands:
     list                    List all checkpoints
     info <id>               Show information about a specific checkpoint
   restore <id>              Restore from a checkpoint
+  proxy <port1> [port2...]  Forward local ports through the remote server proxy
 
 Environment Variables:
   SPRITE_URL    Base URL of the Sprite API (required)
@@ -126,6 +130,9 @@ Examples:
 
   # Restore from checkpoint
   sprite-client restore my-checkpoint-id
+
+  # Forward local ports 8080 and 3000
+  sprite-client proxy 8080 3000
 
 Use 'sprite-client exec -h' for exec command options.
 `)
