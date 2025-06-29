@@ -7,10 +7,17 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	gorillaws "github.com/gorilla/websocket"
 )
+
+// BrowserOpenEvent contains the parsed browser open request
+type BrowserOpenEvent struct {
+	URL   string
+	Ports []string
+}
 
 // Command returns a new Cmd for executing remotely via WebSocket
 func Command(req *http.Request, name string, arg ...string) *Cmd {
@@ -38,6 +45,9 @@ func CommandContext(ctx context.Context, req *http.Request, name string, arg ...
 	return cmd
 }
 
+// BrowserOpenFunc is a function that handles browser open requests
+type BrowserOpenFunc func(url string, ports []string)
+
 // Cmd represents a remote command execution
 type Cmd struct {
 	// Command to execute
@@ -56,6 +66,9 @@ type Cmd struct {
 	Env []string
 	Dir string
 	Tty bool
+
+	// Browser open handler
+	BrowserOpen BrowserOpenFunc
 
 	// Private fields
 	ctx     context.Context
@@ -160,8 +173,15 @@ func (c *Cmd) runIO() {
 			go io.Copy(adapter, c.Stdin)
 		}
 
-		// Copy WebSocket to stdout
-		io.Copy(stdout, adapter)
+		// Set up output writer with optional OSC monitoring
+		var output io.Writer = stdout
+		if c.BrowserOpen != nil {
+			oscMonitor := NewOSCMonitor(c.handleOSCSequence)
+			output = io.MultiWriter(stdout, oscMonitor)
+		}
+
+		// Copy WebSocket to output (stdout with optional monitoring)
+		io.Copy(output, adapter)
 
 		// When io.Copy returns, the command is done
 		// Send default exit code
@@ -270,4 +290,30 @@ func (c *Cmd) Resize(width, height uint16) error {
 	}
 
 	return c.adapter.WriteControl(msg)
+}
+
+// handleOSCSequence handles OSC escape sequences
+func (c *Cmd) handleOSCSequence(sequence string) {
+	// Parse OSC 9999 sequences for browser-open
+	// Format: 9999;browser-open;URL;ports (ports is comma-separated list)
+	parts := strings.Split(sequence, ";")
+	if len(parts) >= 3 && parts[0] == "9999" && parts[1] == "browser-open" && c.BrowserOpen != nil {
+		url := parts[2]
+		var ports []string
+
+		// Parse ports if present (fourth part)
+		if len(parts) >= 4 && parts[3] != "" {
+			ports = strings.Split(parts[3], ",")
+			// Clean up any empty strings
+			var cleanPorts []string
+			for _, port := range ports {
+				if trimmed := strings.TrimSpace(port); trimmed != "" {
+					cleanPorts = append(cleanPorts, trimmed)
+				}
+			}
+			ports = cleanPorts
+		}
+
+		c.BrowserOpen(url, ports)
+	}
 }

@@ -114,16 +114,21 @@ func (c *CheckpointDB) initialize() error {
 		return fmt.Errorf("failed to create sprite_checkpoints table: %w", err)
 	}
 
-	// Check if we need to create the initial v0 record
+	// Check if we need to create the initial records
 	var count int
 	if err := c.db.QueryRow("SELECT COUNT(*) FROM sprite_checkpoints").Scan(&count); err != nil {
 		return fmt.Errorf("failed to check checkpoint count: %w", err)
 	}
 
 	if count == 0 {
-		// Insert the initial v0 record pointing to active/
-		if _, err := c.db.Exec("INSERT INTO sprite_checkpoints (path, parent_id) VALUES (?, NULL)", "active/"); err != nil {
-			return fmt.Errorf("failed to create initial checkpoint record: %w", err)
+		// Insert the initial v0 record pointing to checkpoints/v0/
+		if _, err := c.db.Exec("INSERT INTO sprite_checkpoints (path, parent_id) VALUES (?, NULL)", "checkpoints/v0"); err != nil {
+			return fmt.Errorf("failed to create initial v0 checkpoint record: %w", err)
+		}
+
+		// Insert the v1 record pointing to active/ with parent_id of 1 (the v0 record)
+		if _, err := c.db.Exec("INSERT INTO sprite_checkpoints (path, parent_id) VALUES (?, ?)", "active/", 1); err != nil {
+			return fmt.Errorf("failed to create initial v1 checkpoint record: %w", err)
 		}
 	}
 

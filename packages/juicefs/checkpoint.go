@@ -175,9 +175,9 @@ func (j *JuiceFS) Restore(ctx context.Context, checkpointID string) error {
 			}
 		}
 
-		// Unmount the overlay before restore
+		// Unmount the overlay before restore - error if this fails
 		if err := j.overlayMgr.Unmount(ctx); err != nil {
-			j.logger.Warn("Failed to unmount overlay", "error", err)
+			return fmt.Errorf("failed to unmount overlay before restore: %w", err)
 		}
 	}
 

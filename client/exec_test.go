@@ -510,3 +510,122 @@ func TestMockServerSetup(t *testing.T) {
 		t.Error("Server URL should have a valid host")
 	}
 }
+
+// TestHandleBrowserOpen tests the browser open functionality with callback servers
+func TestHandleBrowserOpen(t *testing.T) {
+	// Mock the browser open command to avoid actually opening browser
+	originalEnv := os.Getenv("PATH")
+	defer os.Setenv("PATH", originalEnv)
+
+	// Create a fake 'open' command that does nothing
+	tempDir := t.TempDir()
+	fakeOpenPath := tempDir + "/open"
+	err := os.WriteFile(fakeOpenPath, []byte("#!/bin/bash\nexit 0\n"), 0755)
+	if err != nil {
+		t.Fatalf("Failed to create fake open command: %v", err)
+	}
+	os.Setenv("PATH", tempDir+":"+originalEnv)
+
+	t.Run("single_port_callback", func(t *testing.T) {
+		// Find an available port for testing
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("Failed to find available port: %v", err)
+		}
+		port := listener.Addr().(*net.TCPAddr).Port
+		listener.Close()
+
+		portStr := strconv.Itoa(port)
+		testURL := "https://oauth.example.com/auth?callback=http://localhost:" + portStr + "/callback"
+
+		// Channel to signal when the callback is received
+		callbackReceived := make(chan bool, 1)
+
+		// Start a goroutine to make the callback request
+		go func() {
+			// Give the server time to start
+			time.Sleep(200 * time.Millisecond)
+
+			// Make callback request
+			resp, err := http.Get("http://localhost:" + portStr + "/callback?code=test123")
+			if err != nil {
+				t.Errorf("Failed to make callback request: %v", err)
+				return
+			}
+			defer resp.Body.Close()
+
+			// Check response
+			if resp.StatusCode != http.StatusNotImplemented {
+				t.Errorf("Expected status %d, got %d", http.StatusNotImplemented, resp.StatusCode)
+			}
+
+			callbackReceived <- true
+		}()
+
+		// Call handleBrowserOpen
+		handleBrowserOpen(testURL, []string{portStr})
+
+		// Wait for callback to be received
+		select {
+		case <-callbackReceived:
+			// Success!
+		case <-time.After(3 * time.Second):
+			t.Error("Timeout waiting for callback to be received")
+		}
+
+		// Give server time to shut down
+		time.Sleep(300 * time.Millisecond)
+	})
+
+	t.Run("multiple_ports", func(t *testing.T) {
+		// Find two available ports
+		listener1, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("Failed to find first available port: %v", err)
+		}
+		port1 := listener1.Addr().(*net.TCPAddr).Port
+		listener1.Close()
+
+		listener2, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("Failed to find second available port: %v", err)
+		}
+		port2 := listener2.Addr().(*net.TCPAddr).Port
+		listener2.Close()
+
+		portStr1 := strconv.Itoa(port1)
+		portStr2 := strconv.Itoa(port2)
+		multiplePorts := []string{portStr1, portStr2}
+		testURL := "https://oauth.example.com/auth"
+
+		// Test with multiple ports (just verify they start without errors)
+		handleBrowserOpen(testURL, multiplePorts)
+
+		// Give servers time to start
+		time.Sleep(300 * time.Millisecond)
+
+		// Test that servers are running on both ports
+		for _, p := range multiplePorts {
+			resp, err := http.Get("http://localhost:" + p + "/test")
+			if err != nil {
+				t.Errorf("Server not running on port %s: %v", p, err)
+				continue
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusNotImplemented {
+				t.Errorf("Expected status %d on port %s, got %d", http.StatusNotImplemented, p, resp.StatusCode)
+			}
+		}
+
+		// Give servers time to shut down after the requests
+		time.Sleep(300 * time.Millisecond)
+	})
+
+	t.Run("empty_ports", func(t *testing.T) {
+		testURL := "https://oauth.example.com/auth"
+
+		// Test with empty ports (should not fail)
+		handleBrowserOpen(testURL, []string{})
+		handleBrowserOpen(testURL, nil)
+	})
+}

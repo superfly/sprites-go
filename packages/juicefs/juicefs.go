@@ -844,8 +844,23 @@ func (j *JuiceFS) watchForReady(mountPath string, startTime time.Time) {
 
 // performPostMountSetup handles the tasks that need to be done after mount is ready
 func (j *JuiceFS) performPostMountSetup(mountPath string, startTime time.Time) error {
-	// Create the active directory
+	// Create the checkpoints directory first
 	stepStart := time.Now()
+	checkpointsDir := filepath.Join(mountPath, "checkpoints")
+	if err := os.MkdirAll(checkpointsDir, 0755); err != nil {
+		return fmt.Errorf("failed to create checkpoints directory: %w", err)
+	}
+
+	// Create empty v0 directory in checkpoints/ if it doesn't exist
+	v0Dir := filepath.Join(checkpointsDir, "v0")
+	if _, err := os.Stat(v0Dir); os.IsNotExist(err) {
+		if err := os.MkdirAll(v0Dir, 0755); err != nil {
+			return fmt.Errorf("failed to create v0 checkpoint directory: %w", err)
+		}
+		j.logger.Info("Created empty v0 checkpoint directory", "path", v0Dir)
+	}
+
+	// Create the active directory
 	activeDir := filepath.Join(mountPath, "active", "fs")
 	if err := os.MkdirAll(activeDir, 0755); err != nil {
 		return fmt.Errorf("failed to create active directory: %w", err)

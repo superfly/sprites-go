@@ -41,7 +41,7 @@ func NewOverlay(j *JuiceFS, logger *slog.Logger) *OverlayManager {
 	return &OverlayManager{
 		juiceFS:           j,
 		imagePath:         filepath.Join(mountPath, "active", "root-upper.img"),
-		mountPath:         filepath.Join(mountPath, "root-upper"),
+		mountPath:         filepath.Join(mountPath, "..", "root-upper"),
 		imageSize:         "100G",           // 100GB sparse image
 		lowerPath:         "/mnt/app-image", // Default lower directory
 		overlayTargetPath: "/mnt/newroot",   // Default overlay mount point

@@ -16,6 +16,7 @@
     {
       "name": "sprite",
       "image": "<image_ref>",
+      "cmd": ["tini", "--", "tail", "-f", "/dev/null"],
       "env": {
         "SPRITE_HTTP_API_TOKEN": "f0e4c2f76c58916ec258f246851bea091d14d4247a2fc3e18694461b1816e13b",
         "SPRITE_KEEP_ALIVE_ON_ERROR": "true",
@@ -45,7 +46,7 @@
       ],
       "files":[{
         "guest_path": "/etc/app-image.json",
-        "image_config": "ghcr.io/superfly/sprite-ubuntu:25.04-e3748e0"
+        "image_config": "registry.fly.io/sprite-env-prime:ubuntu-25.04.1"
       }],
       "mounts": [
         {
@@ -101,7 +102,7 @@
     },
     {
       "name": "app-image",
-      "image": "ghcr.io/superfly/sprite-ubuntu:25.04-e3748e0"
+      "image": "registry.fly.io/sprite-env-prime:ubuntu-25.04.1"
     }
   ]
 }

@@ -72,19 +72,27 @@ func TestJuiceFSLocalModeIntegration(t *testing.T) {
 			t.Fatalf("Failed to list checkpoints: %v", err)
 		}
 
-		if len(checkpoints) != 1 {
-			t.Fatalf("Expected 1 checkpoint, got %d", len(checkpoints))
+		if len(checkpoints) != 2 {
+			t.Fatalf("Expected 2 checkpoints (v0 initial + v1 created), got %d", len(checkpoints))
 		}
 
-		// Should be v0 (first checkpoint)
-		if checkpoints[0].ID != "v0" {
-			t.Errorf("Expected checkpoint ID to be v0, got %s", checkpoints[0].ID)
+		// The first checkpoint created should be v1 (v0 is the initial empty one)
+		// Checkpoints are returned in reverse order, so v1 should be first
+		foundV1 := false
+		for _, cp := range checkpoints {
+			if cp.ID == "v1" {
+				foundV1 = true
+				break
+			}
+		}
+		if !foundV1 {
+			t.Errorf("Expected to find v1 checkpoint, available checkpoints: %v", checkpoints)
 		}
 
 		// Test restore
 		t.Run("Restore", func(t *testing.T) {
-			// Restore from v0
-			err := jfs.Restore(ctx, "v0")
+			// Restore from v1 (the checkpoint we just created)
+			err := jfs.Restore(ctx, "v1")
 			if err != nil {
 				t.Fatalf("Failed to restore checkpoint: %v", err)
 			}
@@ -127,7 +135,7 @@ func TestJuiceFSLocalModeIntegration(t *testing.T) {
 	}
 
 	// Restore from checkpoint
-	if err := jfs.Restore(ctx, "v0"); err != nil {
+	if err := jfs.Restore(ctx, "v1"); err != nil {
 		t.Fatalf("Failed to restore from checkpoint: %v", err)
 	}
 

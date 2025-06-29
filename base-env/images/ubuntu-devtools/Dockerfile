@@ -15,19 +15,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         coreutils util-linux findutils grep sed gawk \
         file which less nano vim-tiny \
         procps htop tree \
-        zip gzip bzip2 \
+        zip gzip bzip2 locales iproute2 \
         libffi-dev libyaml-dev gosu \
+    && locale-gen en_US.UTF-8 \
     && apt-get clean
 # we are keeping indexes for future apts
 
 # --- global asdf ---
-ENV ASDF_DIR=/opt/asdf \
+ENV LANG=en_US.UTF-8 \
+    ASDF_DIR=/opt/asdf \
     ASDF_DATA_DIR=/opt/asdf \
     PATH="/opt/asdf/bin:/opt/asdf/shims:${PATH}"
 
 RUN git clone https://github.com/asdf-vm/asdf.git --branch v0.14.0 --depth 1 "$ASDF_DIR" \
- && echo '. /opt/asdf/asdf.sh'                 >  /etc/profile.d/asdf.sh \
- && echo '. /opt/asdf/completions/asdf.bash'  >> /etc/profile.d/asdf.sh
+ && { \
+      echo '# /etc/profile.d/asdf.sh'; \
+      echo 'export ASDF_DIR=/opt/asdf'; \
+      echo 'export ASDF_DATA_DIR=/opt/asdf'; \
+      echo 'export PATH="$ASDF_DATA_DIR/shims:$ASDF_DIR/bin:$PATH"'; \
+      echo '. "$ASDF_DIR/asdf.sh"'; \
+      echo '. "$ASDF_DIR/completions/asdf.bash"'; \
+    } > /etc/profile.d/asdf.sh \
+ && echo ". /etc/profile.d/asdf.sh" >> /etc/bash.bashrc
 
 # Copy the sudoers file and user skeleton, then fix ownership
 
@@ -89,11 +98,6 @@ COPY --chown=$USER:$USER --from=languages-split /opt/asdf /opt/asdf
 FROM base
 ARG USER UID
 
-ENV ASDF_DIR=/opt/asdf \
-    ASDF_DATA_DIR=/opt/asdf \
-    PATH="/opt/asdf/bin:/opt/asdf/shims:${PATH}" \
-    HOME="/home/sprite"
-
 # Create sprite scripts directory
 RUN mkdir -p /.sprite
 
@@ -101,6 +105,17 @@ RUN mkdir -p /.sprite
 COPY root/ /
 
 USER sprite
+
+# --- global asdf ---
+ENV LANG=en_US.UTF-8 \
+ASDF_DIR=/opt/asdf \
+ASDF_DATA_DIR=/opt/asdf \
+PATH="/opt/asdf/bin:/opt/asdf/shims:${PATH}"
+
+# --- user env ---
+ENV LANG=en_US.UTF-8 \
+    HOME="/home/sprite"
+
 WORKDIR /home/sprite
 
 ENTRYPOINT ["/.sprite/entrypoint.sh"]

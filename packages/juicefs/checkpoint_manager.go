@@ -190,9 +190,9 @@ func (cm *CheckpointManager) Restore(ctx context.Context, checkpointID string) e
 			}
 		}
 
-		// Unmount the overlay before restore
+		// Unmount the overlay before restore - error if this fails
 		if err := cm.overlayMgr.Unmount(ctx); err != nil {
-			cm.logger.Warn("Failed to unmount overlay", "error", err)
+			return fmt.Errorf("failed to unmount overlay before restore: %w", err)
 		}
 	}
 

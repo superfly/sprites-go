@@ -327,3 +327,66 @@ func TestConcurrentCommandExecution(t *testing.T) {
 		}
 	}
 }
+
+// TestBrowserOpenWithPorts tests the browser open functionality with ports detection
+func TestBrowserOpenWithPorts(t *testing.T) {
+	// Create test server that outputs browser escape sequence
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cmd := &wsexec.ServerCommand{
+			Path: "sh",
+			Args: []string{"sh", "-c", "printf '\\033]9999;browser-open;https://oauth.example.com;3000,8080\\033\\\\'"},
+			Tty:  true, // Use PTY mode for escape sequence handling
+		}
+
+		if err := cmd.Handle(w, r); err != nil {
+			t.Errorf("Server handle error: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	// Create client
+	req, err := http.NewRequest("GET", server.URL+"/exec/test/websocket", nil)
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	req.URL.Scheme = "ws"
+
+	// Set up browser open handler
+	var capturedURL string
+	var capturedPorts []string
+	browserOpenHandler := func(url string, ports []string) {
+		capturedURL = url
+		capturedPorts = make([]string, len(ports))
+		copy(capturedPorts, ports)
+	}
+
+	var stdout bytes.Buffer
+	cmd := wsexec.Command(req, "sh", "-c", "printf '\\033]9999;browser-open;https://oauth.example.com;3000,8080\\033\\\\'")
+	cmd.Stdout = &stdout
+	cmd.Tty = true
+	cmd.BrowserOpen = browserOpenHandler
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Command failed: %v", err)
+	}
+
+	// Give the async handler time to fire
+	time.Sleep(50 * time.Millisecond)
+
+	// Check captured values
+	expectedURL := "https://oauth.example.com"
+	if capturedURL != expectedURL {
+		t.Errorf("Expected URL %s, got %s", expectedURL, capturedURL)
+	}
+
+	expectedPorts := []string{"3000", "8080"}
+	if len(capturedPorts) != len(expectedPorts) {
+		t.Errorf("Expected %d ports, got %d", len(expectedPorts), len(capturedPorts))
+	} else {
+		for i, expected := range expectedPorts {
+			if capturedPorts[i] != expected {
+				t.Errorf("Expected port %s at index %d, got %s", expected, i, capturedPorts[i])
+			}
+		}
+	}
+}

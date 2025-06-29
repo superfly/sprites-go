@@ -48,8 +48,10 @@ func TestListCheckpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to list checkpoints: %v", err)
 	}
-	if len(checkpoints) != 0 {
-		t.Errorf("Expected 0 checkpoints, got %d", len(checkpoints))
+	// Now we start with a v0 checkpoint, but ListCheckpoints only returns checkpoints with "checkpoints/" prefix
+	// The initial v0 is at "checkpoints/v0" so we should have 1
+	if len(checkpoints) != 1 {
+		t.Errorf("Expected 1 checkpoint (v0), got %d", len(checkpoints))
 	}
 
 	// Create checkpoints directory and some test checkpoints
@@ -60,7 +62,8 @@ func TestListCheckpoints(t *testing.T) {
 
 	// Create test checkpoints using the SQLite database
 	// Insert test checkpoints directly into the database
-	for i := 0; i < 3; i++ {
+	// We start with v0 already existing, so create v1, v2, v3
+	for i := 1; i <= 3; i++ {
 		checkpointPath := fmt.Sprintf("checkpoints/v%d", i)
 		_, err := db.db.Exec("INSERT INTO sprite_checkpoints (path, parent_id) VALUES (?, ?)", checkpointPath, nil)
 		if err != nil {
@@ -83,15 +86,16 @@ func TestListCheckpoints(t *testing.T) {
 		t.Fatalf("Failed to list checkpoints: %v", err)
 	}
 
-	// Should have 3 checkpoints (symlinks should be skipped)
-	if len(checkpoints) != 3 {
-		t.Errorf("Expected 3 checkpoints, got %d", len(checkpoints))
+	// Should have 4 checkpoints (v0 + v1, v2, v3) (symlinks should be skipped)
+	if len(checkpoints) != 4 {
+		t.Errorf("Expected 4 checkpoints, got %d", len(checkpoints))
 	}
 
 	// Verify checkpoint details
 	foundV0 := false
 	foundV1 := false
 	foundV2 := false
+	foundV3 := false
 	for _, cp := range checkpoints {
 		if cp.ID == "v0" {
 			foundV0 = true
@@ -99,6 +103,8 @@ func TestListCheckpoints(t *testing.T) {
 			foundV1 = true
 		} else if cp.ID == "v2" {
 			foundV2 = true
+		} else if cp.ID == "v3" {
+			foundV3 = true
 		}
 	}
 
@@ -110,6 +116,9 @@ func TestListCheckpoints(t *testing.T) {
 	}
 	if !foundV2 {
 		t.Error("v2 not found in list")
+	}
+	if !foundV3 {
+		t.Error("v3 not found in list")
 	}
 }
 
@@ -226,8 +235,9 @@ func TestListCheckpointsWithActive(t *testing.T) {
 	// Note: Version files are no longer used in SQLite system
 
 	// Create some test checkpoints in the database
-	// Insert 3 checkpoints - the active version will be determined by the latest checkpoint
-	for i := 0; i < 3; i++ {
+	// Insert 3 additional checkpoints - the initial v0 already exists
+	// Create v1, v2, v3
+	for i := 1; i <= 3; i++ {
 		checkpointPath := fmt.Sprintf("checkpoints/v%d", i)
 		_, err := db.db.Exec("INSERT INTO sprite_checkpoints (path, parent_id) VALUES (?, ?)", checkpointPath, nil)
 		if err != nil {
@@ -242,9 +252,9 @@ func TestListCheckpointsWithActive(t *testing.T) {
 		t.Fatalf("Failed to list checkpoints with active: %v", err)
 	}
 
-	// Should have 4 checkpoints (3 + active)
-	if len(checkpoints) != 4 {
-		t.Errorf("Expected 4 checkpoints, got %d", len(checkpoints))
+	// Should have 5 checkpoints (4 checkpoints: v0, v1, v2, v3 + 1 active)
+	if len(checkpoints) != 5 {
+		t.Errorf("Expected 5 checkpoints, got %d", len(checkpoints))
 	}
 
 	// First should be the active version (latest checkpoint ID - 1)
@@ -252,13 +262,13 @@ func TestListCheckpointsWithActive(t *testing.T) {
 		t.Errorf("Expected first checkpoint to end with ' (active)', got %s", checkpoints[0].ID)
 	}
 
-	// Verify we have the expected number of checkpoints (3 regular + 1 active)
-	if len(checkpoints) != 4 {
+	// Verify we have the expected number of checkpoints (4 regular + 1 active)
+	if len(checkpoints) != 5 {
 		return // Already failed above
 	}
 
-	// The remaining should be the actual checkpoints v2, v1, v0 in reverse order
-	expectedCheckpoints := []string{"v2", "v1", "v0"}
+	// The remaining should be the actual checkpoints v3, v2, v1, v0 in reverse order
+	expectedCheckpoints := []string{"v3", "v2", "v1", "v0"}
 	for i, expected := range expectedCheckpoints {
 		actualIndex := i + 1 // Skip the active checkpoint at index 0
 		if actualIndex >= len(checkpoints) {
@@ -312,7 +322,7 @@ func TestGetCheckpointActive(t *testing.T) {
 	}
 
 	// Note: Version files are no longer used in SQLite system
-	// The initial database starts with ID=1, so active version is v0
+	// The initial database starts with ID=1 for v0 and ID=2 for active, so active version is v1
 
 	// Test getting active checkpoint
 	checkpoint, err := jfs.GetCheckpoint(ctx, "active")
@@ -321,9 +331,9 @@ func TestGetCheckpointActive(t *testing.T) {
 	}
 
 	// In the SQLite system, the active version is the latest checkpoint ID - 1
-	// Since we start with ID=1, the active version is v0
-	if checkpoint.ID != "v0" {
-		t.Errorf("Expected ID 'v0', got %s", checkpoint.ID)
+	// Since we start with ID=2 for active, the active version is v1
+	if checkpoint.ID != "v1" {
+		t.Errorf("Expected ID 'v1', got %s", checkpoint.ID)
 	}
 
 	// Note: History checking removed - history files are no longer used

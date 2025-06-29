@@ -15,6 +15,11 @@ A Go package for executing commands remotely over WebSocket connections with a s
 - **Streaming I/O**: Real-time stdin/stdout/stderr streaming
 - **Simple Protocol**: Minimal overhead binary protocol (no JSON encoding)
 - **Large Data Support**: Efficient handling of large data transfers
+- **Remote Command Execution**: Execute commands on remote servers via WebSocket
+- **PTY Support**: Full terminal emulation with PTY mode
+- **Stream Multiplexing**: Separate stdout/stderr handling in non-PTY mode
+- **Browser Integration**: Detects and handles browser open escape sequences with port information
+- **Context Support**: Proper cancellation and timeout handling
 
 ## Protocol Overview
 
@@ -146,4 +151,47 @@ cmd.SetTTY(true).
 
 ```bash
 go test -v
+```
+
+## Browser Open Support
+
+The package can detect and parse OSC escape sequences for browser open requests:
+
+```
+\033]9999;browser-open;<URL>;<ports>\033\\
+```
+
+Where:
+- `<URL>` is the URL to open
+- `<ports>` is a comma-separated list of ports the parent process is listening on (optional)
+
+### Example Usage
+
+```go
+cmd := wsexec.Command(req, "my-command")
+cmd.BrowserOpen = func(url string, ports []string) {
+    fmt.Printf("Open browser: %s\n", url)
+    fmt.Printf("Available ports: %v\n", ports)
+}
+```
+
+### Browser Open Events
+
+When a command outputs a browser open escape sequence, the `BrowserOpen` callback will be called with:
+- The URL to open
+- A slice of port strings that the parent process is listening on
+
+This enables smart OAuth callback handling where the client knows which localhost ports are available.
+
+## Usage Example
+
+```go
+req, _ := http.NewRequest("GET", "ws://server/exec/websocket", nil)
+
+cmd := wsexec.Command(req, "echo", "hello world")
+cmd.Stdout = os.Stdout
+
+if err := cmd.Run(); err != nil {
+    log.Fatal(err)
+}
 ``` 

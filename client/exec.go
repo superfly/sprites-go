@@ -5,12 +5,16 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/sprite-env/packages/wsexec"
 	"golang.org/x/term"
@@ -189,6 +193,11 @@ func execCommand(baseURL, token string, args []string) {
 	wsCmd.Stdout = os.Stdout
 	wsCmd.Stderr = os.Stderr
 	wsCmd.Tty = *tty
+
+	// Set up browser handler for TTY mode
+	if *tty {
+		wsCmd.BrowserOpen = handleBrowserOpen
+	}
 
 	logger.Debug("Created wsexec command", "tty", wsCmd.Tty)
 
@@ -381,6 +390,11 @@ func executeDirectWebSocket(baseURL, token string, cmd []string, workingDir stri
 	wsCmd.Stderr = os.Stderr
 	wsCmd.Tty = tty
 
+	// Set up browser handler for TTY mode
+	if tty {
+		wsCmd.BrowserOpen = handleBrowserOpen
+	}
+
 	logger.Debug("Created wsexec command", "tty", wsCmd.Tty)
 
 	// Set up PTY mode if needed
@@ -464,4 +478,152 @@ func buildExecWebSocketURL(baseURL string) (*url.URL, error) {
 	}
 
 	return u, nil
+}
+
+// handleBrowserOpen handles browser open requests from the container
+func handleBrowserOpen(url string, ports []string) {
+	logger := slog.Default()
+	logger.Info("Browser open request received", "url", url, "ports", ports)
+
+	// Start HTTP servers on specified ports if any are provided
+	var servers []*http.Server
+	var serverReady sync.WaitGroup
+
+	if len(ports) > 0 {
+		logger.Info("Starting callback servers", "ports", ports)
+
+		for _, portStr := range ports {
+			port := strings.TrimSpace(portStr)
+			if port == "" {
+				continue
+			}
+
+			// Start server for this port
+			server := &http.Server{
+				Addr: ":" + port,
+			}
+
+			// Set up handler for this server
+			mux := http.NewServeMux()
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				logger.Info("OAuth callback received", "port", port, "url", r.URL.String(), "method", r.Method)
+
+				// Show notification using AppleScript
+				notificationTitle := "OAuth Callback Received"
+				notificationText := fmt.Sprintf("Received request on port %s: %s", port, r.URL.Path)
+				cmd := exec.Command("osascript", "-e",
+					fmt.Sprintf(`display notification "%s" with title "%s"`, notificationText, notificationTitle))
+				if err := cmd.Run(); err != nil {
+					logger.Warn("Failed to show notification", "error", err)
+				}
+
+				// Serve "not implemented" response
+				w.Header().Set("Content-Type", "text/html")
+				w.WriteHeader(http.StatusNotImplemented)
+				fmt.Fprintf(w, `<!DOCTYPE html>
+<html>
+<head>
+    <title>OAuth Callback - Not Implemented</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
+        .message { background: #f0f0f0; padding: 20px; border-radius: 5px; }
+        .details { margin-top: 20px; font-size: 0.9em; color: #666; }
+    </style>
+</head>
+<body>
+    <div class="message">
+        <h2>OAuth Callback Received</h2>
+        <p>The OAuth callback was successfully received but is not yet implemented.</p>
+        <div class="details">
+            <strong>Port:</strong> %s<br>
+            <strong>Path:</strong> %s<br>
+            <strong>Method:</strong> %s<br>
+            <strong>Time:</strong> %s
+        </div>
+    </div>
+</body>
+</html>`, port, r.URL.Path, r.Method, time.Now().Format("2006-01-02 15:04:05"))
+
+				// Shutdown this server after serving the response
+				go func() {
+					time.Sleep(100 * time.Millisecond) // Give response time to be sent
+					logger.Info("Shutting down callback server", "port", port)
+					server.Shutdown(context.Background())
+				}()
+			})
+			server.Handler = mux
+
+			// Start server in background
+			serverReady.Add(1)
+			go func(s *http.Server, p string) {
+				defer serverReady.Done()
+
+				// Try to start the server
+				listener, err := net.Listen("tcp", s.Addr)
+				if err != nil {
+					logger.Error("Failed to start callback server", "port", p, "error", err)
+					return
+				}
+
+				logger.Info("Callback server ready", "port", p, "addr", listener.Addr())
+
+				// Server is ready, signal completion
+				go func() {
+					if err := s.Serve(listener); err != nil && err != http.ErrServerClosed {
+						logger.Error("Callback server error", "port", p, "error", err)
+					}
+				}()
+			}(server, port)
+
+			servers = append(servers, server)
+		}
+
+		// Wait for all servers to be ready
+		logger.Info("Waiting for callback servers to be ready...")
+		serverReady.Wait()
+		logger.Info("All callback servers ready, opening browser")
+	}
+
+	// Open the browser
+	var cmd *exec.Cmd
+	switch {
+	case os.Getenv("WSL_DISTRO_NAME") != "":
+		// WSL - use Windows browser
+		cmd = exec.Command("cmd.exe", "/c", "start", url)
+	case isCommandAvailable("xdg-open"):
+		// Linux
+		cmd = exec.Command("xdg-open", url)
+	case isCommandAvailable("open"):
+		// macOS
+		cmd = exec.Command("open", url)
+	default:
+		logger.Error("Unable to detect browser command")
+		fmt.Fprintf(os.Stderr, "sprite: unable to detect browser command\n")
+		return
+	}
+
+	logger.Info("Opening browser", "url", url)
+	if err := cmd.Start(); err != nil {
+		logger.Error("Failed to open browser", "error", err)
+		fmt.Fprintf(os.Stderr, "sprite: failed to open browser: %v\n", err)
+	} else {
+		logger.Info("Browser opened successfully")
+	}
+
+	// Clean up servers after a reasonable timeout if they haven't shut down already
+	if len(servers) > 0 {
+		go func() {
+			time.Sleep(5 * time.Minute) // Give OAuth flow time to complete
+			for _, server := range servers {
+				server.Shutdown(context.Background())
+			}
+			logger.Info("Cleaned up callback servers after timeout")
+		}()
+	}
+}
+
+// isCommandAvailable checks if a command is available in PATH
+func isCommandAvailable(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
 }
