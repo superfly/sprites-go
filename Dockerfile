@@ -53,8 +53,10 @@ RUN curl -L https://github.com/containers/crun/releases/download/1.21/crun-1.21-
 # Get litestream binary
 FROM litestream/litestream:latest AS litestream
 
+FROM ghcr.io/superfly/juicefs:fname as juicefs
+
 # Final stage - based on juicedata/mount which includes juicefs
-FROM juicedata/mount:latest
+FROM ubuntu:25.04
 
 RUN apt-get update && \
     apt-get install -y sqlite3 bash e2fsprogs fio jq nano coreutils \
@@ -63,7 +65,7 @@ RUN apt-get update && \
     # Tools for DRBD
     drbd-utils \
     # Additional useful tools for disk management
-    parted gdisk util-linux fdisk xfsprogs \
+    parted gdisk util-linux fdisk xfsprogs fuse3 \
     # Cleanup
     && apt-get clean && \
     rm -rf /var/lib/apt/lists/*
@@ -71,6 +73,7 @@ RUN apt-get update && \
 # Copy binaries from other stages
 COPY --from=crun /crun /usr/local/bin/crun
 COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
+COPY --from=juicefs /usr/local/bin/juicefs /usr/local/bin/juicefs
 
 # Define environment variables for paths
 ENV SPRITE_WRITE_DIR=/dev/fly_vol \
@@ -95,3 +98,5 @@ EXPOSE 7778
 # Use spritectl as entrypoint with config file
 # /usr/local/bin/spritectl -config /home/sprite/config.json -listen 0.0.0.0:7778
 ENTRYPOINT ["/usr/local/bin/spritectl", "-config", "/home/sprite/config.json", "-listen", "0.0.0.0:7778"] 
+
+# juicefs mount --no-usage-report -o writeback_cache -o fsname=SpriteFS --writeback --upload-delay=1m --cache-dir=/dev/fly_vol/  --no-syslog --cache-size=8192 --buffer-size=819  sqlite3://dev/fly_vol/juicefs/metadata.db /data

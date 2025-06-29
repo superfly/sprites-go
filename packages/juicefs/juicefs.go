@@ -346,13 +346,13 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 		"mount",
 		"--no-usage-report",
 		"-o", "writeback_cache",
-		"-o", "fsname=SpriteFS", // not currently working like it's suppposed to
 		"--writeback",
 		"--upload-delay=1m",
 		"--cache-dir", cacheDir,
 		"--cache-size", fmt.Sprintf("%d", cacheSizeMB),
 		"--buffer-size", fmt.Sprintf("%d", bufferSizeMB),
 		"--no-syslog",
+		"--fsname", "SpriteFS",
 		metaURL,
 		mountPath,
 	}
@@ -361,6 +361,10 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	j.mountCmd.Env = append(os.Environ(),
 		"FSTAB_NAME_PREFIX=\"sprite:\"",
 	)
+
+	// Send JuiceFS output directly to our stdout/stderr
+	j.mountCmd.Stdout = os.Stdout
+	j.mountCmd.Stderr = os.Stderr
 
 	// Start the mount command
 	if err := j.mountCmd.Start(); err != nil {
