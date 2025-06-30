@@ -1,131 +1,98 @@
-name: Release
+name: Release Docker Images
 
 on:
+  workflow_dispatch:
+    inputs:
+      tag_suffix:
+        description: 'Tag suffix to append to 25.04 (defaults to short commit ID)'
+        required: false
+        default: ''
+        type: string
+      tag_latest:
+        description: 'Also tag as latest'
+        required: false
+        type: boolean
+        default: true
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
       - 'v[0-9]+.[0-9]+.[0-9]+-*'
 
-permissions:
-  contents: write
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: superfly/sprite-ubuntu
 
 jobs:
-  # First run all tests by calling the test workflow
-  tests:
-    uses: ./.github/workflows/test.yml
-    
-  # Then release if tests pass
-  release:
-    name: Build and Release
+  generate-tag:
     runs-on: ubuntu-latest
-    needs: tests
-    if: success()
-    
+    outputs:
+      ubuntu_tag: ${{ steps.tag.outputs.ubuntu_tag }}
+      sprite_env_tag: ${{ steps.tag.outputs.sprite_env_tag }}
+      is_version_tag: ${{ steps.tag.outputs.is_version_tag }}
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: 1.24
-
-    - name: Get version
-      id: version
-      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-
-    - name: Build binaries
+    - name: Generate short SHA
+      id: short-sha
+      run: echo "short-sha=${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
+    
+    - name: Generate tags
+      id: tag
       run: |
-        # Create output directory
-        mkdir -p ./dist
-        
-        # Build for Linux AMD64
-        echo "Building for Linux AMD64..."
-        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build ./server \
-          -ldflags="-w -s -X main.version=${{ steps.version.outputs.VERSION }}" \
-          -o ./dist/spritectl-linux-amd64 .
-        
-        # Build for Linux ARM64
-        echo "Building for Linux ARM64..."
-        CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./server \
-          -ldflags="-w -s -X main.version=${{ steps.version.outputs.VERSION }}" \
-          -o ./dist/spritectl-linux-arm64 .
-        
-        # Build for macOS AMD64
-        echo "Building for macOS AMD64..."
-        CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build ./server \
-          -ldflags="-w -s -X main.version=${{ steps.version.outputs.VERSION }}" \
-          -o ./dist/spritectl-darwin-amd64 .
-        
-        # Build for macOS ARM64 (Apple Silicon)
-        echo "Building for macOS ARM64..."
-        CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build ./server \
-          -ldflags="-w -s -X main.version=${{ steps.version.outputs.VERSION }}" \
-          -o ./dist/spritectl-darwin-arm64 .
+        if [[ "${{ github.ref_type }}" == "tag" ]]; then
+          # Strip the 'v' prefix from version tags
+          TAG="${{ github.ref_name }}"
+          TAG="${TAG#v}"
+          echo "ubuntu_tag=25.04-${TAG}" >> $GITHUB_OUTPUT
+          echo "sprite_env_tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "is_version_tag=true" >> $GITHUB_OUTPUT
+        else
+          SUFFIX="${{ inputs.tag_suffix || steps.short-sha.outputs.short-sha }}"
+          echo "ubuntu_tag=25.04-${SUFFIX}" >> $GITHUB_OUTPUT
+          echo "sprite_env_tag=${SUFFIX}" >> $GITHUB_OUTPUT
+          echo "is_version_tag=false" >> $GITHUB_OUTPUT
+        fi
 
-    - name: Compress binaries
-      run: |
-        cd ./dist
-        for file in spritectl-*; do
-          echo "Compressing $file..."
-          tar -czf "${file}.tar.gz" "$file"
-          rm "$file"
-        done
-        
-        # Create checksums
-        echo "Creating checksums..."
-        sha256sum *.tar.gz > checksums.txt
+  build-base:
+    needs: generate-tag
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker-publish.yml
+    with:
+      context_dir: base-env/images/ubuntu-devtools
+      dockerfile: base-env/images/ubuntu-devtools/Dockerfile
+      tag: ${{ needs.generate-tag.outputs.ubuntu_tag }}
+      image_name: superfly/sprite-ubuntu
+      cache_tag: 25.04-latest
+      latest_tag: 25.04-latest
+      tag_latest: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && (inputs.tag_latest == true || inputs.tag_latest == null) }}
 
-    - name: Create Release
-      id: create_release
-      uses: actions/create-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ github.ref }}
-        release_name: Release ${{ steps.version.outputs.VERSION }}
-        body: |
-          ## spritectl ${{ steps.version.outputs.VERSION }}
-          
-          ### Installation
-          
-          Download the appropriate binary for your platform:
-          
-          #### Linux
-          ```bash
-          # For AMD64
-          curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/spritectl-linux-amd64.tar.gz | tar xz
-          chmod +x spritectl-linux-amd64
-          
-          # For ARM64
-          curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/spritectl-linux-arm64.tar.gz | tar xz
-          chmod +x spritectl-linux-arm64
-          ```
-          
-          #### macOS
-          ```bash
-          # For Intel Macs
-          curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/spritectl-darwin-amd64.tar.gz | tar xz
-          chmod +x spritectl-darwin-amd64
-          
-          # For Apple Silicon Macs
-          curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/spritectl-darwin-arm64.tar.gz | tar xz
-          chmod +x spritectl-darwin-arm64
-          ```
-          
-          ### Checksums
-          
-          Verify the integrity of your download by checking the SHA256 checksums in `checksums.txt`.
-        draft: false
-        prerelease: ${{ contains(steps.version.outputs.VERSION, '-') }}
+  build-languages:
+    needs: [generate-tag, build-base]
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker-publish.yml
+    with:
+      context_dir: base-env/images/ubuntu-devtools
+      dockerfile: base-env/images/ubuntu-devtools/Dockerfile
+      tag: ${{ needs.generate-tag.outputs.ubuntu_tag }}-languages
+      image_name: superfly/sprite-ubuntu
+      target: languages
+      cache_tag: 25.04-languages-latest
+      latest_tag: 25.04-languages-latest
+      tag_latest: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && (inputs.tag_latest == true || inputs.tag_latest == null) }}
 
-    - name: Upload Release Assets
-      run: |
-        cd ./dist
-        for file in *.tar.gz checksums.txt; do
-          echo "Uploading $file..."
-          gh release upload "${{ steps.version.outputs.VERSION }}" "$file" \
-            --repo "${{ github.repository }}"
-        done
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  build-sprite-env:
+    needs: generate-tag
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker-publish.yml
+    with:
+      context_dir: .
+      dockerfile: ./Dockerfile
+      tag: ${{ needs.generate-tag.outputs.sprite_env_tag }}
+      image_name: superfly/sprite-env
+      cache_tag: latest
+      latest_tag: latest
+      tag_latest: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && (inputs.tag_latest == true || inputs.tag_latest == null) }}

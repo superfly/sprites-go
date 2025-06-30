@@ -1,45 +1,57 @@
-name: Docker Publish
+name: Reusable Docker Publish
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
-      version:
-        description: 'Version tag for the image (e.g., v1.0.0, latest)'
-        required: false
-        default: 'latest'
+      context_dir:
+        description: 'Docker build context directory'
+        required: true
         type: string
-      push:
-        description: 'Push images to registry'
+      dockerfile:
+        description: 'Path to Dockerfile'
+        required: true
+        type: string
+      tag:
+        description: 'Tag for the final image'
+        required: true
+        type: string
+      image_name:
+        description: 'Image name (without registry)'
+        required: true
+        type: string
+      target:
+        description: 'Docker build target (optional)'
         required: false
-        default: true
+        type: string
+      tag_latest:
+        description: 'Also tag as latest'
+        required: false
         type: boolean
+        default: true
+      latest_tag:
+        description: 'Specific latest tag to use (e.g., "latest", "25.04-latest")'
+        required: false
+        type: string
+      cache_tag:
+        description: 'Tag to use for cache-from (e.g., "latest", "25.04-latest")'
+        required: true
+        type: string
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+  build-amd64:
+    runs-on: ubuntu-big
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
-      with:
-        platforms: linux/amd64,linux/arm64
-
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
-      with:
-        driver-opts: |
-          image=moby/buildkit:master
-          network=host
 
     - name: Log in to GitHub Container Registry
       uses: docker/login-action@v3
@@ -48,26 +60,71 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-        tags: |
-          type=raw,value=${{ inputs.version }}
-          type=raw,value=${{ inputs.version }}-{{sha}},enable=${{ inputs.version != 'latest' }}
-          type=sha,prefix={{branch}}-,enable=${{ inputs.version == 'latest' }}
-
-    - name: Build and push Docker images
+    - name: Build and push AMD64 image
+      id: build
       uses: docker/build-push-action@v5
       with:
-        context: .
-        file: ./Dockerfile
-        platforms: linux/amd64,linux/arm64
-        push: ${{ inputs.push }}
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        build-args: |
-          VERSION=${{ inputs.version }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+        context: ${{ inputs.context_dir }}
+        file: ${{ inputs.dockerfile }}
+        target: ${{ inputs.target }}
+        platforms: linux/amd64
+        push: true
+        tags: ${{ env.REGISTRY }}/${{ inputs.image_name }}:${{ inputs.tag }}-amd64
+        cache-from: | 
+          type=registry,ref=${{ env.REGISTRY }}/${{ inputs.image_name }}:${{ inputs.cache_tag }}
+          type=gha,scope=amd64
+        cache-to: type=gha,mode=max,scope=amd64
+
+  build-arm64:
+    runs-on: ubuntu-big-arm64
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push ARM64 image
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: ${{ inputs.context_dir }}
+        file: ${{ inputs.dockerfile }}
+        target: ${{ inputs.target }}
+        platforms: linux/arm64
+        push: true
+        tags: ${{ env.REGISTRY }}/${{ inputs.image_name }}:${{ inputs.tag }}-arm64
+        cache-from: | 
+          type=registry,ref=${{ env.REGISTRY }}/${{ inputs.image_name }}:${{ inputs.cache_tag }}
+          type=gha,scope=arm64
+        cache-to: type=gha,mode=max,scope=arm64
+
+  manifest:
+    runs-on: ubuntu-latest
+    needs: [build-amd64, build-arm64]
+
+    steps:
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Create and push multi-platform manifest
+      run: |
+        docker buildx imagetools create \
+          -t ${{ env.REGISTRY }}/${{ inputs.image_name }}:${{ inputs.tag }} \
+          ${{ inputs.tag_latest && inputs.latest_tag && format('-t {0}/{1}:{2}', env.REGISTRY, inputs.image_name, inputs.latest_tag) || '' }} \
+          ${{ env.REGISTRY }}/${{ inputs.image_name }}@${{ needs.build-amd64.outputs.digest }} \
+          ${{ env.REGISTRY }}/${{ inputs.image_name }}@${{ needs.build-arm64.outputs.digest }}
