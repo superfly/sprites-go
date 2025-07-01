@@ -21,14 +21,14 @@ type TranscriptCollector interface {
 	Close() error
 }
 
-// noopTranscript is a TranscriptCollector that discards all output.
-type noopTranscript struct{}
+// NoopTranscript is a TranscriptCollector that discards all output.
+type NoopTranscript struct{}
 
-func (n *noopTranscript) StreamWriter(name string) io.Writer {
+func (n *NoopTranscript) StreamWriter(name string) io.Writer {
 	return io.Discard
 }
 
-func (n *noopTranscript) Close() error {
+func (n *NoopTranscript) Close() error {
 	return nil
 }
 

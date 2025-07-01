@@ -62,6 +62,9 @@ type Config struct {
 	OverlayLowerPath     string // Path to lower directory (read-only base layer)
 	OverlayTargetPath    string // Where to mount the final overlay
 	OverlaySkipOverlayFS bool   // Skip overlayfs, only mount loopback
+
+	// Transcript configuration
+	TranscriptDBPath string // Path to SQLite database file
 }
 
 // Application represents the main application
@@ -126,6 +129,8 @@ func NewApplication(config Config) (*Application, error) {
 		OverlayLowerPath:               config.OverlayLowerPath,
 		OverlayTargetPath:              config.OverlayTargetPath,
 		OverlaySkipOverlayFS:           config.OverlaySkipOverlayFS,
+		TranscriptsEnabled:             true, // Default enabled as per requirements
+		TranscriptDBPath:               config.TranscriptDBPath,
 	}
 
 	system, err := NewSystem(systemConfig, logger, app.reaper)
@@ -293,7 +298,7 @@ func (app *Application) shutdown(exitCode int) error {
 // Command-line parsing and main
 
 func parseCommandLine() (Config, error) {
-	var config Config
+	config := Config{}
 
 	// Flags
 	var (
@@ -361,6 +366,9 @@ func parseCommandLine() (Config, error) {
 			OverlayLowerPath     string `json:"overlay_lower_path"`
 			OverlayTargetPath    string `json:"overlay_target_path"`
 			OverlaySkipOverlayFS bool   `json:"overlay_skip_overlayfs"`
+
+			// Transcript configuration
+			TranscriptDBPath string `json:"transcript_db_path"`
 		}
 
 		if err := json.Unmarshal(data, &fileConfig); err != nil {
@@ -411,6 +419,7 @@ func parseCommandLine() (Config, error) {
 		config.OverlayLowerPath = fileConfig.OverlayLowerPath
 		config.OverlayTargetPath = fileConfig.OverlayTargetPath
 		config.OverlaySkipOverlayFS = fileConfig.OverlaySkipOverlayFS
+		config.TranscriptDBPath = fileConfig.TranscriptDBPath
 	}
 
 	// Apply command-line overrides
@@ -480,6 +489,11 @@ func parseCommandLine() (Config, error) {
 		config.OverlaySkipOverlayFS = false
 	}
 
+	// Transcript configuration - environment overrides file config
+	if transcriptDBPath := os.Getenv("SPRITE_TRANSCRIPT_DB_PATH"); transcriptDBPath != "" {
+		config.TranscriptDBPath = transcriptDBPath
+	}
+
 	// Debug configuration
 	if os.Getenv("SPRITE_KEEP_ALIVE_ON_ERROR") == "true" {
 		config.KeepAliveOnError = true
@@ -488,6 +502,10 @@ func parseCommandLine() (Config, error) {
 	// Validate - now API token is required if API server is configured
 	if config.APIListenAddr != "" && config.APIToken == "" {
 		return config, fmt.Errorf("API token must be set when API server is enabled")
+	}
+
+	if config.TranscriptDBPath == "" {
+		config.TranscriptDBPath = "/var/log/transcripts.db"
 	}
 
 	return config, nil

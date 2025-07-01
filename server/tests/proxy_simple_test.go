@@ -16,6 +16,7 @@ import (
 	"github.com/sprite-env/lib/api"
 	"github.com/sprite-env/packages/juicefs"
 	"github.com/sprite-env/server/api/handlers"
+	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
 // TestProxyHandlerDirect tests the proxy handler directly
@@ -349,3 +350,6 @@ func (m *simpleSystemManager) WasProcessReaped(pid int) (bool, time.Time) { retu
 func (m *simpleSystemManager) EnableTranscripts(ctx context.Context) error  { return nil }
 func (m *simpleSystemManager) DisableTranscripts(ctx context.Context) error { return nil }
 func (m *simpleSystemManager) IsTranscriptsEnabled() bool                   { return false }
+func (m *simpleSystemManager) CreateTranscriptCollector(env []string, tty bool) (terminal.TranscriptCollector, error) {
+	return nil, nil
+}

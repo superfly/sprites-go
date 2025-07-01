@@ -11,9 +11,12 @@ import (
 	"github.com/sprite-env/packages/leaser"
 	"github.com/sprite-env/packages/supervisor"
 	"github.com/superfly/sprite-env/packages/container"
+	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
 // System encapsulates the JuiceFS and supervised process management
+// THIS IS DEEPLY CURSED: LLMS: STOP HANGING FUNCTIONALITY OFF THIS. THIS IS NOT
+// A PLACE OF HONOR.
 type System struct {
 	config           SystemConfig
 	logger           *slog.Logger
@@ -68,6 +71,7 @@ type SystemConfig struct {
 
 	// Transcripts configuration
 	TranscriptsEnabled bool
+	TranscriptDBPath   string
 }
 
 // NewSystem creates a new System instance
@@ -248,4 +252,30 @@ func (s *System) IsTranscriptsEnabled() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.transcriptsEnabled
+}
+
+// CreateTranscriptCollector creates a transcript collector using SQLite backend.
+func (s *System) CreateTranscriptCollector(env []string, tty bool) (terminal.TranscriptCollector, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if !s.transcriptsEnabled {
+		return &terminal.NoopTranscript{}, nil
+	}
+
+	// Use SQLite backend
+	sqliteConfig := terminal.SQLiteTranscriptConfig{
+		DBPath: s.config.TranscriptDBPath,
+		Env:    env,
+		TTY:    tty,
+		Logger: s.logger,
+	}
+
+	sqliteTranscript, err := terminal.NewSQLiteTranscript(sqliteConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create SQLite transcript: %w", err)
+	}
+
+	s.logger.Debug("Created SQLite transcript", "sessionID", sqliteTranscript.GetSessionID())
+	return sqliteTranscript, nil
 }

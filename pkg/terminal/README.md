@@ -132,11 +132,34 @@ func handleWebSocketExec(w http.ResponseWriter, r *http.Request) {
 
 ## Transcript Collection
 
-The package provides a flexible transcript collection system:
+The package provides a flexible transcript collection system with multiple backend options:
 
 ### Built-in Collectors
 
-1. **Memory Transcript**: Collects data in memory
+1. **SQLite Transcript** (Default): Stores transcripts in a structured SQLite database
+```go
+config := terminal.SQLiteTranscriptConfig{
+    DBPath:  "/var/log/transcripts.db",
+    WorkDir: &workDir,
+    Env:     []string{"VAR=value"},
+    TTY:     true,
+    Logger:  logger,
+}
+
+transcript, err := terminal.NewSQLiteTranscript(config)
+if err != nil {
+    return err
+}
+defer transcript.Close()
+
+// Use with terminal session
+session := terminal.NewSession(
+    terminal.WithCommand("echo", "hello"),
+    terminal.WithTranscript(transcript),
+)
+```
+
+2. **Memory Transcript**: Collects data in memory
 ```go
 transcript := terminal.NewMemoryTranscript()
 // ... use transcript ...
@@ -144,7 +167,7 @@ stdoutData := transcript.GetStreamData("stdout")
 allStreams := transcript.GetAllStreams()
 ```
 
-2. **File Transcript**: Logs to structured files
+3. **File Transcript**: Logs to structured files
 ```go
 transcript, err := terminal.NewFileTranscript("/path/to/transcript.log")
 if err != nil {
@@ -153,11 +176,119 @@ if err != nil {
 defer transcript.Close()
 ```
 
-3. **No-op Transcript**: Discards all data (default)
+4. **No-op Transcript**: Discards all data
 ```go
 // Automatically used if no transcript is specified
 session := terminal.NewSession(/* no transcript option */)
 ```
+
+### SQLite Backend Features
+
+The SQLite backend provides structured transcript storage:
+
+- **Simple Schema**: Two-table design (sessions and log_lines)
+- **Unique IDs**: All records have unique identifiers for API access
+- **Essential Metadata**: Working directory, environment, timestamps
+- **Concurrent Safe**: Proper transaction handling and locking
+- **Efficient Queries**: Indexed for fast retrieval and filtering
+- **Future-Ready**: Designed to support HTTP APIs for transcript access
+
+#### Database Schema
+
+```sql
+-- Sessions table
+CREATE TABLE sessions (
+    session_id TEXT PRIMARY KEY,
+    start_time INTEGER NOT NULL,
+    end_time INTEGER DEFAULT NULL,
+    working_dir TEXT DEFAULT NULL,
+    environment TEXT DEFAULT NULL, -- JSON encoded
+    tty BOOLEAN NOT NULL DEFAULT FALSE,
+    exit_code INTEGER DEFAULT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+-- Log lines table
+CREATE TABLE log_lines (
+    line_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    stream TEXT NOT NULL, -- 'stdin', 'stdout', 'stderr'
+    sequence INTEGER NOT NULL, -- Global sequence within session
+    timestamp INTEGER NOT NULL,
+    message TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+);
+```
+
+#### Reading SQLite Transcripts
+
+```go
+// Create backend for reading
+backend, err := terminal.NewSQLiteTranscriptBackend("/var/log/transcripts.db")
+if err != nil {
+    return err
+}
+defer backend.Close()
+
+// Query log lines
+query := terminal.LineQuery{
+    SessionID:     "session-uuid",
+    Stream:        "stdout", // or "stderr", "stdin", "all"
+    Limit:         100,
+    AfterSequence: 0, // Start from beginning
+    Follow:        false, // For live streaming (not supported in SQLite backend)
+}
+
+lines, err := backend.GetLines(context.Background(), query)
+if err != nil {
+    return err
+}
+
+for _, line := range lines {
+    fmt.Printf("[%s] %s: %s\n", line.Timestamp.Format(time.RFC3339), line.Stream, line.Text)
+}
+
+// Get session information
+sqliteBackend := backend.(*terminal.SQLiteTranscriptBackend)
+sessionInfo, err := sqliteBackend.GetSessionInfo(context.Background(), "session-uuid")
+if err != nil {
+    return err
+}
+
+fmt.Printf("Command: %s, Exit Code: %d\n", sessionInfo.Command, sessionInfo.ExitCode)
+
+// List all sessions
+sessions, err := sqliteBackend.ListSessions(context.Background(), 10, 0) // limit=10, offset=0
+if err != nil {
+    return err
+}
+
+for _, session := range sessions {
+    fmt.Printf("Session %s: %s (exit: %d)\n", session.SessionID, session.Command, session.ExitCode)
+}
+```
+
+### Backend Configuration
+
+The SQLite backend is hardcoded as the only transcript backend. Configuration is simple:
+
+#### Environment Variables
+
+- `SPRITE_TRANSCRIPT_DB_PATH` - Path to SQLite database file (default: /var/log/transcripts.db)
+
+#### JSON Configuration
+
+```json
+{
+  "transcript_db_path": "/var/log/transcripts.db"
+}
+```
+
+#### Requirements
+
+The SQLite backend requires CGO to be enabled during compilation. If SQLite is unavailable, the system will fail to start rather than silently degrade.
 
 ### Custom Transcript Collectors
 
