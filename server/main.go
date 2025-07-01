@@ -298,11 +298,7 @@ func (app *Application) shutdown(exitCode int) error {
 // Command-line parsing and main
 
 func parseCommandLine() (Config, error) {
-	// Initialize config with defaults
-	config := Config{
-		// Set transcript defaults
-		TranscriptDBPath: "/var/log/transcripts.db",
-	}
+	config := Config{}
 
 	// Flags
 	var (
@@ -506,6 +502,10 @@ func parseCommandLine() (Config, error) {
 	// Validate - now API token is required if API server is configured
 	if config.APIListenAddr != "" && config.APIToken == "" {
 		return config, fmt.Errorf("API token must be set when API server is enabled")
+	}
+
+	if config.TranscriptDBPath == "" {
+		config.TranscriptDBPath = "/var/log/transcripts.db"
 	}
 
 	return config, nil
