@@ -29,7 +29,7 @@ import (
 // @response 401 {string} string "Unauthorized - invalid or missing authentication"
 // @response 405 {string} string "Method not allowed - only GET/POST supported"
 // @response 503 {string} string "Service unavailable - sprite not running"
-func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) HandleExecWsexec(w http.ResponseWriter, r *http.Request) {
 	h.logger.Debug("HandleExec called",
 		"method", r.Method,
 		"url", r.URL.String(),

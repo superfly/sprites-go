@@ -8,5 +8,6 @@ use (
 	./packages/leaser
 	./packages/supervisor
 	./packages/wsexec
+	./pkg/terminal
 	./server
 )
