@@ -34,11 +34,7 @@ type SystemManager interface {
 	DisableTranscripts(ctx context.Context) error
 	IsTranscriptsEnabled() bool
 
-	CreateTranscriptCollector(
-		workDir *string,
-		env []string,
-		ty bool,
-	) (terminal.TranscriptCollector, error)
+	CreateTranscriptCollector(env []string, ty bool) (terminal.TranscriptCollector, error)
 
 	// Reaper integration
 	SubscribeToReapEvents() <-chan int

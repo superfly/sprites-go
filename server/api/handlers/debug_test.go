@@ -168,7 +168,6 @@ func (m *mockSystemManager) IsTranscriptsEnabled() bool {
 }
 
 func (m *mockSystemManager) CreateTranscriptCollector(
-	workDir *string,
 	env []string,
 	ty bool,
 ) (terminal.TranscriptCollector, error) {

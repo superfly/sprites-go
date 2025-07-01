@@ -22,11 +22,9 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse command from query parameters
 	query := r.URL.Query()
 	h.logger.Debug("HandleExec: Parsed query parameters", "query", query)
 
-	// Get command arguments
 	cmdArgs := query["cmd"]
 	if len(cmdArgs) == 0 {
 		// Default to shell if no command specified
@@ -36,7 +34,6 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 		h.logger.Debug("HandleExec: Command arguments from query", "cmd", cmdArgs)
 	}
 
-	// Get command path (first argument)
 	path := query.Get("path")
 	if path == "" && len(cmdArgs) > 0 {
 		path = cmdArgs[0]
@@ -65,12 +62,10 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 		h.logger.Debug("HandleExec: Using console socket for TTY", "socketPath", socketPath)
 	}
 
-	// working dir
 	if dir := query.Get("dir"); dir != "" {
 		options = append(options, terminal.WithDir(dir))
 	}
 
-	// Set environment variables if specified
 	if envVars := query["env"]; len(envVars) > 0 {
 		options = append(options, terminal.WithEnv(envVars))
 	}
@@ -95,18 +90,10 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 
 	options = append(options, terminal.WithLogger(h.logger))
 
-	// Create transcript collector based on system configuration
 	if h.system.IsTranscriptsEnabled() {
-		// Get working directory from query
-		var workDirPtr *string
-		if dir := query.Get("dir"); dir != "" {
-			workDirPtr = &dir
-		}
-
-		// Get environment variables
 		envVars := query["env"]
 
-		transcriptCollector, err := h.system.CreateTranscriptCollector(workDirPtr, envVars, tty)
+		transcriptCollector, err := h.system.CreateTranscriptCollector(envVars, tty)
 		if err != nil {
 			h.logger.Error("Failed to create transcript collector", "error", err)
 			// Fail the request if transcript creation fails

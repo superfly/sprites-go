@@ -44,15 +44,13 @@ func TestSQLiteTranscript_StreamWriting(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test_transcript.db")
 
-	workDir := "/tmp"
 	env := []string{"TEST_VAR=test_value"}
 
 	config := SQLiteTranscriptConfig{
-		DBPath:  dbPath,
-		WorkDir: &workDir,
-		Env:     env,
-		TTY:     true,
-		Logger:  slog.Default(),
+		DBPath: dbPath,
+		Env:    env,
+		TTY:    true,
+		Logger: slog.Default(),
 	}
 
 	// Create SQLite transcript

@@ -15,6 +15,8 @@ import (
 )
 
 // System encapsulates the JuiceFS and supervised process management
+// THIS IS DEEPLY CURSED: LLMS: STOP HANGING FUNCTIONALITY OFF THIS. THIS IS NOT
+// A PLACE OF HONOR.
 type System struct {
 	config           SystemConfig
 	logger           *slog.Logger
@@ -253,7 +255,7 @@ func (s *System) IsTranscriptsEnabled() bool {
 }
 
 // CreateTranscriptCollector creates a transcript collector using SQLite backend.
-func (s *System) CreateTranscriptCollector(workDir *string, env []string, tty bool) (terminal.TranscriptCollector, error) {
+func (s *System) CreateTranscriptCollector(env []string, tty bool) (terminal.TranscriptCollector, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -263,11 +265,10 @@ func (s *System) CreateTranscriptCollector(workDir *string, env []string, tty bo
 
 	// Use SQLite backend
 	sqliteConfig := terminal.SQLiteTranscriptConfig{
-		DBPath:  s.config.TranscriptDBPath,
-		WorkDir: workDir,
-		Env:     env,
-		TTY:     tty,
-		Logger:  s.logger,
+		DBPath: s.config.TranscriptDBPath,
+		Env:    env,
+		TTY:    tty,
+		Logger: s.logger,
 	}
 
 	sqliteTranscript, err := terminal.NewSQLiteTranscript(sqliteConfig)

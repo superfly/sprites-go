@@ -350,6 +350,6 @@ func (m *simpleSystemManager) WasProcessReaped(pid int) (bool, time.Time) { retu
 func (m *simpleSystemManager) EnableTranscripts(ctx context.Context) error  { return nil }
 func (m *simpleSystemManager) DisableTranscripts(ctx context.Context) error { return nil }
 func (m *simpleSystemManager) IsTranscriptsEnabled() bool                   { return false }
-func (m *simpleSystemManager) CreateTranscriptCollector(workDir *string, env []string, tty bool) (terminal.TranscriptCollector, error) {
+func (m *simpleSystemManager) CreateTranscriptCollector(env []string, tty bool) (terminal.TranscriptCollector, error) {
 	return nil, nil
 }
