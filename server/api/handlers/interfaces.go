@@ -8,6 +8,7 @@ import (
 	"github.com/sprite-env/lib/api"
 
 	"github.com/sprite-env/packages/juicefs"
+	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
 // SystemManager interface provides methods for managing the system (process + storage)
@@ -32,6 +33,12 @@ type SystemManager interface {
 	EnableTranscripts(ctx context.Context) error
 	DisableTranscripts(ctx context.Context) error
 	IsTranscriptsEnabled() bool
+
+	CreateTranscriptCollector(
+		workDir *string,
+		env []string,
+		ty bool,
+	) (terminal.TranscriptCollector, error)
 
 	// Reaper integration
 	SubscribeToReapEvents() <-chan int

@@ -12,6 +12,7 @@ import (
 	"github.com/sprite-env/lib/api"
 
 	"github.com/sprite-env/packages/juicefs"
+	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
 // mockSupervisor implements Supervisor interface for testing
@@ -291,4 +292,13 @@ func (m *mockSystemManager) DisableTranscripts(ctx context.Context) error {
 
 func (m *mockSystemManager) IsTranscriptsEnabled() bool {
 	return false
+
+}
+
+func (m *mockSystemManager) CreateTranscriptCollector(
+	workDir *string,
+	env []string,
+	ty bool,
+) (terminal.TranscriptCollector, error) {
+	return nil, nil
 }

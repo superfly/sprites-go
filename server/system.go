@@ -11,6 +11,7 @@ import (
 	"github.com/sprite-env/packages/leaser"
 	"github.com/sprite-env/packages/supervisor"
 	"github.com/superfly/sprite-env/packages/container"
+	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
 // System encapsulates the JuiceFS and supervised process management

@@ -164,7 +164,7 @@ func TestLineWriterPartialLines(t *testing.T) {
 }
 
 func TestNoopTranscript(t *testing.T) {
-	transcript := &noopTranscript{}
+	transcript := &NoopTranscript{}
 
 	// Should not panic or error
 	writer := transcript.StreamWriter("test")
