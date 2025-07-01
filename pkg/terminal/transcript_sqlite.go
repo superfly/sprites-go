@@ -108,8 +108,8 @@ func (t *SQLiteTranscript) createSession() error {
 	}
 
 	query := `
-		INSERT INTO sessions (session_id, start_time, working_dir, environment, tty)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO sessions (session_id, start_time, environment, tty)
+		VALUES (?, ?, ?, ?)
 	`
 
 	_, err := t.db.Exec(query,
