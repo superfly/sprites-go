@@ -192,6 +192,8 @@ func execCommand(baseURL, token string, args []string) {
 
 	logger.Debug("Created wsexec command", "tty", wsCmd.Tty)
 
+	logger.Info("Starting WebSocket command execution")
+
 	// Set up PTY mode if needed
 	var cleanup func()
 	if *tty {
@@ -208,8 +210,6 @@ func execCommand(baseURL, token string, args []string) {
 			}
 		}()
 	}
-
-	logger.Info("Starting WebSocket command execution")
 
 	// Start the command
 	if err := wsCmd.Start(); err != nil {
