@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/superfly/sprite-env/pkg/terminal"
@@ -95,14 +96,25 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 
 	options = append(options, terminal.WithLogger(h.logger))
 
-	// Create transcript collector only if transcripts are enabled
+	// Create transcript collector based on system configuration
 	if h.system.IsTranscriptsEnabled() {
-		ts, err := terminal.NewFileTranscript("/var/log/exec")
-		if err != nil {
-			h.logger.Error("create transcript", "error", err)
-		} else {
-			options = append(options, terminal.WithTranscript(ts))
+		// Get working directory from query
+		var workDirPtr *string
+		if dir := query.Get("dir"); dir != "" {
+			workDirPtr = &dir
 		}
+
+		// Get environment variables
+		envVars := query["env"]
+
+		transcriptCollector, err := h.system.CreateTranscriptCollector(workDirPtr, envVars, tty)
+		if err != nil {
+			h.logger.Error("Failed to create transcript collector", "error", err)
+			// Fail the request if transcript creation fails
+			http.Error(w, "Failed to create transcript collector", http.StatusInternalServerError)
+			return
+		}
+		options = append(options, terminal.WithTranscript(transcriptCollector))
 	}
 
 	var (

@@ -62,6 +62,9 @@ type Config struct {
 	OverlayLowerPath     string // Path to lower directory (read-only base layer)
 	OverlayTargetPath    string // Where to mount the final overlay
 	OverlaySkipOverlayFS bool   // Skip overlayfs, only mount loopback
+
+	// Transcript configuration
+	TranscriptDBPath string // Path to SQLite database file
 }
 
 // Application represents the main application
@@ -126,6 +129,8 @@ func NewApplication(config Config) (*Application, error) {
 		OverlayLowerPath:               config.OverlayLowerPath,
 		OverlayTargetPath:              config.OverlayTargetPath,
 		OverlaySkipOverlayFS:           config.OverlaySkipOverlayFS,
+		TranscriptsEnabled:             true, // Default enabled as per requirements
+		TranscriptDBPath:               config.TranscriptDBPath,
 	}
 
 	system, err := NewSystem(systemConfig, logger, app.reaper)
@@ -293,7 +298,11 @@ func (app *Application) shutdown(exitCode int) error {
 // Command-line parsing and main
 
 func parseCommandLine() (Config, error) {
-	var config Config
+	// Initialize config with defaults
+	config := Config{
+		// Set transcript defaults
+		TranscriptDBPath: "/var/log/transcripts.db",
+	}
 
 	// Flags
 	var (
@@ -361,6 +370,9 @@ func parseCommandLine() (Config, error) {
 			OverlayLowerPath     string `json:"overlay_lower_path"`
 			OverlayTargetPath    string `json:"overlay_target_path"`
 			OverlaySkipOverlayFS bool   `json:"overlay_skip_overlayfs"`
+
+			// Transcript configuration
+			TranscriptDBPath string `json:"transcript_db_path"`
 		}
 
 		if err := json.Unmarshal(data, &fileConfig); err != nil {
@@ -411,6 +423,7 @@ func parseCommandLine() (Config, error) {
 		config.OverlayLowerPath = fileConfig.OverlayLowerPath
 		config.OverlayTargetPath = fileConfig.OverlayTargetPath
 		config.OverlaySkipOverlayFS = fileConfig.OverlaySkipOverlayFS
+		config.TranscriptDBPath = fileConfig.TranscriptDBPath
 	}
 
 	// Apply command-line overrides
@@ -478,6 +491,11 @@ func parseCommandLine() (Config, error) {
 		config.OverlaySkipOverlayFS = true
 	} else if skipOverlayFS == "false" {
 		config.OverlaySkipOverlayFS = false
+	}
+
+	// Transcript configuration - environment overrides file config
+	if transcriptDBPath := os.Getenv("SPRITE_TRANSCRIPT_DB_PATH"); transcriptDBPath != "" {
+		config.TranscriptDBPath = transcriptDBPath
 	}
 
 	// Debug configuration

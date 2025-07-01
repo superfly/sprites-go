@@ -127,7 +127,7 @@ func (s *Session) Run(ctx context.Context, stdin io.Reader, stdout, stderr io.Wr
 	// Set up transcript collection
 	transcript := s.transcript
 	if transcript == nil {
-		transcript = &noopTranscript{}
+		transcript = &NoopTranscript{}
 	}
 	defer transcript.Close()
 
