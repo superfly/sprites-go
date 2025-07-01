@@ -71,7 +71,7 @@ type SystemConfig struct {
 
 	// Transcripts configuration
 	TranscriptsEnabled bool
-	TranscriptDBPath   string // Path to SQLite database file
+	TranscriptDBPath   string
 }
 
 // NewSystem creates a new System instance
