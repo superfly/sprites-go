@@ -279,3 +279,16 @@ func (m *mockSystemManager) setProcessRunning(running bool) {
 	defer m.mu.Unlock()
 	m.processRunning = running
 }
+
+// Transcripts management stubs satisfy the SystemManager interface.
+func (m *mockSystemManager) EnableTranscripts(ctx context.Context) error {
+	return nil
+}
+
+func (m *mockSystemManager) DisableTranscripts(ctx context.Context) error {
+	return nil
+}
+
+func (m *mockSystemManager) IsTranscriptsEnabled() bool {
+	return false
+}

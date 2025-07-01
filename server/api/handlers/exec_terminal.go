@@ -95,12 +95,14 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 
 	options = append(options, terminal.WithLogger(h.logger))
 
-	// Create transcript collector (using the existing fileCollector logic)
-	ts, err := terminal.NewFileTranscript("/var/log/exec")
-	if err != nil {
-		h.logger.Error("create transcript", "error", err)
-	} else {
-		options = append(options, terminal.WithTranscript(ts))
+	// Create transcript collector only if transcripts are enabled
+	if h.system.IsTranscriptsEnabled() {
+		ts, err := terminal.NewFileTranscript("/var/log/exec")
+		if err != nil {
+			h.logger.Error("create transcript", "error", err)
+		} else {
+			options = append(options, terminal.WithTranscript(ts))
+		}
 	}
 
 	var (
@@ -114,7 +116,7 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 		"wrapperCommand", h.execWrapperCommand)
 
 	startTime := time.Now()
-	err = wsHandler.Handle(w, r)
+	err := wsHandler.Handle(w, r)
 
 	h.logger.Info("Exec completed",
 		"path", path,
