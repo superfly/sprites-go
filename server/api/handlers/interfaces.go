@@ -28,6 +28,11 @@ type SystemManager interface {
 	ListCheckpointsByHistory(ctx context.Context, version string) ([]string, error)
 	GetCheckpoint(ctx context.Context, checkpointID string) (*juicefs.CheckpointInfo, error)
 
+	// Transcript management
+	EnableTranscripts(ctx context.Context) error
+	DisableTranscripts(ctx context.Context) error
+	IsTranscriptsEnabled() bool
+
 	// Reaper integration
 	SubscribeToReapEvents() <-chan int
 	UnsubscribeFromReapEvents(ch <-chan int)

@@ -325,6 +325,26 @@ Create a checkpoint of the current state.
 ### POST /restore
 Restore from a checkpoint.
 
+### POST /transcripts/enable
+Enable transcript recording for future exec calls.
+
+**Response:**
+```json
+{
+  "enabled": true
+}
+```
+
+### POST /transcripts/disable
+Disable transcript recording for future exec calls.
+
+**Response:**
+```json
+{
+  "enabled": false
+}
+```
+
 ### GET /debug/create-zombie
 Create a zombie process for testing (debug endpoint).
 

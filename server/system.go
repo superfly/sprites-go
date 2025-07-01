@@ -27,10 +27,11 @@ type System struct {
 	processDoneCh chan error
 
 	// State management
-	mu             sync.RWMutex
-	processRunning bool
-	restoringNow   bool
-	juicefsReady   bool
+	mu                 sync.RWMutex
+	processRunning     bool
+	restoringNow       bool
+	juicefsReady       bool
+	transcriptsEnabled bool
 
 	// Channels for notifying when components become ready
 	processReadyCh chan struct{}
@@ -64,17 +65,21 @@ type SystemConfig struct {
 	OverlayLowerPath     string
 	OverlayTargetPath    string
 	OverlaySkipOverlayFS bool
+
+	// Transcripts configuration
+	TranscriptsEnabled bool
 }
 
 // NewSystem creates a new System instance
 func NewSystem(config SystemConfig, logger *slog.Logger, reaper *Reaper) (*System, error) {
 	s := &System{
-		config:         config,
-		logger:         logger,
-		reaper:         reaper,
-		processDoneCh:  make(chan error, 1),
-		processReadyCh: make(chan struct{}),
-		juicefsReadyCh: make(chan struct{}),
+		config:             config,
+		logger:             logger,
+		reaper:             reaper,
+		processDoneCh:      make(chan error, 1),
+		processReadyCh:     make(chan struct{}),
+		juicefsReadyCh:     make(chan struct{}),
+		transcriptsEnabled: config.TranscriptsEnabled,
 	}
 
 	// Configure container package with system settings
@@ -218,4 +223,29 @@ func (s *System) Shutdown(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// EnableTranscripts enables transcript recording for future exec calls
+func (s *System) EnableTranscripts(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.transcriptsEnabled = true
+	s.logger.Info("transcripts enabled")
+	return nil
+}
+
+// DisableTranscripts disables transcript recording for future exec calls
+func (s *System) DisableTranscripts(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.transcriptsEnabled = false
+	s.logger.Info("transcripts disabled")
+	return nil
+}
+
+// IsTranscriptsEnabled returns whether transcript recording is currently enabled
+func (s *System) IsTranscriptsEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.transcriptsEnabled
 }

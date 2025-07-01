@@ -154,6 +154,18 @@ func (m *mockSystemManager) WaitForJuiceFS(ctx context.Context) error {
 	return nil
 }
 
+func (m *mockSystemManager) EnableTranscripts(ctx context.Context) error {
+	return nil
+}
+
+func (m *mockSystemManager) DisableTranscripts(ctx context.Context) error {
+	return nil
+}
+
+func (m *mockSystemManager) IsTranscriptsEnabled() bool {
+	return false
+}
+
 // TestHandleDebugCreateZombie tests the debug zombie creation handler
 func TestHandleDebugCreateZombie(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))

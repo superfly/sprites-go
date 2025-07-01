@@ -82,6 +82,9 @@ func main() {
 	case "restore":
 		// Handle restore command
 		restoreCommand(url, token, os.Args[2:])
+	case "transcripts":
+		// Handle transcripts command
+		transcriptsCommand(url, token, os.Args[2:])
 	case "proxy":
 		// Handle proxy command
 		proxyCommand(url, token, os.Args[2:])
@@ -108,6 +111,9 @@ Commands:
     list                    List all checkpoints
     info <id>               Show information about a specific checkpoint
   restore <id>              Restore from a checkpoint
+  transcripts <subcommand>  Manage transcript recording
+    enable                  Enable transcript recording for future exec calls
+    disable                 Disable transcript recording for future exec calls
   proxy <port1> [port2...]  Forward local ports through the remote server proxy
 
 Environment Variables:
@@ -130,6 +136,12 @@ Examples:
 
   # Restore from checkpoint
   sprite-client restore my-checkpoint-id
+
+  # Enable transcript recording
+  sprite-client transcripts enable
+
+  # Disable transcript recording
+  sprite-client transcripts disable
 
   # Forward local ports 8080 and 3000
   sprite-client proxy 8080 3000
@@ -467,6 +479,124 @@ func restoreCommand(baseURL, token string, args []string) {
 	// Process streaming response
 	exitCode := processStreamingResponse(resp.Body)
 	os.Exit(exitCode)
+}
+
+func transcriptsCommand(baseURL, token string, args []string) {
+	if len(args) < 1 {
+		fmt.Fprintf(os.Stderr, "Error: transcripts requires a subcommand\n")
+		fmt.Fprintf(os.Stderr, "Usage: sprite-client transcripts <enable|disable>\n")
+		os.Exit(1)
+	}
+
+	subcommand := args[0]
+	subArgs := args[1:]
+
+	switch subcommand {
+	case "enable":
+		transcriptsEnableCommand(baseURL, token, subArgs)
+	case "disable":
+		transcriptsDisableCommand(baseURL, token, subArgs)
+	default:
+		fmt.Fprintf(os.Stderr, "Error: Unknown transcripts subcommand '%s'\n", subcommand)
+		fmt.Fprintf(os.Stderr, "Usage: sprite-client transcripts <enable|disable>\n")
+		os.Exit(1)
+	}
+}
+
+func transcriptsEnableCommand(baseURL, token string, args []string) {
+	if len(args) != 0 {
+		fmt.Fprintf(os.Stderr, "Error: transcripts enable takes no arguments\n")
+		fmt.Fprintf(os.Stderr, "Usage: sprite-client transcripts enable\n")
+		os.Exit(1)
+	}
+
+	// Make HTTP request
+	url := fmt.Sprintf("%s/transcripts/enable", baseURL)
+	debugLog("HTTP request: %s %s", "POST", url)
+
+	httpReq, err := http.NewRequest("POST", url, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to create HTTP request: %v\n", err)
+		os.Exit(1)
+	}
+
+	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+
+	client := &http.Client{}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to make HTTP request: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Fprintf(os.Stderr, "Error: HTTP %d: %s\n", resp.StatusCode, string(body))
+		os.Exit(1)
+	}
+
+	// Parse JSON response
+	var response api.TranscriptsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to parse response: %v\n", err)
+		os.Exit(1)
+	}
+
+	if response.Enabled {
+		fmt.Println("Transcripts enabled successfully.")
+	} else {
+		fmt.Fprintf(os.Stderr, "Error: Expected transcripts to be enabled, but got disabled response\n")
+		os.Exit(1)
+	}
+}
+
+func transcriptsDisableCommand(baseURL, token string, args []string) {
+	if len(args) != 0 {
+		fmt.Fprintf(os.Stderr, "Error: transcripts disable takes no arguments\n")
+		fmt.Fprintf(os.Stderr, "Usage: sprite-client transcripts disable\n")
+		os.Exit(1)
+	}
+
+	// Make HTTP request
+	url := fmt.Sprintf("%s/transcripts/disable", baseURL)
+	debugLog("HTTP request: %s %s", "POST", url)
+
+	httpReq, err := http.NewRequest("POST", url, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to create HTTP request: %v\n", err)
+		os.Exit(1)
+	}
+
+	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+
+	client := &http.Client{}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to make HTTP request: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Fprintf(os.Stderr, "Error: HTTP %d: %s\n", resp.StatusCode, string(body))
+		os.Exit(1)
+	}
+
+	// Parse JSON response
+	var response api.TranscriptsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to parse response: %v\n", err)
+		os.Exit(1)
+	}
+
+	if !response.Enabled {
+		fmt.Println("Transcripts disabled successfully.")
+	} else {
+		fmt.Fprintf(os.Stderr, "Error: Expected transcripts to be disabled, but got enabled response\n")
+		os.Exit(1)
+	}
 }
 
 // processStreamingResponse processes NDJSON streaming responses
