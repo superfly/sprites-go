@@ -345,3 +345,7 @@ func (m *simpleSystemManager) GetCheckpoint(ctx context.Context, checkpointID st
 func (m *simpleSystemManager) SubscribeToReapEvents() <-chan int          { return make(<-chan int) }
 func (m *simpleSystemManager) UnsubscribeFromReapEvents(ch <-chan int)    {}
 func (m *simpleSystemManager) WasProcessReaped(pid int) (bool, time.Time) { return false, time.Time{} }
+
+func (m *simpleSystemManager) EnableTranscripts(ctx context.Context) error  { return nil }
+func (m *simpleSystemManager) DisableTranscripts(ctx context.Context) error { return nil }
+func (m *simpleSystemManager) IsTranscriptsEnabled() bool                   { return false }
