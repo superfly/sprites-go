@@ -6,18 +6,22 @@ import (
 	"strings"
 )
 
-// ANSI color codes
+// ANSI color codes - using theme-adaptive colors
 const (
-	Reset   = "\033[0m"
-	Bold    = "\033[1m"
-	Red     = "\033[31m"
-	Green   = "\033[32m"
-	Yellow  = "\033[33m"
-	Blue    = "\033[34m"
-	Magenta = "\033[35m"
-	Cyan    = "\033[36m"
-	Gray    = "\033[90m"
-	White   = "\033[97m"
+	Reset = "\033[0m"
+	Bold  = "\033[1m"
+
+	// Basic colors that adapt to terminal themes
+	Red     = "\033[91m" // Bright red - adapts better to dark/light themes
+	Green   = "\033[92m" // Bright green - adapts better to dark/light themes
+	Yellow  = "\033[93m" // Bright yellow - adapts better to dark/light themes
+	Blue    = "\033[94m" // Bright blue - adapts better to dark/light themes
+	Magenta = "\033[95m" // Bright magenta - adapts better to dark/light themes
+	Cyan    = "\033[96m" // Bright cyan - adapts better to dark/light themes
+
+	// Subtle colors for secondary information
+	Gray = "\033[37m" // Light gray - works on both light and dark
+	Dim  = "\033[2m"  // Dim text - lets terminal choose appropriate dimming
 )
 
 // Check if we should use colors (not disabled, and terminal supports it)
@@ -26,12 +30,17 @@ func shouldUseColor() bool {
 	if os.Getenv("NO_COLOR") != "" {
 		return false
 	}
-	
+
+	// Check if FORCE_COLOR is set (useful for CI/testing)
+	if os.Getenv("FORCE_COLOR") != "" {
+		return true
+	}
+
 	// Check if stdout is a terminal
 	if fileInfo, _ := os.Stdout.Stat(); (fileInfo.Mode() & os.ModeCharDevice) == 0 {
 		return false
 	}
-	
+
 	return true
 }
 
@@ -43,17 +52,17 @@ func colorize(s string, color string) string {
 	return color + s + Reset
 }
 
-// Org formats an organization name with consistent color (cyan)
+// Org formats an organization name with consistent color (cyan - good contrast on both themes)
 func Org(name string) string {
 	return colorize(name, Cyan)
 }
 
-// Sprite formats a sprite name with consistent color (green)
+// Sprite formats a sprite name with consistent color (green - universally good)
 func Sprite(name string) string {
 	return colorize(name, Green)
 }
 
-// Command formats a command with consistent color (yellow)
+// Command formats a command with consistent color (yellow - high visibility)
 func Command(cmd string) string {
 	return colorize(cmd, Yellow)
 }
@@ -92,6 +101,16 @@ func ContextCommand(org, cmd, sprite string) string {
 // Bold makes text bold
 func BoldText(s string) string {
 	return colorize(s, Bold)
+}
+
+// Question formats question prompts with blue
+func Question(msg string) string {
+	return colorize(msg, Blue)
+}
+
+// Subtle formats subtle text with dimmed appearance (theme-adaptive)
+func Subtle(msg string) string {
+	return colorize(msg, Dim)
 }
 
 // GetOrgDisplayName returns a user-friendly display name for the organization

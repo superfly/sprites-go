@@ -10,6 +10,7 @@ import (
 
 	"github.com/sprite-env/client/config"
 	"github.com/sprite-env/client/format"
+	"github.com/sprite-env/client/prompts"
 )
 
 // DestroyCommand handles the destroy command
@@ -29,7 +30,7 @@ func DestroyCommand(cfg *config.Manager, args []string) {
 
 	// Set up flags
 	flags := NewSpriteFlags(cmd.FlagSet)
-	force := cmd.FlagSet.Bool("force", false, "Skip confirmation prompt")
+	forceFlag := cmd.FlagSet.Bool("force", false, "Skip confirmation prompt")
 
 	// Parse flags
 	remainingArgs, err := ParseFlags(cmd, args)
@@ -44,7 +45,7 @@ func DestroyCommand(cfg *config.Manager, args []string) {
 	}
 
 	// Ensure we have an org and sprite
-	org, sprite, isNewSprite, err := EnsureOrgAndSprite(cfg, flags.Org, flags.Sprite)
+	org, spriteName, isNewSprite, err := EnsureOrgAndSprite(cfg, flags.Org, flags.Sprite)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -56,23 +57,26 @@ func DestroyCommand(cfg *config.Manager, args []string) {
 		os.Exit(1)
 	}
 
-	if sprite == nil {
+	if spriteName == "" {
 		fmt.Fprintf(os.Stderr, "Error: No sprite selected to destroy\n")
 		os.Exit(1)
 	}
 
-	fmt.Println(format.Context(format.GetOrgDisplayName(org.Name, org.URL), fmt.Sprintf("About to destroy sprite %s", format.Sprite(sprite.Name))))
+	fmt.Println(format.Context(format.GetOrgDisplayName(org.Name, org.URL), fmt.Sprintf("About to destroy sprite %s", format.Sprite(spriteName))))
 	fmt.Println()
 
-	if !*force {
-		fmt.Printf("Warning: This will permanently destroy sprite %s\n", format.Sprite(sprite.Name))
-		fmt.Print("Are you sure? (y/N): ")
+	if !*forceFlag {
+		title := fmt.Sprintf("Destroy sprite %s?", spriteName)
+		description := "⚠️  This will permanently destroy the sprite and all its data. This action cannot be undone."
 
-		var response string
-		fmt.Scanln(&response)
+		confirmed, err := prompts.PromptForConfirmation(title, description)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 
-		if response != "y" && response != "Y" {
-			fmt.Println("Destroy cancelled.")
+		if !confirmed {
+			fmt.Println("Cancelled.")
 			os.Exit(0)
 		}
 	}
@@ -81,7 +85,7 @@ func DestroyCommand(cfg *config.Manager, args []string) {
 	var url string
 	if org.Name != "env" && strings.Contains(getSpritesAPIURL(org), "sprites.dev") {
 		// Use the new sprites API
-		url = fmt.Sprintf("%s/v1/sprites/%s", getSpritesAPIURL(org), sprite.Name)
+		url = fmt.Sprintf("%s/v1/sprites/%s", getSpritesAPIURL(org), spriteName)
 	} else {
 		// Use direct endpoint for backward compatibility
 		url = fmt.Sprintf("%s/sprite/destroy", org.URL)
@@ -93,7 +97,7 @@ func DestroyCommand(cfg *config.Manager, args []string) {
 		os.Exit(1)
 	}
 
-	token, err := org.GetToken()
+	token, err := org.GetTokenWithKeyringDisabled(cfg.IsKeyringDisabled())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
 		os.Exit(1)
@@ -114,19 +118,14 @@ func DestroyCommand(cfg *config.Manager, args []string) {
 		os.Exit(1)
 	}
 
-	// Remove sprite from local config
-	if err := cfg.RemoveSprite(sprite.Name); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to remove sprite from local config: %v\n", err)
-	}
-
 	// Remove .sprite file if it exists and matches this sprite
 	if spriteFile, _ := config.ReadSpriteFile(); spriteFile != nil {
-		if spriteFile.Organization == org.Name && spriteFile.Sprite == sprite.Name {
+		if spriteFile.Organization == org.Name && spriteFile.Sprite == spriteName {
 			if err := config.RemoveSpriteFile(); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: Failed to remove .sprite file: %v\n", err)
 			}
 		}
 	}
 
-	fmt.Printf("\n%s Sprite %s destroyed successfully.\n", format.Success("✓"), format.Sprite(sprite.Name))
+	fmt.Printf("\n%s Sprite %s destroyed successfully.\n", format.Success("✓"), format.Sprite(spriteName))
 }

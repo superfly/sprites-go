@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/sprite-env/client/config"
@@ -20,7 +19,7 @@ type SpritesListResponse struct {
 }
 
 // ListSprites fetches the list of sprites from the API
-func ListSprites(org *config.Organization) ([]SpriteInfo, error) {
+func ListSprites(cfg *config.Manager, org *config.Organization) ([]SpriteInfo, error) {
 	var allSprites []SpriteInfo
 	continuationToken := ""
 
@@ -45,7 +44,7 @@ func ListSprites(org *config.Organization) ([]SpriteInfo, error) {
 			return nil, fmt.Errorf("failed to create request: %w", err)
 		}
 
-		token, err := org.GetToken()
+		token, err := org.GetTokenWithKeyringDisabled(cfg.IsKeyringDisabled())
 		if err != nil {
 			return nil, fmt.Errorf("failed to get auth token: %w", err)
 		}
@@ -89,37 +88,9 @@ func ListSprites(org *config.Organization) ([]SpriteInfo, error) {
 	return allSprites, nil
 }
 
-// SyncSpritesWithConfig updates the local config with sprites from the API
+// SyncSpritesWithConfig is now a no-op since we don't store sprites locally
 func SyncSpritesWithConfig(cfg *config.Manager, org *config.Organization) error {
-	// Only sync for organizations using the new API
-	if !strings.Contains(getSpritesAPIURL(org), "sprites.dev") {
-		return nil
-	}
-
-	sprites, err := ListSprites(org)
-	if err != nil {
-		return fmt.Errorf("failed to list sprites: %w", err)
-	}
-
-	// Update the organization's sprites in config
-	currentOrg := cfg.GetCurrentOrg()
-	if currentOrg != nil && currentOrg.Name == org.Name {
-		// Clear existing sprites
-		currentOrg.Sprites = make(map[string]*config.Sprite)
-
-		// Add sprites from API
-		for _, sprite := range sprites {
-			currentOrg.Sprites[sprite.Name] = &config.Sprite{
-				Name: sprite.Name,
-				ID:   sprite.ID,
-			}
-		}
-
-		// Save the updated config
-		if err := cfg.Save(); err != nil {
-			return fmt.Errorf("failed to save config: %w", err)
-		}
-	}
-
+	// Sprites are no longer stored in local config
+	// They are fetched from API when needed or passed through to API calls
 	return nil
 }

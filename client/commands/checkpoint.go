@@ -17,9 +17,9 @@ import (
 	"github.com/sprite-env/lib/api"
 )
 
-// CheckpointCommand handles checkpoint-related commands
+// CheckpointCommand handles the checkpoint command
 func CheckpointCommand(cfg *config.Manager, args []string) {
-	// Create command structure for checkpoint
+	// Create command structure
 	cmd := &Command{
 		Name:        "checkpoint",
 		Usage:       "checkpoint <subcommand> [options]",
@@ -63,31 +63,31 @@ func CheckpointCommand(cfg *config.Manager, args []string) {
 	}
 
 	// Ensure we have an org and sprite
-	org, sprite, isNewSprite, err := EnsureOrgAndSprite(cfg, flags.Org, flags.Sprite)
+	org, spriteName, isNewSprite, err := EnsureOrgAndSprite(cfg, flags.Org, flags.Sprite)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Handle sprite creation if needed
-	if isNewSprite && sprite != nil {
-		fmt.Printf("Creating sprite %s...\n", format.Sprite(sprite.Name))
-		if err := CreateSprite(cfg, org, sprite.Name); err != nil {
+	if isNewSprite && spriteName != "" {
+		fmt.Printf("Creating sprite %s...\n", format.Sprite(spriteName))
+		if err := CreateSprite(cfg, org, spriteName); err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating sprite: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("%s Sprite %s created successfully!\n", format.Success("✓"), format.Sprite(sprite.Name))
+		fmt.Printf("%s Sprite %s created successfully!\n", format.Success("✓"), format.Sprite(spriteName))
 		// Sprite is now created and ready to use
 		isNewSprite = false
 	}
 
 	if len(remainingArgs) < 1 {
 		// Default to list if no subcommand
-		if sprite != nil {
-			fmt.Println(format.ContextSprite(format.GetOrgDisplayName(org.Name, org.URL), "Listing checkpoints for sprite", sprite.Name))
+		if spriteName != "" {
+			fmt.Println(format.ContextSprite(format.GetOrgDisplayName(org.Name, org.URL), "Listing checkpoints for sprite", spriteName))
 			fmt.Println()
 		}
-		checkpointListCommand(org, sprite, "")
+		checkpointListCommand(cfg, org, spriteName, "")
 		return
 	}
 
@@ -96,34 +96,34 @@ func CheckpointCommand(cfg *config.Manager, args []string) {
 
 	switch subcommand {
 	case "create":
-		if sprite != nil {
-			fmt.Println(format.ContextSprite(format.GetOrgDisplayName(org.Name, org.URL), "Creating checkpoint for sprite", sprite.Name))
+		if spriteName != "" {
+			fmt.Println(format.ContextSprite(format.GetOrgDisplayName(org.Name, org.URL), "Creating checkpoint for sprite", spriteName))
 			fmt.Println()
 		}
-		checkpointCreateCommand(org, sprite, subArgs)
+		checkpointCreateCommand(cfg, org, spriteName, subArgs)
 	case "list":
-		if sprite != nil {
-			fmt.Println(format.ContextSprite(format.GetOrgDisplayName(org.Name, org.URL), "Listing checkpoints for sprite", sprite.Name))
+		if spriteName != "" {
+			fmt.Println(format.ContextSprite(format.GetOrgDisplayName(org.Name, org.URL), "Listing checkpoints for sprite", spriteName))
 			fmt.Println()
 		}
-		checkpointListCommandWithFlags(org, sprite, subArgs)
+		checkpointListCommandWithFlags(cfg, org, spriteName, subArgs)
 	case "info":
-		if sprite != nil {
-			fmt.Println(format.ContextSprite(format.GetOrgDisplayName(org.Name, org.URL), "Getting checkpoint info for sprite", sprite.Name))
+		if spriteName != "" {
+			fmt.Println(format.ContextSprite(format.GetOrgDisplayName(org.Name, org.URL), "Getting checkpoint info for sprite", spriteName))
 			fmt.Println()
 		}
-		checkpointInfoCommand(org, sprite, subArgs)
+		checkpointInfoCommand(cfg, org, spriteName, subArgs)
 	default:
 		// If it's not a subcommand, assume it's a checkpoint ID for info
-		if sprite != nil {
-			fmt.Println(format.ContextSprite(format.GetOrgDisplayName(org.Name, org.URL), "Getting checkpoint info for sprite", sprite.Name))
+		if spriteName != "" {
+			fmt.Println(format.ContextSprite(format.GetOrgDisplayName(org.Name, org.URL), "Getting checkpoint info for sprite", spriteName))
 			fmt.Println()
 		}
-		checkpointInfoCommand(org, sprite, remainingArgs)
+		checkpointInfoCommand(cfg, org, spriteName, remainingArgs)
 	}
 }
 
-func checkpointCreateCommand(org *config.Organization, sprite *config.Sprite, args []string) {
+func checkpointCreateCommand(cfg *config.Manager, org *config.Organization, spriteName string, args []string) {
 	// Create command structure
 	cmd := &Command{
 		Name:        "checkpoint create",
@@ -158,9 +158,9 @@ func checkpointCreateCommand(org *config.Organization, sprite *config.Sprite, ar
 
 	// Build the URL
 	var url string
-	if sprite != nil && org.Name != "env" {
+	if spriteName != "" && org.Name != "env" {
 		// Use sprite proxy endpoint
-		url = buildSpriteProxyURL(org, sprite.Name, "/checkpoint")
+		url = buildSpriteProxyURL(org, spriteName, "/checkpoint")
 	} else {
 		// Use direct endpoint for backward compatibility
 		url = fmt.Sprintf("%s/checkpoint", org.URL)
@@ -172,7 +172,7 @@ func checkpointCreateCommand(org *config.Organization, sprite *config.Sprite, ar
 		os.Exit(1)
 	}
 
-	token, err := org.GetToken()
+	token, err := org.GetTokenWithKeyringDisabled(cfg.IsKeyringDisabled())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
 		os.Exit(1)
@@ -202,7 +202,7 @@ func checkpointCreateCommand(org *config.Organization, sprite *config.Sprite, ar
 	os.Exit(exitCode)
 }
 
-func checkpointListCommandWithFlags(org *config.Organization, sprite *config.Sprite, args []string) {
+func checkpointListCommandWithFlags(cfg *config.Manager, org *config.Organization, spriteName string, args []string) {
 	// Create command structure
 	cmd := &Command{
 		Name:        "checkpoint list",
@@ -227,15 +227,15 @@ func checkpointListCommandWithFlags(org *config.Organization, sprite *config.Spr
 		os.Exit(1)
 	}
 
-	checkpointListCommand(org, sprite, *historyFilter)
+	checkpointListCommand(cfg, org, spriteName, *historyFilter)
 }
 
-func checkpointListCommand(org *config.Organization, sprite *config.Sprite, historyFilter string) {
+func checkpointListCommand(cfg *config.Manager, org *config.Organization, spriteName string, historyFilter string) {
 	// Build the URL
 	var url string
-	if sprite != nil && org.Name != "env" {
+	if spriteName != "" && org.Name != "env" {
 		// Use sprite proxy endpoint
-		url = buildSpriteProxyURL(org, sprite.Name, "/checkpoints")
+		url = buildSpriteProxyURL(org, spriteName, "/checkpoints")
 	} else {
 		// Use direct endpoint for backward compatibility
 		url = fmt.Sprintf("%s/checkpoints", org.URL)
@@ -251,7 +251,7 @@ func checkpointListCommand(org *config.Organization, sprite *config.Sprite, hist
 		os.Exit(1)
 	}
 
-	token, err := org.GetToken()
+	token, err := org.GetTokenWithKeyringDisabled(cfg.IsKeyringDisabled())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
 		os.Exit(1)
@@ -303,7 +303,7 @@ func checkpointListCommand(org *config.Organization, sprite *config.Sprite, hist
 	}
 }
 
-func checkpointInfoCommand(org *config.Organization, sprite *config.Sprite, args []string) {
+func checkpointInfoCommand(cfg *config.Manager, org *config.Organization, spriteName string, args []string) {
 	if len(args) != 1 {
 		fmt.Fprintf(os.Stderr, "Error: checkpoint info requires exactly one argument (checkpoint ID)\n")
 		fmt.Fprintf(os.Stderr, "Usage: sprite checkpoint info <checkpoint-id>\n")
@@ -314,9 +314,9 @@ func checkpointInfoCommand(org *config.Organization, sprite *config.Sprite, args
 
 	// Build the URL
 	var url string
-	if sprite != nil && org.Name != "env" {
+	if spriteName != "" && org.Name != "env" {
 		// Use sprite proxy endpoint
-		url = buildSpriteProxyURL(org, sprite.Name, fmt.Sprintf("/checkpoints/%s", checkpointID))
+		url = buildSpriteProxyURL(org, spriteName, fmt.Sprintf("/checkpoints/%s", checkpointID))
 	} else {
 		// Use direct endpoint for backward compatibility
 		url = fmt.Sprintf("%s/checkpoints/%s", org.URL, checkpointID)
@@ -328,7 +328,7 @@ func checkpointInfoCommand(org *config.Organization, sprite *config.Sprite, args
 		os.Exit(1)
 	}
 
-	token, err := org.GetToken()
+	token, err := org.GetTokenWithKeyringDisabled(cfg.IsKeyringDisabled())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
 		os.Exit(1)
@@ -411,34 +411,34 @@ func RestoreCommand(cfg *config.Manager, args []string) {
 	checkpointID := remainingArgs[0]
 
 	// Ensure we have an org and sprite
-	org, sprite, isNewSprite, err := EnsureOrgAndSprite(cfg, flags.Org, flags.Sprite)
+	org, spriteName, isNewSprite, err := EnsureOrgAndSprite(cfg, flags.Org, flags.Sprite)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Handle sprite creation if needed
-	if isNewSprite && sprite != nil {
-		fmt.Printf("Creating sprite %s...\n", format.Sprite(sprite.Name))
-		if err := CreateSprite(cfg, org, sprite.Name); err != nil {
+	if isNewSprite && spriteName != "" {
+		fmt.Printf("Creating sprite %s...\n", format.Sprite(spriteName))
+		if err := CreateSprite(cfg, org, spriteName); err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating sprite: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("%s Sprite %s created successfully!\n", format.Success("✓"), format.Sprite(sprite.Name))
+		fmt.Printf("%s Sprite %s created successfully!\n", format.Success("✓"), format.Sprite(spriteName))
 		// Sprite is now created and ready to use
 		isNewSprite = false
 	}
 
-	if sprite != nil {
-		fmt.Println(format.ContextSprite(format.GetOrgDisplayName(org.Name, org.URL), fmt.Sprintf("Restoring checkpoint %s for sprite", format.Command(checkpointID)), sprite.Name))
+	if spriteName != "" {
+		fmt.Println(format.ContextSprite(format.GetOrgDisplayName(org.Name, org.URL), fmt.Sprintf("Restoring checkpoint %s for sprite", format.Command(checkpointID)), spriteName))
 		fmt.Println()
 	}
 
 	// Build the URL
 	var url string
-	if sprite != nil && org.Name != "env" {
+	if spriteName != "" && org.Name != "env" {
 		// Use sprite proxy endpoint
-		url = buildSpriteProxyURL(org, sprite.Name, fmt.Sprintf("/checkpoints/%s/restore", checkpointID))
+		url = buildSpriteProxyURL(org, spriteName, fmt.Sprintf("/checkpoints/%s/restore", checkpointID))
 	} else {
 		// Use direct endpoint for backward compatibility
 		url = fmt.Sprintf("%s/checkpoints/%s/restore", org.URL, checkpointID)
@@ -450,7 +450,7 @@ func RestoreCommand(cfg *config.Manager, args []string) {
 		os.Exit(1)
 	}
 
-	token, err := org.GetToken()
+	token, err := org.GetTokenWithKeyringDisabled(cfg.IsKeyringDisabled())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
 		os.Exit(1)

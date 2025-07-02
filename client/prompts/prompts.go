@@ -1,36 +1,108 @@
 package prompts
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"strings"
 
+	"github.com/charmbracelet/huh"
 	"github.com/sprite-env/client/config"
 	"github.com/sprite-env/client/format"
-	"golang.org/x/term"
 )
+
+// isInteractiveTerminal checks if we're running in an interactive terminal
+func isInteractiveTerminal() bool {
+	// Check if stdin is a terminal
+	if fileInfo, _ := os.Stdin.Stat(); (fileInfo.Mode() & os.ModeCharDevice) == 0 {
+		return false
+	}
+
+	// Check if stdout is a terminal
+	if fileInfo, _ := os.Stdout.Stat(); (fileInfo.Mode() & os.ModeCharDevice) == 0 {
+		return false
+	}
+
+	return true
+}
+
+// configureForm applies common accessibility and theming settings to a form
+func configureForm(form *huh.Form) *huh.Form {
+	// Enable accessible mode if explicitly requested or if not in interactive terminal
+	accessibleMode := os.Getenv("ACCESSIBLE") != "" || !isInteractiveTerminal()
+	form = form.WithAccessible(accessibleMode)
+
+	// Apply NO_COLOR theme if requested
+	if os.Getenv("NO_COLOR") != "" {
+		form = form.WithTheme(huh.ThemeBase())
+	}
+
+	return form
+}
 
 // PromptForInitialLogin prompts the user to login when no organizations are configured
 func PromptForInitialLogin(cfg *config.Manager) (*config.Organization, error) {
-	fmt.Println("We need an API token to work with Sprites:")
-	fmt.Print("Enter your API token: ")
-
-	// Get token input
 	var token string
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		tokenBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-		fmt.Println() // New line after password
-		if err != nil {
-			return nil, fmt.Errorf("failed to read token: %w", err)
-		}
-		token = string(tokenBytes)
-	} else {
-		token = readLine()
+	var useKeyring bool
+
+	// Check if keyring is disabled
+	keyringDisabled := cfg.IsKeyringDisabled()
+
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewNote().
+				Title("🔐 Authentication Required").
+				Description("We need an API token to work with Sprites. You can get one from your dashboard."),
+
+			huh.NewInput().
+				Key("token").
+				Title("Enter your API token").
+				Password(true).
+				Value(&token).
+				Validate(func(s string) error {
+					if strings.TrimSpace(s) == "" {
+						return fmt.Errorf("API token is required")
+					}
+					return nil
+				}),
+		),
+	)
+
+	// Add keyring option only if keyring is available
+	if !keyringDisabled {
+		form = huh.NewForm(
+			huh.NewGroup(
+				huh.NewNote().
+					Title("🔐 Authentication Required").
+					Description("We need an API token to work with Sprites. You can get one from your dashboard."),
+
+				huh.NewInput().
+					Key("token").
+					Title("Enter your API token").
+					Password(true).
+					Value(&token).
+					Validate(func(s string) error {
+						if strings.TrimSpace(s) == "" {
+							return fmt.Errorf("API token is required")
+						}
+						return nil
+					}),
+
+				huh.NewConfirm().
+					Key("keyring").
+					Title("Store token securely in system keyring?").
+					Description("Recommended for security. Choose 'No' to store in config file.").
+					Value(&useKeyring).
+					Affirmative("Yes").
+					Negative("No"),
+			),
+		)
 	}
 
-	if token == "" {
-		return nil, fmt.Errorf("API token is required")
+	// Configure form with accessibility and theming
+	form = configureForm(form)
+
+	if err := form.Run(); err != nil {
+		return nil, fmt.Errorf("authentication cancelled: %w", err)
 	}
 
 	// Use the Sprites API URL (can be overridden with SPRITES_API_URL)
@@ -39,21 +111,35 @@ func PromptForInitialLogin(cfg *config.Manager) (*config.Organization, error) {
 		url = envURL
 	}
 
-	// Validate token and get organization name from API
+	// Show validation progress
 	fmt.Print("Validating token...")
 	orgInfo, err := fetchOrganizationInfo(token, url)
 	if err != nil {
-		fmt.Printf("\r\033[K") // Clear the validation line
+		fmt.Print("\r\033[K") // Clear the line
 		return nil, fmt.Errorf("token validation failed: %w", err)
 	}
-	fmt.Printf("\r\033[K") // Clear the validation line
+	fmt.Print("\r\033[K") // Clear the line
 
 	// Use the organization name from API
 	orgName := orgInfo.Organization
 
+	// Temporarily disable keyring if user chose not to use it
+	if !keyringDisabled && !useKeyring {
+		cfg.SetKeyringDisabled(true)
+	}
+
 	// Add the organization
 	if err := cfg.AddOrg(orgName, token, url); err != nil {
+		// Restore keyring setting if we changed it
+		if !keyringDisabled && !useKeyring {
+			cfg.SetKeyringDisabled(false)
+		}
 		return nil, fmt.Errorf("failed to save credentials: %w", err)
+	}
+
+	// Restore keyring setting if we changed it
+	if !keyringDisabled && !useKeyring {
+		cfg.SetKeyringDisabled(false)
 	}
 
 	fmt.Println(format.Success("✓ Authenticated with organization: " + format.Org(orgName)))
@@ -76,196 +162,179 @@ func SelectOrganization(cfg *config.Manager) (*config.Organization, error) {
 		return nil, fmt.Errorf("no organizations configured. Please run 'sprite org auth' first")
 	}
 
-	if len(orgs) == 1 {
-		// Only one org, use it automatically
-		for _, org := range orgs {
-			return org, nil
+	// Create options for existing organizations
+	var options []huh.Option[string]
+	for _, org := range orgs {
+		displayName := format.GetOrgDisplayName(org.Name, org.URL)
+		options = append(options, huh.NewOption(displayName, org.Name))
+	}
+
+	// Add option to add new organization
+	options = append(options, huh.NewOption("🔗 Add new organization", "__add_new__"))
+
+	var selectedOrgKey string
+
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Key("org").
+				Title("Which organization are you working with?").
+				Description("Select an existing organization or add a new one.").
+				Options(options...).
+				Value(&selectedOrgKey),
+		),
+	)
+
+	// Configure form with accessibility and theming
+	form = configureForm(form)
+
+	if err := form.Run(); err != nil {
+		return nil, fmt.Errorf("organization selection cancelled: %w", err)
+	}
+
+	// Check if user wants to add a new organization
+	if selectedOrgKey == "__add_new__" {
+		fmt.Println()
+		newOrg, err := PromptForInitialLogin(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("failed to add new organization: %w", err)
 		}
+		return newOrg, nil
 	}
 
-	// Check if terminal supports interactive mode
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		return nil, fmt.Errorf("interactive mode not available. Please set current org with environment variable")
-	}
-
-	// Create a sorted list of org names
-	var orgNames []string
-	for name := range orgs {
-		orgNames = append(orgNames, name)
-	}
-
-	fmt.Println("Select an organization:")
-	selected := selectFromList(orgNames)
-
-	if selected == "" {
-		return nil, fmt.Errorf("no organization selected")
+	// Find the selected organization
+	selectedOrg := orgs[selectedOrgKey]
+	if selectedOrg == nil {
+		return nil, fmt.Errorf("selected organization not found")
 	}
 
 	// Set as current org
-	if err := cfg.SetCurrentOrg(selected); err != nil {
-		return nil, err
+	if err := cfg.SetCurrentOrg(selectedOrg.Name); err != nil {
+		return nil, fmt.Errorf("failed to set current organization: %w", err)
 	}
 
-	return orgs[selected], nil
+	displayName := format.GetOrgDisplayName(selectedOrg.Name, selectedOrg.URL)
+	fmt.Printf("\n%s Using organization: %s\n", format.Success("✓"), format.Org(displayName))
+
+	return selectedOrg, nil
 }
 
-// SelectOrCreateSprite prompts the user to select or create a sprite
-func SelectOrCreateSprite(cfg *config.Manager, org *config.Organization) (*config.Sprite, bool, error) {
-	// Sync sprites from API if using the new API
-	if strings.Contains(org.URL, "sprites.dev") {
-		fmt.Print("Fetching sprites...")
-		// Import the commands package to use SyncSpritesWithConfig
-		// For now, we'll handle this differently to avoid circular dependencies
-		sprites, err := fetchSpritesFromAPI(org)
-		if err != nil {
-			fmt.Printf("\rWarning: Failed to fetch sprites from API: %v\n", err)
-			// Continue with local config
-		} else {
-			fmt.Printf("\r\033[K") // Clear the line
-			// Update org's sprites
-			if org.Sprites == nil {
-				org.Sprites = make(map[string]*config.Sprite)
-			}
-			// Clear and repopulate
-			for k := range org.Sprites {
-				delete(org.Sprites, k)
-			}
-			for _, sprite := range sprites {
-				org.Sprites[sprite.Name] = &config.Sprite{
-					Name: sprite.Name,
-					ID:   sprite.ID,
-				}
-			}
-		}
+// PromptForSpriteName prompts the user to enter a sprite name
+func PromptForSpriteName() (string, error) {
+	var spriteName string
+
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewInput().
+				Key("sprite").
+				Title("Which Sprite are you connecting to?").
+				Description("Enter the name of the sprite you want to work with.").
+				Placeholder("my-sprite").
+				Value(&spriteName).
+				Validate(func(s string) error {
+					s = strings.TrimSpace(s)
+					if s == "" {
+						return fmt.Errorf("sprite name is required")
+					}
+					return nil
+				}),
+		),
+	)
+
+	// Configure form with accessibility and theming
+	form = configureForm(form)
+
+	if err := form.Run(); err != nil {
+		return "", fmt.Errorf("sprite selection cancelled: %w", err)
 	}
 
-	if org.Sprites == nil {
-		org.Sprites = make(map[string]*config.Sprite)
-	}
-
-	sprites := org.Sprites
-
-	// Check if terminal supports interactive mode
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		return nil, false, fmt.Errorf("interactive mode not available")
-	}
-
-	if len(sprites) == 0 {
-		// No sprites, prompt to create new one
-		fmt.Println(format.Context(getOrgDisplayName(org), "Creating new Sprite, what would you like to call it?"))
-		name := readLine()
-		if name == "" {
-			return nil, false, fmt.Errorf("no sprite name provided")
-		}
-		return &config.Sprite{Name: name}, true, nil
-	}
-
-	// Create options list
-	options := []string{"[Create new sprite]"}
-	var spriteNames []string
-	for name := range sprites {
-		spriteNames = append(spriteNames, name)
-		options = append(options, name)
-	}
-
-	fmt.Println(format.Context(getOrgDisplayName(org), "Select a sprite:"))
-	selected := selectFromList(options)
-
-	if selected == "" {
-		return nil, false, fmt.Errorf("no sprite selected")
-	}
-
-	if selected == "[Create new sprite]" {
-		fmt.Println(format.Context(getOrgDisplayName(org), "Creating new Sprite, what would you like to call it?"))
-		name := readLine()
-		if name == "" {
-			return nil, false, fmt.Errorf("no sprite name provided")
-		}
-		return &config.Sprite{Name: name}, true, nil
-	}
-
-	// Set as current sprite
-	if err := cfg.SetCurrentSprite(selected); err != nil {
-		return nil, false, err
-	}
-
-	return sprites[selected], false, nil
+	return strings.TrimSpace(spriteName), nil
 }
 
-// selectFromList provides a simple text-based selection menu
-func selectFromList(items []string) string {
-	if len(items) == 0 {
-		return ""
+// PromptForConfirmation shows a confirmation dialog
+func PromptForConfirmation(title, description string) (bool, error) {
+	var confirmed bool
+
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Key("confirm").
+				Title(title).
+				Description(description).
+				Value(&confirmed).
+				Affirmative("Yes").
+				Negative("No"),
+		),
+	)
+
+	// Configure form with accessibility and theming
+	form = configureForm(form)
+
+	if err := form.Run(); err != nil {
+		return false, fmt.Errorf("confirmation cancelled: %w", err)
 	}
 
-	// For now, use a simple numbered list
-	// TODO: Add arrow key navigation when we add a proper TUI library
-	for i, item := range items {
-		fmt.Printf("  %d. %s\n", i+1, item)
-	}
-
-	fmt.Print("Enter number (1-", len(items), "): ")
-	reader := bufio.NewReader(os.Stdin)
-	input, err := reader.ReadString('\n')
-	if err != nil {
-		return ""
-	}
-
-	input = strings.TrimSpace(input)
-	var choice int
-	if _, err := fmt.Sscanf(input, "%d", &choice); err != nil {
-		return ""
-	}
-
-	if choice < 1 || choice > len(items) {
-		return ""
-	}
-
-	return items[choice-1]
-}
-
-// readLine reads a line from stdin
-func readLine() string {
-	reader := bufio.NewReader(os.Stdin)
-	input, err := reader.ReadString('\n')
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(input)
+	return confirmed, nil
 }
 
 // PromptForAuth prompts for organization authentication details
 func PromptForAuth() (name, url, token string, err error) {
-	fmt.Println("Enter organization details:")
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewNote().
+				Title("🔧 Manual Organization Setup").
+				Description("Enter the details for your organization manually."),
 
-	fmt.Print("Organization name: ")
-	name = readLine()
-	if name == "" {
-		return "", "", "", fmt.Errorf("organization name is required")
+			huh.NewInput().
+				Key("name").
+				Title("Organization name").
+				Description("A friendly name for this organization").
+				Placeholder("my-org").
+				Value(&name).
+				Validate(func(s string) error {
+					if strings.TrimSpace(s) == "" {
+						return fmt.Errorf("organization name is required")
+					}
+					return nil
+				}),
+
+			huh.NewInput().
+				Key("url").
+				Title("API URL").
+				Description("The base URL for your sprites API").
+				Placeholder("https://api.example.com").
+				Value(&url).
+				Validate(func(s string) error {
+					if strings.TrimSpace(s) == "" {
+						return fmt.Errorf("API URL is required")
+					}
+					if !strings.HasPrefix(s, "http://") && !strings.HasPrefix(s, "https://") {
+						return fmt.Errorf("API URL must start with http:// or https://")
+					}
+					return nil
+				}),
+
+			huh.NewInput().
+				Key("token").
+				Title("API Token").
+				Description("Your authentication token for this API").
+				Password(true).
+				Value(&token).
+				Validate(func(s string) error {
+					if strings.TrimSpace(s) == "" {
+						return fmt.Errorf("API token is required")
+					}
+					return nil
+				}),
+		),
+	)
+
+	// Configure form with accessibility and theming
+	form = configureForm(form)
+
+	if err := form.Run(); err != nil {
+		return "", "", "", fmt.Errorf("authentication setup cancelled: %w", err)
 	}
 
-	fmt.Print("API URL: ")
-	url = readLine()
-	if url == "" {
-		return "", "", "", fmt.Errorf("API URL is required")
-	}
-
-	fmt.Print("API Token: ")
-	// Try to hide password input
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		tokenBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-		fmt.Println() // New line after password
-		if err != nil {
-			return "", "", "", fmt.Errorf("failed to read token: %w", err)
-		}
-		token = string(tokenBytes)
-	} else {
-		token = readLine()
-	}
-
-	if token == "" {
-		return "", "", "", fmt.Errorf("API token is required")
-	}
-
-	return name, url, token, nil
+	return strings.TrimSpace(name), strings.TrimSpace(url), strings.TrimSpace(token), nil
 }

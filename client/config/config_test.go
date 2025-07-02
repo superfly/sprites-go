@@ -254,3 +254,84 @@ func TestCredentialKeyStructure(t *testing.T) {
 		t.Errorf("Expected cert key to be '%s', got '%s'", expectedCertKey, certKey)
 	}
 }
+
+func TestOrganizationSelector(t *testing.T) {
+	// Initialize mock keyring for consistent testing
+	keyring.MockInit()
+
+	// Create a test manager with multiple organizations
+	cfg, err := NewManager()
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+
+	// Clean up any existing organizations first
+	existingOrgs := cfg.GetOrgs()
+	for orgName := range existingOrgs {
+		_ = cfg.RemoveOrg(orgName)
+	}
+
+	// Add multiple test organizations
+	testOrgs := []struct {
+		name  string
+		token string
+		url   string
+	}{
+		{"acme-corp", "token-acme-123", "https://api.acme.dev"},
+		{"beta-inc", "token-beta-456", "https://api.beta.dev"},
+		{"gamma-llc", "token-gamma-789", "https://api.gamma.dev"},
+	}
+
+	for _, orgData := range testOrgs {
+		err := cfg.AddOrg(orgData.name, orgData.token, orgData.url)
+		if err != nil {
+			t.Fatalf("Failed to add org %s: %v", orgData.name, err)
+		}
+	}
+
+	// Test that we have the expected organizations
+	orgs := cfg.GetOrgs()
+	if len(orgs) != len(testOrgs) {
+		t.Errorf("Expected %d organizations, got %d", len(testOrgs), len(orgs))
+	}
+
+	// Test token-based lookup (useful for org selector)
+	for _, orgData := range testOrgs {
+		foundOrg, foundName, err := cfg.FindOrgByToken(orgData.token)
+		if err != nil {
+			t.Errorf("Failed to find org by token %s: %v", orgData.token, err)
+			continue
+		}
+		if foundName != orgData.name {
+			t.Errorf("Expected org name %s, got %s", orgData.name, foundName)
+		}
+		if foundOrg.Name != orgData.name {
+			t.Errorf("Expected org name %s, got %s", orgData.name, foundOrg.Name)
+		}
+	}
+
+	// Verify each org can retrieve its token
+	for _, orgData := range testOrgs {
+		if org, exists := orgs[orgData.name]; exists {
+			token, err := org.GetToken()
+			if err != nil {
+				t.Errorf("Failed to get token for org %s: %v", orgData.name, err)
+			} else if token != orgData.token {
+				t.Errorf("Expected token %s for org %s, got %s", orgData.token, orgData.name, token)
+			}
+		} else {
+			t.Errorf("Organization %s not found in config", orgData.name)
+		}
+	}
+
+	t.Logf("Successfully tested organization selector with %d organizations", len(testOrgs))
+	t.Logf("Organizations ready for interactive selection:")
+	for _, orgData := range testOrgs {
+		t.Logf("  - %s (%s)", orgData.name, orgData.url)
+	}
+
+	// Clean up
+	for _, orgData := range testOrgs {
+		_ = cfg.RemoveOrg(orgData.name)
+	}
+}

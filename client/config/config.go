@@ -12,24 +12,16 @@ import (
 
 // Config represents the sprite configuration
 type Config struct {
-	CurrentOrg string                   `json:"current_org,omitempty"`
-	Orgs       map[string]*Organization `json:"orgs"`
+	CurrentOrg     string                   `json:"current_org,omitempty"`
+	Orgs           map[string]*Organization `json:"orgs"`
+	DisableKeyring bool                     `json:"disable_keyring,omitempty"`
 }
 
 // Organization represents an organization configuration
 type Organization struct {
-	Name          string             `json:"name"`
-	Token         string             `json:"token,omitempty"` // Keep for backward compatibility and fallback
-	URL           string             `json:"url"`
-	CurrentSprite string             `json:"current_sprite,omitempty"`
-	Sprites       map[string]*Sprite `json:"sprites"`
-	UseKeyring    bool               `json:"use_keyring,omitempty"` // Track if we're using keyring for this org
-}
-
-// Sprite represents a sprite configuration
-type Sprite struct {
-	Name string `json:"name"`
-	ID   string `json:"id,omitempty"`
+	Name  string `json:"name"`
+	Token string `json:"token,omitempty"` // Only used when keyring is disabled
+	URL   string `json:"url"`
 }
 
 // Manager handles configuration operations
@@ -118,7 +110,84 @@ func (m *Manager) Load() error {
 		return err
 	}
 
-	return json.Unmarshal(data, &m.config)
+	if err := json.Unmarshal(data, &m.config); err != nil {
+		return err
+	}
+
+	// Discover organizations from keyring that might not be in config file
+	if err := m.discoverFromKeyring(); err != nil {
+		// Log but don't fail - keyring discovery is best effort
+		// We'll continue with whatever was in the config file
+	}
+
+	return nil
+}
+
+// discoverFromKeyring scans the keyring for sprites-cli entries and adds missing organizations
+func (m *Manager) discoverFromKeyring() error {
+	// Skip discovery if keyring is disabled
+	if m.config.DisableKeyring {
+		return fmt.Errorf("keyring discovery disabled in configuration")
+	}
+
+	// This is a best-effort approach since go-keyring doesn't provide a list function
+	// We'll try some common organization name patterns and see what we find
+
+	if m.config.Orgs == nil {
+		m.config.Orgs = make(map[string]*Organization)
+	}
+
+	commonOrgNames := []string{
+		"kurtle-the-turtle", // Based on user's actual keyring entry
+		"default",
+		"sprites",
+		"main",
+		"org",
+	}
+
+	// Also try environment variables that might hint at org names
+	if envOrg := os.Getenv("SPRITE_ORG"); envOrg != "" {
+		commonOrgNames = append([]string{envOrg}, commonOrgNames...)
+	}
+
+	for _, orgName := range commonOrgNames {
+		// Try to get a token from keyring for this org name
+		token, err := keyring.Get(KeyringService, orgName)
+		if err != nil {
+			continue // This org name doesn't exist in keyring
+		}
+
+		// Found a token! Create organization entry
+		apiURL := "https://api.sprites.dev"
+		if envURL := os.Getenv("SPRITES_API_URL"); envURL != "" {
+			apiURL = envURL
+		}
+
+		// Add to config (but don't set as current - let user choose)
+		if err := m.AddOrgWithoutSetting(orgName, token, apiURL); err != nil {
+			continue // Failed to add, try next
+		}
+
+		fmt.Printf("✓ Discovered organization from keyring: %s\n", orgName)
+		return nil // Found one, that's enough
+	}
+
+	return fmt.Errorf("no organizations found in keyring")
+}
+
+// DiscoverFromKeyring is a public wrapper for discoverFromKeyring
+func (m *Manager) DiscoverFromKeyring() (*Organization, error) {
+	if err := m.discoverFromKeyring(); err != nil {
+		return nil, err
+	}
+
+	// Return the first organization we find
+	orgs := m.GetOrgs()
+	for _, org := range orgs {
+		return org, nil
+	}
+
+	return nil, fmt.Errorf("no organizations found after discovery")
 }
 
 // Save writes the configuration to disk
@@ -145,7 +214,7 @@ func (m *Manager) GetCurrentOrgToken() (string, error) {
 	if org == nil {
 		return "", fmt.Errorf("no current organization")
 	}
-	return org.GetToken()
+	return org.GetTokenWithKeyringDisabled(m.config.DisableKeyring)
 }
 
 // SetCurrentOrg sets the current organization
@@ -167,7 +236,7 @@ func (m *Manager) AddOrg(name, token, url string) error {
 	var existingOrgByToken *Organization
 	var existingOrgNameByToken string
 	for orgName, org := range m.config.Orgs {
-		existingToken, err := org.GetToken()
+		existingToken, err := org.GetTokenWithKeyringDisabled(m.config.DisableKeyring)
 		if err == nil && existingToken == token {
 			existingOrgByToken = org
 			existingOrgNameByToken = orgName
@@ -189,25 +258,23 @@ func (m *Manager) AddOrg(name, token, url string) error {
 
 		// Update the organization details
 		existingOrgByToken.Name = name
-		existingOrgByToken.SetToken(token) // Use keyring-aware method
+		existingOrgByToken.SetTokenWithKeyringDisabled(token, m.config.DisableKeyring)
 		existingOrgByToken.URL = url
 
 		// Store under the correct name
 		m.config.Orgs[name] = existingOrgByToken
 	} else if existingOrg, exists := m.config.Orgs[name]; exists {
 		// Check by name as fallback - update existing organization
-		existingOrg.SetToken(token) // Use keyring-aware method
+		existingOrg.SetTokenWithKeyringDisabled(token, m.config.DisableKeyring)
 		existingOrg.URL = url
-		// Keep existing Name, CurrentSprite, and Sprites unchanged
 	} else {
 		// Create new organization
 		org := &Organization{
-			Name:    name,
-			URL:     url,
-			Sprites: make(map[string]*Sprite),
+			Name: name,
+			URL:  url,
 		}
 
-		org.SetToken(token) // Use keyring-aware method
+		org.SetTokenWithKeyringDisabled(token, m.config.DisableKeyring)
 		m.config.Orgs[name] = org
 
 		// Set as current if it's the first org
@@ -236,88 +303,19 @@ func (m *Manager) GetOrgs() map[string]*Organization {
 	return m.config.Orgs
 }
 
-// GetCurrentSprite returns the current sprite for the current org
-func (m *Manager) GetCurrentSprite() *Sprite {
-	org := m.GetCurrentOrg()
-	if org == nil || org.CurrentSprite == "" {
-		return nil
-	}
-	return org.Sprites[org.CurrentSprite]
-}
-
-// SetCurrentSprite sets the current sprite for the current org
-func (m *Manager) SetCurrentSprite(spriteName string) error {
-	org := m.GetCurrentOrg()
-	if org == nil {
-		return fmt.Errorf("no current organization")
-	}
-
-	if _, exists := org.Sprites[spriteName]; !exists {
-		return fmt.Errorf("sprite %s not found", spriteName)
-	}
-
-	org.CurrentSprite = spriteName
-	return m.Save()
-}
-
-// AddSprite adds a new sprite to the current org
-func (m *Manager) AddSprite(name, id string) error {
-	org := m.GetCurrentOrg()
-	if org == nil {
-		return fmt.Errorf("no current organization")
-	}
-
-	if org.Sprites == nil {
-		org.Sprites = make(map[string]*Sprite)
-	}
-
-	org.Sprites[name] = &Sprite{
-		Name: name,
-		ID:   id,
-	}
-
-	// Set as current if it's the first sprite
-	if len(org.Sprites) == 1 {
-		org.CurrentSprite = name
-	}
-
-	return m.Save()
-}
-
-// RemoveSprite removes a sprite from the current org
-func (m *Manager) RemoveSprite(name string) error {
-	org := m.GetCurrentOrg()
-	if org == nil {
-		return fmt.Errorf("no current organization")
-	}
-
-	delete(org.Sprites, name)
-
-	// Clear current sprite if it was removed
-	if org.CurrentSprite == name {
-		org.CurrentSprite = ""
-	}
-
-	return m.Save()
-}
-
 // GetToken retrieves the token for this organization, checking keyring first, then config file
 func (o *Organization) GetToken() (string, error) {
-	// First try keyring if we're configured to use it
-	if o.UseKeyring {
+	return o.GetTokenWithKeyringDisabled(false)
+}
+
+// GetTokenWithKeyringDisabled retrieves the token with optional keyring bypass
+func (o *Organization) GetTokenWithKeyringDisabled(disableKeyring bool) (string, error) {
+	if !disableKeyring {
+		// Try keyring first
 		token, err := keyring.Get(KeyringService, o.Name)
 		if err == nil {
 			return token, nil
 		}
-		// If keyring fails, continue to check file storage as fallback
-	}
-
-	// Try keyring even if UseKeyring is false (for backward compatibility)
-	token, err := keyring.Get(KeyringService, o.Name)
-	if err == nil {
-		// Found in keyring, update the flag
-		o.UseKeyring = true
-		return token, nil
 	}
 
 	// Fallback to file-stored token
@@ -330,17 +328,22 @@ func (o *Organization) GetToken() (string, error) {
 
 // SetToken stores the token for this organization, preferring keyring with fallback to config file
 func (o *Organization) SetToken(token string) error {
-	// Try to store in keyring first
-	err := keyring.Set(KeyringService, o.Name, token)
-	if err == nil {
-		// Successfully stored in keyring
-		o.UseKeyring = true
-		o.Token = "" // Clear file-stored token since we're using keyring
-		return nil
+	return o.SetTokenWithKeyringDisabled(token, false)
+}
+
+// SetTokenWithKeyringDisabled stores the token with optional keyring bypass
+func (o *Organization) SetTokenWithKeyringDisabled(token string, disableKeyring bool) error {
+	if !disableKeyring {
+		// Try to store in keyring first
+		err := keyring.Set(KeyringService, o.Name, token)
+		if err == nil {
+			// Successfully stored in keyring
+			o.Token = "" // Clear file-stored token since we're using keyring
+			return nil
+		}
 	}
 
-	// Keyring failed, fallback to file storage
-	o.UseKeyring = false
+	// Keyring disabled or failed, use file storage
 	o.Token = token
 	return nil
 }
@@ -358,7 +361,6 @@ func (o *Organization) DeleteToken() error {
 
 	// Clear file-stored token
 	o.Token = ""
-	o.UseKeyring = false
 
 	if len(errors) > 0 {
 		return fmt.Errorf("token deletion had issues: %v", errors)
@@ -482,4 +484,34 @@ func (m *Manager) SearchOrgsByCredential(credType CredentialType, credential str
 		}
 	}
 	return orgs
+}
+
+// AddOrgWithoutSetting adds an organization but doesn't set it as current (used for discovery)
+func (m *Manager) AddOrgWithoutSetting(name, token, url string) error {
+	if m.config.Orgs == nil {
+		m.config.Orgs = make(map[string]*Organization)
+	}
+
+	// Create new organization
+	org := &Organization{
+		Name: name,
+		URL:  url,
+	}
+
+	org.SetTokenWithKeyringDisabled(token, m.config.DisableKeyring)
+	m.config.Orgs[name] = org
+
+	// Don't auto-set as current - let user choose through interactive selector
+	return m.Save()
+}
+
+// IsKeyringDisabled returns whether keyring usage is disabled
+func (m *Manager) IsKeyringDisabled() bool {
+	return m.config.DisableKeyring
+}
+
+// SetKeyringDisabled enables or disables keyring usage
+func (m *Manager) SetKeyringDisabled(disabled bool) error {
+	m.config.DisableKeyring = disabled
+	return m.Save()
 }

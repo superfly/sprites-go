@@ -64,20 +64,20 @@ func ExecCommand(cfg *config.Manager, args []string) {
 	}
 
 	// Ensure we have an org and sprite
-	org, sprite, isNewSprite, err := EnsureOrgAndSprite(cfg, flags.Org, flags.Sprite)
+	org, spriteName, isNewSprite, err := EnsureOrgAndSprite(cfg, flags.Org, flags.Sprite)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Handle sprite creation if needed
-	if isNewSprite && sprite != nil {
-		fmt.Printf("Creating sprite %s...\n", format.Sprite(sprite.Name))
-		if err := CreateSprite(cfg, org, sprite.Name); err != nil {
+	if isNewSprite && spriteName != "" {
+		fmt.Printf("Creating sprite %s...\n", format.Sprite(spriteName))
+		if err := CreateSprite(cfg, org, spriteName); err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating sprite: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("%s Sprite %s created successfully!\n", format.Success("✓"), format.Sprite(sprite.Name))
+		fmt.Printf("%s Sprite %s created successfully!\n", format.Success("✓"), format.Sprite(spriteName))
 		// Sprite is now created and ready to use
 		isNewSprite = false
 	}
@@ -120,15 +120,15 @@ func ExecCommand(cfg *config.Manager, args []string) {
 
 	// Print connection message with context
 	fmt.Println()
-	if sprite != nil {
+	if spriteName != "" {
 		// Config-based connection with org and sprite
 		if org.Name != "env" {
 			fmt.Printf("Connecting to %s sprite %s...\n",
 				format.Org(format.GetOrgDisplayName(org.Name, org.URL)),
-				format.Sprite(sprite.Name))
+				format.Sprite(spriteName))
 		} else {
 			// Just sprite name if using env vars
-			fmt.Printf("Connecting to sprite %s...\n", format.Sprite(sprite.Name))
+			fmt.Printf("Connecting to sprite %s...\n", format.Sprite(spriteName))
 		}
 		fmt.Printf("Running: %s\n", format.Command(cmdStr))
 	} else {
@@ -140,12 +140,12 @@ func ExecCommand(cfg *config.Manager, args []string) {
 
 	// Execute the command
 	var exitCode int
-	if sprite != nil && org.Name != "env" {
+	if spriteName != "" && org.Name != "env" {
 		// Use the new sprite proxy endpoint
-		exitCode = executeSpriteProxy(org, sprite.Name, remainingArgs, *workingDir, envList, *tty)
+		exitCode = executeSpriteProxy(org, spriteName, remainingArgs, *workingDir, envList, *tty)
 	} else {
 		// Use direct WebSocket for backward compatibility with SPRITE_URL/SPRITE_TOKEN
-		token, err := org.GetToken()
+		token, err := org.GetTokenWithKeyringDisabled(cfg.IsKeyringDisabled())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
 			os.Exit(1)

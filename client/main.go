@@ -81,7 +81,7 @@ func main() {
 		commands.RestoreCommand(cfg, subArgs)
 	case "destroy":
 		commands.DestroyCommand(cfg, subArgs)
-	case "org":
+	case "org", "orgs", "organizations":
 		commands.OrgCommand(cfg, subArgs)
 	case "transcripts":
 		// Handle transcripts command using config
@@ -119,7 +119,7 @@ Commands:
   proxy <port1> [port2...]  Forward local ports through the remote server proxy
 
 Organization Commands:
-  org auth                  Add an API token
+  org auth                  Add an API token (aliases: orgs, organizations)
   org list                  Show configured tokens
   org logout                Remove all tokens
 
@@ -135,6 +135,7 @@ Command Options:
 Examples:
   # Authenticate with an organization
   sprite org auth
+  sprite orgs auth
 
   # Execute a command
   sprite exec ls -la
