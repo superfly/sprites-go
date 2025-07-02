@@ -1,19 +1,62 @@
 # Sprite Client
 
-A command-line client for interacting with the Sprite Environment API. The client uses Docker's multiplexed stream format by default for proper stdout/stderr separation.
+The Sprite client allows you to manage and interact with sprites (lightweight VMs) across different organizations.
+
+## Current Status
+
+> **Note:** The client now supports automatic sprite creation when needed. When you select a new sprite name, the client will create it on the server automatically.
+
+## Configuration
+
+The client uses two types of configuration:
+
+### Global Configuration (~/.sprites/config.json)
+
+Stores your organizations and their credentials:
+- Organization names, URLs, and tokens
+- Available sprites per organization
+- Default organization and sprite
+
+This file is automatically created and managed when you run `sprite org auth`.
+
+### Local Configuration (.sprite)
+
+Each directory can have a `.sprite` file that remembers the last organization and sprite used in that directory:
+
+```json
+{
+  "organization": "default-1735676400",
+  "sprite": "my-app"
+}
+```
+
+This file is automatically created when you run sprite commands in a directory. The client will look for `.sprite` files in the current directory and parent directories to determine context.
+
+Add `.sprite` to your `.gitignore` as it contains user-specific context.
+
+## Environment Variables
+
+### For Backward Compatibility
+The client supports these environment variables for backward compatibility with direct sprite connections:
+- `SPRITE_URL`: The sprite server URL
+- `SPRITE_TOKEN`: Authentication token
+
+When these are set, they take precedence over the configuration files.
+
+### API Configuration
+- `SPRITES_API_URL`: Override the default Sprites API URL (default: https://api.sprites.dev)
+
+This is useful for testing or using alternative Sprites API endpoints:
+```bash
+export SPRITES_API_URL=https://staging.api.sprites.dev
+sprite exec ls
+```
 
 ## Building
 
 ```bash
 go build -o sprite-client
 ```
-
-## Configuration
-
-The client requires two environment variables:
-
-- `SPRITE_URL`: The base URL of the Sprite API (e.g., `http://localhost:8181` or `https://myapp.fly.dev`)
-- `SPRITE_TOKEN`: The authentication token for the API
 
 ## Usage
 

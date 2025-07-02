@@ -24,3 +24,6 @@ dist
 server/server
 client/client
 server/api/handlers/static
+
+# Local sprite configuration
+.sprite
