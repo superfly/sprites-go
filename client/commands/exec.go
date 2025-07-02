@@ -118,25 +118,28 @@ func ExecCommand(cfg *config.Manager, args []string) {
 		cmdStr = cmdStr[:47] + "..."
 	}
 
-	// Print connection message with context
-	fmt.Println()
-	if spriteName != "" {
-		// Config-based connection with org and sprite
-		if org.Name != "env" {
-			fmt.Printf("Connecting to %s sprite %s...\n",
-				format.Org(format.GetOrgDisplayName(org.Name, org.URL)),
-				format.Sprite(spriteName))
+	// Only print connection messages if debug logging is enabled
+	logger := slog.Default()
+	if logger.Enabled(context.Background(), slog.LevelDebug) {
+		fmt.Println()
+		if spriteName != "" {
+			// Config-based connection with org and sprite
+			if org.Name != "env" {
+				fmt.Printf("Connecting to %s sprite %s...\n",
+					format.Org(format.GetOrgDisplayName(org.Name, org.URL)),
+					format.Sprite(spriteName))
+			} else {
+				// Just sprite name if using env vars
+				fmt.Printf("Connecting to sprite %s...\n", format.Sprite(spriteName))
+			}
+			fmt.Printf("Running: %s\n", format.Command(cmdStr))
 		} else {
-			// Just sprite name if using env vars
-			fmt.Printf("Connecting to sprite %s...\n", format.Sprite(spriteName))
+			// Environment variable based connection (no sprite tracking)
+			fmt.Println("Connecting to sprite environment...")
+			fmt.Printf("Running: %s\n", format.Command(cmdStr))
 		}
-		fmt.Printf("Running: %s\n", format.Command(cmdStr))
-	} else {
-		// Environment variable based connection (no sprite tracking)
-		fmt.Println("Connecting to sprite environment...")
-		fmt.Printf("Running: %s\n", format.Command(cmdStr))
+		fmt.Println()
 	}
-	fmt.Println()
 
 	// Execute the command
 	var exitCode int

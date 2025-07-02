@@ -21,12 +21,16 @@ var (
 )
 
 func setupLogger(debug bool) {
-	level := slog.LevelInfo
 	if debug {
-		level = slog.LevelDebug
+		// Only enable logging when debug is explicitly requested
+		level := slog.LevelDebug
+		clientLogger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+		slog.SetDefault(clientLogger)
+	} else {
+		// Disable all logging by default - send to discard
+		clientLogger = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError + 1}))
+		slog.SetDefault(clientLogger)
 	}
-	clientLogger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
-	slog.SetDefault(clientLogger)
 }
 
 // debugLog logs at Debug level; output depends on logger configuration.

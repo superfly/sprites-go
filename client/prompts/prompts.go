@@ -1,7 +1,9 @@
 package prompts
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -214,7 +216,10 @@ func SelectOrganization(cfg *config.Manager) (*config.Organization, error) {
 	}
 
 	displayName := format.GetOrgDisplayName(selectedOrg.Name, selectedOrg.URL)
-	fmt.Printf("\n%s Using organization: %s\n", format.Success("✓"), format.Org(displayName))
+	// Only show organization selection message in debug mode
+	if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		fmt.Printf("\n%s Using organization: %s\n", format.Success("✓"), format.Org(displayName))
+	}
 
 	return selectedOrg, nil
 }

@@ -108,10 +108,7 @@ func orgAuthCommand(cfg *config.Manager, args []string) {
 
 	// Use the same simplified flow as initial login
 	org, err := prompts.PromptForInitialLogin(cfg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
+	handlePromptError(err)
 
 	// Set as current org
 	if err := cfg.SetCurrentOrg(org.Name); err != nil {
@@ -216,11 +213,7 @@ func orgLogoutCommand(cfg *config.Manager, args []string) {
 		title := fmt.Sprintf("Remove all %d API token(s)?", len(orgs))
 		description := "This will remove all configured API tokens. You'll need to re-authenticate to use Sprites."
 
-		confirmed, err := prompts.PromptForConfirmation(title, description)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
+		confirmed := PromptForConfirmationOrExit(title, description)
 
 		if !confirmed {
 			fmt.Println("Logout cancelled.")

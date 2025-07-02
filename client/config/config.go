@@ -1,8 +1,10 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -168,7 +170,11 @@ func (m *Manager) discoverFromKeyring() error {
 			continue // Failed to add, try next
 		}
 
-		fmt.Printf("✓ Discovered organization from keyring: %s\n", orgName)
+		// Only show discovery message in debug mode
+		// Import needed for context and slog
+		if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+			fmt.Printf("✓ Discovered organization from keyring: %s\n", orgName)
+		}
 		return nil // Found one, that's enough
 	}
 

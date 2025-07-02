@@ -10,7 +10,6 @@ import (
 
 	"github.com/sprite-env/client/config"
 	"github.com/sprite-env/client/format"
-	"github.com/sprite-env/client/prompts"
 )
 
 // DestroyCommand handles the destroy command
@@ -69,11 +68,7 @@ func DestroyCommand(cfg *config.Manager, args []string) {
 		title := fmt.Sprintf("Destroy sprite %s?", spriteName)
 		description := "⚠️  This will permanently destroy the sprite and all its data. This action cannot be undone."
 
-		confirmed, err := prompts.PromptForConfirmation(title, description)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
+		confirmed := PromptForConfirmationOrExit(title, description)
 
 		if !confirmed {
 			fmt.Println("Cancelled.")

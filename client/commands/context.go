@@ -1,15 +1,36 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/sprite-env/client/config"
 	"github.com/sprite-env/client/format"
 	"github.com/sprite-env/client/prompts"
 )
+
+// handlePromptError checks if an error is from user cancellation and handles it gracefully
+func handlePromptError(err error) {
+	if err != nil {
+		if strings.Contains(err.Error(), "cancelled") {
+			fmt.Println("Ok, come back later!")
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// PromptForConfirmationOrExit wraps prompts.PromptForConfirmation with cancellation handling
+func PromptForConfirmationOrExit(title, description string) bool {
+	confirmed, err := prompts.PromptForConfirmation(title, description)
+	handlePromptError(err)
+	return confirmed
+}
 
 // EnsureOrgAndSprite ensures we have both an organization and sprite selected
 // Returns the org and sprite name, with isNew indicating if this is a new sprite
@@ -77,8 +98,12 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 			}
 
 			if org != nil {
-				fmt.Printf("Using organization '%s' and sprite '%s' from .sprite file\n",
-					format.Org(org.Name), format.Sprite(spriteName))
+				// Only show .sprite file usage message in debug mode
+				logger := slog.Default()
+				if logger.Enabled(context.Background(), slog.LevelDebug) {
+					fmt.Printf("Using organization '%s' and sprite '%s' from .sprite file\n",
+						format.Org(org.Name), format.Sprite(spriteName))
+				}
 				// Set as current in the config
 				cfg.SetCurrentOrg(org.Name)
 			}
@@ -97,9 +122,7 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 			} else {
 				// No organizations found - prompt for initial login
 				selectedOrg, err := prompts.PromptForInitialLogin(cfg)
-				if err != nil {
-					return nil, "", false, err
-				}
+				handlePromptError(err)
 				org = selectedOrg
 			}
 		} else {
@@ -109,9 +132,7 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 			// If no current org, prompt for one
 			if org == nil {
 				selectedOrg, err := prompts.SelectOrganization(cfg)
-				if err != nil {
-					return nil, "", false, err
-				}
+				handlePromptError(err)
 				org = selectedOrg
 			}
 		}
@@ -124,7 +145,9 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 
 	// If no sprite yet, prompt for one
 	if spriteName == "" {
-		spriteName = promptForSpriteName()
+		var err error
+		spriteName, err = promptForSpriteName()
+		handlePromptError(err)
 		isNew = true // Assume it's new since we don't track sprites
 	}
 
@@ -134,9 +157,13 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 			// Log but don't fail - .sprite file is a convenience feature
 			slog.Debug("Failed to write .sprite file", "error", err)
 		} else {
-			fmt.Printf("Created .sprite file for %s:%s\n",
-				format.Org(format.GetOrgDisplayName(org.Name, org.URL)),
-				format.Sprite(spriteName))
+			// Only show .sprite file creation message in debug mode
+			logger := slog.Default()
+			if logger.Enabled(context.Background(), slog.LevelDebug) {
+				fmt.Printf("Created .sprite file for %s:%s\n",
+					format.Org(format.GetOrgDisplayName(org.Name, org.URL)),
+					format.Sprite(spriteName))
+			}
 		}
 	}
 
@@ -144,13 +171,12 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 }
 
 // promptForSpriteName prompts the user to enter a sprite name using huh
-func promptForSpriteName() string {
+func promptForSpriteName() (string, error) {
 	spriteName, err := prompts.PromptForSpriteName()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return ""
+		return "", err // Return the error instead of printing and returning empty string
 	}
-	return spriteName
+	return spriteName, nil
 }
 
 // SaveSprite is now a no-op since we don't store sprites locally
@@ -170,9 +196,13 @@ func SaveSprite(cfg *config.Manager, name, id string) error {
 			if err := config.WriteSpriteFile(org.Name, name); err != nil {
 				slog.Debug("Failed to write .sprite file", "error", err)
 			} else {
-				fmt.Printf("Updated .sprite file for %s:%s\n",
-					format.Org(format.GetOrgDisplayName(org.Name, org.URL)),
-					format.Sprite(name))
+				// Only show .sprite file update message in debug mode
+				logger := slog.Default()
+				if logger.Enabled(context.Background(), slog.LevelDebug) {
+					fmt.Printf("Updated .sprite file for %s:%s\n",
+						format.Org(format.GetOrgDisplayName(org.Name, org.URL)),
+						format.Sprite(name))
+				}
 			}
 		}
 	}
