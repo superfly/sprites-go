@@ -10,17 +10,17 @@ import (
 
 // Config represents the sprite configuration
 type Config struct {
-	CurrentOrg string                    `json:"current_org,omitempty"`
-	Orgs       map[string]*Organization  `json:"orgs"`
+	CurrentOrg string                   `json:"current_org,omitempty"`
+	Orgs       map[string]*Organization `json:"orgs"`
 }
 
 // Organization represents an organization configuration
 type Organization struct {
-	Name        string              `json:"name"`
-	Token       string              `json:"token"`
-	URL         string              `json:"url"`
-	CurrentSprite string            `json:"current_sprite,omitempty"`
-	Sprites     map[string]*Sprite  `json:"sprites"`
+	Name          string             `json:"name"`
+	Token         string             `json:"token"`
+	URL           string             `json:"url"`
+	CurrentSprite string             `json:"current_sprite,omitempty"`
+	Sprites       map[string]*Sprite `json:"sprites"`
 }
 
 // Sprite represents a sprite configuration
@@ -43,7 +43,7 @@ func NewManager() (*Manager, error) {
 	}
 
 	configPath := filepath.Join(configDir, "config.json")
-	
+
 	m := &Manager{
 		configPath: configPath,
 		config:     &Config{Orgs: make(map[string]*Organization)},
@@ -60,7 +60,7 @@ func NewManager() (*Manager, error) {
 // getConfigDir returns the appropriate config directory path
 func getConfigDir() (string, error) {
 	var homeDir string
-	
+
 	switch runtime.GOOS {
 	case "windows":
 		homeDir = os.Getenv("USERPROFILE")
@@ -70,18 +70,18 @@ func getConfigDir() (string, error) {
 	default:
 		homeDir = os.Getenv("HOME")
 	}
-	
+
 	if homeDir == "" {
 		return "", fmt.Errorf("unable to determine home directory")
 	}
-	
+
 	configDir := filepath.Join(homeDir, ".sprites")
-	
+
 	// Create directory if it doesn't exist
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create config directory: %w", err)
 	}
-	
+
 	return configDir, nil
 }
 
@@ -91,7 +91,7 @@ func (m *Manager) Load() error {
 	if err != nil {
 		return err
 	}
-	
+
 	return json.Unmarshal(data, &m.config)
 }
 
@@ -101,7 +101,7 @@ func (m *Manager) Save() error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
-	
+
 	return os.WriteFile(m.configPath, data, 0600)
 }
 
@@ -122,38 +122,76 @@ func (m *Manager) SetCurrentOrg(orgName string) error {
 	return m.Save()
 }
 
-// AddOrg adds a new organization
+// AddOrg adds a new organization or updates an existing one
 func (m *Manager) AddOrg(name, token, url string) error {
 	if m.config.Orgs == nil {
 		m.config.Orgs = make(map[string]*Organization)
 	}
-	
-	org := &Organization{
-		Name:    name,
-		Token:   token,
-		URL:     url,
-		Sprites: make(map[string]*Sprite),
+
+	// First, check if we already have an organization with this token
+	var existingOrgByToken *Organization
+	var existingOrgNameByToken string
+	for orgName, org := range m.config.Orgs {
+		if org.Token == token {
+			existingOrgByToken = org
+			existingOrgNameByToken = orgName
+			break
+		}
 	}
-	
-	m.config.Orgs[name] = org
-	
-	// Set as current if it's the first org
-	if len(m.config.Orgs) == 1 {
-		m.config.CurrentOrg = name
+
+	if existingOrgByToken != nil {
+		// Update existing organization found by token
+		// If the name changed, we need to move the org to the new key
+		if existingOrgNameByToken != name {
+			// Remove old entry
+			delete(m.config.Orgs, existingOrgNameByToken)
+			// Update current org reference if it was pointing to the old name
+			if m.config.CurrentOrg == existingOrgNameByToken {
+				m.config.CurrentOrg = name
+			}
+		}
+
+		// Update the organization details
+		existingOrgByToken.Name = name
+		existingOrgByToken.Token = token
+		existingOrgByToken.URL = url
+
+		// Store under the correct name
+		m.config.Orgs[name] = existingOrgByToken
+	} else if existingOrg, exists := m.config.Orgs[name]; exists {
+		// Check by name as fallback - update existing organization
+		existingOrg.Token = token
+		existingOrg.URL = url
+		// Keep existing Name, CurrentSprite, and Sprites unchanged
+	} else {
+		// Create new organization
+		org := &Organization{
+			Name:    name,
+			Token:   token,
+			URL:     url,
+			Sprites: make(map[string]*Sprite),
+		}
+
+		m.config.Orgs[name] = org
+
+		// Set as current if it's the first org
+		if len(m.config.Orgs) == 1 {
+			m.config.CurrentOrg = name
+		}
 	}
-	
+
 	return m.Save()
 }
 
 // RemoveOrg removes an organization
 func (m *Manager) RemoveOrg(name string) error {
 	delete(m.config.Orgs, name)
-	
+
 	// Clear current org if it was removed
 	if m.config.CurrentOrg == name {
 		m.config.CurrentOrg = ""
 	}
-	
+
 	return m.Save()
 }
 
@@ -177,11 +215,11 @@ func (m *Manager) SetCurrentSprite(spriteName string) error {
 	if org == nil {
 		return fmt.Errorf("no current organization")
 	}
-	
+
 	if _, exists := org.Sprites[spriteName]; !exists {
 		return fmt.Errorf("sprite %s not found", spriteName)
 	}
-	
+
 	org.CurrentSprite = spriteName
 	return m.Save()
 }
@@ -192,21 +230,21 @@ func (m *Manager) AddSprite(name, id string) error {
 	if org == nil {
 		return fmt.Errorf("no current organization")
 	}
-	
+
 	if org.Sprites == nil {
 		org.Sprites = make(map[string]*Sprite)
 	}
-	
+
 	org.Sprites[name] = &Sprite{
 		Name: name,
 		ID:   id,
 	}
-	
+
 	// Set as current if it's the first sprite
 	if len(org.Sprites) == 1 {
 		org.CurrentSprite = name
 	}
-	
+
 	return m.Save()
 }
 
@@ -216,13 +254,13 @@ func (m *Manager) RemoveSprite(name string) error {
 	if org == nil {
 		return fmt.Errorf("no current organization")
 	}
-	
+
 	delete(org.Sprites, name)
-	
+
 	// Clear current sprite if it was removed
 	if org.CurrentSprite == name {
 		org.CurrentSprite = ""
 	}
-	
+
 	return m.Save()
 }
