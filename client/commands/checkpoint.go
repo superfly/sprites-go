@@ -172,7 +172,12 @@ func checkpointCreateCommand(org *config.Organization, sprite *config.Sprite, ar
 		os.Exit(1)
 	}
 
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", org.Token))
+	token, err := org.GetToken()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
+		os.Exit(1)
+	}
+	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	// Use client with no timeout for streaming
@@ -235,7 +240,7 @@ func checkpointListCommand(org *config.Organization, sprite *config.Sprite, hist
 		// Use direct endpoint for backward compatibility
 		url = fmt.Sprintf("%s/checkpoints", org.URL)
 	}
-	
+
 	if historyFilter != "" {
 		url += fmt.Sprintf("?history=%s", historyFilter)
 	}
@@ -246,7 +251,12 @@ func checkpointListCommand(org *config.Organization, sprite *config.Sprite, hist
 		os.Exit(1)
 	}
 
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", org.Token))
+	token, err := org.GetToken()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
+		os.Exit(1)
+	}
+	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 
 	client := &http.Client{}
 	resp, err := client.Do(httpReq)
@@ -318,7 +328,12 @@ func checkpointInfoCommand(org *config.Organization, sprite *config.Sprite, args
 		os.Exit(1)
 	}
 
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", org.Token))
+	token, err := org.GetToken()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
+		os.Exit(1)
+	}
+	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 
 	client := &http.Client{}
 	resp, err := client.Do(httpReq)
@@ -435,7 +450,12 @@ func RestoreCommand(cfg *config.Manager, args []string) {
 		os.Exit(1)
 	}
 
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", org.Token))
+	token, err := org.GetToken()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
+		os.Exit(1)
+	}
+	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 
 	// Use client with no timeout for streaming
 	client := &http.Client{

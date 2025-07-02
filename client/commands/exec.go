@@ -123,8 +123,8 @@ func ExecCommand(cfg *config.Manager, args []string) {
 	if sprite != nil {
 		// Config-based connection with org and sprite
 		if org.Name != "env" {
-			fmt.Printf("Connecting to %s sprite %s...\n", 
-				format.Org(format.GetOrgDisplayName(org.Name, org.URL)), 
+			fmt.Printf("Connecting to %s sprite %s...\n",
+				format.Org(format.GetOrgDisplayName(org.Name, org.URL)),
 				format.Sprite(sprite.Name))
 		} else {
 			// Just sprite name if using env vars
@@ -145,9 +145,14 @@ func ExecCommand(cfg *config.Manager, args []string) {
 		exitCode = executeSpriteProxy(org, sprite.Name, remainingArgs, *workingDir, envList, *tty)
 	} else {
 		// Use direct WebSocket for backward compatibility with SPRITE_URL/SPRITE_TOKEN
-		exitCode = executeDirectWebSocket(org.URL, org.Token, remainingArgs, *workingDir, envList, *tty)
+		token, err := org.GetToken()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
+			os.Exit(1)
+		}
+		exitCode = executeDirectWebSocket(org.URL, token, remainingArgs, *workingDir, envList, *tty)
 	}
-	
+
 	os.Exit(exitCode)
 }
 
@@ -155,16 +160,21 @@ func ExecCommand(cfg *config.Manager, args []string) {
 func executeSpriteProxy(org *config.Organization, spriteName string, cmd []string, workingDir string, env []string, tty bool) int {
 	// Build the proxy URL for exec endpoint
 	baseURL := buildSpriteProxyURL(org, spriteName, "/exec")
-	
+
 	// Convert to WebSocket URL
 	wsURL, err := convertToWebSocketURL(baseURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to build WebSocket URL: %v\n", err)
 		return 1
 	}
-	
+
 	// Use the existing WebSocket execution logic
-	return executeWebSocket(wsURL, org.Token, cmd, workingDir, env, tty)
+	token, err := org.GetToken()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
+		return 1
+	}
+	return executeWebSocket(wsURL, token, cmd, workingDir, env, tty)
 }
 
 func executeDirectWebSocket(baseURL, token string, cmd []string, workingDir string, env []string, tty bool) int {
@@ -174,7 +184,7 @@ func executeDirectWebSocket(baseURL, token string, cmd []string, workingDir stri
 		fmt.Fprintf(os.Stderr, "Error: Failed to build WebSocket URL: %v\n", err)
 		return 1
 	}
-	
+
 	return executeWebSocket(wsURL, token, cmd, workingDir, env, tty)
 }
 
@@ -422,12 +432,12 @@ func handleBrowserOpen(url string, ports []string) {
 
 			srv := &http.Server{
 				Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					logger.Debug("Received browser callback", 
+					logger.Debug("Received browser callback",
 						"port", port,
 						"method", r.Method,
 						"url", r.URL.String(),
 						"remoteAddr", r.RemoteAddr)
-					
+
 					// Send a simple response
 					w.Header().Set("Content-Type", "text/plain")
 					w.WriteHeader(http.StatusOK)

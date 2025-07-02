@@ -212,7 +212,12 @@ func transcriptsEnableCommand(cfg *config.Manager, args []string) {
 		os.Exit(1)
 	}
 
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", org.Token))
+	token, err := org.GetToken()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
+		os.Exit(1)
+	}
+	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 
 	client := &http.Client{}
 	resp, err := client.Do(httpReq)
@@ -267,7 +272,12 @@ func transcriptsDisableCommand(cfg *config.Manager, args []string) {
 		os.Exit(1)
 	}
 
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", org.Token))
+	token, err := org.GetToken()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
+		os.Exit(1)
+	}
+	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 
 	client := &http.Client{}
 	resp, err := client.Do(httpReq)
@@ -312,7 +322,12 @@ func proxyCommandPlaceholder(cfg *config.Manager, args []string) {
 		}
 		proxyCommand(url, token, args)
 	} else {
-		proxyCommand(org.URL, org.Token, args)
+		token, err := org.GetToken()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
+			os.Exit(1)
+		}
+		proxyCommand(org.URL, token, args)
 	}
 }
 

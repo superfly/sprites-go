@@ -36,7 +36,6 @@ require (
 require github.com/sprite-env/lib v0.0.0
 
 require (
-	github.com/mattn/go-sqlite3 v1.14.28
 	github.com/sprite-env/packages/juicefs v0.0.0-00010101000000-000000000000
 	github.com/sprite-env/packages/leaser v0.0.0-00010101000000-000000000000
 	github.com/sprite-env/packages/supervisor v0.0.0

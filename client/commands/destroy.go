@@ -63,14 +63,14 @@ func DestroyCommand(cfg *config.Manager, args []string) {
 
 	fmt.Println(format.Context(format.GetOrgDisplayName(org.Name, org.URL), fmt.Sprintf("About to destroy sprite %s", format.Sprite(sprite.Name))))
 	fmt.Println()
-	
+
 	if !*force {
 		fmt.Printf("Warning: This will permanently destroy sprite %s\n", format.Sprite(sprite.Name))
 		fmt.Print("Are you sure? (y/N): ")
-		
+
 		var response string
 		fmt.Scanln(&response)
-		
+
 		if response != "y" && response != "Y" {
 			fmt.Println("Destroy cancelled.")
 			os.Exit(0)
@@ -93,7 +93,12 @@ func DestroyCommand(cfg *config.Manager, args []string) {
 		os.Exit(1)
 	}
 
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", org.Token))
+	token, err := org.GetToken()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
+		os.Exit(1)
+	}
+	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 
 	client := &http.Client{}
 	resp, err := client.Do(httpReq)

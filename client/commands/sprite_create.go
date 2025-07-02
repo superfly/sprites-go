@@ -13,9 +13,9 @@ import (
 
 // SpriteCreateRequest represents the request to create a sprite
 type SpriteCreateRequest struct {
-	Name        string                 `json:"name"`
-	Config      *SpriteConfig          `json:"config,omitempty"`
-	Environment map[string]string      `json:"environment,omitempty"`
+	Name        string            `json:"name"`
+	Config      *SpriteConfig     `json:"config,omitempty"`
+	Environment map[string]string `json:"environment,omitempty"`
 }
 
 // SpriteConfig represents sprite configuration
@@ -33,16 +33,16 @@ type SpriteCreateResponse struct {
 
 // SpriteInfo represents sprite information from the API
 type SpriteInfo struct {
-	ID             string            `json:"id"`
-	Name           string            `json:"name"`
-	Organization   string            `json:"organization"`
-	Status         string            `json:"status"`
-	Config         *SpriteConfig     `json:"config,omitempty"`
-	Environment    map[string]string `json:"environment,omitempty"`
-	CreatedAt      time.Time         `json:"created_at"`
-	UpdatedAt      time.Time         `json:"updated_at"`
-	BucketName     string            `json:"bucket_name,omitempty"`
-	PrimaryRegion  string            `json:"primary_region,omitempty"`
+	ID            string            `json:"id"`
+	Name          string            `json:"name"`
+	Organization  string            `json:"organization"`
+	Status        string            `json:"status"`
+	Config        *SpriteConfig     `json:"config,omitempty"`
+	Environment   map[string]string `json:"environment,omitempty"`
+	CreatedAt     time.Time         `json:"created_at"`
+	UpdatedAt     time.Time         `json:"updated_at"`
+	BucketName    string            `json:"bucket_name,omitempty"`
+	PrimaryRegion string            `json:"primary_region,omitempty"`
 }
 
 // CreateSprite creates a new sprite on the server
@@ -56,13 +56,14 @@ type SpriteInfo struct {
 // 5. Return any errors that occur
 //
 // Expected usage:
-//   if isNewSprite {
-//       if err := CreateSprite(cfg, org, sprite.Name); err != nil {
-//           fmt.Fprintf(os.Stderr, "Error creating sprite: %v\n", err)
-//           os.Exit(1)
-//       }
-//       // Sprite is now created and ready to use
-//   }
+//
+//	if isNewSprite {
+//	    if err := CreateSprite(cfg, org, sprite.Name); err != nil {
+//	        fmt.Fprintf(os.Stderr, "Error creating sprite: %v\n", err)
+//	        os.Exit(1)
+//	    }
+//	    // Sprite is now created and ready to use
+//	}
 func CreateSprite(cfg *config.Manager, org *config.Organization, spriteName string) error {
 	// Create the request
 	req := SpriteCreateRequest{
@@ -84,7 +85,11 @@ func CreateSprite(cfg *config.Manager, org *config.Organization, spriteName stri
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", org.Token))
+	token, err := org.GetToken()
+	if err != nil {
+		return fmt.Errorf("failed to get auth token: %w", err)
+	}
+	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	// Make the request
@@ -164,7 +169,11 @@ func getSpriteInfo(org *config.Organization, spriteName string) (*SpriteInfo, er
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", org.Token))
+	token, err := org.GetToken()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get auth token: %w", err)
+	}
+	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(httpReq)

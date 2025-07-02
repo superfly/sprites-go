@@ -116,7 +116,11 @@ func fetchSpritesFromAPI(org *config.Organization) ([]SpriteInfo, error) {
 			return nil, fmt.Errorf("failed to create request: %w", err)
 		}
 
-		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", org.Token))
+		token, err := org.GetToken()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get auth token: %w", err)
+		}
+		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 
 		// Make request
 		client := &http.Client{Timeout: 10 * time.Second}
