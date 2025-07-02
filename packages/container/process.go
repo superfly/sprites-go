@@ -189,7 +189,7 @@ func (p *Process) findContainerProcess() {
 	}
 
 	if p.config.Logger != nil {
-		p.config.Logger.Info("Looking for container process", "wrapperPID", wrapperPID)
+		p.config.Logger.Debug("Looking for container process", "wrapperPID", wrapperPID)
 	}
 
 	// Look for child processes of the wrapper
@@ -202,14 +202,14 @@ func (p *Process) findContainerProcess() {
 	}
 
 	if p.config.Logger != nil {
-		p.config.Logger.Info("Found child processes", "children", children, "count", len(children))
+		p.config.Logger.Debug("Found child processes", "children", children, "count", len(children))
 	}
 
 	// For crun, we're typically looking for the first child process
 	if len(children) > 0 {
 		p.containerPID = children[0]
 		if p.config.Logger != nil {
-			p.config.Logger.Info("Successfully discovered container process",
+			p.config.Logger.Debug("Successfully discovered container process",
 				"containerPID", p.containerPID,
 				"wrapperPID", wrapperPID,
 				"allChildren", children)
@@ -312,7 +312,7 @@ func (p *Process) GetTTY() (*os.File, error) {
 	// discover it now that the container is running and connected
 	if p.isContainerProcess() && p.containerPID == 0 {
 		if p.config.Logger != nil {
-			p.config.Logger.Info("Container process detected, attempting to find container PID",
+			p.config.Logger.Debug("Container process detected, attempting to find container PID",
 				"isContainer", p.isContainerProcess(),
 				"currentContainerPID", p.containerPID)
 		}

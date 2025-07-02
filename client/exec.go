@@ -201,8 +201,6 @@ func execCommand(baseURL, token string, args []string) {
 
 	logger.Debug("Created wsexec command", "tty", wsCmd.Tty)
 
-	logger.Info("Starting WebSocket command execution")
-
 	// Set up PTY mode if needed
 	var cleanup func()
 	if *tty {
@@ -220,6 +218,7 @@ func execCommand(baseURL, token string, args []string) {
 		}()
 	}
 
+	logger.Debug("Starting WebSocket command execution")
 	// Start the command
 	if err := wsCmd.Start(); err != nil {
 		logger.Error("Failed to start WebSocket command", "error", err)
@@ -246,7 +245,7 @@ func execCommand(baseURL, token string, args []string) {
 		exitCode = 1
 	}
 
-	logger.Info("WebSocket exec completed", "finalExitCode", exitCode)
+	logger.Debug("WebSocket exec completed", "finalExitCode", exitCode)
 
 	// Restore terminal state before exiting
 	if initialState != nil {
@@ -414,7 +413,7 @@ func executeDirectWebSocket(baseURL, token string, cmd []string, workingDir stri
 		}()
 	}
 
-	logger.Info("Starting WebSocket command execution")
+	logger.Debug("Starting WebSocket command execution")
 
 	// Start the command
 	if err := wsCmd.Start(); err != nil {
@@ -442,7 +441,7 @@ func executeDirectWebSocket(baseURL, token string, cmd []string, workingDir stri
 		exitCode = 1
 	}
 
-	logger.Info("WebSocket exec completed", "finalExitCode", exitCode)
+	logger.Debug("WebSocket exec completed", "finalExitCode", exitCode)
 
 	// Restore terminal state before exiting
 	if initialState != nil {
@@ -483,14 +482,14 @@ func buildExecWebSocketURL(baseURL string) (*url.URL, error) {
 // handleBrowserOpen handles browser open requests from the container
 func handleBrowserOpen(url string, ports []string) {
 	logger := slog.Default()
-	logger.Info("Browser open request received", "url", url, "ports", ports)
+	logger.Debug("Browser open request received", "url", url, "ports", ports)
 
 	// Start HTTP servers on specified ports if any are provided
 	var servers []*http.Server
 	var serverReady sync.WaitGroup
 
 	if len(ports) > 0 {
-		logger.Info("Starting callback servers", "ports", ports)
+		logger.Debug("Starting callback servers", "ports", ports)
 
 		for _, portStr := range ports {
 			port := strings.TrimSpace(portStr)
@@ -506,7 +505,7 @@ func handleBrowserOpen(url string, ports []string) {
 			// Set up handler for this server
 			mux := http.NewServeMux()
 			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-				logger.Info("OAuth callback received", "port", port, "url", r.URL.String(), "method", r.Method)
+				logger.Debug("OAuth callback received", "port", port, "url", r.URL.String(), "method", r.Method)
 
 				// Show notification using AppleScript
 				notificationTitle := "OAuth Callback Received"
@@ -547,7 +546,7 @@ func handleBrowserOpen(url string, ports []string) {
 				// Shutdown this server after serving the response
 				go func() {
 					time.Sleep(100 * time.Millisecond) // Give response time to be sent
-					logger.Info("Shutting down callback server", "port", port)
+					logger.Debug("Shutting down callback server", "port", port)
 					server.Shutdown(context.Background())
 				}()
 			})

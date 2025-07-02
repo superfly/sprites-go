@@ -42,12 +42,12 @@ func main() {
 	token := os.Getenv("SPRITE_TOKEN")
 
 	if url == "" {
-		fmt.Fprintf(os.Stderr, "Error: SPRITE_URL environment variable not set\n")
+		slog.Error("SPRITE_URL environment variable not set")
 		os.Exit(1)
 	}
 
 	if token == "" {
-		fmt.Fprintf(os.Stderr, "Error: SPRITE_TOKEN environment variable not set\n")
+		slog.Error("SPRITE_TOKEN environment variable not set")
 		os.Exit(1)
 	}
 
@@ -92,7 +92,7 @@ func main() {
 		printUsage()
 		os.Exit(0)
 	default:
-		fmt.Fprintf(os.Stderr, "Error: Unknown command '%s'\n\n", subcommand)
+		slog.Error("Unknown command", "command", subcommand)
 		printUsage()
 		os.Exit(1)
 	}

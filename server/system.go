@@ -153,16 +153,16 @@ func NewSystem(config SystemConfig, logger *slog.Logger, reaper *Reaper) (*Syste
 
 // Boot handles the boot sequence for the system
 func (s *System) Boot(ctx context.Context) error {
-	s.logger.Info("=== Starting system boot sequence ===")
+	s.logger.Debug("=== Starting system boot sequence ===")
 
 	// Start JuiceFS if configured
 	if s.juicefs != nil {
-		s.logger.Info("Starting JuiceFS...")
+		s.logger.Debug("Starting JuiceFS...")
 		if err := s.juicefs.Start(ctx); err != nil {
 			s.logger.Error("JuiceFS start failed", "error", err)
 			return fmt.Errorf("failed to start JuiceFS: %w", err)
 		}
-		s.logger.Info("JuiceFS started successfully")
+		s.logger.Debug("JuiceFS started successfully")
 
 		// Mark JuiceFS as ready
 		s.mu.Lock()
@@ -171,7 +171,7 @@ func (s *System) Boot(ctx context.Context) error {
 		s.juicefsReadyCh = make(chan struct{})
 		s.mu.Unlock()
 	} else {
-		s.logger.Info("JuiceFS not configured, skipping")
+		s.logger.Debug("JuiceFS not configured, skipping")
 	}
 
 	// Start supervised process if configured
@@ -195,7 +195,7 @@ func (s *System) Boot(ctx context.Context) error {
 		s.logger.Info("No process command configured, skipping process start")
 	}
 
-	s.logger.Info("=== System boot sequence completed successfully ===")
+	s.logger.Debug("=== System boot sequence completed successfully ===")
 	return nil
 }
 

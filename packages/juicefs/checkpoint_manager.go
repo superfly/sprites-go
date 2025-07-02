@@ -95,7 +95,7 @@ func (cm *CheckpointManager) Checkpoint(ctx context.Context, checkpointID string
 			srcPath := filepath.Join(mountPath, src)
 			dstPath := filepath.Join(mountPath, dst)
 
-			cm.logger.Info("Creating checkpoint", "src", src, "dst", dst)
+			cm.logger.Debug("Creating checkpoint", "src", src, "dst", dst)
 			cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", srcPath, dstPath)
 			if output, err := cloneCmd.CombinedOutput(); err != nil {
 				return fmt.Errorf("failed to clone: %w, output: %s", err, string(output))
@@ -202,15 +202,15 @@ func (cm *CheckpointManager) Restore(ctx context.Context, checkpointID string) e
 		backupName := fmt.Sprintf("pre-restore-v%d-%d", record.ID, timestamp)
 		backupPath := filepath.Join(checkpointsDir, backupName)
 
-		cm.logger.Info("Backing up current active directory", "backupPath", backupPath)
+		cm.logger.Debug("Backing up current active directory", "backupPath", backupPath)
 		if err := os.Rename(activeDir, backupPath); err != nil {
 			return fmt.Errorf("failed to backup active directory: %w", err)
 		}
-		cm.logger.Info("Backup completed")
+		cm.logger.Debug("Backup completed")
 	}
 
 	// Clone checkpoint to active directory
-	cm.logger.Info("Restoring from checkpoint", "id", record.ID, "path", checkpointPath)
+	cm.logger.Debug("Restoring from checkpoint", "id", record.ID, "path", checkpointPath)
 	cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", fullCheckpointPath, activeDir)
 	if output, err := cloneCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to restore from checkpoint: %w, output: %s", err, string(output))

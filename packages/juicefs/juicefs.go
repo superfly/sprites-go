@@ -205,7 +205,7 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 		j.logger.Debug("Local mode backup check completed", "duration", time.Since(stepStart).Seconds(), "needsRestore", needsRestore)
 	} else if j.leaseMgr != nil {
 		// S3 mode - use lease manager
-		j.logger.Info("Acquiring JuiceFS database lease...")
+		j.logger.Debug("Acquiring JuiceFS database lease...")
 		err := j.leaseMgr.Wait(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to acquire lease: %w", err)
@@ -473,7 +473,7 @@ func (j *JuiceFS) monitorProcess() {
 	case <-j.stopCh:
 		// Stop requested, first unmount the overlay
 		if j.overlayMgr != nil {
-			j.logger.Info("Unmounting root overlay...")
+			j.logger.Debug("Unmounting root overlay...")
 			ctx := context.Background()
 			if err := j.overlayMgr.Unmount(ctx); err != nil {
 				j.logger.Warn("Error unmounting overlay", "error", err)
@@ -481,13 +481,13 @@ func (j *JuiceFS) monitorProcess() {
 		}
 
 		// Then unmount dependent mounts
-		j.logger.Info("Looking for dependent mounts to unmount...")
+		j.logger.Debug("Looking for dependent mounts to unmount...")
 		if err := j.findAndUnmountDependentMounts(mountPath); err != nil {
 			j.logger.Warn("Error finding/unmounting dependent mounts", "error", err)
 		}
 
 		// Sync the JuiceFS filesystem to flush pending writes
-		j.logger.Info("Syncing JuiceFS filesystem...")
+		j.logger.Debug("Syncing JuiceFS filesystem...")
 		syncStart := time.Now()
 		syncCmd := exec.Command("sync", "-f", mountPath)
 		if output, err := syncCmd.CombinedOutput(); err != nil {

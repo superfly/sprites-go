@@ -161,11 +161,11 @@ func NewApplication(config Config) (*Application, error) {
 
 // Run starts and runs the application
 func (app *Application) Run() error {
-	app.logger.Info("Starting sprite-env application", "version", version)
+	app.logger.Debug("Starting sprite-env application", "version", version)
 
 	// Log debug settings
 	if app.config.KeepAliveOnError {
-		app.logger.Info("Keep-alive mode enabled - server will continue running if process fails")
+		app.logger.Debug("Keep-alive mode enabled - server will continue running if process fails")
 	}
 
 	// Start zombie reaper
@@ -203,7 +203,7 @@ func (app *Application) Run() error {
 		select {
 		case <-app.ctx.Done():
 			// Context cancelled, shutdown
-			app.logger.Info("Context cancelled, shutting down")
+			app.logger.Debug("Context cancelled, shutting down")
 			return app.shutdown(1)
 
 		case err := <-processDoneCh:
@@ -333,8 +333,8 @@ func parseCommandLine() (Config, error) {
 		}
 
 		// Debug: Show what's in the config file
-		fmt.Printf("DEBUG: Loading config from %s\n", configFile)
-		fmt.Printf("DEBUG: Config file contents: %s\n", string(data))
+		slog.Debug("Loading config from file", "file", configFile)
+		slog.Debug("Config file contents", "contents", string(data))
 
 		var fileConfig struct {
 			LogLevel           string   `json:"log_level"`
@@ -405,8 +405,10 @@ func parseCommandLine() (Config, error) {
 		}
 
 		// Debug: Log container config values parsed from file
-		fmt.Printf("DEBUG: Container config from file - enabled: %v, socket_dir: %s, tty_timeout: %v\n",
-			config.ContainerEnabled, config.ContainerSocketDir, config.ContainerTTYTimeout)
+		slog.Debug("Container config from file",
+			"enabled", config.ContainerEnabled,
+			"socket_dir", config.ContainerSocketDir,
+			"tty_timeout", config.ContainerTTYTimeout)
 
 		config.JuiceFSBaseDir = fileConfig.JuiceFSBaseDir
 		config.JuiceFSLocalMode = fileConfig.JuiceFSLocalMode

@@ -175,7 +175,7 @@ func (c *ServerCommand) Handle(w http.ResponseWriter, r *http.Request) error {
 	conn.SetReadLimit(10 * 1024 * 1024)
 
 	if c.Logger != nil {
-		c.Logger.Info("ServerCommand.Handle: WebSocket upgrade successful")
+		c.Logger.Debug("ServerCommand.Handle: WebSocket upgrade successful")
 	}
 
 	adapter := NewAdapter(conn, c.Tty)

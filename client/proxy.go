@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -40,8 +41,9 @@ func proxyCommand(baseURL, token string, args []string) {
 	// Create proxy URL
 	proxyURL := fmt.Sprintf("%s://%s/proxy", parsedURL.Scheme, parsedURL.Host)
 
-	fmt.Printf("Starting proxy for ports: %v\n", ports)
-	fmt.Printf("Proxying through: %s\n", proxyURL)
+	logger := slog.Default()
+	logger.Info("Starting proxy for ports", "ports", ports)
+	logger.Info("Proxying through", "url", proxyURL)
 
 	// Start listeners for each port
 	var wg sync.WaitGroup
@@ -66,7 +68,8 @@ func proxyPort(port int, proxyURL, token string) error {
 	}
 	defer listener.Close()
 
-	fmt.Printf("Listening on port %d...\n", port)
+	logger := slog.Default()
+	logger.Info("Listening on port", "port", port)
 
 	for {
 		// Accept local connection

@@ -124,7 +124,7 @@ func (h *Handlers) HandleExecWsexec(w http.ResponseWriter, r *http.Request) {
 	cmd.SetWrapperCommand(h.execWrapperCommand).
 		SetLogger(h.logger)
 
-	h.logger.Info("HandleExec: Starting WebSocket command execution",
+	h.logger.Debug("HandleExec: Starting WebSocket command execution",
 		"path", path,
 		"args", args,
 		"tty", tty,
@@ -133,7 +133,7 @@ func (h *Handlers) HandleExecWsexec(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
 	err := cmd.Handle(w, r)
 
-	h.logger.Info("Exec completed",
+	h.logger.Debug("Exec completed",
 		"path", path,
 		"args", args,
 		"error", err,
