@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/sprite-env/client/config"
 	"github.com/sprite-env/client/format"
@@ -16,7 +15,7 @@ import (
 func PromptForInitialLogin(cfg *config.Manager) (*config.Organization, error) {
 	fmt.Println("We need an API token to work with Sprites:")
 	fmt.Print("Enter your API token: ")
-	
+
 	// Get token input
 	var token string
 	if term.IsTerminal(int(os.Stdin.Fd())) {
@@ -29,27 +28,37 @@ func PromptForInitialLogin(cfg *config.Manager) (*config.Organization, error) {
 	} else {
 		token = readLine()
 	}
-	
+
 	if token == "" {
 		return nil, fmt.Errorf("API token is required")
 	}
-	
-	// Generate a simple org name based on timestamp
-	orgName := fmt.Sprintf("default-%d", time.Now().Unix())
-	
+
 	// Use the Sprites API URL (can be overridden with SPRITES_API_URL)
 	url := "https://api.sprites.dev"
 	if envURL := os.Getenv("SPRITES_API_URL"); envURL != "" {
 		url = envURL
 	}
-	
+
+	// Validate token and get organization name from API
+	fmt.Print("Validating token...")
+	orgInfo, err := fetchOrganizationInfo(token, url)
+	if err != nil {
+		fmt.Printf("\r\033[K") // Clear the validation line
+		return nil, fmt.Errorf("token validation failed: %w", err)
+	}
+	fmt.Printf("\r\033[K") // Clear the validation line
+
+	// Use the organization name from API
+	orgName := orgInfo.Organization
+
 	// Add the organization
 	if err := cfg.AddOrg(orgName, token, url); err != nil {
 		return nil, fmt.Errorf("failed to save credentials: %w", err)
 	}
-	
-	fmt.Println("\n" + format.Success("✓ Ready to work with Sprites!") + "\n")
-	
+
+	fmt.Println(format.Success("✓ Authenticated with organization: " + format.Org(orgName)))
+	fmt.Println(format.Success("✓ Ready to work with Sprites!") + "\n")
+
 	// Return the newly added org
 	return cfg.GetOrgs()[orgName], nil
 }
@@ -62,11 +71,11 @@ func getOrgDisplayName(org *config.Organization) string {
 // SelectOrganization prompts the user to select an organization
 func SelectOrganization(cfg *config.Manager) (*config.Organization, error) {
 	orgs := cfg.GetOrgs()
-	
+
 	if len(orgs) == 0 {
 		return nil, fmt.Errorf("no organizations configured. Please run 'sprite org auth' first")
 	}
-	
+
 	if len(orgs) == 1 {
 		// Only one org, use it automatically
 		for _, org := range orgs {
@@ -87,7 +96,7 @@ func SelectOrganization(cfg *config.Manager) (*config.Organization, error) {
 
 	fmt.Println("Select an organization:")
 	selected := selectFromList(orgNames)
-	
+
 	if selected == "" {
 		return nil, fmt.Errorf("no organization selected")
 	}
@@ -129,13 +138,13 @@ func SelectOrCreateSprite(cfg *config.Manager, org *config.Organization) (*confi
 			}
 		}
 	}
-	
+
 	if org.Sprites == nil {
 		org.Sprites = make(map[string]*config.Sprite)
 	}
 
 	sprites := org.Sprites
-	
+
 	// Check if terminal supports interactive mode
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return nil, false, fmt.Errorf("interactive mode not available")
@@ -161,7 +170,7 @@ func SelectOrCreateSprite(cfg *config.Manager, org *config.Organization) (*confi
 
 	fmt.Println(format.Context(getOrgDisplayName(org), "Select a sprite:"))
 	selected := selectFromList(options)
-	
+
 	if selected == "" {
 		return nil, false, fmt.Errorf("no sprite selected")
 	}
@@ -194,24 +203,24 @@ func selectFromList(items []string) string {
 	for i, item := range items {
 		fmt.Printf("  %d. %s\n", i+1, item)
 	}
-	
+
 	fmt.Print("Enter number (1-", len(items), "): ")
 	reader := bufio.NewReader(os.Stdin)
 	input, err := reader.ReadString('\n')
 	if err != nil {
 		return ""
 	}
-	
+
 	input = strings.TrimSpace(input)
 	var choice int
 	if _, err := fmt.Sscanf(input, "%d", &choice); err != nil {
 		return ""
 	}
-	
+
 	if choice < 1 || choice > len(items) {
 		return ""
 	}
-	
+
 	return items[choice-1]
 }
 
@@ -228,19 +237,19 @@ func readLine() string {
 // PromptForAuth prompts for organization authentication details
 func PromptForAuth() (name, url, token string, err error) {
 	fmt.Println("Enter organization details:")
-	
+
 	fmt.Print("Organization name: ")
 	name = readLine()
 	if name == "" {
 		return "", "", "", fmt.Errorf("organization name is required")
 	}
-	
+
 	fmt.Print("API URL: ")
 	url = readLine()
 	if url == "" {
 		return "", "", "", fmt.Errorf("API URL is required")
 	}
-	
+
 	fmt.Print("API Token: ")
 	// Try to hide password input
 	if term.IsTerminal(int(os.Stdin.Fd())) {
@@ -253,10 +262,10 @@ func PromptForAuth() (name, url, token string, err error) {
 	} else {
 		token = readLine()
 	}
-	
+
 	if token == "" {
 		return "", "", "", fmt.Errorf("API token is required")
 	}
-	
+
 	return name, url, token, nil
 }
