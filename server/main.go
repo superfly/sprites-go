@@ -63,6 +63,9 @@ type Config struct {
 	OverlayTargetPath    string // Where to mount the final overlay
 	OverlaySkipOverlayFS bool   // Skip overlayfs, only mount loopback
 
+	// Dynamic configuration
+	DynamicConfigPath string // Path to persist dynamic configuration
+
 	// Transcript configuration
 	TranscriptDBPath string // Path to SQLite database file
 }
@@ -79,6 +82,7 @@ type Application struct {
 
 	// State
 	keepAliveOnError bool
+	dynamicConfig    bool // Whether we're in dynamic config mode
 }
 
 // NewApplication creates a new application instance
@@ -104,39 +108,47 @@ func NewApplication(config Config) (*Application, error) {
 		ctx:              ctx,
 		cancel:           cancel,
 		keepAliveOnError: config.KeepAliveOnError,
+		dynamicConfig:    config.DynamicConfigPath != "",
 	}
 
 	// Create Reaper instance
 	app.reaper = NewReaper(logger)
 
-	// Create System instance
-	systemConfig := SystemConfig{
-		ProcessCommand:                 config.ProcessCommand,
-		ProcessWorkingDir:              config.ProcessWorkingDir,
-		ProcessEnvironment:             config.ProcessEnvironment,
-		ProcessGracefulShutdownTimeout: config.ProcessGracefulShutdownTimeout,
-		ContainerEnabled:               config.ContainerEnabled,
-		ContainerSocketDir:             config.ContainerSocketDir,
-		ContainerTTYTimeout:            config.ContainerTTYTimeout,
-		JuiceFSBaseDir:                 config.JuiceFSBaseDir,
-		JuiceFSLocalMode:               config.JuiceFSLocalMode,
-		S3AccessKey:                    config.S3AccessKey,
-		S3SecretAccessKey:              config.S3SecretAccessKey,
-		S3EndpointURL:                  config.S3EndpointURL,
-		S3Bucket:                       config.S3Bucket,
-		OverlayEnabled:                 config.OverlayEnabled,
-		OverlayImageSize:               config.OverlayImageSize,
-		OverlayLowerPath:               config.OverlayLowerPath,
-		OverlayTargetPath:              config.OverlayTargetPath,
-		OverlaySkipOverlayFS:           config.OverlaySkipOverlayFS,
-		TranscriptsEnabled:             true, // Default enabled as per requirements
-		TranscriptDBPath:               config.TranscriptDBPath,
+	// Create System instance with minimal config if in dynamic mode
+	var systemConfig SystemConfig
+	if config.DynamicConfigPath == "" {
+		// Normal mode - populate config from parsed values
+		systemConfig = SystemConfig{
+			ProcessCommand:                 config.ProcessCommand,
+			ProcessWorkingDir:              config.ProcessWorkingDir,
+			ProcessEnvironment:             config.ProcessEnvironment,
+			ProcessGracefulShutdownTimeout: config.ProcessGracefulShutdownTimeout,
+			ContainerEnabled:               config.ContainerEnabled,
+			ContainerSocketDir:             config.ContainerSocketDir,
+			ContainerTTYTimeout:            config.ContainerTTYTimeout,
+			JuiceFSBaseDir:                 config.JuiceFSBaseDir,
+			JuiceFSLocalMode:               config.JuiceFSLocalMode,
+			S3AccessKey:                    config.S3AccessKey,
+			S3SecretAccessKey:              config.S3SecretAccessKey,
+			S3EndpointURL:                  config.S3EndpointURL,
+			S3Bucket:                       config.S3Bucket,
+			OverlayEnabled:                 config.OverlayEnabled,
+			OverlayImageSize:               config.OverlayImageSize,
+			OverlayLowerPath:               config.OverlayLowerPath,
+			OverlayTargetPath:              config.OverlayTargetPath,
+			OverlaySkipOverlayFS:           config.OverlaySkipOverlayFS,
+		}
 	}
+	// In dynamic mode with existing config file, systemConfig will be populated from the file
 
-	system, err := NewSystem(systemConfig, logger, app.reaper)
+	system, err := NewSystemWithDynamicConfig(systemConfig, config.DynamicConfigPath, logger, app.reaper)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create system: %w", err)
 	}
+
+	// Set transcript DB path
+	system.SetTranscriptDBPath(config.TranscriptDBPath)
+
 	app.system = system
 
 	// Set up API server if configured
@@ -171,20 +183,40 @@ func (app *Application) Run() error {
 	// Start zombie reaper
 	app.reaper.Start()
 
-	// Start system boot sequence
-	if err := app.system.Boot(app.ctx); err != nil {
-		return fmt.Errorf("failed to boot system: %w", err)
-	}
+	// Handle dynamic configuration mode
+	if app.dynamicConfig && !fileExists(app.config.DynamicConfigPath) {
+		app.logger.Info("Dynamic configuration mode enabled, waiting for configuration",
+			"config_path", app.config.DynamicConfigPath)
 
-	// Start API server if configured
-	if app.apiServer != nil {
-		go func() {
-			if err := app.apiServer.Start(); err != nil {
-				app.logger.Error("API server error", "error", err)
-				// Trigger shutdown if API server fails
-				app.cancel()
-			}
-		}()
+		// In dynamic config mode without existing config, only start the API server
+		// The /configure endpoint will handle booting the system
+		if app.apiServer != nil {
+			go func() {
+				if err := app.apiServer.Start(); err != nil {
+					app.logger.Error("API server error", "error", err)
+					// Trigger shutdown if API server fails
+					app.cancel()
+				}
+			}()
+		} else {
+			return fmt.Errorf("API server must be configured when using dynamic configuration mode")
+		}
+	} else {
+		// Normal boot sequence
+		if err := app.system.Boot(app.ctx); err != nil {
+			return fmt.Errorf("failed to boot system: %w", err)
+		}
+
+		// Start API server if configured
+		if app.apiServer != nil {
+			go func() {
+				if err := app.apiServer.Start(); err != nil {
+					app.logger.Error("API server error", "error", err)
+					// Trigger shutdown if API server fails
+					app.cancel()
+				}
+			}()
+		}
 	}
 
 	// Set up signal handling
@@ -309,6 +341,7 @@ func parseCommandLine() (Config, error) {
 		gracefulShutdownTimeout time.Duration
 		juicefsDirFlag          string
 		showVersion             bool
+		dynamicConfigPath       string
 	)
 
 	flag.StringVar(&configFile, "config", "", "JSON configuration file")
@@ -318,11 +351,20 @@ func parseCommandLine() (Config, error) {
 	flag.DurationVar(&gracefulShutdownTimeout, "graceful-shutdown-timeout", 30*time.Second, "Process graceful shutdown timeout")
 	flag.StringVar(&juicefsDirFlag, "juicefs-dir", "", "JuiceFS base directory")
 	flag.BoolVar(&showVersion, "version", false, "Show version and exit")
+	flag.StringVar(&dynamicConfigPath, "dynamic-config", "", "Path to persist dynamic configuration (enables dynamic config mode)")
 	flag.Parse()
 
 	if showVersion {
 		fmt.Printf("sprite-env version %s\n", version)
 		os.Exit(0)
+	}
+
+	// Set dynamic config path
+	config.DynamicConfigPath = dynamicConfigPath
+
+	// If dynamic config mode is enabled and config file exists, load it
+	if dynamicConfigPath != "" && fileExists(dynamicConfigPath) {
+		configFile = dynamicConfigPath
 	}
 
 	// Load from config file if specified
@@ -511,6 +553,12 @@ func parseCommandLine() (Config, error) {
 	}
 
 	return config, nil
+}
+
+// fileExists checks if a file exists
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func main() {

@@ -12,9 +12,6 @@ import (
 
 // StartProcess starts the supervised process
 func (s *System) StartProcess() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	s.logger.Info("StartProcess: Entering method")
 
 	if len(s.config.ProcessCommand) == 0 {
@@ -113,7 +110,7 @@ func (s *System) StartProcess() error {
 		// Store the container process (which embeds the supervisor)
 		s.supervisor = containerProcess.Supervisor
 		s.containerProcess = containerProcess
-		s.processRunning = true
+		s.setState("processRunning", true)
 
 		s.logger.Info("StartProcess: Container process started successfully", "pid", pid, "command", s.config.ProcessCommand)
 
@@ -135,7 +132,7 @@ func (s *System) StartProcess() error {
 		}
 
 		s.supervisor = sup
-		s.processRunning = true
+		s.setState("processRunning", true)
 
 		s.logger.Info("StartProcess: Process started successfully", "pid", pid, "command", s.config.ProcessCommand)
 	}
@@ -151,9 +148,7 @@ func (s *System) StartProcess() error {
 		s.logger.Info("StartProcess: Process monitor detected process exit", "error", err)
 		s.processDoneCh <- err
 
-		s.mu.Lock()
-		s.processRunning = false
-		s.mu.Unlock()
+		s.setState("processRunning", false)
 		s.logger.Info("StartProcess: Background monitor completed")
 	}()
 
@@ -163,10 +158,7 @@ func (s *System) StartProcess() error {
 
 // StopProcess stops the supervised process
 func (s *System) StopProcess() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if !s.processRunning || s.supervisor == nil {
+	if !s.getState("processRunning").(bool) || s.supervisor == nil {
 		return nil
 	}
 
@@ -184,7 +176,7 @@ func (s *System) StopProcess() error {
 		}
 	}
 
-	s.processRunning = false
+	s.setState("processRunning", false)
 	s.logger.Info("Process stopped successfully")
 	return nil
 }
@@ -192,12 +184,9 @@ func (s *System) StopProcess() error {
 // Wait waits for the supervised process to complete
 func (s *System) Wait() error {
 	// If no process is running, return immediately
-	s.mu.RLock()
-	if !s.processRunning {
-		s.mu.RUnlock()
+	if !s.getState("processRunning").(bool) {
 		return nil
 	}
-	s.mu.RUnlock()
 
 	// Wait for process to complete
 	err := <-s.processDoneCh
@@ -206,10 +195,7 @@ func (s *System) Wait() error {
 
 // ForwardSignal forwards a signal to the supervised process
 func (s *System) ForwardSignal(sig os.Signal) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if s.processRunning && s.supervisor != nil {
+	if s.getState("processRunning").(bool) && s.supervisor != nil {
 		return s.supervisor.Signal(sig)
 	}
 	return nil

@@ -45,14 +45,10 @@ func (s *System) CheckpointAndGetVersion(ctx context.Context) (string, error) {
 
 // Restore restores the system from a checkpoint
 func (s *System) Restore(ctx context.Context, checkpointID string) error {
-	s.mu.Lock()
-	s.restoringNow = true
-	s.mu.Unlock()
+	s.setState("restoringNow", true)
 
 	defer func() {
-		s.mu.Lock()
-		s.restoringNow = false
-		s.mu.Unlock()
+		s.setState("restoringNow", false)
 	}()
 
 	if checkpointID == "" {
@@ -133,14 +129,10 @@ func (s *System) CheckpointWithStream(ctx context.Context, checkpointID string, 
 func (s *System) RestoreWithStream(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) error {
 	defer close(streamCh)
 
-	s.mu.Lock()
-	s.restoringNow = true
-	s.mu.Unlock()
+	s.setState("restoringNow", true)
 
 	defer func() {
-		s.mu.Lock()
-		s.restoringNow = false
-		s.mu.Unlock()
+		s.setState("restoringNow", false)
 	}()
 
 	s.logger.Info("Starting restore sequence", "checkpointID", checkpointID)
@@ -292,14 +284,10 @@ func (s *System) GetCheckpoint(ctx context.Context, checkpointID string) (*juice
 // 2. Clearing the JuiceFS mount directory
 // 3. Removing the checkpoint database
 func (s *System) ResetState() error {
-	s.mu.Lock()
-	s.restoringNow = true
-	s.mu.Unlock()
+	s.setState("restoringNow", true)
 
 	defer func() {
-		s.mu.Lock()
-		s.restoringNow = false
-		s.mu.Unlock()
+		s.setState("restoringNow", false)
 	}()
 
 	s.logger.Info("Starting system state reset")

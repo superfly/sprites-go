@@ -13,6 +13,12 @@ import (
 
 // SystemManager interface provides methods for managing the system (process + storage)
 type SystemManager interface {
+	// Configuration management
+	IsConfigured() bool
+	Configure(config interface{}) error // Using interface{} to avoid circular import
+	Boot(ctx context.Context) error
+	GetDynamicConfigPath() string
+
 	// Process management
 	IsProcessRunning() bool
 	WaitForProcessRunning(ctx context.Context) error
