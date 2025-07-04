@@ -615,15 +615,15 @@ dbs:
       - type: file
         path: %s
         retention: 24h
-        snapshot-interval: 1m
-        sync-interval: 1s
+        snapshot-interval: 1h
+        sync-interval: 1m
   - path: %s
     replicas:
       - type: file
         path: %s
         retention: 24h
-        snapshot-interval: 1m
-        sync-interval: 1s
+        snapshot-interval: 1h
+        sync-interval: 1m
 `, metaDB, localBackupPath, checkpointDB, localBackupPath)
 	} else {
 		// S3-based replication
@@ -638,7 +638,8 @@ dbs:
         path: juicefs-metadata
         access-key-id: ${SPRITE_S3_ACCESS_KEY}
         secret-access-key: ${SPRITE_S3_SECRET_ACCESS_KEY}
-        sync-interval: 1s
+        snapshot-interval: 1h
+        sync-interval: 1m
   - path: ${CHECKPOINT_DB}
     replicas:
       - type: s3
@@ -647,7 +648,8 @@ dbs:
         path: checkpoints
         access-key-id: ${SPRITE_S3_ACCESS_KEY}
         secret-access-key: ${SPRITE_S3_SECRET_ACCESS_KEY}
-        sync-interval: 1s
+        snapshot-interval: 1h
+        sync-interval: 1m
 `
 	}
 

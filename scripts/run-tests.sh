@@ -30,6 +30,9 @@ for package_dir in packages/*/; do
 done
 
 # Run lib tests
+run_test "client tests" "go test ./client/..."
+
+# Run lib tests
 run_test "lib tests" "go test ./lib/..."
 
 # Run server tests

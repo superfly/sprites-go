@@ -158,6 +158,8 @@ func TestLitestreamConfig(t *testing.T) {
 				"bucket: ${SPRITE_S3_BUCKET}",
 				"path: juicefs-metadata",
 				"path: checkpoints",
+				"snapshot-interval: 1h",
+				"sync-interval: 1m",
 			},
 		},
 		{
@@ -174,8 +176,8 @@ func TestLitestreamConfig(t *testing.T) {
 				"type: file",
 				"path: " + filepath.Join(tmpDir, "litestream"),
 				"retention: 24h",
-				"snapshot-interval: 1m",
-				"sync-interval: 1s",
+				"snapshot-interval: 1h",
+				"sync-interval: 1m",
 			},
 		},
 	}
