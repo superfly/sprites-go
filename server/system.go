@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/sprite-env/packages/juicefs"
@@ -14,7 +13,6 @@ import (
 	"github.com/superfly/sprite-env/packages/container"
 	"github.com/superfly/sprite-env/pkg/terminal"
 )
-
 
 // SystemConfig holds configuration for the System
 type SystemConfig struct {
@@ -51,11 +49,13 @@ type SystemConfig struct {
 
 // systemState holds the mutable state of the system
 type systemState struct {
-	processRunning    bool
-	restoringNow      bool
-	juicefsReady      bool
-	configured        bool
-	dynamicConfigPath string
+	processRunning     bool
+	restoringNow       bool
+	juicefsReady       bool
+	configured         bool
+	dynamicConfigPath  string
+	transcriptsEnabled bool
+	transcriptDBPath   string
 }
 
 // stateOp represents state operations
@@ -104,7 +104,6 @@ func NewSystem(config SystemConfig, logger *slog.Logger, reaper *Reaper) (*Syste
 // NewSystemWithDynamicConfig creates a new System instance with dynamic config support
 func NewSystemWithDynamicConfig(config SystemConfig, dynamicConfigPath string, logger *slog.Logger, reaper *Reaper) (*System, error) {
 	s := &System{
-<<<<<<< HEAD
 		config:         config,
 		logger:         logger,
 		reaper:         reaper,
@@ -114,18 +113,11 @@ func NewSystemWithDynamicConfig(config SystemConfig, dynamicConfigPath string, l
 		stateCh:        make(chan stateOp),
 		stopCh:         make(chan struct{}),
 		stateMgr: &systemState{
-			configured:        false,
-			dynamicConfigPath: dynamicConfigPath,
+			configured:         false,
+			dynamicConfigPath:  dynamicConfigPath,
+			transcriptsEnabled: config.TranscriptsEnabled,
+			transcriptDBPath:   config.TranscriptDBPath,
 		},
-=======
-		config:             config,
-		logger:             logger,
-		reaper:             reaper,
-		processDoneCh:      make(chan error, 1),
-		processReadyCh:     make(chan struct{}),
-		juicefsReadyCh:     make(chan struct{}),
-		transcriptsEnabled: config.TranscriptsEnabled,
->>>>>>> main
 	}
 
 	// Start state manager goroutine
@@ -163,6 +155,10 @@ func (s *System) runStateManager() {
 					result = s.stateMgr.restoringNow
 				case "juicefsReady":
 					result = s.stateMgr.juicefsReady
+				case "transcriptsEnabled":
+					result = s.stateMgr.transcriptsEnabled
+				case "transcriptDBPath":
+					result = s.stateMgr.transcriptDBPath
 				}
 				op.response <- result
 			case stateOpSet:
@@ -175,6 +171,10 @@ func (s *System) runStateManager() {
 					s.stateMgr.restoringNow = op.value.(bool)
 				case "juicefsReady":
 					s.stateMgr.juicefsReady = op.value.(bool)
+				case "transcriptsEnabled":
+					s.stateMgr.transcriptsEnabled = op.value.(bool)
+				case "transcriptDBPath":
+					s.stateMgr.transcriptDBPath = op.value.(string)
 				}
 				close(op.response)
 			}
@@ -212,7 +212,7 @@ func (s *System) Configure(config interface{}) error {
 	}
 
 	var sysConfig SystemConfig
-	
+
 	// Try direct type assertion first
 	if sc, ok := config.(SystemConfig); ok {
 		sysConfig = sc
@@ -223,7 +223,7 @@ func (s *System) Configure(config interface{}) error {
 		if err != nil {
 			return fmt.Errorf("failed to marshal config: %w", err)
 		}
-		
+
 		if err := json.Unmarshal(jsonData, &sysConfig); err != nil {
 			return fmt.Errorf("failed to unmarshal config to SystemConfig: %w", err)
 		}
@@ -388,43 +388,44 @@ func (s *System) Shutdown(ctx context.Context) error {
 	return nil
 }
 
+// SetTranscriptDBPath sets the path for the transcript database
+func (s *System) SetTranscriptDBPath(path string) {
+	s.setState("transcriptDBPath", path)
+}
+
 // EnableTranscripts enables transcript recording for future exec calls
 func (s *System) EnableTranscripts(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.transcriptsEnabled = true
+	s.setState("transcriptsEnabled", true)
 	s.logger.Info("transcripts enabled")
 	return nil
 }
 
 // DisableTranscripts disables transcript recording for future exec calls
 func (s *System) DisableTranscripts(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.transcriptsEnabled = false
+	s.setState("transcriptsEnabled", false)
 	s.logger.Info("transcripts disabled")
 	return nil
 }
 
 // IsTranscriptsEnabled returns whether transcript recording is currently enabled
 func (s *System) IsTranscriptsEnabled() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.transcriptsEnabled
+	return s.getState("transcriptsEnabled").(bool)
 }
 
 // CreateTranscriptCollector creates a transcript collector using SQLite backend.
 func (s *System) CreateTranscriptCollector(env []string, tty bool) (terminal.TranscriptCollector, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if !s.transcriptsEnabled {
+	if !s.IsTranscriptsEnabled() {
 		return &terminal.NoopTranscript{}, nil
 	}
 
 	// Use SQLite backend
+	dbPath := s.getState("transcriptDBPath").(string)
+	if dbPath == "" {
+		dbPath = s.config.TranscriptDBPath
+	}
+
 	sqliteConfig := terminal.SQLiteTranscriptConfig{
-		DBPath: s.config.TranscriptDBPath,
+		DBPath: dbPath,
 		Env:    env,
 		TTY:    tty,
 		Logger: s.logger,
