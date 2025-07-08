@@ -21,9 +21,10 @@ type Config struct {
 
 // Organization represents an organization configuration
 type Organization struct {
-	Name  string `json:"name"`
-	Token string `json:"token,omitempty"` // Only used when keyring is disabled
-	URL   string `json:"url"`
+	Name       string `json:"name"`
+	Token      string `json:"token,omitempty"` // Only used when keyring is disabled
+	URL        string `json:"url"`
+	UseKeyring bool   `json:"use_keyring,omitempty"` // Tracks whether keyring is being used for this org
 }
 
 // Manager handles configuration operations
@@ -320,12 +321,14 @@ func (o *Organization) GetTokenWithKeyringDisabled(disableKeyring bool) (string,
 		// Try keyring first
 		token, err := keyring.Get(KeyringService, o.Name)
 		if err == nil {
+			o.UseKeyring = true // Update flag to reflect we're using keyring
 			return token, nil
 		}
 	}
 
 	// Fallback to file-stored token
 	if o.Token != "" {
+		o.UseKeyring = false // Update flag to reflect we're using file storage
 		return o.Token, nil
 	}
 
@@ -344,13 +347,15 @@ func (o *Organization) SetTokenWithKeyringDisabled(token string, disableKeyring 
 		err := keyring.Set(KeyringService, o.Name, token)
 		if err == nil {
 			// Successfully stored in keyring
-			o.Token = "" // Clear file-stored token since we're using keyring
+			o.Token = ""        // Clear file-stored token since we're using keyring
+			o.UseKeyring = true // Mark that we're using keyring for this org
 			return nil
 		}
 	}
 
 	// Keyring disabled or failed, use file storage
 	o.Token = token
+	o.UseKeyring = false // Mark that we're using file storage for this org
 	return nil
 }
 

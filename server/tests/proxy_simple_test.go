@@ -341,15 +341,36 @@ func (m *simpleSystemManager) ListCheckpointsByHistory(ctx context.Context, vers
 	return []string{}, nil
 }
 func (m *simpleSystemManager) GetCheckpoint(ctx context.Context, checkpointID string) (*juicefs.CheckpointInfo, error) {
-	return nil, fmt.Errorf("not found")
+	return nil, fmt.Errorf("checkpoint not found")
 }
-func (m *simpleSystemManager) SubscribeToReapEvents() <-chan int          { return make(<-chan int) }
-func (m *simpleSystemManager) UnsubscribeFromReapEvents(ch <-chan int)    {}
-func (m *simpleSystemManager) WasProcessReaped(pid int) (bool, time.Time) { return false, time.Time{} }
-
-func (m *simpleSystemManager) EnableTranscripts(ctx context.Context) error  { return nil }
-func (m *simpleSystemManager) DisableTranscripts(ctx context.Context) error { return nil }
-func (m *simpleSystemManager) IsTranscriptsEnabled() bool                   { return false }
-func (m *simpleSystemManager) CreateTranscriptCollector(env []string, tty bool) (terminal.TranscriptCollector, error) {
+func (m *simpleSystemManager) SubscribeToReapEvents() <-chan int {
+	return make(chan int)
+}
+func (m *simpleSystemManager) UnsubscribeFromReapEvents(ch <-chan int) {}
+func (m *simpleSystemManager) WasProcessReaped(pid int) (bool, time.Time) {
+	return false, time.Time{}
+}
+func (m *simpleSystemManager) EnableTranscripts(ctx context.Context) error {
+	return nil
+}
+func (m *simpleSystemManager) DisableTranscripts(ctx context.Context) error {
+	return nil
+}
+func (m *simpleSystemManager) IsTranscriptsEnabled() bool {
+	return false
+}
+func (m *simpleSystemManager) CreateTranscriptCollector(env []string, ty bool) (terminal.TranscriptCollector, error) {
 	return nil, nil
+}
+func (m *simpleSystemManager) IsConfigured() bool {
+	return true
+}
+func (m *simpleSystemManager) Configure(config interface{}) error {
+	return nil
+}
+func (m *simpleSystemManager) Boot(ctx context.Context) error {
+	return nil
+}
+func (m *simpleSystemManager) GetDynamicConfigPath() string {
+	return "/tmp/mock-config.json"
 }

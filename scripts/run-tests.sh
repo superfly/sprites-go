@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+set -o pipefail
 
 # Colors for output
 RED='\033[0;31m'
@@ -16,9 +17,13 @@ run_test() {
     local test_command=$2
     
     echo -e "${YELLOW}Running $test_name...${NC}"
-    eval "$test_command"
-    echo -e "${GREEN}✓ $test_name passed${NC}"
-    echo
+    if eval "$test_command"; then
+        echo -e "${GREEN}✓ $test_name passed${NC}"
+        echo
+    else
+        echo -e "${RED}✗ $test_name failed${NC}"
+        exit 1
+    fi
 }
 
 # Run tests for each package in packages/
@@ -29,14 +34,14 @@ for package_dir in packages/*/; do
     fi
 done
 
-# Run lib tests
-run_test "client tests" "go test ./client/..."
+# Run client tests
+run_test "client tests" "go test -v -failfast ./client/..."
 
 # Run lib tests
-run_test "lib tests" "go test ./lib/..."
+run_test "lib tests" "go test -v -failfast ./lib/..."
 
 # Run server tests
-run_test "server tests" "go test ./server/..."
+run_test "server tests" "go test -v -failfast ./server/..."
 
 # All tests passed if we reach here
 echo
