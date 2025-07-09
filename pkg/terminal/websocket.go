@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -9,10 +10,16 @@ import (
 	gorillaws "github.com/gorilla/websocket"
 )
 
+// TextMessageSender allows sending text messages through the websocket
+type TextMessageSender interface {
+	SendTextMessage(data []byte) error
+}
+
 // WebSocketHandler wraps a terminal Session to provide WebSocket connectivity.
 type WebSocketHandler struct {
-	session  *Session
-	upgrader gorillaws.Upgrader
+	session     *Session
+	upgrader    gorillaws.Upgrader
+	onConnected func(sender TextMessageSender) // called when websocket is connected
 }
 
 // NewWebSocketHandler creates a new WebSocket handler for the given session.
@@ -30,6 +37,12 @@ func NewWebSocketHandler(session *Session) *WebSocketHandler {
 	}
 }
 
+// WithOnConnected sets a callback that is called when the websocket connection is established
+func (h *WebSocketHandler) WithOnConnected(callback func(sender TextMessageSender)) *WebSocketHandler {
+	h.onConnected = callback
+	return h
+}
+
 // Handle upgrades the HTTP request to WebSocket and runs the terminal session.
 func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error {
 	// Upgrade to WebSocket
@@ -45,6 +58,11 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 	// Create WebSocket streams
 	wsStreams := newWebSocketStreams(conn, h.session.tty)
 	defer wsStreams.Close()
+
+	// Call onConnected callback if set
+	if h.onConnected != nil {
+		h.onConnected(wsStreams)
+	}
 
 	// Run the session
 	ctx := r.Context()
@@ -248,6 +266,35 @@ func (ws *webSocketStreams) WriteExit(code int) error {
 		code = 255 // Cap at 255 for byte representation
 	}
 	return ws.writeStream(StreamExit, []byte{byte(code)})
+}
+
+// WriteTextMessage writes a raw text message as a text WebSocket frame
+func (ws *webSocketStreams) WriteTextMessage(data []byte) error {
+	result := make(chan error, 1)
+	select {
+	case ws.writeChan <- writeRequest{
+		messageType: gorillaws.TextMessage,
+		data:        data,
+		result:      result,
+	}:
+		return <-result
+	case <-ws.done:
+		return errors.New("adapter closed")
+	}
+}
+
+// SendTextMessage implements the TextMessageSender interface
+func (ws *webSocketStreams) SendTextMessage(data []byte) error {
+	return ws.WriteTextMessage(data)
+}
+
+// WriteControlMessage writes a control message as a text WebSocket frame
+func (ws *webSocketStreams) WriteControlMessage(msg ControlMessage) error {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	return ws.WriteTextMessage(data)
 }
 
 // Close closes the WebSocket streams

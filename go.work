@@ -6,6 +6,7 @@ use (
 	./packages/container
 	./packages/juicefs
 	./packages/leaser
+	./packages/port-watcher
 	./packages/supervisor
 	./packages/wsexec
 	./pkg/terminal

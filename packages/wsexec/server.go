@@ -69,6 +69,12 @@ type ServerCommand struct {
 
 	// Context for cancellation
 	ctx context.Context
+
+	// Process information
+	pid int
+
+	// Callback for when process starts (receives PID)
+	OnProcessStart func(pid int)
 }
 
 // SetTTY sets whether the command should run with a TTY
@@ -123,6 +129,17 @@ func (c *ServerCommand) SetInitialTerminalSize(cols, rows uint16) *ServerCommand
 	c.InitialCols = cols
 	c.InitialRows = rows
 	return c
+}
+
+// SetOnProcessStart sets a callback to be called when the process starts
+func (c *ServerCommand) SetOnProcessStart(callback func(pid int)) *ServerCommand {
+	c.OnProcessStart = callback
+	return c
+}
+
+// GetPID returns the PID of the running process (0 if not started or finished)
+func (c *ServerCommand) GetPID() int {
+	return c.pid
 }
 
 // GetContext returns the context for the command
@@ -234,6 +251,9 @@ func (c *ServerCommand) Handle(w http.ResponseWriter, r *http.Request) error {
 
 // run executes the command and handles I/O
 func (c *ServerCommand) run(ctx context.Context, ws *Adapter) int {
+	// Clear PID at start
+	c.pid = 0
+
 	collector := c.LogCollector
 	if collector == nil {
 		// Use no-op collector to prevent nil pointer dereference
@@ -408,6 +428,17 @@ func (c *ServerCommand) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, ws *Ad
 	}
 	defer ptmx.Close()
 
+	// Store PID and call callback
+	if cmd.Process != nil {
+		c.pid = cmd.Process.Pid
+		if c.OnProcessStart != nil {
+			c.OnProcessStart(c.pid)
+		}
+		if c.Logger != nil {
+			c.Logger.Debug("Process started with PTY", "pid", c.pid)
+		}
+	}
+
 	// Set initial terminal size if specified
 	if c.InitialCols > 0 && c.InitialRows > 0 {
 		if err := creackpty.Setsize(ptmx, &creackpty.Winsize{
@@ -432,6 +463,9 @@ func (c *ServerCommand) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, ws *Ad
 
 	// Wait for command
 	cmdErr := cmd.Wait()
+
+	// Clear PID when process completes
+	c.pid = 0
 
 	// Get exit code
 	if cmdErr != nil {
@@ -476,6 +510,17 @@ func (c *ServerCommand) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd,
 			c.Logger.Error("Failed to start command", "error", err)
 		}
 		return -1
+	}
+
+	// Store PID and call callback
+	if cmd.Process != nil {
+		c.pid = cmd.Process.Pid
+		if c.OnProcessStart != nil {
+			c.OnProcessStart(c.pid)
+		}
+		if c.Logger != nil {
+			c.Logger.Debug("Process started with console socket", "pid", c.pid)
+		}
 	}
 
 	// Wait for crun to send us the PTY
@@ -523,6 +568,9 @@ func (c *ServerCommand) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd,
 	// Wait for command
 	cmdErr := cmd.Wait()
 
+	// Clear PID when process completes
+	c.pid = 0
+
 	// Get exit code
 	if cmdErr != nil {
 		if exitErr, ok := cmdErr.(*exec.ExitError); ok {
@@ -554,6 +602,17 @@ func (c *ServerCommand) runWithoutPTY(ctx context.Context, cmd *exec.Cmd, ws *Ad
 		return -1
 	}
 
+	// Store PID and call callback
+	if cmd.Process != nil {
+		c.pid = cmd.Process.Pid
+		if c.OnProcessStart != nil {
+			c.OnProcessStart(c.pid)
+		}
+		if c.Logger != nil {
+			c.Logger.Debug("Process started without PTY", "pid", c.pid)
+		}
+	}
+
 	// Create readers/writers for the WebSocket streams
 	stdinReader := &streamReader{ws: ws, streamID: StreamStdin}
 	stdoutWriter := &streamWriter{ws: ws, streamID: StreamStdout}
@@ -577,6 +636,9 @@ func (c *ServerCommand) runWithoutPTY(ctx context.Context, cmd *exec.Cmd, ws *Ad
 
 	// Wait for command to complete
 	err = cmd.Wait()
+
+	// Clear PID when process completes
+	c.pid = 0
 
 	// Return exit code
 	if err != nil {

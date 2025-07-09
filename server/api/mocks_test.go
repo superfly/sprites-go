@@ -157,6 +157,21 @@ func (m *mockSystemManager) ForwardSignal(sig os.Signal) error {
 	return nil
 }
 
+// Exec process monitoring methods
+func (m *mockSystemManager) MonitorExecProcess(execID string, execFunc func() error) error {
+	// Mock implementation just calls the function
+	return execFunc()
+}
+
+func (m *mockSystemManager) StartExecProcessTracking(execID string, pid int) error {
+	// Mock implementation does nothing
+	return nil
+}
+
+func (m *mockSystemManager) StopExecProcessTracking(execID string) {
+	// Mock implementation does nothing
+}
+
 func (m *mockSystemManager) HasJuiceFS() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -3,6 +3,7 @@ package wsexec
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -48,6 +49,9 @@ func CommandContext(ctx context.Context, req *http.Request, name string, arg ...
 // BrowserOpenFunc is a function that handles browser open requests
 type BrowserOpenFunc func(url string, ports []string)
 
+// TextMessageHandler is a function that handles arbitrary text messages from the server
+type TextMessageHandler func(data []byte)
+
 // Cmd represents a remote command execution
 type Cmd struct {
 	// Command to execute
@@ -69,6 +73,9 @@ type Cmd struct {
 
 	// Browser open handler
 	BrowserOpen BrowserOpenFunc
+
+	// Text message handler for arbitrary server messages
+	TextMessageHandler TextMessageHandler
 
 	// Private fields
 	ctx     context.Context
@@ -166,7 +173,7 @@ func (c *Cmd) runIO() {
 		stderr = os.Stderr
 	}
 
-	// For PTY mode, it's just bidirectional copying
+	// For PTY mode, handle messages directly for text message support
 	if c.Tty {
 		// Copy stdin to WebSocket
 		if c.Stdin != nil {
@@ -180,10 +187,25 @@ func (c *Cmd) runIO() {
 			output = io.MultiWriter(stdout, oscMonitor)
 		}
 
-		// Copy WebSocket to output (stdout with optional monitoring)
-		io.Copy(output, adapter)
+		// Handle WebSocket messages directly (both binary and text)
+		for {
+			messageType, data, err := conn.ReadMessage()
+			if err != nil {
+				// Connection closed
+				break
+			}
 
-		// When io.Copy returns, the command is done
+			switch messageType {
+			case gorillaws.BinaryMessage:
+				// Write binary data to output
+				output.Write(data)
+			case gorillaws.TextMessage:
+				// Handle text messages
+				c.handleTextMessage(data)
+			}
+		}
+
+		// When message loop exits, the command is done
 		// Send default exit code
 		select {
 		case c.exitChan <- 0:
@@ -204,29 +226,58 @@ func (c *Cmd) runIO() {
 		}()
 	}
 
-	// Read messages until we get an exit code
+	// Handle WebSocket messages directly for text message support
 	for {
-		stream, data, err := adapter.ReadStream()
+		messageType, data, err := conn.ReadMessage()
 		if err != nil {
 			// Connection closed
 			return
 		}
 
-		switch stream {
-		case StreamStdout:
-			stdout.Write(data)
-		case StreamStderr:
-			stderr.Write(data)
-		case StreamExit:
-			if len(data) > 0 {
-				code := int(data[0])
-				select {
-				case c.exitChan <- code:
-				default:
-				}
+		switch messageType {
+		case gorillaws.BinaryMessage:
+			// Handle binary messages with stream multiplexing
+			if len(data) == 0 {
+				continue
 			}
-			return // Command finished
+			stream := StreamID(data[0])
+			payload := data[1:]
+
+			switch stream {
+			case StreamStdout:
+				stdout.Write(payload)
+			case StreamStderr:
+				stderr.Write(payload)
+			case StreamExit:
+				if len(payload) > 0 {
+					code := int(payload[0])
+					select {
+					case c.exitChan <- code:
+					default:
+					}
+				}
+				return // Command finished
+			}
+		case gorillaws.TextMessage:
+			// Handle text messages
+			c.handleTextMessage(data)
 		}
+	}
+}
+
+// handleTextMessage processes text messages from the server
+func (c *Cmd) handleTextMessage(data []byte) {
+	// First, try to handle as control message (resize)
+	var controlMsg ControlMessage
+	if err := json.Unmarshal(data, &controlMsg); err == nil && controlMsg.Type == "resize" {
+		// Resize messages are handled internally by wsexec
+		// (though typically these come from client to server, not server to client)
+		return
+	}
+
+	// If we have a text message handler, call it for arbitrary messages
+	if c.TextMessageHandler != nil {
+		c.TextMessageHandler(data)
 	}
 }
 

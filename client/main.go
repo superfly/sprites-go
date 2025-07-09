@@ -16,15 +16,25 @@ import (
 
 var (
 	clientLogger *slog.Logger
-	globalDebug  bool
+	globalDebug  string
 	globalHelp   bool
 )
 
-func setupLogger(debug bool) {
-	if debug {
-		// Only enable logging when debug is explicitly requested
-		level := slog.LevelDebug
-		clientLogger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+func setupLogger(debugFile string) {
+	if debugFile != "" {
+		// Create or open the debug log file
+		file, err := os.OpenFile(debugFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: Failed to open debug log file: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Create a text handler for the file with debug level
+		opts := &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		}
+		handler := slog.NewTextHandler(file, opts)
+		clientLogger = slog.New(handler)
 		slog.SetDefault(clientLogger)
 	} else {
 		// Disable all logging by default - send to discard
@@ -41,7 +51,7 @@ func debugLog(format string, a ...interface{}) {
 func main() {
 	// Parse global flags first
 	globalFlags := flag.NewFlagSet("sprite", flag.ContinueOnError)
-	globalFlags.BoolVar(&globalDebug, "debug", false, "Enable debug logging")
+	globalFlags.StringVar(&globalDebug, "debug", "", "Enable debug logging to file (e.g., --debug=/tmp/debug.log)")
 	globalFlags.BoolVar(&globalHelp, "help", false, "Show help")
 	globalFlags.BoolVar(&globalHelp, "h", false, "Show help")
 
@@ -91,8 +101,7 @@ func main() {
 		// Handle transcripts command using config
 		handleTranscriptsCommand(cfg, subArgs)
 	case "proxy":
-		// TODO: Move proxy command to commands package
-		proxyCommandPlaceholder(cfg, subArgs)
+		commands.ProxyCommand(cfg, subArgs)
 	case "admin":
 		// TODO: Move admin command to commands package if needed
 		adminCommand(cfg, subArgs)
@@ -128,7 +137,7 @@ Organization Commands:
   org logout                Remove all tokens
 
 Global Options:
-  --debug                   Enable debug logging
+  --debug=/path/to/log      Enable debug logging to file (requires = format)
   -h, --help                Show this help message
 
 Command Options:
@@ -144,6 +153,9 @@ Examples:
   # Execute a command
   sprite exec ls -la
   sprite exec -o myorg -s mysprite npm start
+
+  # Execute with debug logging
+  sprite --debug=/tmp/debug.log exec npm start
 
   # Create a checkpoint
   sprite checkpoint create
@@ -310,29 +322,6 @@ func transcriptsDisableCommand(cfg *config.Manager, args []string) {
 	} else {
 		fmt.Fprintf(os.Stderr, "Error: Expected transcripts to be disabled, but got enabled response\n")
 		os.Exit(1)
-	}
-}
-
-// TODO: Move these placeholder functions to commands package
-func proxyCommandPlaceholder(cfg *config.Manager, args []string) {
-	// For now, we need to get org credentials and use the old proxy implementation
-	org := cfg.GetCurrentOrg()
-	if org == nil {
-		// Try environment variables for backward compatibility
-		url := os.Getenv("SPRITE_URL")
-		token := os.Getenv("SPRITE_TOKEN")
-		if url == "" || token == "" {
-			fmt.Fprintf(os.Stderr, "Error: No organization configured. Please run 'sprite org auth' first\n")
-			os.Exit(1)
-		}
-		proxyCommand(url, token, args)
-	} else {
-		token, err := org.GetToken()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
-			os.Exit(1)
-		}
-		proxyCommand(org.URL, token, args)
 	}
 }
 

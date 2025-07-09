@@ -1,97 +1,174 @@
 package handlers
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"strconv"
-	"strings"
 	"sync"
+
+	gorillaws "github.com/gorilla/websocket"
 )
 
-// HandleProxy handles HTTP CONNECT proxy requests
+// ProxyInitMessage represents the initial message sent by the client to specify the target
+type ProxyInitMessage struct {
+	Host string `json:"host"`
+	Port int    `json:"port"`
+}
+
+// HandleProxy handles WebSocket proxy requests
 func (h *Handlers) HandleProxy(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodConnect {
+	h.logger.Info("Received proxy request", "method", r.Method, "url", r.URL.String(), "remote_addr", r.RemoteAddr)
+
+	// Only allow GET for WebSocket upgrade
+	if r.Method != http.MethodGet {
+		h.logger.Warn("Non-GET method received", "method", r.Method)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Extract port from the host header (format: hostname:port)
-	host := r.Host
-	if host == "" {
-		host = r.URL.Host
+	// Set up WebSocket upgrader
+	upgrader := gorillaws.Upgrader{
+		ReadBufferSize:  1024 * 1024, // 1MB buffer
+		WriteBufferSize: 1024 * 1024, // 1MB buffer
+		CheckOrigin: func(r *http.Request) bool {
+			// Allow all origins for now
+			// TODO: Add proper origin checking if needed
+			return true
+		},
 	}
 
-	parts := strings.Split(host, ":")
-	if len(parts) != 2 {
-		http.Error(w, "Invalid host format, expected hostname:port", http.StatusBadRequest)
+	// Upgrade to WebSocket
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		h.logger.Error("Failed to upgrade to WebSocket", "error", err)
+		return
+	}
+	defer conn.Close()
+
+	// Set read limit to allow reasonable message sizes
+	conn.SetReadLimit(1024)
+
+	h.logger.Debug("WebSocket upgrade successful")
+
+	// Read initial message with target host:port
+	messageType, data, err := conn.ReadMessage()
+	if err != nil {
+		h.logger.Error("Failed to read initial message", "error", err)
 		return
 	}
 
-	port, err := strconv.Atoi(parts[1])
-	if err != nil || port < 1 || port > 65535 {
-		http.Error(w, "Invalid port number", http.StatusBadRequest)
+	if messageType != gorillaws.TextMessage {
+		h.logger.Error("Expected text message for initialization", "messageType", messageType)
+		conn.WriteMessage(gorillaws.CloseMessage,
+			gorillaws.FormatCloseMessage(gorillaws.CloseUnsupportedData, "Expected JSON initialization message"))
 		return
 	}
 
-	// Connect to localhost:port
-	targetAddr := fmt.Sprintf("localhost:%d", port)
+	// Parse target from JSON message
+	var initMsg ProxyInitMessage
+	if err := json.Unmarshal(data, &initMsg); err != nil {
+		h.logger.Error("Failed to parse initialization message", "error", err)
+		conn.WriteMessage(gorillaws.CloseMessage,
+			gorillaws.FormatCloseMessage(gorillaws.CloseUnsupportedData, "Invalid JSON in initialization message"))
+		return
+	}
+
+	// Validate port range
+	if initMsg.Port < 1 || initMsg.Port > 65535 {
+		h.logger.Error("Invalid port number", "port", initMsg.Port)
+		conn.WriteMessage(gorillaws.CloseMessage,
+			gorillaws.FormatCloseMessage(gorillaws.CloseUnsupportedData, "Invalid port number"))
+		return
+	}
+
+	// Default host to localhost if empty
+	if initMsg.Host == "" {
+		initMsg.Host = "localhost"
+	}
+
+	// Connect to target
+	targetAddr := fmt.Sprintf("%s:%d", initMsg.Host, initMsg.Port)
+	h.logger.Info("Attempting to connect to target", "target", targetAddr)
+
 	targetConn, err := net.Dial("tcp", targetAddr)
 	if err != nil {
 		h.logger.Error("Failed to connect to target", "addr", targetAddr, "error", err)
-		http.Error(w, fmt.Sprintf("Failed to connect to target: %v", err), http.StatusBadGateway)
+		conn.WriteMessage(gorillaws.CloseMessage,
+			gorillaws.FormatCloseMessage(gorillaws.CloseInternalServerErr, fmt.Sprintf("Failed to connect to target: %v", err)))
 		return
 	}
 	defer targetConn.Close()
 
-	// Send 200 Connection Established response
-	w.WriteHeader(http.StatusOK)
+	h.logger.Info("Successfully connected to target", "target", targetAddr)
 
-	// Hijack the connection
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
+	// Send success response
+	successMsg := map[string]interface{}{
+		"status": "connected",
+		"target": targetAddr,
+	}
+	successData, _ := json.Marshal(successMsg)
+	if err := conn.WriteMessage(gorillaws.TextMessage, successData); err != nil {
+		h.logger.Error("Failed to send success message", "error", err)
 		return
 	}
 
-	clientConn, _, err := hijacker.Hijack()
-	if err != nil {
-		h.logger.Error("Failed to hijack connection", "error", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer clientConn.Close()
+	// Remove read limit for data forwarding
+	conn.SetReadLimit(10 * 1024 * 1024) // 10MB for large data transfers
 
-	// Send the 200 Connection Established response
-	_, err = clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
-	if err != nil {
-		h.logger.Error("Failed to write response", "error", err)
-		return
-	}
+	h.logger.Info("Proxy tunnel established", "target", targetAddr, "client", conn.RemoteAddr())
 
-	// Start bidirectional copy
+	// Start bidirectional data forwarding
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// Copy from client to target
+	// Copy from WebSocket to target
 	go func() {
 		defer wg.Done()
-		_, err := io.Copy(targetConn, clientConn)
-		if err != nil && err != io.EOF {
-			h.logger.Debug("Copy error (client to target)", "error", err)
+		defer targetConn.Close()
+
+		for {
+			messageType, data, err := conn.ReadMessage()
+			if err != nil {
+				if !gorillaws.IsCloseError(err, gorillaws.CloseNormalClosure, gorillaws.CloseGoingAway) {
+					h.logger.Debug("WebSocket read error (client to target)", "error", err)
+				}
+				return
+			}
+
+			// Only forward binary messages as data
+			if messageType == gorillaws.BinaryMessage {
+				_, err := targetConn.Write(data)
+				if err != nil {
+					h.logger.Debug("TCP write error (client to target)", "error", err)
+					return
+				}
+			}
 		}
-		targetConn.(*net.TCPConn).CloseWrite()
 	}()
 
-	// Copy from target to client
+	// Copy from target to WebSocket
 	go func() {
 		defer wg.Done()
-		_, err := io.Copy(clientConn, targetConn)
-		if err != nil && err != io.EOF {
-			h.logger.Debug("Copy error (target to client)", "error", err)
+		defer conn.Close()
+
+		buffer := make([]byte, 32*1024) // 32KB buffer
+		for {
+			n, err := targetConn.Read(buffer)
+			if err != nil {
+				if err != io.EOF {
+					h.logger.Debug("TCP read error (target to client)", "error", err)
+				}
+				return
+			}
+
+			err = conn.WriteMessage(gorillaws.BinaryMessage, buffer[:n])
+			if err != nil {
+				h.logger.Debug("WebSocket write error (target to client)", "error", err)
+				return
+			}
 		}
-		clientConn.(*net.TCPConn).CloseWrite()
 	}()
 
 	wg.Wait()

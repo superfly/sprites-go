@@ -17,10 +17,12 @@ require (
 	github.com/aws/smithy-go v1.22.4 // indirect
 	github.com/creack/pty v1.1.24 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/mattn/go-sqlite3 v1.14.28 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	golang.org/x/sys v0.33.0 // indirect
@@ -41,6 +43,8 @@ require (
 	github.com/sprite-env/packages/supervisor v0.0.0
 	github.com/sprite-env/packages/wsexec v0.0.0-00010101000000-000000000000
 	github.com/superfly/sprite-env/packages/container v0.0.0
+	github.com/superfly/sprite-env/packages/port-watcher v0.0.0-00010101000000-000000000000
+	github.com/superfly/sprite-env/pkg/terminal v0.0.0-00010101000000-000000000000
 )
 
 replace github.com/sprite-env/lib => ../lib
@@ -54,3 +58,7 @@ replace github.com/sprite-env/packages/supervisor => ../packages/supervisor
 replace github.com/sprite-env/packages/wsexec => ../packages/wsexec
 
 replace github.com/superfly/sprite-env/packages/container => ../packages/container
+
+replace github.com/superfly/sprite-env/packages/port-watcher => ../packages/port-watcher
+
+replace github.com/superfly/sprite-env/pkg/terminal => ../pkg/terminal

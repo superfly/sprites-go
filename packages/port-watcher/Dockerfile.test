@@ -1,0 +1,29 @@
+# Test image for port-watcher package
+FROM golang:1.24.4-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache \
+    git \
+    gcc \
+    musl-dev \
+    bash \
+    ca-certificates \
+    util-linux
+
+# Create directory structure
+RUN mkdir -p /workspace/server/packages/port-watcher
+
+# Set working directory
+WORKDIR /workspace/server/packages/port-watcher
+
+# Copy go.mod and go.sum files for dependency caching
+COPY packages/port-watcher/go.mod packages/port-watcher/go.sum ./
+
+# Download dependencies
+RUN go mod download
+
+# Now copy the source code
+COPY packages/port-watcher/ ./
+
+# Run tests with coverage as root (needed for /proc access)
+CMD ["go", "test", "-v", "-race", "-coverprofile=coverage.out", "-covermode=atomic", "-run", "^Test", "./..."] 

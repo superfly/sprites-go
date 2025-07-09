@@ -11,6 +11,7 @@ import (
 	"github.com/sprite-env/packages/leaser"
 	"github.com/sprite-env/packages/supervisor"
 	"github.com/superfly/sprite-env/packages/container"
+	portwatcher "github.com/superfly/sprite-env/packages/port-watcher"
 	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
@@ -75,13 +76,16 @@ const (
 
 // System encapsulates the JuiceFS and supervised process management
 type System struct {
-	config           SystemConfig
-	logger           *slog.Logger
-	leaserInstance   *leaser.Leaser
-	juicefs          *juicefs.JuiceFS
-	supervisor       *supervisor.Supervisor
-	containerProcess *container.Process // Optional container-wrapped process
-	reaper           *Reaper
+	config             SystemConfig
+	logger             *slog.Logger
+	leaserInstance     *leaser.Leaser
+	juicefs            *juicefs.JuiceFS
+	supervisor         *supervisor.Supervisor
+	containerProcess   *container.Process // Optional container-wrapped process
+	reaper             *Reaper
+	portWatcher        *portwatcher.PortWatcher
+	portTracker        interface{} // Will be *portTracker, but avoiding circular import
+	execProcessTracker interface{} // Will be *execProcessTracker, avoiding import issues
 
 	// Channels for monitoring
 	processDoneCh chan error

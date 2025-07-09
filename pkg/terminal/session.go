@@ -37,6 +37,9 @@ type Session struct {
 
 	// Logging
 	logger *slog.Logger
+
+	// Process start callback
+	onProcessStart func(pid int)
 }
 
 // Option represents a configuration option for a Session.
@@ -118,6 +121,13 @@ func WithTranscript(collector TranscriptCollector) Option {
 func WithLogger(logger *slog.Logger) Option {
 	return func(s *Session) {
 		s.logger = logger
+	}
+}
+
+// WithOnProcessStart sets a callback to be called when the process starts with its PID.
+func WithOnProcessStart(callback func(pid int)) Option {
+	return func(s *Session) {
+		s.onProcessStart = callback
 	}
 }
 
@@ -236,6 +246,14 @@ func (s *Session) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, stdin io.Rea
 	}
 	defer ptmx.Close()
 
+	// Call process start callback if provided
+	if s.onProcessStart != nil && cmd.Process != nil {
+		s.onProcessStart(cmd.Process.Pid)
+		if s.logger != nil {
+			s.logger.Debug("Terminal session process started with PTY", "pid", cmd.Process.Pid)
+		}
+	}
+
 	// Set initial terminal size if specified
 	if s.initialCols > 0 && s.initialRows > 0 {
 		if err := creackpty.Setsize(ptmx, &creackpty.Winsize{
@@ -286,6 +304,14 @@ func (s *Session) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd, stdin
 			s.logger.Error("Failed to start command", "error", err)
 		}
 		return -1, fmt.Errorf("failed to start command: %w", err)
+	}
+
+	// Call process start callback if provided
+	if s.onProcessStart != nil && cmd.Process != nil {
+		s.onProcessStart(cmd.Process.Pid)
+		if s.logger != nil {
+			s.logger.Debug("Terminal session process started with console socket", "pid", cmd.Process.Pid)
+		}
 	}
 
 	// Wait for crun to send us the PTY
@@ -339,6 +365,14 @@ func (s *Session) runWithoutTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Rea
 
 	if err := cmd.Start(); err != nil {
 		return -1, fmt.Errorf("failed to start command: %w", err)
+	}
+
+	// Call process start callback if provided
+	if s.onProcessStart != nil && cmd.Process != nil {
+		s.onProcessStart(cmd.Process.Pid)
+		if s.logger != nil {
+			s.logger.Debug("Terminal session process started without TTY", "pid", cmd.Process.Pid)
+		}
 	}
 
 	done := make(chan struct{})

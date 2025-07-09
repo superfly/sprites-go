@@ -5,10 +5,131 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"log/slog"
 
 	"github.com/sprite-env/packages/supervisor"
 	"github.com/superfly/sprite-env/packages/container"
+	portwatcher "github.com/superfly/sprite-env/packages/port-watcher"
 )
+
+// portTracker tracks active ports and detects changes
+type portTracker struct {
+	mu          sync.RWMutex
+	activePorts map[string]portwatcher.Port // key: "address:port:pid"
+	logger      *slog.Logger
+	pid         int
+	stopCh      chan struct{}
+}
+
+func newPortTracker(logger *slog.Logger, pid int) *portTracker {
+	return &portTracker{
+		activePorts: make(map[string]portwatcher.Port),
+		logger:      logger,
+		pid:         pid,
+		stopCh:      make(chan struct{}),
+	}
+}
+
+func (pt *portTracker) portKey(port portwatcher.Port) string {
+	return fmt.Sprintf("%s:%d:%d", port.Address, port.Port, port.PID)
+}
+
+func (pt *portTracker) addPort(port portwatcher.Port) {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+
+	key := pt.portKey(port)
+	if _, exists := pt.activePorts[key]; !exists {
+		pt.activePorts[key] = port
+		pt.logger.Info("Process started listening on port",
+			"port", port.Port,
+			"address", port.Address,
+			"pid", port.PID)
+	}
+}
+
+func (pt *portTracker) getCurrentPorts() []portwatcher.Port {
+	// Create a temporary port watcher to scan current ports
+	tempCallback := func(port portwatcher.Port) {
+		// This callback is used internally for scanning
+	}
+
+	tempWatcher, err := portwatcher.New(pt.pid, tempCallback)
+	if err != nil {
+		return nil
+	}
+	defer tempWatcher.Stop()
+
+	// We can't easily extract current ports from the port-watcher package
+	// So we'll use a different approach: track ports when the process exits
+	return nil
+}
+
+func (pt *portTracker) checkRemovedPorts() {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+
+	// For now, we'll detect removed ports when the process stops
+	// This is a simplified implementation
+	// In a full implementation, we'd scan /proc/net/tcp directly
+
+	// When the process stops, all ports are removed
+	for key, port := range pt.activePorts {
+		pt.logger.Info("Process stopped listening on port",
+			"port", port.Port,
+			"address", port.Address,
+			"pid", port.PID)
+
+		delete(pt.activePorts, key)
+	}
+}
+
+func (pt *portTracker) stop() {
+	close(pt.stopCh)
+	pt.checkRemovedPorts()
+}
+
+func (pt *portTracker) clear() {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+	pt.activePorts = make(map[string]portwatcher.Port)
+}
+
+func (s *System) startPortWatcher(pid int) error {
+	if s.portWatcher != nil {
+		s.portWatcher.Stop()
+	}
+
+	tracker := newPortTracker(s.logger, pid)
+
+	callback := func(port portwatcher.Port) {
+		tracker.addPort(port)
+	}
+
+	// Create port watcher
+	pw, err := portwatcher.New(pid, callback)
+	if err != nil {
+		return fmt.Errorf("failed to create port watcher: %w", err)
+	}
+
+	// Start port watcher
+	if err := pw.Start(); err != nil {
+		return fmt.Errorf("failed to start port watcher: %w", err)
+	}
+
+	s.portWatcher = pw
+	s.logger.Debug("Port watcher started for process", "pid", pid)
+
+	// Store the tracker so we can use it when stopping
+	s.portTracker = tracker
+
+	return nil
+}
 
 // StartProcess starts the supervised process
 func (s *System) StartProcess() error {
@@ -114,6 +235,12 @@ func (s *System) StartProcess() error {
 
 		s.logger.Info("StartProcess: Container process started successfully", "pid", pid, "command", s.config.ProcessCommand)
 
+		// Start port watcher for the container process
+		if err := s.startPortWatcher(pid); err != nil {
+			s.logger.Error("StartProcess: Failed to start port watcher for container process", "error", err)
+			return fmt.Errorf("failed to start port watcher for container process: %w", err)
+		}
+
 	} else {
 		s.logger.Info("StartProcess: Creating basic supervisor (containers disabled)")
 
@@ -135,6 +262,12 @@ func (s *System) StartProcess() error {
 		s.setState("processRunning", true)
 
 		s.logger.Info("StartProcess: Process started successfully", "pid", pid, "command", s.config.ProcessCommand)
+
+		// Start port watcher for the basic supervisor process
+		if err := s.startPortWatcher(pid); err != nil {
+			s.logger.Error("StartProcess: Failed to start port watcher for basic supervisor process", "error", err)
+			return fmt.Errorf("failed to start port watcher for basic supervisor process: %w", err)
+		}
 	}
 
 	// Close the old channel and create a new one for future waits
@@ -163,6 +296,21 @@ func (s *System) StopProcess() error {
 	}
 
 	s.logger.Info("Stopping supervised process...")
+
+	// Stop port tracker if running (this will log stopped ports)
+	if s.portTracker != nil {
+		if tracker, ok := s.portTracker.(*portTracker); ok {
+			tracker.stop()
+		}
+		s.portTracker = nil
+	}
+
+	// Stop port watcher if running
+	if s.portWatcher != nil {
+		s.logger.Debug("Stopping port watcher...")
+		s.portWatcher.Stop()
+		s.portWatcher = nil
+	}
 
 	// Stop container process if available, otherwise stop basic supervisor
 	if s.containerProcess != nil {
@@ -199,4 +347,264 @@ func (s *System) ForwardSignal(sig os.Signal) error {
 		return s.supervisor.Signal(sig)
 	}
 	return nil
+}
+
+// execProcessTracker tracks processes created by exec operations
+type execProcessTracker struct {
+	mu       sync.RWMutex
+	trackers map[string]*execPortTracker // key: unique exec ID
+	logger   *slog.Logger
+}
+
+type execPortTracker struct {
+	portWatcher *portwatcher.PortWatcher
+	portTracker *portTracker
+	processIds  []int // PIDs being monitored
+	stopCh      chan struct{}
+}
+
+func newExecProcessTracker(logger *slog.Logger) *execProcessTracker {
+	return &execProcessTracker{
+		trackers: make(map[string]*execPortTracker),
+		logger:   logger,
+	}
+}
+
+func (ept *execProcessTracker) startTracking(execID string, watchPID int) error {
+	ept.mu.Lock()
+	defer ept.mu.Unlock()
+
+	// Stop any existing tracker for this exec ID
+	if existing, exists := ept.trackers[execID]; exists {
+		existing.stop()
+		delete(ept.trackers, execID)
+	}
+
+	// Create new port tracker for the exec process
+	tracker := newPortTracker(ept.logger, watchPID)
+
+	callback := func(port portwatcher.Port) {
+		tracker.addPort(port)
+	}
+
+	// Create port watcher for the exec process and its children
+	pw, err := portwatcher.New(watchPID, callback)
+	if err != nil {
+		return fmt.Errorf("failed to create port watcher for exec process: %w", err)
+	}
+
+	if err := pw.Start(); err != nil {
+		return fmt.Errorf("failed to start port watcher for exec process: %w", err)
+	}
+
+	execTracker := &execPortTracker{
+		portWatcher: pw,
+		portTracker: tracker,
+		processIds:  []int{watchPID},
+		stopCh:      make(chan struct{}),
+	}
+
+	ept.trackers[execID] = execTracker
+	ept.logger.Debug("Started port monitoring for exec process", "execID", execID, "pid", watchPID)
+
+	return nil
+}
+
+func (ept *execProcessTracker) stopTracking(execID string) {
+	ept.mu.Lock()
+	defer ept.mu.Unlock()
+
+	if tracker, exists := ept.trackers[execID]; exists {
+		tracker.stop()
+		delete(ept.trackers, execID)
+		ept.logger.Debug("Stopped port monitoring for exec process", "execID", execID)
+	}
+}
+
+func (ett *execPortTracker) stop() {
+	close(ett.stopCh)
+	if ett.portWatcher != nil {
+		ett.portWatcher.Stop()
+	}
+	if ett.portTracker != nil {
+		ett.portTracker.stop()
+	}
+}
+
+func (s *System) getExecProcessTracker() *execProcessTracker {
+	if s.execProcessTracker == nil {
+		s.execProcessTracker = newExecProcessTracker(s.logger)
+	}
+
+	if ept, ok := s.execProcessTracker.(*execProcessTracker); ok {
+		return ept
+	}
+
+	// This shouldn't happen, but handle it gracefully
+	s.execProcessTracker = newExecProcessTracker(s.logger)
+	return s.execProcessTracker.(*execProcessTracker)
+}
+
+// getCurrentProcesses returns a set of currently running process PIDs that are children of the current process
+func getCurrentProcesses() (map[int]bool, error) {
+	processes := make(map[int]bool)
+
+	// Get current process PID
+	currentPID := os.Getpid()
+
+	// Use ps to get all processes and their parent PIDs
+	cmd := exec.Command("ps", "-eo", "pid,ppid")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get process list: %w", err)
+	}
+
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines[1:] { // Skip header
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil {
+			continue
+		}
+
+		ppid, err := strconv.Atoi(fields[1])
+		if err != nil {
+			continue
+		}
+
+		// Check if this process is a descendant of current process
+		if ppid == currentPID || isDescendantOf(pid, currentPID) {
+			processes[pid] = true
+		}
+	}
+
+	return processes, nil
+}
+
+// isDescendantOf checks if pid is a descendant of ancestorPID
+func isDescendantOf(pid, ancestorPID int) bool {
+	if pid == ancestorPID {
+		return true
+	}
+
+	// Get parent PID
+	parentPID := getParentPID(pid)
+	if parentPID <= 1 {
+		return false
+	}
+
+	return isDescendantOf(parentPID, ancestorPID)
+}
+
+// getParentPID returns the parent PID of the given PID
+func getParentPID(pid int) int {
+	statPath := fmt.Sprintf("/proc/%d/stat", pid)
+	data, err := os.ReadFile(statPath)
+	if err != nil {
+		return 0
+	}
+
+	// Parse the stat file to get PPID (4th field after the comm field)
+	statStr := string(data)
+
+	// Find the last occurrence of ')' to handle process names with spaces/parens
+	lastParen := strings.LastIndex(statStr, ")")
+	if lastParen == -1 {
+		return 0
+	}
+
+	// Skip the ') ' and split the remaining fields
+	fields := strings.Fields(statStr[lastParen+2:])
+	if len(fields) < 2 {
+		return 0
+	}
+
+	ppid, err := strconv.Atoi(fields[1]) // PPID is the 3rd field after ')'
+	if err != nil {
+		return 0
+	}
+
+	return ppid
+}
+
+// findNewProcesses compares two process snapshots and returns newly created processes
+func findNewProcesses(before, after map[int]bool) []int {
+	var newPIDs []int
+
+	for pid := range after {
+		if !before[pid] {
+			newPIDs = append(newPIDs, pid)
+		}
+	}
+
+	return newPIDs
+}
+
+// monitorExecProcess wraps an exec operation to monitor any new processes it creates
+func (s *System) monitorExecProcess(execID string, execFunc func() error) error {
+	// Get process snapshot before exec
+	beforeProcs, err := getCurrentProcesses()
+	if err != nil {
+		s.logger.Debug("Failed to get process snapshot before exec", "error", err)
+		// Continue without monitoring
+		return execFunc()
+	}
+
+	// Execute the actual exec operation
+	execErr := execFunc()
+
+	// Small delay to allow process to start
+	time.Sleep(100 * time.Millisecond)
+
+	// Get process snapshot after exec
+	afterProcs, err := getCurrentProcesses()
+	if err != nil {
+		s.logger.Debug("Failed to get process snapshot after exec", "error", err)
+		return execErr
+	}
+
+	// Find new processes
+	newPIDs := findNewProcesses(beforeProcs, afterProcs)
+
+	if len(newPIDs) > 0 {
+		s.logger.Debug("Found new processes from exec", "execID", execID, "pids", newPIDs)
+
+		// Start monitoring the first new process (usually the main exec'd process)
+		tracker := s.getExecProcessTracker()
+		if tracker != nil {
+			if err := tracker.startTracking(execID, newPIDs[0]); err != nil {
+				s.logger.Error("Failed to start tracking exec process", "execID", execID, "pid", newPIDs[0], "error", err)
+			}
+		}
+	} else {
+		s.logger.Debug("No new processes detected from exec", "execID", execID)
+	}
+
+	return execErr
+}
+
+// MonitorExecProcess wraps an exec operation to monitor any new processes it creates
+func (s *System) MonitorExecProcess(execID string, execFunc func() error) error {
+	return s.monitorExecProcess(execID, execFunc)
+}
+
+// StartExecProcessTracking starts monitoring an exec process by PID directly
+func (s *System) StartExecProcessTracking(execID string, pid int) error {
+	tracker := s.getExecProcessTracker()
+	if tracker != nil {
+		return tracker.startTracking(execID, pid)
+	}
+	return nil
+}
+
+// StopExecProcessTracking stops monitoring an exec process
+func (s *System) StopExecProcessTracking(execID string) {
+	tracker := s.getExecProcessTracker()
+	if tracker != nil {
+		tracker.stopTracking(execID)
+	}
 }

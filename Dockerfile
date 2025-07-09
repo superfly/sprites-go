@@ -25,6 +25,7 @@ COPY packages/wsexec/go.mod packages/wsexec/go.sum* ./packages/wsexec/
 COPY packages/leaser/go.mod packages/leaser/go.sum* ./packages/leaser/
 COPY packages/api-docs/go.mod packages/api-docs/go.sum* ./packages/api-docs/
 COPY pkg/terminal/go.mod pkg/terminal/go.sum* ./pkg/terminal/
+COPY packages/port-watcher/go.mod packages/port-watcher/go.sum* ./packages/port-watcher/
 
 # Download dependencies for all modules in the workspace
 RUN go mod download -x

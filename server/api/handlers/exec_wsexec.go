@@ -6,8 +6,24 @@ import (
 	"strconv"
 	"time"
 
+	"io"
+
 	"github.com/sprite-env/packages/wsexec"
+	"github.com/superfly/sprite-env/pkg/terminal"
 )
+
+// transcriptAdapter adapts terminal.TranscriptCollector to wsexec.LogCollector
+type transcriptAdapter struct {
+	collector terminal.TranscriptCollector
+}
+
+func (t *transcriptAdapter) Stream(name string) io.Writer {
+	return t.collector.StreamWriter(name)
+}
+
+func (t *transcriptAdapter) Close() error {
+	return t.collector.Close()
+}
 
 // HandleExec handles GET/POST /sprites/{id}/exec - WebSocket upgrade endpoint for sprite execution
 // @public
@@ -43,9 +59,6 @@ func (h *Handlers) HandleExecWsexec(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.logger.Debug("HandleExec: Method check passed")
-
-	// The WebSocket upgrader will handle the upgrade check
-	// Standard WebSocket handshake uses GET with Upgrade headers
 
 	// Parse command from query parameters
 	query := r.URL.Query()
@@ -124,6 +137,20 @@ func (h *Handlers) HandleExecWsexec(w http.ResponseWriter, r *http.Request) {
 	cmd.SetWrapperCommand(h.execWrapperCommand).
 		SetLogger(h.logger)
 
+	// Add transcript support if enabled
+	if h.system.IsTranscriptsEnabled() {
+		envVars := query["env"]
+		transcriptCollector, err := h.system.CreateTranscriptCollector(envVars, tty)
+		if err != nil {
+			h.logger.Error("Failed to create transcript collector", "error", err)
+			// Fail the request if transcript creation fails
+			http.Error(w, "Failed to create transcript collector", http.StatusInternalServerError)
+			return
+		}
+		cmd.SetLogCollector(&transcriptAdapter{collector: transcriptCollector})
+		h.logger.Debug("HandleExec: Transcript collector set")
+	}
+
 	h.logger.Debug("HandleExec: Starting WebSocket command execution",
 		"path", path,
 		"args", args,
@@ -131,7 +158,23 @@ func (h *Handlers) HandleExecWsexec(w http.ResponseWriter, r *http.Request) {
 		"wrapperCommand", h.execWrapperCommand)
 
 	startTime := time.Now()
+
+	// Create unique exec ID for tracking
+	execID := fmt.Sprintf("wsexec-%d-%s", time.Now().UnixNano(), path)
+
+	// Set up process start callback to monitor ports
+	cmd.SetOnProcessStart(func(pid int) {
+		h.logger.Debug("Process started via wsexec", "execID", execID, "pid", pid)
+		if err := h.system.StartExecProcessTracking(execID, pid); err != nil {
+			h.logger.Error("Failed to start port monitoring for wsexec process", "execID", execID, "pid", pid, "error", err)
+		}
+	})
+
+	// Execute the command directly
 	err := cmd.Handle(w, r)
+
+	// Stop tracking when exec completes
+	defer h.system.StopExecProcessTracking(execID)
 
 	h.logger.Debug("Exec completed",
 		"path", path,

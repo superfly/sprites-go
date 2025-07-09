@@ -356,3 +356,48 @@ func TestBuildCommand(t *testing.T) {
 		})
 	}
 }
+
+// TestRunWithOnProcessStartCallback tests the PID callback functionality
+func TestRunWithOnProcessStartCallback(t *testing.T) {
+	var receivedPID int
+	callbackCalled := make(chan bool, 1)
+
+	// Create session with PID callback
+	session := NewSession(
+		WithCommand("echo", "test"),
+		WithOnProcessStart(func(pid int) {
+			receivedPID = pid
+			callbackCalled <- true
+		}),
+	)
+
+	var stdout strings.Builder
+	ctx := context.Background()
+
+	// Run the command
+	exitCode, err := session.Run(ctx, strings.NewReader(""), &stdout, &strings.Builder{})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	if exitCode != 0 {
+		t.Errorf("Expected exit code 0, got %d", exitCode)
+	}
+
+	// Wait for callback
+	select {
+	case <-callbackCalled:
+		if receivedPID <= 0 {
+			t.Errorf("Expected positive PID, got %d", receivedPID)
+		}
+		t.Logf("Callback received PID: %d", receivedPID)
+	case <-time.After(2 * time.Second):
+		t.Error("Callback was not called within timeout")
+	}
+
+	// Check output
+	output := strings.TrimSpace(stdout.String())
+	if output != "test" {
+		t.Errorf("Expected output 'test', got %q", output)
+	}
+}

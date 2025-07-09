@@ -17,11 +17,244 @@ import (
 	"syscall"
 	"time"
 
+	"encoding/json"
+
 	"github.com/sprite-env/client/config"
 	"github.com/sprite-env/client/format"
 	"github.com/sprite-env/packages/wsexec"
 	"golang.org/x/term"
 )
+
+// PortNotificationMessage represents a port event notification from the server
+type PortNotificationMessage struct {
+	Type    string `json:"type"`    // "port_opened" or "port_closed"
+	Port    int    `json:"port"`    // Port number
+	Address string `json:"address"` // Address (e.g., "127.0.0.1", "0.0.0.0")
+	PID     int    `json:"pid"`     // Process ID
+}
+
+// portManager manages active port proxies
+type portManager struct {
+	proxies map[int]*portProxy // key: port number
+	logger  *slog.Logger
+	config  ProxyConfig // Proxy configuration for WebSocket connections
+
+	// Channel-based communication instead of mutexes
+	actionCh chan portAction
+	stopCh   chan struct{}
+}
+
+type portProxy struct {
+	port     int
+	address  string
+	listener net.Listener
+	cancel   context.CancelFunc
+}
+
+type portAction struct {
+	action   string // "start", "stop", "cleanup"
+	port     int
+	address  string
+	response chan error // for synchronous operations
+}
+
+func newPortManager(logger *slog.Logger, config ProxyConfig) *portManager {
+	pm := &portManager{
+		proxies:  make(map[int]*portProxy),
+		logger:   logger,
+		config:   config,
+		actionCh: make(chan portAction, 10),
+		stopCh:   make(chan struct{}),
+	}
+
+	// Start the management goroutine
+	go pm.run()
+
+	return pm
+}
+
+func (pm *portManager) run() {
+	for {
+		select {
+		case <-pm.stopCh:
+			// Cleanup all proxies before shutting down
+			for port, proxy := range pm.proxies {
+				pm.logger.Debug("Cleaning up proxy during shutdown", "port", port)
+				proxy.cancel()
+				proxy.listener.Close()
+			}
+			pm.proxies = make(map[int]*portProxy)
+			return
+
+		case action := <-pm.actionCh:
+			var err error
+
+			switch action.action {
+			case "start":
+				err = pm.doStartProxy(action.port, action.address)
+			case "stop":
+				err = pm.doStopProxy(action.port)
+			case "cleanup":
+				pm.doCleanup()
+			}
+
+			if action.response != nil {
+				action.response <- err
+			}
+		}
+	}
+}
+
+func (pm *portManager) handlePortNotification(data []byte) {
+	var notification PortNotificationMessage
+	if err := json.Unmarshal(data, &notification); err != nil {
+		pm.logger.Debug("Failed to parse port notification", "error", err, "data", string(data))
+		return
+	}
+
+	pm.logger.Debug("Received port notification", "type", notification.Type, "port", notification.Port, "address", notification.Address, "pid", notification.PID)
+
+	switch notification.Type {
+	case "port_opened":
+		pm.logger.Info("Port opened, starting proxy", "port", notification.Port, "address", notification.Address, "pid", notification.PID)
+		pm.startProxy(notification.Port, notification.Address)
+	case "port_closed":
+		pm.logger.Info("Port closed, stopping proxy", "port", notification.Port, "pid", notification.PID)
+		pm.stopProxy(notification.Port)
+	default:
+		pm.logger.Debug("Unknown port notification type", "type", notification.Type)
+	}
+}
+
+func (pm *portManager) startProxy(port int, address string) {
+	// Send async action
+	select {
+	case pm.actionCh <- portAction{action: "start", port: port, address: address}:
+	case <-pm.stopCh:
+	}
+}
+
+func (pm *portManager) stopProxy(port int) {
+	// Send async action
+	select {
+	case pm.actionCh <- portAction{action: "stop", port: port}:
+	case <-pm.stopCh:
+	}
+}
+
+func (pm *portManager) cleanup() {
+	// Send stop signal
+	close(pm.stopCh)
+}
+
+func (pm *portManager) doStartProxy(port int, address string) error {
+	// Check if we're already proxying this port
+	if _, exists := pm.proxies[port]; exists {
+		pm.logger.Debug("Port proxy already active", "port", port)
+		return nil
+	}
+
+	// Validate and normalize the address for logging
+	normalizedAddress := address
+	if address == "" || address == "0.0.0.0" || address == "::" {
+		normalizedAddress = "127.0.0.1"
+	}
+
+	pm.logger.Info("Starting automatic proxy", "port", port, "originalAddress", address, "normalizedAddress", normalizedAddress)
+
+	// Start local listener
+	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		pm.logger.Error("Failed to start proxy listener", "port", port, "error", err)
+		return err
+	}
+
+	// Create context for cancellation
+	ctx, cancel := context.WithCancel(context.Background())
+
+	proxy := &portProxy{
+		port:     port,
+		address:  address,
+		listener: listener,
+		cancel:   cancel,
+	}
+
+	pm.proxies[port] = proxy
+
+	// Start proxy in background
+	go func() {
+		defer func() {
+			// Remove from map when proxy stops
+			select {
+			case pm.actionCh <- portAction{action: "stop", port: port}:
+			case <-pm.stopCh:
+			}
+		}()
+
+		pm.logger.Debug("Proxy listener started", "localAddr", listener.Addr().String(), "remotePort", port)
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			conn, err := listener.Accept()
+			if err != nil {
+				select {
+				case <-ctx.Done():
+					return // Context cancelled, expected error
+				default:
+					pm.logger.Error("Failed to accept proxy connection", "port", port, "error", err)
+					return
+				}
+			}
+
+			// Handle connection in background
+			go pm.handleProxyConnection(ctx, conn, port, address)
+		}
+	}()
+
+	fmt.Printf("🔗 Automatically proxying port %d → http://localhost:%d\n", port, port)
+	return nil
+}
+
+func (pm *portManager) doStopProxy(port int) error {
+	proxy, exists := pm.proxies[port]
+	if !exists {
+		pm.logger.Debug("No proxy found for port", "port", port)
+		return nil
+	}
+
+	pm.logger.Info("Stopping automatic proxy", "port", port)
+
+	// Cancel the context to stop accepting new connections
+	proxy.cancel()
+
+	// Close the listener
+	proxy.listener.Close()
+
+	// Remove from map
+	delete(pm.proxies, port)
+
+	fmt.Printf("🔌 Stopped proxying port %d\n", port)
+	return nil
+}
+
+func (pm *portManager) doCleanup() {
+	for port, proxy := range pm.proxies {
+		pm.logger.Debug("Cleaning up proxy", "port", port)
+		proxy.cancel()
+		proxy.listener.Close()
+	}
+	pm.proxies = make(map[int]*portProxy)
+}
+
+func (pm *portManager) handleProxyConnection(ctx context.Context, localConn net.Conn, port int, address string) {
+	// Use the existing proxy implementation
+	HandleProxyConnection(localConn, port, pm.config)
+}
 
 // ExecCommand handles the exec command
 func ExecCommand(cfg *config.Manager, args []string) {
@@ -193,6 +426,15 @@ func executeDirectWebSocket(baseURL, token string, cmd []string, workingDir stri
 
 // executeWebSocket is the common WebSocket execution logic
 func executeWebSocket(wsURL *url.URL, token string, cmd []string, workingDir string, env []string, tty bool) int {
+	// We need to build a proxy config based on the exec URL
+	// Convert the exec WebSocket URL back to HTTP for the proxy
+	proxyBaseURL := strings.Replace(wsURL.String(), "/exec", "/proxy", 1)
+	proxyBaseURL = strings.Replace(proxyBaseURL, "ws://", "http://", 1)
+	proxyBaseURL = strings.Replace(proxyBaseURL, "wss://", "https://", 1)
+	// Remove query parameters
+	if idx := strings.Index(proxyBaseURL, "?"); idx != -1 {
+		proxyBaseURL = proxyBaseURL[:idx]
+	}
 	// Capture initial terminal state for restoration at the end
 	var initialState *term.State
 	if term.IsTerminal(int(os.Stdin.Fd())) {
@@ -264,6 +506,18 @@ func executeWebSocket(wsURL *url.URL, token string, cmd []string, workingDir str
 	if tty {
 		wsCmd.BrowserOpen = handleBrowserOpen
 	}
+
+	// Set up port manager for automatic proxying
+	proxyConfig := ProxyConfig{
+		BaseURL: proxyBaseURL,
+		Token:   token,
+		Logger:  logger,
+	}
+	portMgr := newPortManager(logger, proxyConfig)
+	defer portMgr.cleanup()
+
+	// Set up text message handler for port notifications
+	wsCmd.TextMessageHandler = portMgr.handlePortNotification
 
 	logger.Debug("Created wsexec command", "tty", wsCmd.Tty)
 

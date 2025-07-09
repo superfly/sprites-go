@@ -26,6 +26,11 @@ type SystemManager interface {
 	StopProcess() error
 	ForwardSignal(sig os.Signal) error
 
+	// Exec process monitoring
+	MonitorExecProcess(execID string, execFunc func() error) error
+	StartExecProcessTracking(execID string, pid int) error
+	StopExecProcessTracking(execID string)
+
 	// Storage management
 	HasJuiceFS() bool
 	WaitForJuiceFS(ctx context.Context) error

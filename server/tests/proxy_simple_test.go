@@ -5,11 +5,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -19,41 +17,15 @@ import (
 	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
+// Note: These proxy tests were designed for the old HTTP CONNECT approach.
+// They need to be rewritten to test the new WebSocket-based proxy functionality.
+// For now, we'll skip the complex connection tests and only test basic validation.
+
 // TestProxyHandlerDirect tests the proxy handler directly
 func TestProxyHandlerDirect(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
-
-	// Create a simple TCP echo server for testing
-	listener, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		t.Fatalf("Failed to create test server: %v", err)
-	}
-	defer listener.Close()
-
-	// Get the port number
-	port := listener.Addr().(*net.TCPAddr).Port
-
-	// Start echo server
-	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return // Server closed
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				// Simple echo - read one message and echo it back
-				buf := make([]byte, 1024)
-				n, err := c.Read(buf)
-				if err != nil {
-					return
-				}
-				c.Write(buf[:n])
-			}(conn)
-		}
-	}()
 
 	// Create handlers
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -61,24 +33,9 @@ func TestProxyHandlerDirect(t *testing.T) {
 	config := handlers.Config{}
 	h := handlers.NewHandlers(logger, mockSys, config)
 
-	t.Run("ValidCONNECTRequest", func(t *testing.T) {
-		// Create a request that simulates a CONNECT request
-		req := httptest.NewRequest(http.MethodConnect, "/proxy", nil)
-		req.Host = fmt.Sprintf("localhost:%d", port)
-
-		rr := httptest.NewRecorder()
-		h.HandleProxy(rr, req)
-
-		// The handler should return 200 OK for successful connection
-		if rr.Code != http.StatusOK {
-			t.Errorf("Expected status %d, got %d. Body: %s", http.StatusOK, rr.Code, rr.Body.String())
-		}
-	})
-
-	t.Run("InvalidMethod", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/proxy", nil)
-		req.Host = fmt.Sprintf("localhost:%d", port)
-
+	t.Run("MethodValidation", func(t *testing.T) {
+		// Test that POST method is not allowed (should be GET for WebSocket)
+		req := httptest.NewRequest(http.MethodPost, "/proxy", nil)
 		rr := httptest.NewRecorder()
 		h.HandleProxy(rr, req)
 
@@ -87,56 +44,32 @@ func TestProxyHandlerDirect(t *testing.T) {
 		}
 	})
 
-	t.Run("InvalidHost", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodConnect, "/proxy", nil)
-		req.Host = "invalid-host" // No port
-
+	t.Run("GetMethodAllowed", func(t *testing.T) {
+		// Test that GET method is allowed (for WebSocket upgrade)
+		req := httptest.NewRequest(http.MethodGet, "/proxy", nil)
 		rr := httptest.NewRecorder()
 		h.HandleProxy(rr, req)
 
-		if rr.Code != http.StatusBadRequest {
-			t.Errorf("Expected status %d, got %d", http.StatusBadRequest, rr.Code)
-		}
-
-		if !strings.Contains(rr.Body.String(), "Invalid host format") {
-			t.Errorf("Expected error about invalid host format, got: %s", rr.Body.String())
+		// Should not return method not allowed
+		if rr.Code == http.StatusMethodNotAllowed {
+			t.Errorf("GET method should be allowed for WebSocket upgrade")
 		}
 	})
 
-	t.Run("InvalidPort", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodConnect, "/proxy", nil)
-		req.Host = "localhost:99999" // Port too high
-
-		rr := httptest.NewRecorder()
-		h.HandleProxy(rr, req)
-
-		if rr.Code != http.StatusBadRequest {
-			t.Errorf("Expected status %d, got %d", http.StatusBadRequest, rr.Code)
-		}
-
-		if !strings.Contains(rr.Body.String(), "Invalid port number") {
-			t.Errorf("Expected error about invalid port, got: %s", rr.Body.String())
-		}
-	})
-
-	t.Run("ConnectionFailure", func(t *testing.T) {
-		// Use a port that should be closed
-		req := httptest.NewRequest(http.MethodConnect, "/proxy", nil)
-		req.Host = "localhost:9999" // Unlikely to be open
-
-		rr := httptest.NewRecorder()
-		h.HandleProxy(rr, req)
-
-		if rr.Code != http.StatusBadGateway {
-			t.Errorf("Expected status %d, got %d", http.StatusBadGateway, rr.Code)
-		}
-
-		if !strings.Contains(rr.Body.String(), "Failed to connect to target") {
-			t.Errorf("Expected error about connection failure, got: %s", rr.Body.String())
-		}
-	})
+	// TODO: Add comprehensive WebSocket proxy tests
+	// These would require setting up actual WebSocket connections and are more complex
+	// than the old HTTP CONNECT tests. They should test:
+	// 1. WebSocket upgrade
+	// 2. Initial JSON message with target host:port
+	// 3. Binary data forwarding between WebSocket and TCP
+	// 4. Error handling for invalid JSON, bad ports, connection failures
+	// 5. Authentication via WebSocket headers
 }
 
+// The following tests are commented out because they were designed for HTTP CONNECT
+// and need to be rewritten for the new WebSocket-based proxy approach.
+
+/*
 // TestProxyWithAuthentication tests proxy with authentication middleware
 func TestProxyWithAuthentication(t *testing.T) {
 	if testing.Short() {
@@ -228,6 +161,7 @@ func TestProxyWithAuthentication(t *testing.T) {
 	})
 }
 
+/*
 // TestProxyPortParsing tests various port parsing scenarios
 func TestProxyPortParsing(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -315,6 +249,7 @@ func TestProxyPortParsing(t *testing.T) {
 		})
 	}
 }
+*/
 
 // simpleSystemManager for testing - minimal implementation
 type simpleSystemManager struct{}
@@ -324,8 +259,13 @@ func (m *simpleSystemManager) WaitForProcessRunning(ctx context.Context) error {
 func (m *simpleSystemManager) StartProcess() error                             { return nil }
 func (m *simpleSystemManager) StopProcess() error                              { return nil }
 func (m *simpleSystemManager) ForwardSignal(sig os.Signal) error               { return nil }
-func (m *simpleSystemManager) HasJuiceFS() bool                                { return false }
-func (m *simpleSystemManager) WaitForJuiceFS(ctx context.Context) error        { return nil }
+func (m *simpleSystemManager) MonitorExecProcess(execID string, execFunc func() error) error {
+	return execFunc()
+}
+func (m *simpleSystemManager) StartExecProcessTracking(execID string, pid int) error { return nil }
+func (m *simpleSystemManager) StopExecProcessTracking(execID string)                 {}
+func (m *simpleSystemManager) HasJuiceFS() bool                                      { return false }
+func (m *simpleSystemManager) WaitForJuiceFS(ctx context.Context) error              { return nil }
 func (m *simpleSystemManager) CheckpointWithStream(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) error {
 	defer close(streamCh)
 	return nil
