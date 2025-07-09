@@ -82,9 +82,9 @@ COPY languages/java.sh /tmp/
 RUN chmod +x /tmp/java.sh && /tmp/java.sh && rm /tmp/java.sh
 
 ############################
-# asdf Languages Combined
+# asdf Languages ONLY
 ############################
-FROM base AS languages
+FROM scratch AS languages
 ARG USER UID
 
 COPY --chown=$USER:$USER --from=languages-split /opt/asdf /opt/asdf

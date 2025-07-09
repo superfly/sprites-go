@@ -16,7 +16,10 @@
   
   "overlay_enabled": true,
   "overlay_image_size": "100G",
-  "overlay_lower_path": "/mnt/app-image",
+  "overlay_lower_paths": [
+    "/mnt/languages-image",
+    "/mnt/system-base"
+  ],
   "overlay_target_path": "/mnt/newroot",
   "overlay_skip_overlayfs": false
 } 

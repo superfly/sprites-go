@@ -119,7 +119,8 @@ type configData struct {
 	// Overlay configuration
 	OverlayEnabled       bool
 	OverlayImageSize     string
-	OverlayLowerPath     string
+	OverlayLowerPath     string   // Deprecated, use OverlayLowerPaths
+	OverlayLowerPaths    []string // Preferred over OverlayLowerPath
 	OverlayTargetPath    string
 	OverlaySkipOverlayFS bool
 }
@@ -147,7 +148,7 @@ func (h *Handlers) buildSystemConfigFromEnv(overrides map[string]string) (config
 		}
 	}
 	config.ProcessWorkingDir = getEnv("SPRITE_PROCESS_WORKDIR")
-	
+
 	// Process environment - collect all SPRITE_PROCESS_ENV_* variables
 	// First from actual environment
 	for _, envVar := range os.Environ() {
@@ -206,6 +207,10 @@ func (h *Handlers) buildSystemConfigFromEnv(overrides map[string]string) (config
 	}
 	config.OverlayImageSize = getEnv("SPRITE_OVERLAY_IMAGE_SIZE")
 	config.OverlayLowerPath = getEnv("SPRITE_OVERLAY_LOWER_PATH")
+	// New environment variable for multiple lower paths (colon-separated)
+	if overlayLowerPaths := getEnv("SPRITE_OVERLAY_LOWER_PATHS"); overlayLowerPaths != "" {
+		config.OverlayLowerPaths = strings.Split(overlayLowerPaths, ":")
+	}
 	config.OverlayTargetPath = getEnv("SPRITE_OVERLAY_TARGET_PATH")
 	skipOverlayFS := getEnv("SPRITE_OVERLAY_SKIP_OVERLAYFS")
 	if skipOverlayFS == "true" {
@@ -266,11 +271,11 @@ func (h *Handlers) persistConfig(path string, overrides map[string]string) error
 	if val := getEnv("SPRITE_PROCESS_WORKDIR"); val != "" {
 		fileConfig["process_working_dir"] = val
 	}
-	
+
 	// Process environment variables - merge actual env with overrides
 	var processEnv []string
 	processedKeys := make(map[string]bool)
-	
+
 	// First from actual environment
 	for _, envVar := range os.Environ() {
 		if strings.HasPrefix(envVar, "SPRITE_PROCESS_ENV_") {
@@ -288,7 +293,7 @@ func (h *Handlers) persistConfig(path string, overrides map[string]string) error
 			}
 		}
 	}
-	
+
 	// Then add any override-only values
 	for k, v := range overrides {
 		if strings.HasPrefix(k, "SPRITE_PROCESS_ENV_") && !processedKeys[k] {
@@ -296,7 +301,7 @@ func (h *Handlers) persistConfig(path string, overrides map[string]string) error
 			processEnv = append(processEnv, fmt.Sprintf("%s=%s", envName, v))
 		}
 	}
-	
+
 	if len(processEnv) > 0 {
 		fileConfig["process_environment"] = processEnv
 	}
@@ -347,6 +352,10 @@ func (h *Handlers) persistConfig(path string, overrides map[string]string) error
 	}
 	if val := getEnv("SPRITE_OVERLAY_LOWER_PATH"); val != "" {
 		fileConfig["overlay_lower_path"] = val
+	}
+	// New environment variable for multiple lower paths (colon-separated)
+	if val := getEnv("SPRITE_OVERLAY_LOWER_PATHS"); val != "" {
+		fileConfig["overlay_lower_paths"] = strings.Split(val, ":")
 	}
 	if val := getEnv("SPRITE_OVERLAY_TARGET_PATH"); val != "" {
 		fileConfig["overlay_target_path"] = val

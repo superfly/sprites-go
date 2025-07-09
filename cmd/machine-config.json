@@ -15,7 +15,7 @@
   "containers": [
     {
       "name": "sprite",
-      "image": "<image_ref>",
+      "image": "ghcr.io/superfly/sprite-env:5b809b7",
       "env": {
         "SPRITE_HTTP_API_TOKEN": "f0e4c2f76c58916ec258f246851bea091d14d4247a2fc3e18694461b1816e13b",
         "SPRITE_KEEP_ALIVE_ON_ERROR": "true",
@@ -46,7 +46,8 @@
       "files":[{
         "guest_path": "/etc/app-image.json",
         "image_config": "ghcr.io/superfly/sprite-ubuntu:25.04-5b809b7"
-      }],
+      }
+      ],
       "mounts": [
         {
           "name": "shared",
@@ -55,6 +56,10 @@
         {
           "name": "app-image",
           "path": "/mnt/app-image"
+        },
+        {
+          "name": "languages-image",
+          "path": "/mnt/languages-image"
         }
       ],
       "restart": {
@@ -98,6 +103,10 @@
         "size_mb": 100,
         "storage_type": "memory"
       }
+    },
+    {
+      "name": "languages-image",
+      "image": "ghcr.io/superfly/sprite-ubuntu:25.04-5b809b7-languages"
     },
     {
       "name": "app-image",

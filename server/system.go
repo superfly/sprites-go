@@ -39,7 +39,8 @@ type SystemConfig struct {
 	// Overlay configuration
 	OverlayEnabled       bool
 	OverlayImageSize     string
-	OverlayLowerPath     string
+	OverlayLowerPath     string   // Deprecated, use OverlayLowerPaths
+	OverlayLowerPaths    []string // Preferred over OverlayLowerPath
 	OverlayTargetPath    string
 	OverlaySkipOverlayFS bool
 
@@ -268,6 +269,7 @@ func (s *System) Configure(config interface{}) error {
 			OverlayEnabled:       sysConfig.OverlayEnabled,
 			OverlayImageSize:     sysConfig.OverlayImageSize,
 			OverlayLowerPath:     sysConfig.OverlayLowerPath,
+			OverlayLowerPaths:    sysConfig.OverlayLowerPaths,
 			OverlayTargetPath:    sysConfig.OverlayTargetPath,
 			OverlaySkipOverlayFS: sysConfig.OverlaySkipOverlayFS,
 			Logger:               s.logger,

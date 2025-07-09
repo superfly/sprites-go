@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
@@ -57,17 +58,34 @@ type Config struct {
 	KeepAliveOnError bool // Keep server running when process fails
 
 	// Overlay configuration
-	OverlayEnabled       bool   // Enable root overlay mounting
-	OverlayImageSize     string // Size of the overlay image (e.g., "100G")
-	OverlayLowerPath     string // Path to lower directory (read-only base layer)
-	OverlayTargetPath    string // Where to mount the final overlay
-	OverlaySkipOverlayFS bool   // Skip overlayfs, only mount loopback
+	OverlayEnabled       bool     // Enable root overlay mounting
+	OverlayImageSize     string   // Size of the overlay image (e.g., "100G")
+	OverlayLowerPath     string   // Path to lower directory (read-only base layer) - deprecated, use OverlayLowerPaths
+	OverlayLowerPaths    []string // Paths to lower directories (read-only base layers) - preferred over OverlayLowerPath
+	OverlayTargetPath    string   // Where to mount the final overlay
+	OverlaySkipOverlayFS bool     // Skip overlayfs, only mount loopback
 
 	// Dynamic configuration
 	DynamicConfigPath string // Path to persist dynamic configuration
 
 	// Transcript configuration
 	TranscriptDBPath string // Path to SQLite database file
+}
+
+// GetOverlayLowerPaths returns the overlay lower paths with priority and fallback logic
+func (c *Config) GetOverlayLowerPaths() []string {
+	// Prioritize array format
+	if len(c.OverlayLowerPaths) > 0 {
+		return c.OverlayLowerPaths
+	}
+
+	// Fall back to single string format
+	if c.OverlayLowerPath != "" {
+		return []string{c.OverlayLowerPath}
+	}
+
+	// Default fallback
+	return []string{"/mnt/app-image"}
 }
 
 // Application represents the main application
@@ -135,6 +153,7 @@ func NewApplication(config Config) (*Application, error) {
 			OverlayEnabled:                 config.OverlayEnabled,
 			OverlayImageSize:               config.OverlayImageSize,
 			OverlayLowerPath:               config.OverlayLowerPath,
+			OverlayLowerPaths:              config.GetOverlayLowerPaths(),
 			OverlayTargetPath:              config.OverlayTargetPath,
 			OverlaySkipOverlayFS:           config.OverlaySkipOverlayFS,
 		}
@@ -403,11 +422,12 @@ func parseCommandLine() (Config, error) {
 			S3Bucket          string `json:"s3_bucket"`
 
 			// Overlay configuration
-			OverlayEnabled       bool   `json:"overlay_enabled"`
-			OverlayImageSize     string `json:"overlay_image_size"`
-			OverlayLowerPath     string `json:"overlay_lower_path"`
-			OverlayTargetPath    string `json:"overlay_target_path"`
-			OverlaySkipOverlayFS bool   `json:"overlay_skip_overlayfs"`
+			OverlayEnabled       bool     `json:"overlay_enabled"`
+			OverlayImageSize     string   `json:"overlay_image_size"`
+			OverlayLowerPath     string   `json:"overlay_lower_path"`
+			OverlayLowerPaths    []string `json:"overlay_lower_paths"`
+			OverlayTargetPath    string   `json:"overlay_target_path"`
+			OverlaySkipOverlayFS bool     `json:"overlay_skip_overlayfs"`
 
 			// Transcript configuration
 			TranscriptDBPath string `json:"transcript_db_path"`
@@ -461,6 +481,7 @@ func parseCommandLine() (Config, error) {
 		config.OverlayEnabled = fileConfig.OverlayEnabled
 		config.OverlayImageSize = fileConfig.OverlayImageSize
 		config.OverlayLowerPath = fileConfig.OverlayLowerPath
+		config.OverlayLowerPaths = fileConfig.OverlayLowerPaths
 		config.OverlayTargetPath = fileConfig.OverlayTargetPath
 		config.OverlaySkipOverlayFS = fileConfig.OverlaySkipOverlayFS
 		config.TranscriptDBPath = fileConfig.TranscriptDBPath
@@ -523,6 +544,10 @@ func parseCommandLine() (Config, error) {
 	}
 	if overlayLowerPath := os.Getenv("SPRITE_OVERLAY_LOWER_PATH"); overlayLowerPath != "" {
 		config.OverlayLowerPath = overlayLowerPath
+	}
+	// New environment variable for multiple lower paths (colon-separated)
+	if overlayLowerPaths := os.Getenv("SPRITE_OVERLAY_LOWER_PATHS"); overlayLowerPaths != "" {
+		config.OverlayLowerPaths = strings.Split(overlayLowerPaths, ":")
 	}
 	if overlayTarget := os.Getenv("SPRITE_OVERLAY_TARGET_PATH"); overlayTarget != "" {
 		config.OverlayTargetPath = overlayTarget

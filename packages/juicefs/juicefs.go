@@ -73,11 +73,12 @@ type Config struct {
 	VolumeName string
 
 	// Overlay configuration
-	OverlayEnabled       bool   // Enable root overlay mounting
-	OverlayImageSize     string // Size of the overlay image (e.g., "100G")
-	OverlayLowerPath     string // Path to lower directory (read-only base layer)
-	OverlayTargetPath    string // Where to mount the final overlay
-	OverlaySkipOverlayFS bool   // Skip overlayfs, only mount loopback
+	OverlayEnabled       bool     // Enable root overlay mounting
+	OverlayImageSize     string   // Size of the overlay image (e.g., "100G")
+	OverlayLowerPath     string   // Path to lower directory (read-only base layer) - deprecated, use OverlayLowerPaths
+	OverlayLowerPaths    []string // Paths to lower directories (read-only base layers) - preferred over OverlayLowerPath
+	OverlayTargetPath    string   // Where to mount the final overlay
+	OverlaySkipOverlayFS bool     // Skip overlayfs, only mount loopback
 
 	// LeaseManager for distributed coordination (optional, only used if not LocalMode)
 	LeaseManager LeaseManager
@@ -133,9 +134,14 @@ func New(config Config) (*JuiceFS, error) {
 		if config.OverlayImageSize != "" {
 			j.overlayMgr.imageSize = config.OverlayImageSize
 		}
-		if config.OverlayLowerPath != "" {
-			j.overlayMgr.SetAppImagePath(config.OverlayLowerPath)
+
+		// Handle multiple lower paths with fallback to single path
+		if len(config.OverlayLowerPaths) > 0 {
+			j.overlayMgr.SetLowerPaths(config.OverlayLowerPaths)
+		} else if config.OverlayLowerPath != "" {
+			j.overlayMgr.SetLowerPath(config.OverlayLowerPath)
 		}
+
 		if config.OverlayTargetPath != "" {
 			j.overlayMgr.SetOverlayTargetPath(config.OverlayTargetPath)
 		}

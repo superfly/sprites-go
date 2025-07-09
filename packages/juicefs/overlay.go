@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -30,9 +31,9 @@ type OverlayManager struct {
 	logger    *slog.Logger
 
 	// Overlayfs configuration
-	lowerPath         string // Lower directory (e.g., /mnt/app-image)
-	overlayTargetPath string // Where to mount the overlay (e.g., /mnt/newroot)
-	skipOverlayFS     bool   // Skip overlayfs mounting (for testing)
+	lowerPaths        []string // Lower directories (e.g., ["/mnt/base1", "/mnt/base2", "/mnt/app-image"])
+	overlayTargetPath string   // Where to mount the overlay (e.g., /mnt/newroot)
+	skipOverlayFS     bool     // Skip overlayfs mounting (for testing)
 }
 
 // NewOverlay creates a new overlay manager instance
@@ -42,10 +43,10 @@ func NewOverlay(j *JuiceFS, logger *slog.Logger) *OverlayManager {
 		juiceFS:           j,
 		imagePath:         filepath.Join(mountPath, "active", "root-upper.img"),
 		mountPath:         filepath.Join(mountPath, "..", "root-upper"),
-		imageSize:         "100G",           // 100GB sparse image
-		lowerPath:         "/mnt/app-image", // Default lower directory
-		overlayTargetPath: "/mnt/newroot",   // Default overlay mount point
-		skipOverlayFS:     false,            // Default to mounting overlayfs
+		imageSize:         "100G",                     // 100GB sparse image
+		lowerPaths:        []string{"/mnt/app-image"}, // Default lower directories
+		overlayTargetPath: "/mnt/newroot",             // Default overlay mount point
+		skipOverlayFS:     false,                      // Default to mounting overlayfs
 		logger:            logger,
 	}
 }
@@ -60,13 +61,19 @@ func (om *OverlayManager) GetImagePath() string {
 	return om.imagePath
 }
 
+// SetLowerPaths sets the paths to the lower directories for overlay
+func (om *OverlayManager) SetLowerPaths(paths []string) {
+	om.lowerPaths = paths
+}
+
 // SetLowerPath sets the path to the lower directory for overlay
+// Deprecated: Use SetLowerPaths instead
 func (om *OverlayManager) SetLowerPath(path string) {
-	om.lowerPath = path
+	om.lowerPaths = []string{path}
 }
 
 // SetAppImagePath sets the path to the app image (lower directory for overlay)
-// Deprecated: Use SetLowerPath instead
+// Deprecated: Use SetLowerPaths instead
 func (om *OverlayManager) SetAppImagePath(path string) {
 	om.SetLowerPath(path)
 }
@@ -81,13 +88,22 @@ func (om *OverlayManager) SetSkipOverlayFS(skip bool) {
 	om.skipOverlayFS = skip
 }
 
-// GetLowerPath returns the configured lower directory path
+// GetLowerPaths returns the configured lower directory paths
+func (om *OverlayManager) GetLowerPaths() []string {
+	return om.lowerPaths
+}
+
+// GetLowerPath returns the first configured lower directory path
+// Deprecated: Use GetLowerPaths instead
 func (om *OverlayManager) GetLowerPath() string {
-	return om.lowerPath
+	if len(om.lowerPaths) > 0 {
+		return om.lowerPaths[0]
+	}
+	return ""
 }
 
 // GetAppImagePath returns the configured app image path (lower directory)
-// Deprecated: Use GetLowerPath instead
+// Deprecated: Use GetLowerPaths instead
 func (om *OverlayManager) GetAppImagePath() string {
 	return om.GetLowerPath()
 }
@@ -234,9 +250,11 @@ func (om *OverlayManager) Mount(ctx context.Context) error {
 
 // mountOverlayFS creates and mounts the overlay filesystem
 func (om *OverlayManager) mountOverlayFS(ctx context.Context) error {
-	// Check if app image path exists
-	if _, err := os.Stat(om.lowerPath); os.IsNotExist(err) {
-		return fmt.Errorf("app image path does not exist: %s", om.lowerPath)
+	// Check if all lower paths exist
+	for _, lowerPath := range om.lowerPaths {
+		if _, err := os.Stat(lowerPath); os.IsNotExist(err) {
+			return fmt.Errorf("lower path does not exist: %s", lowerPath)
+		}
 	}
 
 	// Create upper and work directories in the mounted loopback
@@ -258,13 +276,16 @@ func (om *OverlayManager) mountOverlayFS(ctx context.Context) error {
 
 	// Mount the overlay
 	om.logger.Info("Mounting OverlayFS", "targetPath", om.overlayTargetPath)
+
+	// Join multiple lower paths with colon separator for overlayfs
+	lowerDirs := strings.Join(om.lowerPaths, ":")
 	om.logger.Debug("OverlayFS paths",
-		"lower", om.lowerPath,
+		"lower", lowerDirs,
 		"upper", upperDir,
 		"work", workDir)
 
 	mountOptions := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s",
-		om.lowerPath, upperDir, workDir)
+		lowerDirs, upperDir, workDir)
 
 	cmd := exec.CommandContext(ctx, "mount", "-t", "overlay", "overlay",
 		"-o", mountOptions, om.overlayTargetPath)
