@@ -384,7 +384,7 @@ The `-config` option accepts a JSON file with the following structure:
   
   "overlay_enabled": false,
   "overlay_image_size": "100G",
-  "overlay_lower_path": "/mnt/app-image", 
+  "overlay_lower_path": "/mnt/system-base", 
   "overlay_target_path": "/mnt/newroot",
   "overlay_skip_overlayfs": false
 }

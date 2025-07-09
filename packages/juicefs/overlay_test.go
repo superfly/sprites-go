@@ -385,8 +385,8 @@ func TestOverlayPriorityAndFallback(t *testing.T) {
 
 	// Test that default lower path was used
 	defaultPaths := om2.GetLowerPaths()
-	if len(defaultPaths) != 1 || defaultPaths[0] != "/mnt/app-image" {
-		t.Errorf("Expected default lower path [/mnt/app-image], got %v", defaultPaths)
+	if len(defaultPaths) != 1 || defaultPaths[0] != "/mnt/system-base" {
+		t.Errorf("Expected default lower path [/mnt/system-base], got %v", defaultPaths)
 	}
 }
 

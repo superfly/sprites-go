@@ -455,9 +455,9 @@ if [[ "$user_info" == *":"* ]]; then
     # user_info is in "uid:gid" format
     IFS=':' read -r uid gid <<< "$user_info"
 else
-    # user_info is just a username, look it up in /mnt/app-image/etc/passwd
-    if [[ -f "/mnt/app-image/etc/passwd" ]]; then
-        passwd_entry=$(grep "^${user_info}:" /mnt/app-image/etc/passwd || true)
+    # user_info is just a username, look it up in /mnt/system-base/etc/passwd
+    if [[ -f "/mnt/system-base/etc/passwd" ]]; then
+        passwd_entry=$(grep "^${user_info}:" /mnt/system-base/etc/passwd || true)
         if [[ -n "$passwd_entry" ]]; then
             # Extract uid and gid from passwd entry format: username:x:uid:gid:...
             uid=$(echo "$passwd_entry" | cut -d':' -f3)

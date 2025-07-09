@@ -31,7 +31,7 @@ type OverlayManager struct {
 	logger    *slog.Logger
 
 	// Overlayfs configuration
-	lowerPaths        []string // Lower directories (e.g., ["/mnt/base1", "/mnt/base2", "/mnt/app-image"])
+	lowerPaths        []string // Lower directories (e.g., ["/mnt/base1", "/mnt/base2", "/mnt/system-base"])
 	overlayTargetPath string   // Where to mount the overlay (e.g., /mnt/newroot)
 	skipOverlayFS     bool     // Skip overlayfs mounting (for testing)
 }
@@ -43,10 +43,10 @@ func NewOverlay(j *JuiceFS, logger *slog.Logger) *OverlayManager {
 		juiceFS:           j,
 		imagePath:         filepath.Join(mountPath, "active", "root-upper.img"),
 		mountPath:         filepath.Join(mountPath, "..", "root-upper"),
-		imageSize:         "100G",                     // 100GB sparse image
-		lowerPaths:        []string{"/mnt/app-image"}, // Default lower directories
-		overlayTargetPath: "/mnt/newroot",             // Default overlay mount point
-		skipOverlayFS:     false,                      // Default to mounting overlayfs
+		imageSize:         "100G",                       // 100GB sparse image
+		lowerPaths:        []string{"/mnt/system-base"}, // Default lower directories
+		overlayTargetPath: "/mnt/newroot",               // Default overlay mount point
+		skipOverlayFS:     false,                        // Default to mounting overlayfs
 		logger:            logger,
 	}
 }

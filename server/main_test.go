@@ -52,7 +52,7 @@ func TestConfigGetOverlayLowerPathsDefault(t *testing.T) {
 	}
 
 	result := config.GetOverlayLowerPaths()
-	expected := []string{"/mnt/app-image"}
+	expected := []string{"/mnt/system-base"}
 
 	if len(result) != len(expected) {
 		t.Errorf("Expected %d paths, got %d", len(expected), len(result))
@@ -90,7 +90,7 @@ func TestConfigGetOverlayLowerPathsCompletelyEmpty(t *testing.T) {
 	}
 
 	result := config.GetOverlayLowerPaths()
-	expected := []string{"/mnt/app-image"}
+	expected := []string{"/mnt/system-base"}
 
 	if len(result) != len(expected) {
 		t.Errorf("Expected %d paths, got %d", len(expected), len(result))

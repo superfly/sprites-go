@@ -85,7 +85,7 @@ func (c *Config) GetOverlayLowerPaths() []string {
 	}
 
 	// Default fallback
-	return []string{"/mnt/app-image"}
+	return []string{"/mnt/system-base"}
 }
 
 // Application represents the main application
