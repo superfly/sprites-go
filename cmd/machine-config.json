@@ -54,8 +54,8 @@
           "path": "/data"
         },
         {
-          "name": "app-image",
-          "path": "/mnt/app-image"
+          "name": "system-base",
+          "path": "/mnt/system-base"
         },
         {
           "name": "languages-image",
@@ -109,7 +109,7 @@
       "image": "ghcr.io/superfly/sprite-ubuntu:25.04-bbd8241-languages"
     },
     {
-      "name": "app-image",
+      "name": "system-base",
       "image": "ghcr.io/superfly/sprite-ubuntu:25.04-bbd8241"
     }
   ]
