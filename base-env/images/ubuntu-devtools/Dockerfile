@@ -85,9 +85,9 @@ RUN chmod +x /tmp/java.sh && /tmp/java.sh && rm /tmp/java.sh
 # asdf Languages ONLY
 ############################
 FROM scratch AS languages
-ARG USER UID
+ARG UID
 
-COPY --chown=$USER:$USER --from=languages-split /opt/asdf /opt/asdf
+COPY --chown=$UID:$UID --from=languages-split /opt/asdf /opt/asdf
 
 
 ####################################################
