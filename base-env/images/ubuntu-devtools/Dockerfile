@@ -32,11 +32,15 @@ RUN git clone https://github.com/asdf-vm/asdf.git --branch v0.14.0 --depth 1 "$A
       echo '# /etc/profile.d/asdf.sh'; \
       echo 'export ASDF_DIR=/opt/asdf'; \
       echo 'export ASDF_DATA_DIR=/opt/asdf'; \
+      echo 'export ASDF_DEFAULT_TOOL_VERSIONS_FILE=/etc/asdf-default-tool-versions'; \
       echo 'export PATH="$ASDF_DATA_DIR/shims:$ASDF_DIR/bin:$PATH"'; \
       echo '. "$ASDF_DIR/asdf.sh"'; \
       echo '. "$ASDF_DIR/completions/asdf.bash"'; \
     } > /etc/profile.d/asdf.sh \
- && echo ". /etc/profile.d/asdf.sh" >> /etc/bash.bashrc
+ && echo ". /etc/profile.d/asdf.sh" >> /etc/bash.bashrc \
+ && echo ". /etc/profile.d/sprite.sh" >> /etc/bash.bashrc
+
+ ## ^^^ those are annoying but they'll reliably set env vars
 
 # Copy the sudoers file and user skeleton, then fix ownership
 
@@ -88,6 +92,9 @@ FROM scratch AS languages
 ARG UID
 
 COPY --chown=$UID:$UID --from=languages-split /opt/asdf /opt/asdf
+
+# make these tool versions the default
+COPY --from=languages-split /root/.tool-versions /etc/asdf-default-tool-versions
 
 
 ####################################################
