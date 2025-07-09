@@ -4,7 +4,6 @@ go 1.24.4
 
 require (
 	github.com/sprite-env/lib v0.0.0
-	github.com/sprite-env/packages/wsexec v0.0.0-00010101000000-000000000000
 	github.com/zalando/go-keyring v0.2.6
 	golang.org/x/term v0.32.0
 )
@@ -46,4 +45,5 @@ require (
 
 replace github.com/sprite-env/lib => ../lib
 
-replace github.com/sprite-env/packages/wsexec => ../packages/wsexec
+require github.com/superfly/sprite-env/pkg/terminal v0.0.0-00010101000000-000000000000
+replace github.com/superfly/sprite-env/pkg/terminal => ../pkg/terminal

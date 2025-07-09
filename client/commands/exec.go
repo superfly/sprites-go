@@ -21,7 +21,7 @@ import (
 
 	"github.com/sprite-env/client/config"
 	"github.com/sprite-env/client/format"
-	"github.com/sprite-env/packages/wsexec"
+	"github.com/superfly/sprite-env/pkg/terminal"
 	"golang.org/x/term"
 )
 
@@ -493,8 +493,8 @@ func executeWebSocket(wsURL *url.URL, token string, cmd []string, workingDir str
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 
-	// Create wsexec command
-	wsCmd := wsexec.CommandContext(context.Background(), req, "placeholder")
+	// Create exec command
+	wsCmd := terminal.CommandContext(context.Background(), req, "placeholder")
 
 	// Set client-side I/O configuration
 	wsCmd.Stdin = os.Stdin
@@ -519,7 +519,7 @@ func executeWebSocket(wsURL *url.URL, token string, cmd []string, workingDir str
 	// Set up text message handler for port notifications
 	wsCmd.TextMessageHandler = portMgr.handlePortNotification
 
-	logger.Debug("Created wsexec command", "tty", wsCmd.Tty)
+	logger.Debug("Created exec command", "tty", wsCmd.Tty)
 
 	// Set up PTY mode if needed
 	var cleanup func()
@@ -577,7 +577,7 @@ func executeWebSocket(wsURL *url.URL, token string, cmd []string, workingDir str
 }
 
 // handlePTYMode sets up the terminal for PTY mode and returns a cleanup function
-func handlePTYMode(wsCmd *wsexec.Cmd) (cleanup func(), err error) {
+func handlePTYMode(wsCmd *terminal.Cmd) (cleanup func(), err error) {
 	// Check if stdin is a terminal
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		// Not a terminal, no special handling needed
