@@ -11,7 +11,7 @@
       "path": "/dev/fly_vol"
     }
   ],
-  "image": "ghcr.io/superfly/sprite-ubuntu:25.04-latest", 
+  "image": "ghcr.io/superfly/sprite-ubuntu:25.04-5b809b7", 
   "containers": [
     {
       "name": "sprite",
@@ -45,7 +45,7 @@
       ],
       "files":[{
         "guest_path": "/etc/app-image.json",
-        "image_config": "ghcr.io/superfly/sprite-ubuntu:25.04-latest"
+        "image_config": "ghcr.io/superfly/sprite-ubuntu:25.04-5b809b7"
       }],
       "mounts": [
         {
@@ -101,7 +101,7 @@
     },
     {
       "name": "app-image",
-      "image": "ghcr.io/superfly/sprite-ubuntu:25.04-latest"
+      "image": "ghcr.io/superfly/sprite-ubuntu:25.04-5b809b7"
     }
   ]
 }
