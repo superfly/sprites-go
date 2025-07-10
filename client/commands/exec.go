@@ -217,11 +217,16 @@ func (pm *portManager) doStartProxy(port int, address string) error {
 	}()
 
 	fmt.Printf("🔗 Automatically proxying port %d → http://localhost:%d\n", port, port)
-	// Auto-open browser to the proxied port
-	handleBrowserOpen(
-		fmt.Sprintf("http://localhost:%d", port),
-		[]string{fmt.Sprintf("%d", port)},
-	)
+
+	if false /* this should be triggered by OSC */ {
+
+		// Auto-open browser to the proxied port
+		handleBrowserOpen(fmt.Sprintf("http://localhost:%d", port), nil)
+		// don't pass the port in:
+		// 	[]string{fmt.Sprintf("%d", port)},
+		// )
+	}
+
 	return nil
 }
 
