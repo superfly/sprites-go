@@ -11,7 +11,7 @@
       "path": "/dev/fly_vol"
     }
   ],
-  "image": "ghcr.io/superfly/sprite-ubuntu:25.04-21cde31", 
+  "image": "<image_ref>", 
   "containers": [
     {
       "name": "sprite",
@@ -45,7 +45,7 @@
       ],
       "files":[{
         "guest_path": "/etc/app-image.json",
-        "image_config": "ghcr.io/superfly/sprite-ubuntu:25.04-c69367f"
+        "image_config": "ghcr.io/superfly/sprite-ubuntu:25.04-b869a45"
       }
       ],
       "mounts": [
@@ -106,11 +106,11 @@
     },
     {
       "name": "languages-image",
-      "image": "ghcr.io/superfly/sprite-ubuntu:25.04-21cde31-languages"
+      "image": "ghcr.io/superfly/sprite-ubuntu:25.04-b869a45-languages"
     },
     {
       "name": "system-base",
-      "image": "ghcr.io/superfly/sprite-ubuntu:25.04-c69367f"
+      "image": "ghcr.io/superfly/sprite-ubuntu:25.04-b869a45"
     }
   ]
 }

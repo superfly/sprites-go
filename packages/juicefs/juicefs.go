@@ -503,36 +503,39 @@ func (j *JuiceFS) monitorProcess() {
 			j.logger.Info("Sync completed", "duration", time.Since(syncStart))
 		}
 
-		// First try graceful unmount without --force to allow JuiceFS to flush its cache
+		// First try graceful unmount with --flush to ensure all data is written
 		// JuiceFS may need time to:
 		// - Flush write-back cache
 		// - Complete pending uploads (up to --upload-delay=1m)
 		// - Close file handles properly
-		j.logger.Info("Attempting graceful JuiceFS unmount (this may take several minutes)...")
+		j.logger.Info("Attempting graceful JuiceFS unmount with flush (this may take several minutes)...")
 		unmountStart := time.Now()
 
 		// Create a context with a generous timeout for graceful unmount
-		// We use 3 minutes to account for the 1-minute upload delay plus overhead
-		gracefulCtx, gracefulCancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		// We use 5 minutes to account for the 1-minute upload delay plus overhead
+		gracefulCtx, gracefulCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer gracefulCancel()
 
-		unmountCmd := exec.CommandContext(gracefulCtx, "juicefs", "umount", mountPath)
-		if output, err := unmountCmd.CombinedOutput(); err != nil {
+		unmountCmd := exec.CommandContext(gracefulCtx, "juicefs", "umount", "--flush", mountPath)
+		unmountCmd.Stdout = os.Stdout
+		unmountCmd.Stderr = os.Stderr
+
+		if err := unmountCmd.Run(); err != nil {
 			j.logger.Warn("Graceful unmount failed", "duration", time.Since(unmountStart), "error", err)
 
 			// If graceful unmount fails or times out, try with --force
 			j.logger.Info("Attempting force unmount...")
 			forceCmd := exec.Command("juicefs", "umount", "--force", mountPath)
-			if output2, err2 := forceCmd.CombinedOutput(); err2 != nil {
+			forceCmd.Stdout = os.Stdout
+			forceCmd.Stderr = os.Stderr
+
+			if err2 := forceCmd.Run(); err2 != nil {
 				// Check if it's exit status 3 (not mounted) - this is OK
 				if exitErr, ok := err2.(*exec.ExitError); ok && exitErr.ExitCode() == 3 {
 					j.logger.Info("JuiceFS already unmounted", "path", mountPath)
 				} else {
 					// Log but don't fail on other unmount errors
-					j.logger.Warn("Failed to unmount JuiceFS",
-						"error", err2,
-						"gracefulOutput", string(output),
-						"forceOutput", string(output2))
+					j.logger.Warn("Failed to unmount JuiceFS", "error", err2)
 				}
 			} else {
 				j.logger.Info("Force unmount succeeded", "duration", time.Since(unmountStart))
@@ -567,7 +570,7 @@ func (j *JuiceFS) monitorProcess() {
 			select {
 			case <-done:
 				// Process exited gracefully
-			case <-time.After(5 * time.Second):
+			case <-time.After(60 * time.Second):
 				// Force kill if it doesn't exit in time
 				j.litestreamCmd.Process.Kill()
 				<-done
