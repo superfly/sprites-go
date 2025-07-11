@@ -2,7 +2,6 @@
 .git
 .gitignore
 
-cmd
 spec
 scripts
 
