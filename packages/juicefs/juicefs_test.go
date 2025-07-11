@@ -3,6 +3,7 @@ package juicefs
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -411,10 +412,16 @@ func TestLocalModeDirectories(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
+	// Create a logger for detailed output
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+
 	config := Config{
 		BaseDir:    tempDir,
 		LocalMode:  true,
 		VolumeName: "test-volume",
+		Logger:     logger,
 	}
 
 	// Create JuiceFS instance
@@ -431,7 +438,7 @@ func TestLocalModeDirectories(t *testing.T) {
 
 	// Stop JuiceFS when done
 	defer func() {
-		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		stopCtx, cancel := context.WithTimeout(context.Background(), 7*time.Minute)
 		defer cancel()
 		if err := jfs.Stop(stopCtx); err != nil {
 			t.Errorf("Failed to stop JuiceFS: %v", err)
@@ -474,10 +481,16 @@ func TestQuotaApplication(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
+	// Create a logger for detailed output
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+
 	config := Config{
 		BaseDir:    tempDir,
 		LocalMode:  true,
 		VolumeName: "test-quota-volume",
+		Logger:     logger,
 	}
 
 	// Create JuiceFS instance
@@ -518,7 +531,7 @@ func TestQuotaApplication(t *testing.T) {
 	}
 
 	// Stop JuiceFS
-	stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	stopCtx, cancel := context.WithTimeout(context.Background(), 7*time.Minute)
 	defer cancel()
 	if err := jfs.Stop(stopCtx); err != nil {
 		t.Errorf("Failed to stop JuiceFS: %v", err)

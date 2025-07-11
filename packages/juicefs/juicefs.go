@@ -354,7 +354,6 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 		"-o", "writeback_cache",
 		"--writeback",
 		"--upload-delay=1m",
-		"--trash-days=3",
 		"--cache-dir", cacheDir,
 		"--cache-size", fmt.Sprintf("%d", cacheSizeMB),
 		"--buffer-size", fmt.Sprintf("%d", bufferSizeMB),
@@ -503,45 +502,74 @@ func (j *JuiceFS) monitorProcess() {
 			j.logger.Info("Sync completed", "duration", time.Since(syncStart))
 		}
 
-		// First try graceful unmount with --flush to ensure all data is written
-		// JuiceFS may need time to:
-		// - Flush write-back cache
-		// - Complete pending uploads (up to --upload-delay=1m)
-		// - Close file handles properly
-		j.logger.Info("Attempting graceful JuiceFS unmount with flush (this may take several minutes)...")
-		unmountStart := time.Now()
-
-		// Create a context with a generous timeout for graceful unmount
-		// We use 5 minutes to account for the 1-minute upload delay plus overhead
-		gracefulCtx, gracefulCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer gracefulCancel()
-
-		unmountCmd := exec.CommandContext(gracefulCtx, "juicefs", "umount", "--flush", mountPath)
-		unmountCmd.Stdout = os.Stdout
-		unmountCmd.Stderr = os.Stderr
-
-		if err := unmountCmd.Run(); err != nil {
-			j.logger.Warn("Graceful unmount failed", "duration", time.Since(unmountStart), "error", err)
-
-			// If graceful unmount fails or times out, try with --force
-			j.logger.Info("Attempting force unmount...")
-			forceCmd := exec.Command("juicefs", "umount", "--force", mountPath)
-			forceCmd.Stdout = os.Stdout
-			forceCmd.Stderr = os.Stderr
-
-			if err2 := forceCmd.Run(); err2 != nil {
-				// Check if it's exit status 3 (not mounted) - this is OK
-				if exitErr, ok := err2.(*exec.ExitError); ok && exitErr.ExitCode() == 3 {
-					j.logger.Info("JuiceFS already unmounted", "path", mountPath)
-				} else {
-					// Log but don't fail on other unmount errors
-					j.logger.Warn("Failed to unmount JuiceFS", "error", err2)
-				}
-			} else {
-				j.logger.Info("Force unmount succeeded", "duration", time.Since(unmountStart))
+		// Check if mount process is still alive and healthy before attempting unmount
+		processHealthy := true
+		if j.mountCmd != nil && j.mountCmd.Process != nil {
+			// Check if process is still running
+			if err := j.mountCmd.Process.Signal(syscall.Signal(0)); err != nil {
+				j.logger.Debug("Mount process is not running, skipping unmount", "error", err)
+				processHealthy = false
 			}
 		} else {
-			j.logger.Info("Graceful unmount succeeded", "duration", time.Since(unmountStart))
+			j.logger.Debug("Mount process not available, skipping unmount")
+			processHealthy = false
+		}
+
+		if processHealthy {
+			// Try graceful unmount with --flush to ensure all data is written
+			// JuiceFS may need time to:
+			// - Flush write-back cache
+			// - Complete pending uploads (up to --upload-delay=1m)
+			// - Close file handles properly
+			j.logger.Info("Attempting graceful JuiceFS unmount with flush (this may take several minutes)...")
+			unmountStart := time.Now()
+
+			// Create a context with a generous timeout for graceful unmount
+			// We use 5 minutes to account for the 1-minute upload delay plus overhead
+			gracefulCtx, gracefulCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer gracefulCancel()
+
+			unmountCmd := exec.CommandContext(gracefulCtx, "juicefs", "umount", "--flush", mountPath)
+
+			// Add debug output to see what JuiceFS is doing during the long flush
+			unmountCmd.Env = append(os.Environ(), "JUICEFS_DEBUG=1")
+			unmountCmd.Stdout = os.Stdout
+			unmountCmd.Stderr = os.Stderr
+
+			j.logger.Info("Starting JuiceFS unmount with debug",
+				"cmd", unmountCmd.String(),
+				"mountPath", mountPath)
+
+			// Start progress monitoring for the unmount operation
+			progressCtx, progressCancel := context.WithCancel(gracefulCtx)
+			go j.monitorProgress(progressCtx, "unmount --flush", unmountStart)
+			defer progressCancel()
+
+			if err := unmountCmd.Run(); err != nil {
+				j.logger.Warn("Graceful unmount failed", "duration", time.Since(unmountStart), "error", err)
+
+				// If graceful unmount fails or times out, try with --force
+				j.logger.Info("Attempting force unmount...")
+				forceCmd := exec.Command("juicefs", "umount", "--force", mountPath)
+				forceCmd.Stdout = os.Stdout
+				forceCmd.Stderr = os.Stderr
+
+				if err2 := forceCmd.Run(); err2 != nil {
+					// Check if it's exit status 3 (not mounted) - this is OK
+					if exitErr, ok := err2.(*exec.ExitError); ok && exitErr.ExitCode() == 3 {
+						j.logger.Info("JuiceFS already unmounted", "path", mountPath)
+					} else {
+						// Log but don't fail on other unmount errors
+						j.logger.Warn("Failed to unmount JuiceFS", "error", err2)
+					}
+				} else {
+					j.logger.Info("Force unmount succeeded", "duration", time.Since(unmountStart))
+				}
+			} else {
+				j.logger.Info("Graceful unmount succeeded", "duration", time.Since(unmountStart))
+			}
+		} else {
+			j.logger.Info("Skipping unmount since mount process is not healthy")
 		}
 
 		// Wait for mount process to exit
@@ -602,6 +630,24 @@ func (j *JuiceFS) monitorProcess() {
 				j.litestreamCmd.Process.Kill()
 				<-done
 			}
+		}
+	}
+}
+
+// monitorProgress logs periodic updates during long-running operations
+func (j *JuiceFS) monitorProgress(ctx context.Context, operation string, start time.Time) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			elapsed := time.Since(start)
+			j.logger.Info("Operation still running",
+				"operation", operation,
+				"elapsed", elapsed)
 		}
 	}
 }
@@ -731,7 +777,7 @@ func (j *JuiceFS) formatJuiceFS(ctx context.Context, metaURL string) error {
 		cmd = exec.CommandContext(ctx, "juicefs", "format",
 			"--storage", "file",
 			"--bucket", localStoragePath,
-			"--trash-days", "0",
+			"--trash-days", "7",
 			metaURL,
 			j.config.VolumeName,
 		)
@@ -741,7 +787,7 @@ func (j *JuiceFS) formatJuiceFS(ctx context.Context, metaURL string) error {
 		cmd = exec.CommandContext(ctx, "juicefs", "format",
 			"--storage", "s3",
 			"--bucket", bucketURL,
-			"--trash-days", "0",
+			"--trash-days", "7",
 			metaURL,
 			j.config.VolumeName,
 		)

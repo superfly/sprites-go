@@ -11,6 +11,24 @@ import (
 	"time"
 )
 
+// monitorCloneProgress logs periodic updates during long-running clone operations
+func (j *JuiceFS) monitorCloneProgress(ctx context.Context, operation string, start time.Time) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			elapsed := time.Since(start)
+			j.logger.Info("Clone operation still running",
+				"operation", operation,
+				"elapsed", elapsed)
+		}
+	}
+}
+
 // CheckpointInfo contains information about a checkpoint
 type CheckpointInfo struct {
 	ID         string    `json:"id"`
@@ -55,11 +73,55 @@ func (j *JuiceFS) Checkpoint(ctx context.Context, checkpointID string) error {
 			srcPath := filepath.Join(mountPath, src)
 			dstPath := filepath.Join(mountPath, dst)
 
-			j.logger.Info("Creating checkpoint: cloning", "src", src, "dst", dst)
-			cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", srcPath, dstPath)
-			if output, err := cloneCmd.CombinedOutput(); err != nil {
-				return fmt.Errorf("failed to clone: %w, output: %s", err, string(output))
+			// Get source directory size before cloning
+			srcInfo := "unknown"
+			if stat, err := os.Stat(srcPath); err == nil {
+				if stat.IsDir() {
+					if entries, err := os.ReadDir(srcPath); err == nil {
+						srcInfo = fmt.Sprintf("dir with %d entries", len(entries))
+					}
+				} else {
+					srcInfo = fmt.Sprintf("file %d bytes", stat.Size())
+				}
 			}
+
+			j.logger.Info("Starting JuiceFS clone for checkpoint",
+				"source", srcPath,
+				"destination", dstPath,
+				"srcRelative", src,
+				"dstRelative", dst,
+				"sourceInfo", srcInfo)
+
+			cloneStart := time.Now()
+			cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", srcPath, dstPath)
+
+			// Add verbose output to see what JuiceFS is doing
+			cloneCmd.Env = append(os.Environ(), "JUICEFS_DEBUG=1")
+			cloneCmd.Stdout = os.Stdout
+			cloneCmd.Stderr = os.Stderr
+
+			j.logger.Info("JuiceFS checkpoint clone command started", "cmd", cloneCmd.String())
+
+			// Start progress monitoring in background
+			progressCtx, progressCancel := context.WithCancel(ctx)
+			go j.monitorCloneProgress(progressCtx, fmt.Sprintf("checkpoint %s->%s", src, dst), cloneStart)
+			defer progressCancel()
+
+			if err := cloneCmd.Run(); err != nil {
+				cloneDuration := time.Since(cloneStart)
+				j.logger.Error("JuiceFS checkpoint clone failed",
+					"duration", cloneDuration,
+					"source", srcPath,
+					"destination", dstPath,
+					"error", err)
+				return fmt.Errorf("failed to clone after %v: %w", cloneDuration, err)
+			}
+
+			cloneDuration := time.Since(cloneStart)
+			j.logger.Info("JuiceFS checkpoint clone completed successfully",
+				"duration", cloneDuration,
+				"source", srcPath,
+				"destination", dstPath)
 			return nil
 		},
 		// Rename function (also handles cleanup when dst is empty)
@@ -194,12 +256,54 @@ func (j *JuiceFS) Restore(ctx context.Context, checkpointID string) error {
 		j.logger.Info("Backup completed")
 	}
 
-	// Clone checkpoint to active directory
-	j.logger.Info("Restoring from checkpoint", "version", record.ID, "path", checkpointPath)
-	cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", fullCheckpointPath, activeDir)
-	if output, err := cloneCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to restore from checkpoint: %w, output: %s", err, string(output))
+	// Get source directory info before cloning
+	srcInfo := "unknown"
+	if stat, err := os.Stat(fullCheckpointPath); err == nil {
+		if stat.IsDir() {
+			if entries, err := os.ReadDir(fullCheckpointPath); err == nil {
+				srcInfo = fmt.Sprintf("dir with %d entries", len(entries))
+			}
+		} else {
+			srcInfo = fmt.Sprintf("file %d bytes", stat.Size())
+		}
 	}
+
+	// Clone checkpoint to active directory
+	j.logger.Info("Starting JuiceFS clone for restore",
+		"version", record.ID,
+		"source", fullCheckpointPath,
+		"destination", activeDir,
+		"path", checkpointPath,
+		"sourceInfo", srcInfo)
+
+	cloneStart := time.Now()
+	cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", fullCheckpointPath, activeDir)
+
+	// Add verbose output to see what JuiceFS is doing
+	cloneCmd.Env = append(os.Environ(), "JUICEFS_DEBUG=1")
+	cloneCmd.Stdout = os.Stdout
+	cloneCmd.Stderr = os.Stderr
+
+	j.logger.Info("JuiceFS clone command started", "cmd", cloneCmd.String())
+
+	// Start progress monitoring in background
+	progressCtx, progressCancel := context.WithCancel(ctx)
+	go j.monitorCloneProgress(progressCtx, fmt.Sprintf("restore v%d->active", record.ID), cloneStart)
+	defer progressCancel()
+
+	if err := cloneCmd.Run(); err != nil {
+		cloneDuration := time.Since(cloneStart)
+		j.logger.Error("JuiceFS clone failed",
+			"duration", cloneDuration,
+			"error", err)
+		return fmt.Errorf("failed to restore from checkpoint after %v: %w", cloneDuration, err)
+	}
+
+	cloneDuration := time.Since(cloneStart)
+	j.logger.Info("JuiceFS clone completed successfully",
+		"duration", cloneDuration,
+		"source", fullCheckpointPath,
+		"destination", activeDir)
 
 	// Mount the overlay from the restored active directory
 	if j.overlayMgr != nil {
@@ -231,8 +335,8 @@ func (j *JuiceFS) ListCheckpoints(ctx context.Context) ([]CheckpointInfo, error)
 
 	// Get all checkpoints from database
 	rows, err := j.checkpointDB.db.Query(`
-		SELECT id, path, parent_id, created_at 
-		FROM sprite_checkpoints 
+		SELECT id, path, parent_id, created_at
+		FROM sprite_checkpoints
 		WHERE path LIKE 'checkpoints/%'
 		ORDER BY id DESC
 	`)

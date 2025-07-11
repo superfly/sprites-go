@@ -6,6 +6,7 @@ package juicefs_test
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,10 +27,16 @@ func TestJuiceFSLocalModeIntegration(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
+	// Create a logger for detailed output
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+
 	config := juicefs.Config{
 		BaseDir:    tmpDir,
 		LocalMode:  true,
 		VolumeName: "test-volume",
+		Logger:     logger,
 	}
 
 	jfs, err := juicefs.New(config)
@@ -149,8 +156,12 @@ func TestJuiceFSLocalModeIntegration(t *testing.T) {
 		t.Errorf("Restored content mismatch: got %q, want %q", restoredContent, testContent)
 	}
 
-	// Stop JuiceFS
-	if err := jfs.Stop(ctx); err != nil {
+	// Stop JuiceFS with a timeout that accounts for the full shutdown process
+	// JuiceFS unmount can take up to 5 minutes, plus Litestream 1 minute, plus buffer
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 7*time.Minute)
+	defer stopCancel()
+
+	if err := jfs.Stop(stopCtx); err != nil {
 		t.Fatalf("Failed to stop JuiceFS: %v", err)
 	}
 
