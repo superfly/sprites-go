@@ -354,6 +354,7 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 		"-o", "writeback_cache",
 		"--writeback",
 		"--upload-delay=1m",
+		"--trash-days=3",
 		"--cache-dir", cacheDir,
 		"--cache-size", fmt.Sprintf("%d", cacheSizeMB),
 		"--buffer-size", fmt.Sprintf("%d", bufferSizeMB),
@@ -364,9 +365,6 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	}
 
 	j.mountCmd = exec.CommandContext(ctx, "juicefs", mountArgs...)
-	j.mountCmd.Env = append(os.Environ(),
-		"FSTAB_NAME_PREFIX=\"sprite:\"",
-	)
 
 	// Send JuiceFS output directly to our stdout/stderr
 	j.mountCmd.Stdout = os.Stdout
