@@ -369,6 +369,9 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	j.mountCmd.Stdout = os.Stdout
 	j.mountCmd.Stderr = os.Stderr
 
+	// Set JFS_SUPERVISOR=1 to enable proper signal handling
+	j.mountCmd.Env = append(os.Environ(), "JFS_SUPERVISOR=1")
+
 	// Start the mount command
 	if err := j.mountCmd.Start(); err != nil {
 		return fmt.Errorf("failed to start JuiceFS mount: %w", err)
@@ -502,82 +505,47 @@ func (j *JuiceFS) monitorProcess() {
 			j.logger.Info("Sync completed", "duration", time.Since(syncStart))
 		}
 
-		// Check if mount process is still alive and healthy before attempting unmount
-		processHealthy := true
+		// Send SIGHUP to the mount process to trigger graceful shutdown with flush
+		shutdownStart := time.Now()
+
 		if j.mountCmd != nil && j.mountCmd.Process != nil {
 			// Check if process is still running
 			if err := j.mountCmd.Process.Signal(syscall.Signal(0)); err != nil {
-				j.logger.Debug("Mount process is not running, skipping unmount", "error", err)
-				processHealthy = false
-			}
-		} else {
-			j.logger.Debug("Mount process not available, skipping unmount")
-			processHealthy = false
-		}
-
-		if processHealthy {
-			// Try graceful unmount with --flush to ensure all data is written
-			// JuiceFS may need time to:
-			// - Flush write-back cache
-			// - Complete pending uploads (up to --upload-delay=1m)
-			// - Close file handles properly
-			j.logger.Info("Attempting graceful JuiceFS unmount with flush (this may take several minutes)...")
-			unmountStart := time.Now()
-
-			// Create a context with a generous timeout for graceful unmount
-			// We use 5 minutes to account for the 1-minute upload delay plus overhead
-			gracefulCtx, gracefulCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			defer gracefulCancel()
-
-			unmountCmd := exec.CommandContext(gracefulCtx, "juicefs", "umount", "--flush", mountPath)
-
-			// Add debug output to see what JuiceFS is doing during the long flush
-			unmountCmd.Env = append(os.Environ(), "JUICEFS_DEBUG=1")
-			unmountCmd.Stdout = os.Stdout
-			unmountCmd.Stderr = os.Stderr
-
-			j.logger.Info("Starting JuiceFS unmount with debug",
-				"cmd", unmountCmd.String(),
-				"mountPath", mountPath)
-
-			// Start progress monitoring for the unmount operation
-			progressCtx, progressCancel := context.WithCancel(gracefulCtx)
-			go j.monitorProgress(progressCtx, "unmount --flush", unmountStart)
-			defer progressCancel()
-
-			if err := unmountCmd.Run(); err != nil {
-				j.logger.Warn("Graceful unmount failed", "duration", time.Since(unmountStart), "error", err)
-
-				// If graceful unmount fails or times out, try with --force
-				j.logger.Info("Attempting force unmount...")
-				forceCmd := exec.Command("juicefs", "umount", "--force", mountPath)
-				forceCmd.Stdout = os.Stdout
-				forceCmd.Stderr = os.Stderr
-
-				if err2 := forceCmd.Run(); err2 != nil {
-					// Check if it's exit status 3 (not mounted) - this is OK
-					if exitErr, ok := err2.(*exec.ExitError); ok && exitErr.ExitCode() == 3 {
-						j.logger.Info("JuiceFS already unmounted", "path", mountPath)
-					} else {
-						// Log but don't fail on other unmount errors
-						j.logger.Warn("Failed to unmount JuiceFS", "error", err2)
-					}
-				} else {
-					j.logger.Info("Force unmount succeeded", "duration", time.Since(unmountStart))
-				}
+				j.logger.Debug("Mount process is not running, skipping SIGHUP", "error", err)
 			} else {
-				j.logger.Info("Graceful unmount succeeded", "duration", time.Since(unmountStart))
+				j.logger.Info("Sending SIGHUP to JuiceFS mount process for graceful shutdown")
+
+				// Send SIGHUP to trigger JuiceFS internal shutdown with flush
+				if err := j.mountCmd.Process.Signal(syscall.SIGHUP); err != nil {
+					j.logger.Warn("Failed to send SIGHUP to mount process", "error", err)
+					// Try to kill the process if SIGHUP fails
+					j.mountCmd.Process.Kill()
+				} else {
+					// Monitor the shutdown progress
+					progressCtx, progressCancel := context.WithCancel(context.Background())
+					go j.monitorProgress(progressCtx, "JuiceFS SIGHUP shutdown", shutdownStart)
+					defer progressCancel()
+
+					j.logger.Info("SIGHUP sent successfully, waiting for JuiceFS to flush and exit")
+				}
 			}
 		} else {
-			j.logger.Info("Skipping unmount since mount process is not healthy")
+			j.logger.Debug("Mount process not available, skipping shutdown")
 		}
 
-		// Wait for mount process to exit
+		// Wait for mount process to exit after SIGHUP
+		// We give it up to 5 minutes to complete the flush and shutdown
 		select {
-		case <-processDone:
-			// Process exited after unmount
-		case <-time.After(2 * time.Second):
-			// If mount process doesn't exit after unmount, kill it
+		case err := <-processDone:
+			shutdownDuration := time.Since(shutdownStart)
+			if err != nil {
+				j.logger.Warn("JuiceFS mount process exited with error", "error", err, "duration", shutdownDuration)
+			} else {
+				j.logger.Info("JuiceFS mount process exited cleanly", "duration", shutdownDuration)
+			}
+		case <-time.After(5 * time.Minute):
+			// If mount process doesn't exit after 5 minutes, force kill it
+			j.logger.Warn("JuiceFS mount process did not exit after SIGHUP, force killing")
 			if j.mountCmd != nil && j.mountCmd.Process != nil {
 				j.mountCmd.Process.Kill()
 				<-processDone

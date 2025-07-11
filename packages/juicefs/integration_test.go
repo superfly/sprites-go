@@ -25,7 +25,16 @@ func TestJuiceFSLocalModeIntegration(t *testing.T) {
 		t.Skip("juicefs binary not found, skipping integration test")
 	}
 
-	tmpDir := t.TempDir()
+	// Use manual temp directory to control cleanup timing
+	tmpDir, tmpErr := os.MkdirTemp("", "TestJuiceFSLocalModeIntegration")
+	if tmpErr != nil {
+		t.Fatalf("Failed to create temp dir: %v", tmpErr)
+	}
+	defer func() {
+		// Wait for kernel to clean up FUSE mount before removing directory
+		time.Sleep(200 * time.Millisecond)
+		os.RemoveAll(tmpDir)
+	}()
 
 	// Create a logger for detailed output
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{

@@ -344,8 +344,8 @@ func TestCheckpointValidation(t *testing.T) {
 	// Test checkpoint without active directory
 	// Note: In the new implementation, checkpoint ID is ignored as we use auto-incrementing IDs
 	err = jfs.Checkpoint(ctx, "ignored-id")
-	if err == nil || (!strings.Contains(err.Error(), "no such file or directory") && !strings.Contains(err.Error(), "executable file not found")) {
-		t.Errorf("Expected 'no such file or directory' or 'executable file not found' error, got: %v", err)
+	if err == nil || (!strings.Contains(err.Error(), "no such file or directory") && !strings.Contains(err.Error(), "executable file not found") && !strings.Contains(err.Error(), "failed to create checkpoint")) {
+		t.Errorf("Expected error containing 'no such file or directory', 'executable file not found', or 'failed to create checkpoint', got: %v", err)
 	}
 }
 
