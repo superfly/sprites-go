@@ -231,7 +231,7 @@ func main() {
 
 	// Wait for machine to be started
 	log.Printf("Waiting for machine to start...")
-	if err := waitForMachineStarted(ctx, flapsClient, machineID, 30*time.Second); err != nil {
+	if err := waitForMachineStarted(ctx, flapsClient, machineID, 60*time.Second); err != nil {
 		// If machine is stuck in creating/updating, force delete it
 		if strings.Contains(err.Error(), "stuck in") {
 			log.Printf("Machine is stuck, attempting to force delete...")

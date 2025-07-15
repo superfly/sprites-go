@@ -2,7 +2,6 @@ go 1.24.4
 
 use (
 	./client
-	./cmd/sprite-run
 	./lib
 	./packages/container
 	./packages/juicefs
