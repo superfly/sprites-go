@@ -13,6 +13,18 @@ import (
 	"github.com/sprite-env/client/prompts"
 )
 
+// GlobalContext contains global state that should be available to all commands
+type GlobalContext struct {
+	Debug     string // Debug log file path (empty if not debugging)
+	ConfigMgr *config.Manager
+	Logger    *slog.Logger
+}
+
+// IsDebugEnabled returns true if debug logging is enabled
+func (gc *GlobalContext) IsDebugEnabled() bool {
+	return gc.Debug != ""
+}
+
 // handlePromptError checks if an error is from user cancellation and handles it gracefully
 func handlePromptError(err error) {
 	if err != nil {

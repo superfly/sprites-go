@@ -15,7 +15,6 @@ import (
 	"sync"
 
 	gorillaws "github.com/gorilla/websocket"
-	"github.com/sprite-env/client/config"
 	"github.com/sprite-env/client/format"
 )
 
@@ -73,7 +72,7 @@ func StartProxyListener(port int, config ProxyConfig) (func(), error) {
 					if strings.Contains(err.Error(), "use of closed network connection") {
 						return // Listener was closed
 					}
-					debugLog("Failed to accept connection on port %d: %v", port, err)
+					logger.Debug("Failed to accept connection on port", "port", port, "error", err)
 					continue
 				}
 
@@ -95,12 +94,16 @@ func StartProxyListener(port int, config ProxyConfig) (func(), error) {
 func HandleProxyConnection(localConn net.Conn, port int, config ProxyConfig) {
 	defer localConn.Close()
 
-	debugLog("Starting proxy connection for port %d to %s", port, config.BaseURL)
+	logger := config.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Debug("Starting proxy connection", "port", port, "baseURL", config.BaseURL)
 
 	// Parse base URL and convert to WebSocket URL
 	parsedURL, err := url.Parse(config.BaseURL)
 	if err != nil {
-		debugLog("Failed to parse base URL: %v", err)
+		logger.Debug("Failed to parse base URL", "error", err)
 		return
 	}
 
@@ -111,7 +114,7 @@ func HandleProxyConnection(localConn net.Conn, port int, config ProxyConfig) {
 	}
 	wsURL := fmt.Sprintf("%s://%s%s", wsScheme, parsedURL.Host, parsedURL.Path)
 
-	debugLog("Connecting to WebSocket: %s", wsURL)
+	logger.Debug("Connecting to WebSocket", "url", wsURL)
 
 	// Set up WebSocket dialer
 	dialer := &gorillaws.Dialer{
@@ -134,12 +137,12 @@ func HandleProxyConnection(localConn net.Conn, port int, config ProxyConfig) {
 	// Connect to WebSocket
 	wsConn, _, err := dialer.Dial(wsURL, headers)
 	if err != nil {
-		debugLog("Failed to connect to WebSocket: %v", err)
+		logger.Debug("Failed to connect to WebSocket", "error", err)
 		return
 	}
 	defer wsConn.Close()
 
-	debugLog("WebSocket connected, sending initialization message")
+	logger.Debug("WebSocket connected, sending initialization message")
 
 	// Send initialization message with target host:port
 	initMsg := ProxyInitMessage{
@@ -148,42 +151,42 @@ func HandleProxyConnection(localConn net.Conn, port int, config ProxyConfig) {
 	}
 	initData, err := json.Marshal(initMsg)
 	if err != nil {
-		debugLog("Failed to marshal init message: %v", err)
+		logger.Debug("Failed to marshal init message", "error", err)
 		return
 	}
 
 	err = wsConn.WriteMessage(gorillaws.TextMessage, initData)
 	if err != nil {
-		debugLog("Failed to send init message: %v", err)
+		logger.Debug("Failed to send init message", "error", err)
 		return
 	}
 
-	debugLog("Initialization message sent, waiting for response")
+	logger.Debug("Initialization message sent, waiting for response")
 
 	// Read response
 	messageType, responseData, err := wsConn.ReadMessage()
 	if err != nil {
-		debugLog("Failed to read response: %v", err)
+		logger.Debug("Failed to read response", "error", err)
 		return
 	}
 
 	if messageType != gorillaws.TextMessage {
-		debugLog("Expected text response, got message type: %d", messageType)
+		logger.Debug("Expected text response", "messageType", messageType)
 		return
 	}
 
 	var response ProxyResponseMessage
 	if err := json.Unmarshal(responseData, &response); err != nil {
-		debugLog("Failed to parse response: %v", err)
+		logger.Debug("Failed to parse response", "error", err)
 		return
 	}
 
 	if response.Status != "connected" {
-		debugLog("Proxy connection failed: %s", response.Status)
+		logger.Debug("Proxy connection failed", "status", response.Status)
 		return
 	}
 
-	debugLog("Proxy connection established for port %d to %s", port, response.Target)
+	logger.Debug("Proxy connection established", "port", port, "target", response.Target)
 
 	// Start bidirectional data forwarding
 	var wg sync.WaitGroup
@@ -199,14 +202,14 @@ func HandleProxyConnection(localConn net.Conn, port int, config ProxyConfig) {
 			n, err := localConn.Read(buffer)
 			if err != nil {
 				if err != io.EOF {
-					debugLog("Local read error: %v", err)
+					logger.Debug("Local read error", "error", err)
 				}
 				return
 			}
 
 			err = wsConn.WriteMessage(gorillaws.BinaryMessage, buffer[:n])
 			if err != nil {
-				debugLog("WebSocket write error: %v", err)
+				logger.Debug("WebSocket write error", "error", err)
 				return
 			}
 		}
@@ -221,7 +224,7 @@ func HandleProxyConnection(localConn net.Conn, port int, config ProxyConfig) {
 			messageType, data, err := wsConn.ReadMessage()
 			if err != nil {
 				if !gorillaws.IsCloseError(err, gorillaws.CloseNormalClosure, gorillaws.CloseGoingAway) {
-					debugLog("WebSocket read error: %v", err)
+					logger.Debug("WebSocket read error", "error", err)
 				}
 				return
 			}
@@ -230,7 +233,7 @@ func HandleProxyConnection(localConn net.Conn, port int, config ProxyConfig) {
 			if messageType == gorillaws.BinaryMessage {
 				_, err := localConn.Write(data)
 				if err != nil {
-					debugLog("Local write error: %v", err)
+					logger.Debug("Local write error", "error", err)
 					return
 				}
 			}
@@ -238,11 +241,11 @@ func HandleProxyConnection(localConn net.Conn, port int, config ProxyConfig) {
 	}()
 
 	wg.Wait()
-	debugLog("Proxy connection closed for port %d", port)
+	logger.Debug("Proxy connection closed", "port", port)
 }
 
 // ProxyCommand handles the proxy command
-func ProxyCommand(cfg *config.Manager, args []string) {
+func ProxyCommand(ctx *GlobalContext, args []string) {
 	// Create command structure
 	cmd := &Command{
 		Name:        "proxy",
@@ -288,7 +291,7 @@ func ProxyCommand(cfg *config.Manager, args []string) {
 	}
 
 	// Ensure we have an org
-	org, spriteName, isNewSprite, err := EnsureOrgAndSprite(cfg, flags.Org, flags.Sprite)
+	org, spriteName, isNewSprite, err := EnsureOrgAndSprite(ctx.ConfigMgr, flags.Org, flags.Sprite)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -297,7 +300,7 @@ func ProxyCommand(cfg *config.Manager, args []string) {
 	// Handle sprite creation if needed
 	if isNewSprite && spriteName != "" {
 		fmt.Printf("Creating sprite %s...\n", format.Sprite(spriteName))
-		if err := CreateSprite(cfg, org, spriteName); err != nil {
+		if err := CreateSprite(ctx.ConfigMgr, org, spriteName); err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating sprite: %v\n", err)
 			os.Exit(1)
 		}
@@ -315,13 +318,13 @@ func ProxyCommand(cfg *config.Manager, args []string) {
 	}
 
 	// Get auth token
-	token, err := org.GetTokenWithKeyringDisabled(cfg.IsKeyringDisabled())
+	token, err := org.GetTokenWithKeyringDisabled(ctx.ConfigMgr.IsKeyringDisabled())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
 		os.Exit(1)
 	}
 
-	logger := slog.Default()
+	logger := ctx.Logger
 	logger.Info("Starting proxy for ports", "ports", ports)
 
 	// Print connection info
@@ -395,12 +398,4 @@ func handleProxyConnection(localConn net.Conn, port int, baseURL, token string) 
 		Logger:  slog.Default(),
 	}
 	HandleProxyConnection(localConn, port, config)
-}
-
-// debugLog logs debug messages (helper function)
-func debugLog(format string, args ...interface{}) {
-	logger := slog.Default()
-	if logger.Enabled(nil, slog.LevelDebug) {
-		logger.Debug(fmt.Sprintf(format, args...))
-	}
 }

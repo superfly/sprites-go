@@ -13,7 +13,7 @@ import (
 )
 
 // DestroyCommand handles the destroy command
-func DestroyCommand(cfg *config.Manager, args []string) {
+func DestroyCommand(ctx *GlobalContext, args []string) {
 	// Create command structure
 	cmd := &Command{
 		Name:        "destroy",
@@ -44,7 +44,7 @@ func DestroyCommand(cfg *config.Manager, args []string) {
 	}
 
 	// Ensure we have an org and sprite
-	org, spriteName, isNewSprite, err := EnsureOrgAndSprite(cfg, flags.Org, flags.Sprite)
+	org, spriteName, isNewSprite, err := EnsureOrgAndSprite(ctx.ConfigMgr, flags.Org, flags.Sprite)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -92,7 +92,7 @@ func DestroyCommand(cfg *config.Manager, args []string) {
 		os.Exit(1)
 	}
 
-	token, err := org.GetTokenWithKeyringDisabled(cfg.IsKeyringDisabled())
+	token, err := org.GetTokenWithKeyringDisabled(ctx.ConfigMgr.IsKeyringDisabled())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
 		os.Exit(1)

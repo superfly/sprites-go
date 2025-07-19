@@ -1,23 +1,18 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
 	"os"
 
 	"github.com/sprite-env/client/commands"
 	"github.com/sprite-env/client/config"
-	"github.com/sprite-env/lib/api"
 )
 
 var (
 	clientLogger *slog.Logger
-	globalDebug  string
-	globalHelp   bool
 )
 
 func setupLogger(debugFile string) {
@@ -49,25 +44,37 @@ func debugLog(format string, a ...interface{}) {
 }
 
 func main() {
-	// Parse global flags first
-	globalFlags := flag.NewFlagSet("sprite", flag.ContinueOnError)
-	globalFlags.StringVar(&globalDebug, "debug", "", "Enable debug logging to file (e.g., --debug=/tmp/debug.log)")
-	globalFlags.BoolVar(&globalHelp, "help", false, "Show help")
-	globalFlags.BoolVar(&globalHelp, "h", false, "Show help")
+	// Define global flags using flag.CommandLine
+	var globalDebug string
+	var globalHelp bool
+
+	flag.CommandLine.Init("sprite", flag.ContinueOnError)
+	flag.StringVar(&globalDebug, "debug", "", "Enable debug logging to file (e.g., --debug=/tmp/debug.log)")
+	flag.BoolVar(&globalHelp, "help", false, "Show help")
+	flag.BoolVar(&globalHelp, "h", false, "Show help")
 
 	// Custom usage for global help
-	globalFlags.Usage = func() {
+	flag.CommandLine.Usage = func() {
 		printUsage()
 	}
 
-	// Parse only known flags, ignore unknown ones for subcommands
-	globalFlags.Parse(os.Args[1:])
+	// Parse global flags
+	err := flag.CommandLine.Parse(os.Args[1:])
+	if err == flag.ErrHelp {
+		// Help was explicitly requested
+		printUsage()
+		os.Exit(0)
+	} else if err != nil {
+		// Some other parsing error
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Setup logging based on debug flag
 	setupLogger(globalDebug)
 
 	// Get remaining args after global flags
-	args := globalFlags.Args()
+	args := flag.Args()
 
 	// Check if we need help or have no command
 	if globalHelp || len(args) == 0 {
@@ -82,29 +89,36 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create global context to pass to commands
+	globalCtx := &commands.GlobalContext{
+		Debug:     globalDebug,
+		ConfigMgr: cfg,
+		Logger:    clientLogger,
+	}
+
 	// Get subcommand
 	subcommand := args[0]
 	subArgs := args[1:]
 
 	switch subcommand {
 	case "exec":
-		commands.ExecCommand(cfg, subArgs)
+		commands.ExecCommand(globalCtx, subArgs)
+	case "console":
+		commands.ConsoleCommand(globalCtx, subArgs)
 	case "checkpoint", "checkpoints", "c":
-		commands.CheckpointCommand(cfg, subArgs)
+		commands.CheckpointCommand(globalCtx, subArgs)
 	case "restore":
-		commands.RestoreCommand(cfg, subArgs)
+		commands.RestoreCommand(globalCtx, subArgs)
 	case "destroy":
-		commands.DestroyCommand(cfg, subArgs)
+		commands.DestroyCommand(globalCtx, subArgs)
 	case "org", "orgs", "organizations":
-		commands.OrgCommand(cfg, subArgs)
+		commands.OrgCommand(globalCtx, subArgs)
 	case "transcripts":
-		// Handle transcripts command using config
-		handleTranscriptsCommand(cfg, subArgs)
+		commands.TranscriptsCommand(globalCtx, subArgs)
 	case "proxy":
-		commands.ProxyCommand(cfg, subArgs)
+		commands.ProxyCommand(globalCtx, subArgs)
 	case "admin":
-		// TODO: Move admin command to commands package if needed
-		adminCommand(cfg, subArgs)
+		commands.AdminCommand(globalCtx, subArgs)
 	default:
 		slog.Error("Unknown command", "command", subcommand)
 		printUsage()
@@ -120,6 +134,7 @@ Usage:
 
 Commands:
   exec                      Execute a command in the sprite environment
+  console                   Open an interactive shell in the sprite environment
   checkpoint [subcommand]   Manage checkpoints (aliases: checkpoints, c)
     create                  Create a new checkpoint
     list                    List all checkpoints
@@ -154,6 +169,10 @@ Examples:
   sprite exec ls -la
   sprite exec -o myorg -s mysprite npm start
 
+  # Open an interactive shell
+  sprite console
+  sprite console -o myorg -s mysprite
+
   # Execute with debug logging
   sprite --debug=/tmp/debug.log exec npm start
 
@@ -180,152 +199,4 @@ Examples:
 
 Use 'sprite <command> --help' for command-specific options.
 `)
-}
-
-// handleTranscriptsCommand handles the transcripts command using the config system
-func handleTranscriptsCommand(cfg *config.Manager, args []string) {
-	if len(args) < 1 {
-		fmt.Fprintf(os.Stderr, "Error: transcripts requires a subcommand\n")
-		fmt.Fprintf(os.Stderr, "Usage: sprite transcripts <enable|disable>\n")
-		os.Exit(1)
-	}
-
-	subcommand := args[0]
-	subArgs := args[1:]
-
-	switch subcommand {
-	case "enable":
-		transcriptsEnableCommand(cfg, subArgs)
-	case "disable":
-		transcriptsDisableCommand(cfg, subArgs)
-	default:
-		fmt.Fprintf(os.Stderr, "Error: Unknown transcripts subcommand '%s'\n", subcommand)
-		fmt.Fprintf(os.Stderr, "Usage: sprite transcripts <enable|disable>\n")
-		os.Exit(1)
-	}
-}
-
-func transcriptsEnableCommand(cfg *config.Manager, args []string) {
-	if len(args) != 0 {
-		fmt.Fprintf(os.Stderr, "Error: transcripts enable takes no arguments\n")
-		fmt.Fprintf(os.Stderr, "Usage: sprite transcripts enable\n")
-		os.Exit(1)
-	}
-
-	// Get current organization
-	org := cfg.GetCurrentOrg()
-	if org == nil {
-		fmt.Fprintf(os.Stderr, "Error: No organization configured. Please run 'sprite org auth' first\n")
-		os.Exit(1)
-	}
-
-	// Make HTTP request
-	url := fmt.Sprintf("%s/transcripts/enable", org.URL)
-	debugLog("HTTP request: %s %s", "POST", url)
-
-	httpReq, err := http.NewRequest("POST", url, nil)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to create HTTP request: %v\n", err)
-		os.Exit(1)
-	}
-
-	token, err := org.GetToken()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
-		os.Exit(1)
-	}
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-
-	client := &http.Client{}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to make HTTP request: %v\n", err)
-		os.Exit(1)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		fmt.Fprintf(os.Stderr, "Error: HTTP %d: %s\n", resp.StatusCode, string(body))
-		os.Exit(1)
-	}
-
-	// Parse JSON response
-	var response api.TranscriptsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to parse response: %v\n", err)
-		os.Exit(1)
-	}
-
-	if response.Enabled {
-		fmt.Println("Transcripts enabled successfully.")
-	} else {
-		fmt.Fprintf(os.Stderr, "Error: Expected transcripts to be enabled, but got disabled response\n")
-		os.Exit(1)
-	}
-}
-
-func transcriptsDisableCommand(cfg *config.Manager, args []string) {
-	if len(args) != 0 {
-		fmt.Fprintf(os.Stderr, "Error: transcripts disable takes no arguments\n")
-		fmt.Fprintf(os.Stderr, "Usage: sprite transcripts disable\n")
-		os.Exit(1)
-	}
-
-	// Get current organization
-	org := cfg.GetCurrentOrg()
-	if org == nil {
-		fmt.Fprintf(os.Stderr, "Error: No organization configured. Please run 'sprite org auth' first\n")
-		os.Exit(1)
-	}
-
-	// Make HTTP request
-	url := fmt.Sprintf("%s/transcripts/disable", org.URL)
-	debugLog("HTTP request: %s %s", "POST", url)
-
-	httpReq, err := http.NewRequest("POST", url, nil)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to create HTTP request: %v\n", err)
-		os.Exit(1)
-	}
-
-	token, err := org.GetToken()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
-		os.Exit(1)
-	}
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-
-	client := &http.Client{}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to make HTTP request: %v\n", err)
-		os.Exit(1)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		fmt.Fprintf(os.Stderr, "Error: HTTP %d: %s\n", resp.StatusCode, string(body))
-		os.Exit(1)
-	}
-
-	// Parse JSON response
-	var response api.TranscriptsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to parse response: %v\n", err)
-		os.Exit(1)
-	}
-
-	if !response.Enabled {
-		fmt.Println("Transcripts disabled successfully.")
-	} else {
-		fmt.Fprintf(os.Stderr, "Error: Expected transcripts to be disabled, but got enabled response\n")
-		os.Exit(1)
-	}
-}
-
-func adminCommand(cfg *config.Manager, args []string) {
-	fmt.Fprintf(os.Stderr, "Error: admin command not yet implemented in new structure\n")
-	os.Exit(1)
 }

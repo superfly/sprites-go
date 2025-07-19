@@ -18,7 +18,7 @@ import (
 )
 
 // CheckpointCommand handles the checkpoint command
-func CheckpointCommand(cfg *config.Manager, args []string) {
+func CheckpointCommand(ctx *GlobalContext, args []string) {
 	// Create command structure
 	cmd := &Command{
 		Name:        "checkpoint",
@@ -63,7 +63,7 @@ func CheckpointCommand(cfg *config.Manager, args []string) {
 	}
 
 	// Ensure we have an org and sprite
-	org, spriteName, isNewSprite, err := EnsureOrgAndSprite(cfg, flags.Org, flags.Sprite)
+	org, spriteName, isNewSprite, err := EnsureOrgAndSprite(ctx.ConfigMgr, flags.Org, flags.Sprite)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -72,7 +72,7 @@ func CheckpointCommand(cfg *config.Manager, args []string) {
 	// Handle sprite creation if needed
 	if isNewSprite && spriteName != "" {
 		fmt.Printf("Creating sprite %s...\n", format.Sprite(spriteName))
-		if err := CreateSprite(cfg, org, spriteName); err != nil {
+		if err := CreateSprite(ctx.ConfigMgr, org, spriteName); err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating sprite: %v\n", err)
 			os.Exit(1)
 		}
@@ -82,13 +82,9 @@ func CheckpointCommand(cfg *config.Manager, args []string) {
 	}
 
 	if len(remainingArgs) < 1 {
-		// Default to list if no subcommand
-		if spriteName != "" {
-			fmt.Println(format.ContextSprite(format.GetOrgDisplayName(org.Name, org.URL), "Listing checkpoints for sprite", spriteName))
-			fmt.Println()
-		}
-		checkpointListCommand(cfg, org, spriteName, "")
-		return
+		fmt.Fprintf(os.Stderr, "Error: checkpoint requires a subcommand\n\n")
+		cmd.FlagSet.Usage()
+		os.Exit(1)
 	}
 
 	subcommand := remainingArgs[0]
@@ -96,30 +92,20 @@ func CheckpointCommand(cfg *config.Manager, args []string) {
 
 	switch subcommand {
 	case "create":
-		if spriteName != "" {
-			fmt.Println(format.ContextSprite(format.GetOrgDisplayName(org.Name, org.URL), "Creating checkpoint for sprite", spriteName))
-			fmt.Println()
-		}
-		checkpointCreateCommand(cfg, org, spriteName, subArgs)
+		checkpointCreateCommand(ctx.ConfigMgr, org, spriteName, subArgs)
 	case "list":
-		if spriteName != "" {
-			fmt.Println(format.ContextSprite(format.GetOrgDisplayName(org.Name, org.URL), "Listing checkpoints for sprite", spriteName))
-			fmt.Println()
-		}
-		checkpointListCommandWithFlags(cfg, org, spriteName, subArgs)
+		checkpointListCommandWithFlags(ctx.ConfigMgr, org, spriteName, subArgs)
 	case "info":
-		if spriteName != "" {
-			fmt.Println(format.ContextSprite(format.GetOrgDisplayName(org.Name, org.URL), "Getting checkpoint info for sprite", spriteName))
-			fmt.Println()
+		if len(subArgs) < 1 {
+			fmt.Fprintf(os.Stderr, "Error: checkpoint info requires a checkpoint ID\n\n")
+			cmd.FlagSet.Usage()
+			os.Exit(1)
 		}
-		checkpointInfoCommand(cfg, org, spriteName, subArgs)
+		checkpointInfoCommand(ctx.ConfigMgr, org, spriteName, subArgs)
 	default:
-		// If it's not a subcommand, assume it's a checkpoint ID for info
-		if spriteName != "" {
-			fmt.Println(format.ContextSprite(format.GetOrgDisplayName(org.Name, org.URL), "Getting checkpoint info for sprite", spriteName))
-			fmt.Println()
-		}
-		checkpointInfoCommand(cfg, org, spriteName, remainingArgs)
+		fmt.Fprintf(os.Stderr, "Error: Unknown checkpoint subcommand '%s'\n\n", subcommand)
+		cmd.FlagSet.Usage()
+		os.Exit(1)
 	}
 }
 
@@ -380,7 +366,7 @@ func checkpointInfoCommand(cfg *config.Manager, org *config.Organization, sprite
 }
 
 // RestoreCommand handles the restore command
-func RestoreCommand(cfg *config.Manager, args []string) {
+func RestoreCommand(ctx *GlobalContext, args []string) {
 	// Create command structure
 	cmd := &Command{
 		Name:        "restore",
@@ -411,7 +397,7 @@ func RestoreCommand(cfg *config.Manager, args []string) {
 	checkpointID := remainingArgs[0]
 
 	// Ensure we have an org and sprite
-	org, spriteName, isNewSprite, err := EnsureOrgAndSprite(cfg, flags.Org, flags.Sprite)
+	org, spriteName, isNewSprite, err := EnsureOrgAndSprite(ctx.ConfigMgr, flags.Org, flags.Sprite)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -420,7 +406,7 @@ func RestoreCommand(cfg *config.Manager, args []string) {
 	// Handle sprite creation if needed
 	if isNewSprite && spriteName != "" {
 		fmt.Printf("Creating sprite %s...\n", format.Sprite(spriteName))
-		if err := CreateSprite(cfg, org, spriteName); err != nil {
+		if err := CreateSprite(ctx.ConfigMgr, org, spriteName); err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating sprite: %v\n", err)
 			os.Exit(1)
 		}
@@ -450,7 +436,7 @@ func RestoreCommand(cfg *config.Manager, args []string) {
 		os.Exit(1)
 	}
 
-	token, err := org.GetTokenWithKeyringDisabled(cfg.IsKeyringDisabled())
+	token, err := org.GetTokenWithKeyringDisabled(ctx.ConfigMgr.IsKeyringDisabled())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
 		os.Exit(1)

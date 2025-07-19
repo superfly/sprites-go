@@ -14,8 +14,8 @@ import (
 )
 
 // OrgCommand handles organization-related commands
-func OrgCommand(cfg *config.Manager, args []string) {
-	// Create command structure for org
+func OrgCommand(ctx *GlobalContext, args []string) {
+	// Create command structure
 	cmd := &Command{
 		Name:        "org",
 		Usage:       "org <subcommand> [options]",
@@ -71,13 +71,13 @@ func OrgCommand(cfg *config.Manager, args []string) {
 
 	switch subcommand {
 	case "auth":
-		orgAuthCommand(cfg, subArgs)
+		orgAuthCommand(ctx.ConfigMgr, subArgs)
 	case "list":
-		orgListCommand(cfg, subArgs)
+		orgListCommand(ctx.ConfigMgr, subArgs)
 	case "logout":
-		orgLogoutCommand(cfg, subArgs)
+		orgLogoutCommand(ctx.ConfigMgr, subArgs)
 	case "keyring":
-		orgKeyringCommand(cfg, subArgs)
+		orgKeyringCommand(ctx.ConfigMgr, subArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "Error: Unknown org subcommand '%s'\n\n", subcommand)
 		cmd.FlagSet.Usage()

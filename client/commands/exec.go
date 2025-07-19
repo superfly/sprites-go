@@ -267,7 +267,7 @@ func (pm *portManager) handleProxyConnection(ctx context.Context, localConn net.
 }
 
 // ExecCommand handles the exec command
-func ExecCommand(cfg *config.Manager, args []string) {
+func ExecCommand(ctx *GlobalContext, args []string) {
 	// Create command structure
 	cmd := &Command{
 		Name:        "exec",
@@ -307,7 +307,7 @@ func ExecCommand(cfg *config.Manager, args []string) {
 	}
 
 	// Ensure we have an org and sprite
-	org, spriteName, isNewSprite, err := EnsureOrgAndSprite(cfg, flags.Org, flags.Sprite)
+	org, spriteName, isNewSprite, err := EnsureOrgAndSprite(ctx.ConfigMgr, flags.Org, flags.Sprite)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -316,7 +316,7 @@ func ExecCommand(cfg *config.Manager, args []string) {
 	// Handle sprite creation if needed
 	if isNewSprite && spriteName != "" {
 		fmt.Printf("Creating sprite %s...\n", format.Sprite(spriteName))
-		if err := CreateSprite(cfg, org, spriteName); err != nil {
+		if err := CreateSprite(ctx.ConfigMgr, org, spriteName); err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating sprite: %v\n", err)
 			os.Exit(1)
 		}
@@ -362,8 +362,7 @@ func ExecCommand(cfg *config.Manager, args []string) {
 	}
 
 	// Only print connection messages if debug logging is enabled
-	logger := slog.Default()
-	if logger.Enabled(context.Background(), slog.LevelDebug) {
+	if ctx.IsDebugEnabled() {
 		fmt.Println()
 		if spriteName != "" {
 			// Config-based connection with org and sprite
@@ -391,7 +390,7 @@ func ExecCommand(cfg *config.Manager, args []string) {
 		exitCode = executeSpriteProxy(org, spriteName, remainingArgs, *workingDir, envList, *tty)
 	} else {
 		// Use direct WebSocket for backward compatibility with SPRITE_URL/SPRITE_TOKEN
-		token, err := org.GetTokenWithKeyringDisabled(cfg.IsKeyringDisabled())
+		token, err := org.GetTokenWithKeyringDisabled(ctx.ConfigMgr.IsKeyringDisabled())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
 			os.Exit(1)
