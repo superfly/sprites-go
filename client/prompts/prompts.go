@@ -44,10 +44,6 @@ func configureForm(form *huh.Form) *huh.Form {
 // PromptForInitialLogin prompts the user to login when no organizations are configured
 func PromptForInitialLogin(cfg *config.Manager) (*config.Organization, error) {
 	var token string
-	var useKeyring bool
-
-	// Check if keyring is disabled
-	keyringDisabled := cfg.IsKeyringDisabled()
 
 	form := huh.NewForm(
 		huh.NewGroup(
@@ -68,37 +64,6 @@ func PromptForInitialLogin(cfg *config.Manager) (*config.Organization, error) {
 				}),
 		),
 	)
-
-	// Add keyring option only if keyring is available
-	if !keyringDisabled {
-		form = huh.NewForm(
-			huh.NewGroup(
-				huh.NewNote().
-					Title("🔐 Authentication Required").
-					Description("We need an API token to work with Sprites. You can get one from your dashboard."),
-
-				huh.NewInput().
-					Key("token").
-					Title("Enter your API token").
-					Password(true).
-					Value(&token).
-					Validate(func(s string) error {
-						if strings.TrimSpace(s) == "" {
-							return fmt.Errorf("API token is required")
-						}
-						return nil
-					}),
-
-				huh.NewConfirm().
-					Key("keyring").
-					Title("Store token securely in system keyring?").
-					Description("Recommended for security. Choose 'No' to store in config file.").
-					Value(&useKeyring).
-					Affirmative("Yes").
-					Negative("No"),
-			),
-		)
-	}
 
 	// Configure form with accessibility and theming
 	form = configureForm(form)
@@ -125,23 +90,9 @@ func PromptForInitialLogin(cfg *config.Manager) (*config.Organization, error) {
 	// Use the organization name from API
 	orgName := orgInfo.Organization
 
-	// Temporarily disable keyring if user chose not to use it
-	if !keyringDisabled && !useKeyring {
-		cfg.SetKeyringDisabled(true)
-	}
-
-	// Add the organization
+	// Add the organization (uses keyring by default unless disabled)
 	if err := cfg.AddOrg(orgName, token, url); err != nil {
-		// Restore keyring setting if we changed it
-		if !keyringDisabled && !useKeyring {
-			cfg.SetKeyringDisabled(false)
-		}
 		return nil, fmt.Errorf("failed to save credentials: %w", err)
-	}
-
-	// Restore keyring setting if we changed it
-	if !keyringDisabled && !useKeyring {
-		cfg.SetKeyringDisabled(false)
 	}
 
 	fmt.Println(format.Success("✓ Authenticated with organization: " + format.Org(orgName)))
@@ -342,4 +293,88 @@ func PromptForAuth() (name, url, token string, err error) {
 	}
 
 	return strings.TrimSpace(name), strings.TrimSpace(url), strings.TrimSpace(token), nil
+}
+
+// PromptForFlyOrganization prompts the user to select a Fly.io organization
+func PromptForFlyOrganization(orgs []FlyOrganization) (*FlyOrganization, error) {
+	if len(orgs) == 0 {
+		return nil, fmt.Errorf("no organizations found")
+	}
+
+	// Create options for organizations
+	var options []huh.Option[string]
+	orgMap := make(map[string]*FlyOrganization)
+
+	for i := range orgs {
+		org := &orgs[i]
+		options = append(options, huh.NewOption(org.Slug, org.Slug))
+		orgMap[org.Slug] = org
+	}
+
+	var selectedSlug string
+
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Key("org").
+				Title("Which Fly.io organization would you like to use?").
+				Description("Select an organization to create a Sprite token for.").
+				Options(options...).
+				Value(&selectedSlug),
+		),
+	)
+
+	// Configure form with accessibility and theming
+	form = configureForm(form)
+
+	if err := form.Run(); err != nil {
+		return nil, fmt.Errorf("organization selection cancelled: %w", err)
+	}
+
+	selectedOrg, exists := orgMap[selectedSlug]
+	if !exists {
+		return nil, fmt.Errorf("selected organization not found")
+	}
+
+	return selectedOrg, nil
+}
+
+// PromptForInviteCode prompts the user to enter an invite code
+func PromptForInviteCode() (string, error) {
+	var inviteCode string
+
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewInput().
+				Key("invite_code").
+				Title("Have you received an invite code for this org?").
+				Description("Enter the invite code you received, or leave blank to cancel.").
+				Placeholder("a1b2c3d4e5f6g7h8").
+				Value(&inviteCode),
+		),
+	)
+
+	// Configure form with accessibility and theming
+	form = configureForm(form)
+
+	if err := form.Run(); err != nil {
+		return "", fmt.Errorf("invite code entry cancelled: %w", err)
+	}
+
+	inviteCode = strings.TrimSpace(inviteCode)
+	if inviteCode == "" {
+		return "", fmt.Errorf("no invite code provided")
+	}
+
+	return inviteCode, nil
+}
+
+// FlyOrganization represents a Fly.io organization
+// This type is duplicated here to avoid circular import with commands package
+type FlyOrganization struct {
+	ID     string
+	Slug   string
+	Name   string
+	Type   string
+	Status string
 }

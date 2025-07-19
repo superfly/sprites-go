@@ -41,9 +41,11 @@ require (
 	golang.org/x/sync v0.12.0 // indirect
 	golang.org/x/sys v0.33.0 // indirect
 	golang.org/x/text v0.23.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
 replace github.com/sprite-env/lib => ../lib
 
 require github.com/superfly/sprite-env/pkg/terminal v0.0.0-00010101000000-000000000000
+
 replace github.com/superfly/sprite-env/pkg/terminal => ../pkg/terminal

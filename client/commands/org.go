@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"os"
 
+	"log/slog"
+	"strings"
+
 	"github.com/sprite-env/client/config"
 	"github.com/sprite-env/client/format"
 	"github.com/sprite-env/client/prompts"
@@ -106,15 +109,115 @@ func orgAuthCommand(cfg *config.Manager, args []string) {
 		os.Exit(1)
 	}
 
-	// Use the same simplified flow as initial login
-	org, err := prompts.PromptForInitialLogin(cfg)
-	handlePromptError(err)
+	// Try Fly authentication
+	org, err := AuthenticateWithFly(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Set as current org
 	if err := cfg.SetCurrentOrg(org.Name); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to set current organization: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// AuthenticateWithFly handles the Fly.io authentication flow
+func AuthenticateWithFly(cfg *config.Manager) (*config.Organization, error) {
+	fmt.Println("🚀 Checking for Fly.io authentication...")
+	slog.Debug("Starting Fly.io authentication flow")
+
+	// Get Fly token
+	flyToken, source, err := GetFlyToken()
+	if err != nil {
+		slog.Debug("Failed to get Fly token", "error", err)
+		// Check if flyctl is installed
+		if CheckFlyctlInstalled() {
+			return nil, fmt.Errorf("no Fly.io authentication found. Please run 'flyctl auth login' first")
+		}
+		return nil, fmt.Errorf("flyctl is not installed. Please install flyctl from https://fly.io/docs/flyctl/install/ and run 'flyctl auth login' to authenticate")
+	}
+
+	// Print where credentials were found
+	if strings.HasPrefix(source, "FLY_") {
+		fmt.Printf("Using Fly credentials from %s\n", source)
+	} else {
+		fmt.Printf("Using Fly credentials from %s\n", source)
+	}
+
+	slog.Debug("Successfully retrieved Fly token", "token_prefix", flyToken[:10]+"...", "token_length", len(flyToken), "source", source)
+	fmt.Print("Fetching organizations...")
+
+	// Fetch organizations
+	flyOrgs, err := FetchFlyOrganizations(flyToken)
+	if err != nil {
+		fmt.Print("\r\033[K") // Clear the line
+		slog.Debug("Failed to fetch organizations", "error", err)
+		return nil, fmt.Errorf("failed to fetch Fly.io organizations: %w", err)
+	}
+	fmt.Print("\r\033[K") // Clear the line
+
+	if len(flyOrgs) == 0 {
+		slog.Debug("No organizations found in Fly account")
+		return nil, fmt.Errorf("no organizations found in your Fly.io account")
+	}
+
+	slog.Debug("Successfully fetched organizations", "count", len(flyOrgs))
+	fmt.Printf("✓ Found %d organization(s)\n", len(flyOrgs))
+	fmt.Println()
+
+	// Convert FlyOrganization to prompts.FlyOrganization
+	promptOrgs := make([]prompts.FlyOrganization, len(flyOrgs))
+	for i, org := range flyOrgs {
+		promptOrgs[i] = prompts.FlyOrganization{
+			ID:     org.ID,
+			Slug:   org.Slug,
+			Name:   org.Name,
+			Type:   org.Type,
+			Status: org.Status,
+		}
+	}
+
+	// Let user select organization
+	selectedOrg, err := prompts.PromptForFlyOrganization(promptOrgs)
+	if err != nil {
+		slog.Debug("Organization selection cancelled", "error", err)
+		return nil, err
+	}
+
+	slog.Debug("Organization selected", "slug", selectedOrg.Slug, "name", selectedOrg.Name)
+	fmt.Printf("\nCreating Sprite token for organization %s...", format.Org(selectedOrg.Slug))
+
+	// Create sprite token
+	spriteToken, err := CreateSpriteToken(flyToken, selectedOrg.Slug)
+	if err != nil {
+		fmt.Print("\r\033[K") // Clear the line
+		slog.Debug("Failed to create sprite token", "error", err)
+		return nil, fmt.Errorf("failed to create Sprite token: %w", err)
+	}
+	fmt.Print("\r\033[K") // Clear the line
+
+	// Store the organization
+	apiURL := "https://api.sprites.dev"
+	if envURL := os.Getenv("SPRITES_API_URL"); envURL != "" {
+		apiURL = envURL
+		slog.Debug("Using custom API URL from environment", "url", apiURL)
+	}
+
+	// Add the organization with the Fly org name (uses keyring by default)
+	slog.Debug("Saving organization", "name", selectedOrg.Slug, "url", apiURL)
+	if err := cfg.AddOrg(selectedOrg.Slug, spriteToken, apiURL); err != nil {
+		slog.Debug("Failed to save organization", "error", err)
+		return nil, fmt.Errorf("failed to save credentials: %w", err)
+	}
+
+	fmt.Println(format.Success("✓ Authenticated with Fly.io organization: " + format.Org(selectedOrg.Slug)))
+	fmt.Println(format.Success("✓ Ready to work with Sprites!") + "\n")
+
+	// Return the newly added org
+	orgs := cfg.GetOrgs()
+	return orgs[selectedOrg.Slug], nil
 }
 
 func orgListCommand(cfg *config.Manager, args []string) {

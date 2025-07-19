@@ -18,7 +18,7 @@ import (
 // - Unmounted and remounted during restore operations
 // - Automatically managed alongside the JuiceFS lifecycle
 //
-// The overlay uses a 100GB sparse XFS image stored at:
+// The overlay uses a 100GB sparse ext4 image stored at:
 // ${JUICEFS_BASE}/data/active/root-upper.img
 //
 // And is mounted at:
@@ -135,14 +135,16 @@ func (om *OverlayManager) EnsureImage() error {
 		return fmt.Errorf("failed to create sparse image: %w, output: %s", err, string(output))
 	}
 
-	// Format with XFS (better for sparse files and overlayfs workloads)
-	om.logger.Info("Formatting image with XFS...")
-	cmd = exec.Command("mkfs.xfs",
-		"-f",              // Force formatting without prompts
-		"-b", "size=4096", // 4K blocks align with page size
-		"-i", "size=512", // Smaller inodes for overlayfs metadata files
-		"-l", "size=64m", // 64MB log size
-		"-d", "agcount=4", // 4 allocation groups for 100GB
+	// Format with ext4 (optimized for JuiceFS block/slice layouts)
+	om.logger.Info("Formatting image with ext4...")
+	cmd = exec.Command("mkfs.ext4",
+		"-F",         // Force formatting without prompts
+		"-b", "4096", // 4K blocks align with page size and JuiceFS
+		"-i", "16384", // One inode per 16K for overlayfs metadata files
+		"-m", "0", // No reserved blocks (it's a dedicated overlay)
+		"-E", "lazy_itable_init=0,lazy_journal_init=0,stride=1024,stripe-width=1024", // Optimize for 4MB blocks
+		"-O", "extent,huge_file,flex_bg,dir_nlink,extra_isize,sparse_super2", // Enable optimizations
+		"-J", "size=128", // 128MB journal for good performance
 		om.imagePath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		// Clean up the image file if formatting fails
@@ -363,10 +365,10 @@ func (om *OverlayManager) PrepareForCheckpoint(ctx context.Context) error {
 			return fmt.Errorf("failed to sync loopback mount: %w", err)
 		}
 
-		om.logger.Info("Freezing XFS filesystem", "path", om.mountPath)
+		om.logger.Info("Freezing ext4 filesystem", "path", om.mountPath)
 		freezeCmd := exec.CommandContext(ctx, "fsfreeze", "--freeze", om.mountPath)
 		if output, err := freezeCmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("failed to freeze XFS filesystem: %w, output: %s", err, string(output))
+			return fmt.Errorf("failed to freeze ext4 filesystem: %w, output: %s", err, string(output))
 		}
 
 		return nil
@@ -384,11 +386,11 @@ func (om *OverlayManager) PrepareForCheckpoint(ctx context.Context) error {
 		return fmt.Errorf("failed to sync overlayfs: %w, output: %s", err, string(output))
 	}
 
-	// Freeze the underlying XFS filesystem to prevent new writes
-	om.logger.Info("Freezing underlying XFS filesystem", "path", om.mountPath)
+	// Freeze the underlying ext4 filesystem to prevent new writes
+	om.logger.Info("Freezing underlying ext4 filesystem", "path", om.mountPath)
 	freezeCmd := exec.CommandContext(ctx, "fsfreeze", "--freeze", om.mountPath)
 	if output, err := freezeCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to freeze XFS filesystem: %w, output: %s", err, string(output))
+		return fmt.Errorf("failed to freeze ext4 filesystem: %w, output: %s", err, string(output))
 	}
 
 	return nil
@@ -400,7 +402,7 @@ func (om *OverlayManager) UnfreezeAfterCheckpoint(ctx context.Context) error {
 		return nil // Not an error if not mounted
 	}
 
-	om.logger.Info("Unfreezing underlying XFS filesystem", "path", om.mountPath)
+	om.logger.Info("Unfreezing underlying ext4 filesystem", "path", om.mountPath)
 	unfreezeCmd := exec.CommandContext(ctx, "fsfreeze", "--unfreeze", om.mountPath)
 	if output, err := unfreezeCmd.CombinedOutput(); err != nil {
 		// Check if it's already unfrozen by trying to write to the underlying mount
@@ -410,7 +412,7 @@ func (om *OverlayManager) UnfreezeAfterCheckpoint(ctx context.Context) error {
 			os.Remove(testFile)
 			return nil
 		}
-		return fmt.Errorf("failed to unfreeze XFS filesystem: %w, output: %s", err, string(output))
+		return fmt.Errorf("failed to unfreeze ext4 filesystem: %w, output: %s", err, string(output))
 	}
 
 	return nil

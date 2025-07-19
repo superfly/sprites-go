@@ -120,9 +120,12 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 			if err == nil && discoveredOrg != nil {
 				org = discoveredOrg
 			} else {
-				// No organizations found - prompt for initial login
-				selectedOrg, err := prompts.PromptForInitialLogin(cfg)
-				handlePromptError(err)
+				// No organizations found - try Fly authentication
+				selectedOrg, err := AuthenticateWithFly(cfg)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
 				org = selectedOrg
 			}
 		} else {
