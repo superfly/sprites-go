@@ -63,22 +63,10 @@ func CheckpointCommand(ctx *GlobalContext, args []string) {
 	}
 
 	// Ensure we have an org and sprite
-	org, spriteName, isNewSprite, err := EnsureOrgAndSprite(ctx.ConfigMgr, flags.Org, flags.Sprite)
+	org, spriteName, err := EnsureOrgAndSprite(ctx.ConfigMgr, flags.Org, flags.Sprite)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
-	}
-
-	// Handle sprite creation if needed
-	if isNewSprite && spriteName != "" {
-		fmt.Printf("Creating sprite %s...\n", format.Sprite(spriteName))
-		if err := CreateSprite(ctx.ConfigMgr, org, spriteName); err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating sprite: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Printf("%s Sprite %s created successfully!\n", format.Success("✓"), format.Sprite(spriteName))
-		// Sprite is now created and ready to use
-		isNewSprite = false
 	}
 
 	if len(remainingArgs) < 1 {
@@ -397,22 +385,10 @@ func RestoreCommand(ctx *GlobalContext, args []string) {
 	checkpointID := remainingArgs[0]
 
 	// Ensure we have an org and sprite
-	org, spriteName, isNewSprite, err := EnsureOrgAndSprite(ctx.ConfigMgr, flags.Org, flags.Sprite)
+	org, spriteName, err := EnsureOrgAndSprite(ctx.ConfigMgr, flags.Org, flags.Sprite)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
-	}
-
-	// Handle sprite creation if needed
-	if isNewSprite && spriteName != "" {
-		fmt.Printf("Creating sprite %s...\n", format.Sprite(spriteName))
-		if err := CreateSprite(ctx.ConfigMgr, org, spriteName); err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating sprite: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Printf("%s Sprite %s created successfully!\n", format.Success("✓"), format.Sprite(spriteName))
-		// Sprite is now created and ready to use
-		isNewSprite = false
 	}
 
 	if spriteName != "" {

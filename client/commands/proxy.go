@@ -291,20 +291,10 @@ func ProxyCommand(ctx *GlobalContext, args []string) {
 	}
 
 	// Ensure we have an org
-	org, spriteName, isNewSprite, err := EnsureOrgAndSprite(ctx.ConfigMgr, flags.Org, flags.Sprite)
+	org, spriteName, err := EnsureOrgAndSprite(ctx.ConfigMgr, flags.Org, flags.Sprite)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
-	}
-
-	// Handle sprite creation if needed
-	if isNewSprite && spriteName != "" {
-		fmt.Printf("Creating sprite %s...\n", format.Sprite(spriteName))
-		if err := CreateSprite(ctx.ConfigMgr, org, spriteName); err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating sprite: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Printf("%s Sprite %s created successfully!\n", format.Success("✓"), format.Sprite(spriteName))
 	}
 
 	// Get the base URL for the proxy

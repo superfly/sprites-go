@@ -138,7 +138,7 @@ func ApiCommand(ctx *GlobalContext, args []string) {
 	curlArgs := remainingArgs[1:]
 
 	// Ensure we have org and sprite
-	org, spriteName, _, err := EnsureOrgAndSprite(ctx.ConfigMgr, flags.Org, flags.Sprite)
+	org, spriteName, err := EnsureOrgAndSprite(ctx.ConfigMgr, flags.Org, flags.Sprite)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

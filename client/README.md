@@ -4,7 +4,7 @@ The Sprite client allows you to manage and interact with sprites (lightweight VM
 
 ## Current Status
 
-> **Note:** The client now supports automatic sprite creation when needed. When you select a new sprite name, the client will create it on the server automatically.
+> **Note:** Sprites must be explicitly created using `sprite create` before they can be used. The client will not automatically create sprites.
 
 ## Configuration
 

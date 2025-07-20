@@ -44,17 +44,15 @@ func PromptForConfirmationOrExit(title, description string) bool {
 	return confirmed
 }
 
-// EnsureOrgAndSprite ensures we have both an organization and sprite selected
-// Returns the org and sprite name, with isNew indicating if this is a new sprite
-// The orgOverride and spriteOverride parameters allow command-line flags to override config
-func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string) (*config.Organization, string, bool, error) {
+// EnsureOrgAndSprite ensures we have an organization and sprite selected.
+// It returns the organization and sprite name.
+func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string) (*config.Organization, string, error) {
 	// First check if we have environment variables set
 	envURL := os.Getenv("SPRITE_URL")
 	envToken := os.Getenv("SPRITE_TOKEN")
 
 	var org *config.Organization
 	var spriteName string
-	isNew := false
 
 	// If env vars are set, use them (backward compatibility)
 	if envURL != "" && envToken != "" {
@@ -69,12 +67,10 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 		if spriteOverride != "" {
 			// When using env vars with sprite override, we can track the sprite
 			spriteName = spriteOverride
-			// Since we don't have a way to check if it exists with env-based config, assume it's new
-			isNew = true
-			return org, spriteName, isNew, nil
+			return org, spriteName, nil
 		}
 		// Without sprite override, maintain backward compatibility (no sprite tracking)
-		return org, "", false, nil
+		return org, "", nil
 	}
 
 	// Check if we have command-line overrides
@@ -90,7 +86,7 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 			}
 		}
 		if org == nil {
-			return nil, "", false, fmt.Errorf("organization '%s' not found", orgOverride)
+			return nil, "", fmt.Errorf("organization '%s' not found", orgOverride)
 		}
 	}
 
@@ -99,7 +95,7 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 		// Check if we have a .sprite file in the current directory or parent directories
 		spriteFile, err := config.ReadSpriteFile()
 		if err != nil {
-			return nil, "", false, fmt.Errorf("failed to read .sprite file: %w", err)
+			return nil, "", fmt.Errorf("failed to read .sprite file: %w", err)
 		}
 
 		// If we have a .sprite file, use it
@@ -126,6 +122,7 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 				}
 				// Set as current in the config
 				cfg.SetCurrentOrg(org.Name)
+				// Don't check sprite existence - let API endpoints handle it
 			}
 		}
 	}
@@ -164,6 +161,7 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 	// Handle sprite override
 	if spriteOverride != "" {
 		spriteName = spriteOverride
+		// Don't check sprite existence - let API endpoints handle it
 	}
 
 	// If no sprite yet, prompt for one
@@ -171,7 +169,7 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 		var err error
 		spriteName, err = promptForSpriteName()
 		handlePromptError(err)
-		isNew = true // Assume it's new since we don't track sprites
+		// Don't check sprite existence - let API endpoints handle it
 	}
 
 	// Save .sprite file if we have both org and sprite and no overrides were used
@@ -190,7 +188,7 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 		}
 	}
 
-	return org, spriteName, isNew, nil
+	return org, spriteName, nil
 }
 
 // promptForSpriteName prompts the user to enter a sprite name using huh

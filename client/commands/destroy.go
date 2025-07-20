@@ -44,15 +44,9 @@ func DestroyCommand(ctx *GlobalContext, args []string) {
 	}
 
 	// Ensure we have an org and sprite
-	org, spriteName, isNewSprite, err := EnsureOrgAndSprite(ctx.ConfigMgr, flags.Org, flags.Sprite)
+	org, spriteName, err := EnsureOrgAndSprite(ctx.ConfigMgr, flags.Org, flags.Sprite)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Destroy should always fail for new sprites since they don't exist on the server yet
-	if isNewSprite {
-		fmt.Fprintf(os.Stderr, "Error: Cannot destroy a sprite that hasn't been created yet\n")
 		os.Exit(1)
 	}
 

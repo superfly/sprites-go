@@ -27,11 +27,11 @@ func getSpritesAPIURL(org *config.Organization) string {
 // buildSpriteProxyURL builds the URL for sprite proxy endpoints
 func buildSpriteProxyURL(org *config.Organization, spriteName string, path string) string {
 	baseURL := getSpritesAPIURL(org)
-	
+
 	// Clean up the path
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
-	
+
 	return baseURL + "/v1/sprites/" + spriteName + path
 }
