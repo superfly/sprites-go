@@ -2,22 +2,21 @@ package handlers
 
 import (
 	"context"
+	"io"
 	"os"
 	"time"
 
 	"github.com/sprite-env/lib/api"
-
 	"github.com/sprite-env/packages/juicefs"
 	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
 // SystemManager interface provides methods for managing the system (process + storage)
 type SystemManager interface {
-	// Configuration management
-	IsConfigured() bool
-	Configure(config interface{}) error // Using interface{} to avoid circular import
+	// System lifecycle management
 	Boot(ctx context.Context) error
-	GetDynamicConfigPath() string
+	Shutdown(ctx context.Context) error
+	Wait() error
 
 	// Process management
 	IsProcessRunning() bool
@@ -44,11 +43,16 @@ type SystemManager interface {
 	EnableTranscripts(ctx context.Context) error
 	DisableTranscripts(ctx context.Context) error
 	IsTranscriptsEnabled() bool
-
 	CreateTranscriptCollector(env []string, ty bool) (terminal.TranscriptCollector, error)
 
 	// Reaper integration
 	SubscribeToReapEvents() <-chan int
 	UnsubscribeFromReapEvents(ch <-chan int)
 	WasProcessReaped(pid int) (bool, time.Time)
+}
+
+// ProcessManager interface for process operations
+type ProcessManager interface {
+	GetTranscriptReader() io.ReadSeeker
+	GetTranscriptReader2() (func() io.ReadSeeker, func() error)
 }

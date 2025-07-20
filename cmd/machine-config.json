@@ -11,6 +11,9 @@
       "path": "/dev/fly_vol"
     }
   ],
+  "metadata": {
+    "sprite-version": "0.0.1"
+  },
   "image": "<image_ref>", 
   "containers": [
     {

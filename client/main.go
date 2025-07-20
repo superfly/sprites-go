@@ -109,6 +109,8 @@ func main() {
 		commands.CheckpointCommand(globalCtx, subArgs)
 	case "restore":
 		commands.RestoreCommand(globalCtx, subArgs)
+	case "create":
+		commands.CreateCommand(globalCtx, subArgs)
 	case "destroy":
 		commands.DestroyCommand(globalCtx, subArgs)
 	case "org", "orgs", "organizations":
@@ -119,6 +121,8 @@ func main() {
 		commands.ProxyCommand(globalCtx, subArgs)
 	case "admin":
 		commands.AdminCommand(globalCtx, subArgs)
+	case "api":
+		commands.ApiCommand(globalCtx, subArgs)
 	default:
 		slog.Error("Unknown command", "command", subcommand)
 		printUsage()
@@ -135,6 +139,7 @@ Usage:
 Commands:
   exec                      Execute a command in the sprite environment
   console                   Open an interactive shell in the sprite environment
+  create <name>             Create a new sprite
   checkpoint [subcommand]   Manage checkpoints (aliases: checkpoints, c)
     create                  Create a new checkpoint
     list                    List all checkpoints
@@ -145,6 +150,7 @@ Commands:
     enable                  Enable transcript recording for future exec calls
     disable                 Disable transcript recording for future exec calls
   proxy <port1> [port2...]  Forward local ports through the remote server proxy
+  api [options] <path>      Make authenticated API calls with curl
 
 Organization Commands:
   org auth                  Add an API token (aliases: orgs, organizations)
@@ -164,6 +170,10 @@ Examples:
   # Authenticate with an organization
   sprite org auth
   sprite orgs auth
+
+  # Create a new sprite
+  sprite create my-sprite
+  sprite create -o myorg dev-sprite
 
   # Execute a command
   sprite exec ls -la

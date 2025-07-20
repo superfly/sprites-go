@@ -135,7 +135,15 @@ func NewWithS3Client(s3Client S3API, bucketName, leaseKey, machineID, baseDir st
 // Wait blocks until the lease is successfully acquired
 func (l *Leaser) Wait(ctx context.Context) error {
 	// 1. Attempt to acquire lease optimistically with etag stored on disk
-	acquired, etag, err := l.tryAcquireLease(ctx, "")
+	var initialETag string
+	if data, err := os.ReadFile(l.etagFilePath); err == nil {
+		initialETag = string(bytes.TrimSpace(data))
+		l.logger.Debug("Read existing etag from file", "etag", initialETag)
+	} else {
+		l.logger.Debug("No existing etag file found, will attempt to create new lease")
+	}
+
+	acquired, etag, err := l.tryAcquireLease(ctx, initialETag)
 	if err != nil {
 		return fmt.Errorf("failed to try acquire lease: %w", err)
 	}
@@ -148,9 +156,16 @@ func (l *Leaser) Wait(ctx context.Context) error {
 		return nil
 	}
 
+	// Conditional check failed - our etag is stale, delete it
+	if err := os.Remove(l.etagFilePath); err != nil && !os.IsNotExist(err) {
+		l.logger.Debug("Failed to remove stale etag file", "error", err)
+	} else {
+		l.logger.Debug("Removed stale etag file")
+	}
+
 	// 2. If there's a conflict, read current lease info
 	l.logger.Info("Lease acquisition failed, reading current lease info...")
-	currentLease, expired, err := l.checkCurrentLease(ctx)
+	currentLease, currentETag, expired, err := l.checkCurrentLease(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to check current lease: %w", err)
 	}
@@ -159,12 +174,8 @@ func (l *Leaser) Wait(ctx context.Context) error {
 	if expired || (currentLease != nil && currentLease.MachineID == l.machineID) {
 		l.logger.Info("Lease is expired or held by us, attempting acquisition with current etag", "machineID", l.machineID)
 
-		// Get current etag for the object
-		currentETag, err := l.getCurrentETag(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to get current etag: %w", err)
-		}
-
+		// Use the ETag we already got from checkCurrentLease
+		// If the lease didn't exist (currentLease == nil), currentETag will be empty string
 		acquired, etag, err := l.tryAcquireLease(ctx, currentETag)
 		if err != nil {
 			return fmt.Errorf("failed to acquire lease with current etag: %w", err)
@@ -220,19 +231,6 @@ func (l *Leaser) Stop() {
 func (l *Leaser) tryAcquireLease(ctx context.Context, ifMatch string) (bool, string, error) {
 	l.attemptCount++
 
-	// If ifMatch is empty, try to read etag from file
-	actualIfMatch := ifMatch
-	if actualIfMatch == "" {
-		if data, err := os.ReadFile(l.etagFilePath); err == nil {
-			actualIfMatch = string(bytes.TrimSpace(data))
-			l.logger.Debug("Read existing etag from file", "etag", actualIfMatch)
-		} else {
-			// File doesn't exist, use empty string (will use IfNoneMatch)
-			actualIfMatch = ""
-			l.logger.Debug("No existing etag file found, using empty etag")
-		}
-	}
-
 	leaseInfo := LeaseInfo{
 		MachineID:  l.machineID,
 		ExpiresAt:  time.Now().Add(1 * time.Hour),
@@ -252,14 +250,14 @@ func (l *Leaser) tryAcquireLease(ctx context.Context, ifMatch string) (bool, str
 		ContentType: aws.String("application/json"),
 	}
 
-	// Set conditional headers based on the actualIfMatch parameter
-	if actualIfMatch == "" {
+	// Set conditional headers based on the ifMatch parameter
+	if ifMatch == "" {
 		// We want to create the object only if it doesn't exist
 		// Use IfNoneMatch with "*" to ensure it doesn't exist
 		input.IfNoneMatch = aws.String("*")
 	} else {
 		// We have an existing ETag, use it for conditional update
-		input.IfMatch = aws.String(actualIfMatch)
+		input.IfMatch = aws.String(ifMatch)
 	}
 
 	// Attempt to put the object with X-Tigris-Regions header
@@ -311,7 +309,7 @@ func (l *Leaser) tryAcquireLease(ctx context.Context, ifMatch string) (bool, str
 }
 
 // checkCurrentLease reads the current lease and returns the lease info and whether it's expired
-func (l *Leaser) checkCurrentLease(ctx context.Context) (*LeaseInfo, bool, error) {
+func (l *Leaser) checkCurrentLease(ctx context.Context) (*LeaseInfo, string, bool, error) {
 	// Get the lease object
 	getInput := &s3.GetObjectInput{
 		Bucket: aws.String(l.bucketName),
@@ -322,21 +320,27 @@ func (l *Leaser) checkCurrentLease(ctx context.Context) (*LeaseInfo, bool, error
 	if err != nil {
 		// If object doesn't exist, lease is available
 		if strings.Contains(err.Error(), "NoSuchKey") || strings.Contains(err.Error(), "404") {
-			return nil, true, nil
+			return nil, "", true, nil
 		}
-		return nil, false, fmt.Errorf("failed to get lease object: %w", err)
+		return nil, "", false, fmt.Errorf("failed to get lease object: %w", err)
 	}
 	defer output.Body.Close()
+
+	// Extract ETag from response
+	etag := ""
+	if output.ETag != nil {
+		etag = strings.Trim(*output.ETag, `"`)
+	}
 
 	// Read and parse the lease info
 	data, err := io.ReadAll(output.Body)
 	if err != nil {
-		return nil, false, fmt.Errorf("failed to read lease body: %w", err)
+		return nil, "", false, fmt.Errorf("failed to read lease body: %w", err)
 	}
 
 	var leaseInfo LeaseInfo
 	if err := json.Unmarshal(data, &leaseInfo); err != nil {
-		return nil, false, fmt.Errorf("failed to unmarshal lease info: %w", err)
+		return nil, "", false, fmt.Errorf("failed to unmarshal lease info: %w", err)
 	}
 
 	// Check if lease is expired
@@ -351,7 +355,7 @@ func (l *Leaser) checkCurrentLease(ctx context.Context) (*LeaseInfo, bool, error
 			"expiresAt", leaseInfo.ExpiresAt.Format(time.RFC3339))
 	}
 
-	return &leaseInfo, expired, nil
+	return &leaseInfo, etag, expired, nil
 }
 
 // getCurrentETag gets the current ETag of the lease object
@@ -380,27 +384,16 @@ func (l *Leaser) waitForLease(ctx context.Context) error {
 
 	// Check immediately first, don't wait
 	for {
-		currentLease, expired, err := l.checkCurrentLease(ctx)
+		currentLease, currentETag, expired, err := l.checkCurrentLease(ctx)
 		if err != nil {
 			l.logger.Error("Error checking current lease", "error", err)
 		} else {
 			if currentLease == nil || expired {
 				l.logger.Info("Lease is now available, attempting to acquire...")
 
-				// Get current etag and try to acquire with it
-				var ifMatch string
-				if currentLease != nil && expired {
-					// Lease exists but is expired, use current ETag
-					currentETag, err := l.getCurrentETag(ctx)
-					if err != nil {
-						l.logger.Error("Error getting current etag", "error", err)
-					} else {
-						ifMatch = currentETag
-					}
-				}
-				// If currentLease is nil, use empty string (new lease)
-
-				acquired, etag, err := l.tryAcquireLease(ctx, ifMatch)
+				// Use the ETag we got from checkCurrentLease
+				// If currentLease is nil (object doesn't exist), currentETag will be empty string
+				acquired, etag, err := l.tryAcquireLease(ctx, currentETag)
 				if err != nil {
 					l.logger.Error("Error trying to acquire lease", "error", err)
 				} else if acquired {

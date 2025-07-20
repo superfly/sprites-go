@@ -124,7 +124,7 @@ func main() {
 
 	// Look for existing sprite_data volume
 	for _, v := range volumes {
-		if v.Name == "sprite_data" {
+		if v.Name == "sprite_data" || v.Name == "data" {
 			volumeID = v.ID
 			log.Printf("Found existing volume: %s\n", volumeID)
 			break
@@ -163,7 +163,7 @@ func main() {
 
 	// Look for existing sprite_compute machine
 	for _, m := range machines {
-		if m.Name == "sprite_compute" {
+		if m.Name == "sprite_compute" || strings.HasPrefix(m.Name, "sprites-") {
 			machineID = m.ID
 			log.Printf("Found existing machine: %s\n", machineID)
 			break

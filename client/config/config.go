@@ -140,8 +140,8 @@ func (m *Manager) discoverFromKeyring() error {
 		m.config.Orgs = make(map[string]*Organization)
 	}
 
+	// Try some common generic organization names
 	commonOrgNames := []string{
-		"kurtle-the-turtle", // Based on user's actual keyring entry
 		"default",
 		"sprites",
 		"main",

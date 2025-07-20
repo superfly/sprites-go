@@ -1,28 +1,62 @@
+# our stuff
+# this is just a local utility for doing deploys and stuff
+cmd/
+
 # Git
 .git
 .gitignore
+.gitattributes
 
-spec
-scripts
+# Documentation
+*.md
+docs/
+README.md
+LICENSE
+CHANGELOG*
 
-# Go build artifacts
-tmp/
-dist/
-sprite-env
+# Development and testing
+*_test.go
+*.test
+test/
+tests/
+spec/
+**/test-scripts/
+**/*_test.go
+**/*_examples_test.go
+**/example_test.go
+
+# Build artifacts and binaries
+sprite-test
+sprite-test-harness
+sprite-run
+sprite-cli
 *.exe
 *.dll
 *.so
 *.dylib
 
-# Test files
-*_test.go
-test-scripts/
-tests/
+# Go specific
+vendor/
+coverage.txt
+coverage.html
+*.prof
 *.test
+*.out
 
-# Documentation
-*.md
-examples/
+# Python specific
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.Python
+*.egg
+*.whl
 
 # IDE and editor files
 .vscode/
@@ -30,26 +64,49 @@ examples/
 *.swp
 *.swo
 *~
-.cursor/
-
-# OS files
 .DS_Store
-Thumbs.db
+*.sublime-*
 
 # Temporary files
+tmp/
+temp/
 *.tmp
 *.temp
 *.log
+*.pid
 
-# Docker files
-Dockerfile*
-.dockerignore
-
-# GitHub
-.github/
-
-# Issue tracking
-issues/
-
-# Config examples (but keep actual configs)
+# Local configuration
+*.local
+*.env
+.env.*
+config.local.*
 config.example.json
+
+# Scripts and development tools
+scripts/
+Makefile
+**/Makefile
+pytest.ini
+run-tests.sh
+**/run-tests.sh
+
+# Dockerfiles themselves (usually not needed in the build context)
+Dockerfile.test
+**/Dockerfile.test
+
+# TLA+ spec files
+*.tla
+*.cfg
+*.jar
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# Miscellaneous
+TODO.md
+TOKENS.md
+AGENTS.md
+dear_llm.md
+dear-llm.md

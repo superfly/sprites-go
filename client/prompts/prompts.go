@@ -41,67 +41,6 @@ func configureForm(form *huh.Form) *huh.Form {
 	return form
 }
 
-// PromptForInitialLogin prompts the user to login when no organizations are configured
-func PromptForInitialLogin(cfg *config.Manager) (*config.Organization, error) {
-	var token string
-
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewNote().
-				Title("🔐 Authentication Required").
-				Description("We need an API token to work with Sprites. You can get one from your dashboard."),
-
-			huh.NewInput().
-				Key("token").
-				Title("Enter your API token").
-				Password(true).
-				Value(&token).
-				Validate(func(s string) error {
-					if strings.TrimSpace(s) == "" {
-						return fmt.Errorf("API token is required")
-					}
-					return nil
-				}),
-		),
-	)
-
-	// Configure form with accessibility and theming
-	form = configureForm(form)
-
-	if err := form.Run(); err != nil {
-		return nil, fmt.Errorf("authentication cancelled: %w", err)
-	}
-
-	// Use the Sprites API URL (can be overridden with SPRITES_API_URL)
-	url := "https://api.sprites.dev"
-	if envURL := os.Getenv("SPRITES_API_URL"); envURL != "" {
-		url = envURL
-	}
-
-	// Show validation progress
-	fmt.Print("Validating token...")
-	orgInfo, err := fetchOrganizationInfo(token, url)
-	if err != nil {
-		fmt.Print("\r\033[K") // Clear the line
-		return nil, fmt.Errorf("token validation failed: %w", err)
-	}
-	fmt.Print("\r\033[K") // Clear the line
-
-	// Use the organization name from API
-	orgName := orgInfo.Organization
-
-	// Add the organization (uses keyring by default unless disabled)
-	if err := cfg.AddOrg(orgName, token, url); err != nil {
-		return nil, fmt.Errorf("failed to save credentials: %w", err)
-	}
-
-	fmt.Println(format.Success("✓ Authenticated with organization: " + format.Org(orgName)))
-	fmt.Println(format.Success("✓ Ready to work with Sprites!") + "\n")
-
-	// Return the newly added org
-	return cfg.GetOrgs()[orgName], nil
-}
-
 // getOrgDisplayName returns a user-friendly display name for the organization
 func getOrgDisplayName(org *config.Organization) string {
 	return format.GetOrgDisplayName(org.Name, org.URL)
@@ -122,9 +61,6 @@ func SelectOrganization(cfg *config.Manager) (*config.Organization, error) {
 		options = append(options, huh.NewOption(displayName, org.Name))
 	}
 
-	// Add option to add new organization
-	options = append(options, huh.NewOption("🔗 Add new organization", "__add_new__"))
-
 	var selectedOrgKey string
 
 	form := huh.NewForm(
@@ -132,7 +68,7 @@ func SelectOrganization(cfg *config.Manager) (*config.Organization, error) {
 			huh.NewSelect[string]().
 				Key("org").
 				Title("Which organization are you working with?").
-				Description("Select an existing organization or add a new one.").
+				Description("Select an existing organization.").
 				Options(options...).
 				Value(&selectedOrgKey),
 		),
@@ -143,16 +79,6 @@ func SelectOrganization(cfg *config.Manager) (*config.Organization, error) {
 
 	if err := form.Run(); err != nil {
 		return nil, fmt.Errorf("organization selection cancelled: %w", err)
-	}
-
-	// Check if user wants to add a new organization
-	if selectedOrgKey == "__add_new__" {
-		fmt.Println()
-		newOrg, err := PromptForInitialLogin(cfg)
-		if err != nil {
-			return nil, fmt.Errorf("failed to add new organization: %w", err)
-		}
-		return newOrg, nil
 	}
 
 	// Find the selected organization

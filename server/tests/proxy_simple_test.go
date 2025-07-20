@@ -302,15 +302,12 @@ func (m *simpleSystemManager) IsTranscriptsEnabled() bool {
 func (m *simpleSystemManager) CreateTranscriptCollector(env []string, ty bool) (terminal.TranscriptCollector, error) {
 	return nil, nil
 }
-func (m *simpleSystemManager) IsConfigured() bool {
-	return true
-}
-func (m *simpleSystemManager) Configure(config interface{}) error {
-	return nil
-}
 func (m *simpleSystemManager) Boot(ctx context.Context) error {
 	return nil
 }
-func (m *simpleSystemManager) GetDynamicConfigPath() string {
-	return "/tmp/mock-config.json"
+func (m *simpleSystemManager) Shutdown(ctx context.Context) error {
+	return nil
+}
+func (m *simpleSystemManager) Wait() error {
+	return nil
 }

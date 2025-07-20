@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
@@ -54,8 +53,6 @@ type systemState struct {
 	processRunning     bool
 	restoringNow       bool
 	juicefsReady       bool
-	configured         bool
-	dynamicConfigPath  string
 	transcriptsEnabled bool
 	transcriptDBPath   string
 }
@@ -103,11 +100,6 @@ type System struct {
 
 // NewSystem creates a new System instance
 func NewSystem(config SystemConfig, logger *slog.Logger, reaper *Reaper) (*System, error) {
-	return NewSystemWithDynamicConfig(config, "", logger, reaper)
-}
-
-// NewSystemWithDynamicConfig creates a new System instance with dynamic config support
-func NewSystemWithDynamicConfig(config SystemConfig, dynamicConfigPath string, logger *slog.Logger, reaper *Reaper) (*System, error) {
 	s := &System{
 		config:         config,
 		logger:         logger,
@@ -118,8 +110,6 @@ func NewSystemWithDynamicConfig(config SystemConfig, dynamicConfigPath string, l
 		stateCh:        make(chan stateOp),
 		stopCh:         make(chan struct{}),
 		stateMgr: &systemState{
-			configured:         false,
-			dynamicConfigPath:  dynamicConfigPath,
 			transcriptsEnabled: config.TranscriptsEnabled,
 			transcriptDBPath:   config.TranscriptDBPath,
 		},
@@ -128,12 +118,68 @@ func NewSystemWithDynamicConfig(config SystemConfig, dynamicConfigPath string, l
 	// Start state manager goroutine
 	go s.runStateManager()
 
-	// For backward compatibility, if config is already populated, configure immediately
-	if config.JuiceFSBaseDir != "" || config.ContainerEnabled || len(config.ProcessCommand) > 0 {
-		if err := s.Configure(config); err != nil {
-			close(s.stopCh)
-			return nil, err
+	// Configure container package with system settings
+	logger.Info("Configuring container package",
+		"enabled", config.ContainerEnabled,
+		"socket_dir", config.ContainerSocketDir,
+		"tty_timeout", config.ContainerTTYTimeout)
+
+	container.Configure(container.Config{
+		Enabled:   config.ContainerEnabled,
+		SocketDir: config.ContainerSocketDir,
+	})
+
+	if config.ContainerEnabled {
+		logger.Info("Container features enabled",
+			"socket_dir", config.ContainerSocketDir,
+			"tty_timeout", config.ContainerTTYTimeout)
+	} else {
+		logger.Info("Container features disabled")
+	}
+
+	// Set up JuiceFS if base directory is configured
+	if config.JuiceFSBaseDir != "" {
+		juicefsConfig := juicefs.Config{
+			BaseDir:           config.JuiceFSBaseDir,
+			LocalMode:         config.JuiceFSLocalMode,
+			S3AccessKey:       config.S3AccessKey,
+			S3SecretAccessKey: config.S3SecretAccessKey,
+			S3EndpointURL:     config.S3EndpointURL,
+			S3Bucket:          config.S3Bucket,
+			VolumeName:        "sprite-juicefs",
+			// Overlay configuration
+			OverlayEnabled:       config.OverlayEnabled,
+			OverlayImageSize:     config.OverlayImageSize,
+			OverlayLowerPath:     config.OverlayLowerPath,
+			OverlayLowerPaths:    config.OverlayLowerPaths,
+			OverlayTargetPath:    config.OverlayTargetPath,
+			OverlaySkipOverlayFS: config.OverlaySkipOverlayFS,
+			Logger:               logger,
 		}
+
+		// Create leaser for S3 mode (non-local mode)
+		if !config.JuiceFSLocalMode && config.S3AccessKey != "" && config.S3SecretAccessKey != "" &&
+			config.S3EndpointURL != "" && config.S3Bucket != "" {
+			leaserConfig := leaser.Config{
+				S3AccessKey:       config.S3AccessKey,
+				S3SecretAccessKey: config.S3SecretAccessKey,
+				S3EndpointURL:     config.S3EndpointURL,
+				S3Bucket:          config.S3Bucket,
+				BaseDir:           config.JuiceFSBaseDir,
+				Logger:            logger,
+			}
+
+			leaserInstance := leaser.New(leaserConfig)
+			s.leaserInstance = leaserInstance
+			juicefsConfig.LeaseManager = leaserInstance
+		}
+
+		jfs, err := juicefs.New(juicefsConfig)
+		if err != nil {
+			close(s.stopCh)
+			return nil, fmt.Errorf("failed to create JuiceFS instance: %w", err)
+		}
+		s.juicefs = jfs
 	}
 
 	return s, nil
@@ -150,10 +196,6 @@ func (s *System) runStateManager() {
 			case stateOpGet:
 				var result interface{}
 				switch op.field {
-				case "configured":
-					result = s.stateMgr.configured
-				case "dynamicConfigPath":
-					result = s.stateMgr.dynamicConfigPath
 				case "processRunning":
 					result = s.stateMgr.processRunning
 				case "restoringNow":
@@ -168,8 +210,6 @@ func (s *System) runStateManager() {
 				op.response <- result
 			case stateOpSet:
 				switch op.field {
-				case "configured":
-					s.stateMgr.configured = op.value.(bool)
 				case "processRunning":
 					s.stateMgr.processRunning = op.value.(bool)
 				case "restoringNow":
@@ -210,116 +250,9 @@ func (s *System) setState(field string, value interface{}) {
 	<-op.response
 }
 
-// Configure sets up the system with the provided configuration
-func (s *System) Configure(config interface{}) error {
-	if s.getState("configured").(bool) {
-		return fmt.Errorf("system already configured")
-	}
-
-	var sysConfig SystemConfig
-
-	// Try direct type assertion first
-	if sc, ok := config.(SystemConfig); ok {
-		sysConfig = sc
-	} else {
-		// If not SystemConfig, try JSON conversion
-		// This allows handlers to pass their own config struct
-		jsonData, err := json.Marshal(config)
-		if err != nil {
-			return fmt.Errorf("failed to marshal config: %w", err)
-		}
-
-		if err := json.Unmarshal(jsonData, &sysConfig); err != nil {
-			return fmt.Errorf("failed to unmarshal config to SystemConfig: %w", err)
-		}
-	}
-
-	s.config = sysConfig
-
-	// Configure container package with system settings
-	s.logger.Info("Configuring container package",
-		"enabled", sysConfig.ContainerEnabled,
-		"socket_dir", sysConfig.ContainerSocketDir,
-		"tty_timeout", sysConfig.ContainerTTYTimeout)
-
-	container.Configure(container.Config{
-		Enabled:   sysConfig.ContainerEnabled,
-		SocketDir: sysConfig.ContainerSocketDir,
-	})
-
-	if sysConfig.ContainerEnabled {
-		s.logger.Info("Container features enabled",
-			"socket_dir", sysConfig.ContainerSocketDir,
-			"tty_timeout", sysConfig.ContainerTTYTimeout)
-	} else {
-		s.logger.Info("Container features disabled")
-	}
-
-	// Set up JuiceFS if base directory is configured
-	if sysConfig.JuiceFSBaseDir != "" {
-		juicefsConfig := juicefs.Config{
-			BaseDir:           sysConfig.JuiceFSBaseDir,
-			LocalMode:         sysConfig.JuiceFSLocalMode,
-			S3AccessKey:       sysConfig.S3AccessKey,
-			S3SecretAccessKey: sysConfig.S3SecretAccessKey,
-			S3EndpointURL:     sysConfig.S3EndpointURL,
-			S3Bucket:          sysConfig.S3Bucket,
-			VolumeName:        "sprite-juicefs",
-			// Overlay configuration
-			OverlayEnabled:       sysConfig.OverlayEnabled,
-			OverlayImageSize:     sysConfig.OverlayImageSize,
-			OverlayLowerPath:     sysConfig.OverlayLowerPath,
-			OverlayLowerPaths:    sysConfig.OverlayLowerPaths,
-			OverlayTargetPath:    sysConfig.OverlayTargetPath,
-			OverlaySkipOverlayFS: sysConfig.OverlaySkipOverlayFS,
-			Logger:               s.logger,
-		}
-
-		// Create leaser for S3 mode (non-local mode)
-		if !sysConfig.JuiceFSLocalMode && sysConfig.S3AccessKey != "" && sysConfig.S3SecretAccessKey != "" &&
-			sysConfig.S3EndpointURL != "" && sysConfig.S3Bucket != "" {
-			leaserConfig := leaser.Config{
-				S3AccessKey:       sysConfig.S3AccessKey,
-				S3SecretAccessKey: sysConfig.S3SecretAccessKey,
-				S3EndpointURL:     sysConfig.S3EndpointURL,
-				S3Bucket:          sysConfig.S3Bucket,
-				BaseDir:           sysConfig.JuiceFSBaseDir,
-				Logger:            s.logger,
-			}
-
-			leaserInstance := leaser.New(leaserConfig)
-			s.leaserInstance = leaserInstance
-			juicefsConfig.LeaseManager = leaserInstance
-		}
-
-		jfs, err := juicefs.New(juicefsConfig)
-		if err != nil {
-			return fmt.Errorf("failed to create JuiceFS instance: %w", err)
-		}
-		s.juicefs = jfs
-	}
-
-	s.setState("configured", true)
-	return nil
-}
-
-// IsConfigured returns whether the system has been configured
-func (s *System) IsConfigured() bool {
-	return s.getState("configured").(bool)
-}
-
-// GetDynamicConfigPath returns the dynamic config path if set
-func (s *System) GetDynamicConfigPath() string {
-	return s.getState("dynamicConfigPath").(string)
-}
-
 // Boot handles the boot sequence for the system
 func (s *System) Boot(ctx context.Context) error {
 	s.logger.Debug("=== Starting system boot sequence ===")
-
-	if !s.IsConfigured() {
-		return fmt.Errorf("system not configured, cannot boot")
-	}
 
 	// Start JuiceFS if configured
 	if s.juicefs != nil {

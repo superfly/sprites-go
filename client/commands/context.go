@@ -65,7 +65,15 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 			URL:   envURL,
 			Token: envToken,
 		}
-		// For env-based usage, we don't track sprites
+		// For env-based usage, check if sprite override is provided
+		if spriteOverride != "" {
+			// When using env vars with sprite override, we can track the sprite
+			spriteName = spriteOverride
+			// Since we don't have a way to check if it exists with env-based config, assume it's new
+			isNew = true
+			return org, spriteName, isNew, nil
+		}
+		// Without sprite override, maintain backward compatibility (no sprite tracking)
 		return org, "", false, nil
 	}
 

@@ -189,21 +189,16 @@ func (m *mockSystemManager) CreateTranscriptCollector(
 	return nil, nil
 }
 
-// Configuration management methods
-func (m *mockSystemManager) IsConfigured() bool {
-	return true
-}
-
-func (m *mockSystemManager) Configure(config interface{}) error {
-	return nil
-}
-
 func (m *mockSystemManager) Boot(ctx context.Context) error {
 	return nil
 }
 
-func (m *mockSystemManager) GetDynamicConfigPath() string {
-	return "/tmp/mock-config.json"
+func (m *mockSystemManager) Shutdown(ctx context.Context) error {
+	return nil
+}
+
+func (m *mockSystemManager) Wait() error {
+	return nil
 }
 
 // TestHandleDebugCreateZombie tests the debug zombie creation handler
