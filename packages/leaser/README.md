@@ -9,6 +9,22 @@ The leaser package provides a distributed lease management system using S3 (or c
 - **Automatic lease refresh**: Keeps leases alive while the holder is running
 - **Graceful failure handling**: Handles machine crashes and network partitions
 - **No external dependencies**: Uses only S3 object storage for coordination
+- **Fly.io optimization**: Special behavior for faster failover in Fly.io environments
+
+## Lease Duration
+
+- **Lease duration**: 15 minutes
+- **Refresh interval**: 5 minutes
+
+This provides a 10-minute buffer for temporary network issues while allowing relatively quick failover when instances crash.
+
+## Fly.io Environment
+
+When running in Fly.io (detected by `FLY_MACHINE_ID` environment variable), the leaser has special behavior to enable faster failover:
+
+1. **Single instance detection**: Uses DNS lookup on `{FLY_APP_NAME}.internal` to check if this is the only instance
+2. **Faster takeover**: If we're the only instance and the current lease hasn't been refreshed in >5 minutes, we can take it over immediately instead of waiting for expiration
+3. This reduces failover time from up to 15 minutes to just 5 minutes when other instances crash
 
 ## Usage
 
@@ -52,7 +68,8 @@ if lm.LeaseAttemptCount() > 1 {
    - Reads the current lease to check if it's expired or held by the same machine
    - If expired or same machine, acquires with the current ETag
    - If held by another machine, waits with exponential backoff
-3. **Automatic Refresh**: Once acquired, the lease is refreshed every 30 minutes
+   - In Fly.io: Also checks if we're the only instance for faster takeover
+3. **Automatic Refresh**: Once acquired, the lease is refreshed every 5 minutes
 4. **Local State**: Stores the last successful ETag locally for fast reacquisition on restart
 
 ## Testing

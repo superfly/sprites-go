@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,6 +42,13 @@ type Leaser struct {
 	stoppedCh     chan struct{}
 	currentETag   string
 	logger        *slog.Logger
+
+	// Fly.io specific fields
+	isFlyEnvironment bool
+	flyAppName       string
+	flyPrivateIP     string
+	leaseDuration    time.Duration
+	refreshInterval  time.Duration
 }
 
 // Config holds the configuration for the Leaser
@@ -87,6 +95,26 @@ func New(config Config) *Leaser {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
+	// Detect Fly environment and set appropriate durations
+	isFlyEnvironment := os.Getenv("FLY_MACHINE_ID") != ""
+	flyAppName := os.Getenv("FLY_APP_NAME")
+	flyPrivateIP := os.Getenv("FLY_PRIVATE_IP")
+
+	// Use 15 minute lease, 5 minute refresh globally
+	leaseDuration := 15 * time.Minute
+	refreshInterval := 5 * time.Minute
+
+	if isFlyEnvironment {
+		logger.Info("Running in Fly environment",
+			"machineID", machineID,
+			"appName", flyAppName,
+			"privateIP", flyPrivateIP)
+	}
+
+	logger.Debug("Lease configuration",
+		"leaseDuration", leaseDuration,
+		"refreshInterval", refreshInterval)
+
 	// Create AWS config
 	awsCfg := aws.Config{
 		Region: primaryRegion,
@@ -103,32 +131,42 @@ func New(config Config) *Leaser {
 	})
 
 	return &Leaser{
-		s3Client:      s3Client,
-		bucketName:    config.S3Bucket,
-		primaryRegion: primaryRegion,
-		machineID:     machineID,
-		leaseKey:      leaseKey,
-		baseDir:       config.BaseDir,
-		etagFilePath:  filepath.Join(config.BaseDir, ".sprite-lease-etag"),
-		stopCh:        make(chan struct{}),
-		stoppedCh:     make(chan struct{}),
-		logger:        logger,
+		s3Client:         s3Client,
+		bucketName:       config.S3Bucket,
+		primaryRegion:    primaryRegion,
+		machineID:        machineID,
+		leaseKey:         leaseKey,
+		baseDir:          config.BaseDir,
+		etagFilePath:     filepath.Join(config.BaseDir, ".sprite-lease-etag"),
+		stopCh:           make(chan struct{}),
+		stoppedCh:        make(chan struct{}),
+		logger:           logger,
+		isFlyEnvironment: isFlyEnvironment,
+		flyAppName:       flyAppName,
+		flyPrivateIP:     flyPrivateIP,
+		leaseDuration:    leaseDuration,
+		refreshInterval:  refreshInterval,
 	}
 }
 
 // NewWithS3Client creates a Leaser with a custom S3 client (for testing)
 func NewWithS3Client(s3Client S3API, bucketName, leaseKey, machineID, baseDir string) *Leaser {
 	return &Leaser{
-		s3Client:      s3Client,
-		bucketName:    bucketName,
-		primaryRegion: "test-region",
-		machineID:     machineID,
-		leaseKey:      leaseKey,
-		baseDir:       baseDir,
-		etagFilePath:  filepath.Join(baseDir, ".sprite-lease-etag"),
-		stopCh:        make(chan struct{}),
-		stoppedCh:     make(chan struct{}),
-		logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		s3Client:         s3Client,
+		bucketName:       bucketName,
+		primaryRegion:    "test-region",
+		machineID:        machineID,
+		leaseKey:         leaseKey,
+		baseDir:          baseDir,
+		etagFilePath:     filepath.Join(baseDir, ".sprite-lease-etag"),
+		stopCh:           make(chan struct{}),
+		stoppedCh:        make(chan struct{}),
+		logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		isFlyEnvironment: false,
+		flyAppName:       "",
+		flyPrivateIP:     "",
+		leaseDuration:    15 * time.Minute, // Updated to match global default
+		refreshInterval:  5 * time.Minute,  // Updated to match global default
 	}
 }
 
@@ -191,6 +229,31 @@ func (l *Leaser) Wait(ctx context.Context) error {
 
 	// 4. If not expired AND held by a different machine, wait for lease
 	if currentLease != nil && !expired && currentLease.MachineID != l.machineID {
+		// In Fly environment, check if we're the only instance
+		if l.isFlyEnvironment && l.isOnlyInstance() {
+			// Check if lease was refreshed more than 5 minutes ago
+			timeSinceAcquired := time.Since(currentLease.AcquiredAt)
+			if timeSinceAcquired > 5*time.Minute {
+				l.logger.Info("Detected as only instance with stale lease, attempting takeover",
+					"currentHolder", currentLease.MachineID,
+					"timeSinceAcquired", timeSinceAcquired)
+
+				// Try to acquire the lease using the current ETag
+				acquired, etag, err := l.tryAcquireLease(ctx, currentETag)
+				if err != nil {
+					l.logger.Error("Failed to takeover stale lease", "error", err)
+				} else if acquired {
+					l.currentETag = etag
+					l.logger.Info("Successfully took over stale lease as only instance", "etag", etag)
+					l.startLeaseRefresh()
+					return nil
+				}
+			} else {
+				l.logger.Info("Only instance but lease is fresh, waiting",
+					"timeSinceAcquired", timeSinceAcquired)
+			}
+		}
+
 		l.logger.Info("Lease held by different machine, waiting for lease to expire...", "currentHolder", currentLease.MachineID)
 		return l.waitForLease(ctx)
 	}
@@ -227,13 +290,47 @@ func (l *Leaser) Stop() {
 	}
 }
 
+// isOnlyInstance checks if this is the only instance in Fly environment
+func (l *Leaser) isOnlyInstance() bool {
+	if !l.isFlyEnvironment || l.flyAppName == "" || l.flyPrivateIP == "" {
+		return false
+	}
+
+	// Lookup AAAA records for the app's internal hostname
+	hostname := fmt.Sprintf("%s.internal", l.flyAppName)
+	ips, err := net.LookupIP(hostname)
+	if err != nil {
+		l.logger.Debug("Failed to lookup DNS records", "hostname", hostname, "error", err)
+		return false
+	}
+
+	// Filter for IPv6 addresses (AAAA records)
+	var ipv6Addrs []string
+	for _, ip := range ips {
+		if ip.To4() == nil && ip.To16() != nil {
+			// This is an IPv6 address
+			ipv6Addrs = append(ipv6Addrs, ip.String())
+		}
+	}
+
+	l.logger.Debug("DNS lookup results", "hostname", hostname, "ipv6Addrs", ipv6Addrs, "ourIP", l.flyPrivateIP)
+
+	// Check if there's only one IPv6 address and it matches our private IP
+	if len(ipv6Addrs) == 1 && ipv6Addrs[0] == l.flyPrivateIP {
+		l.logger.Info("Detected as only instance", "ip", l.flyPrivateIP)
+		return true
+	}
+
+	return false
+}
+
 // tryAcquireLease attempts to acquire the lease once
 func (l *Leaser) tryAcquireLease(ctx context.Context, ifMatch string) (bool, string, error) {
 	l.attemptCount++
 
 	leaseInfo := LeaseInfo{
 		MachineID:  l.machineID,
-		ExpiresAt:  time.Now().Add(1 * time.Hour),
+		ExpiresAt:  time.Now().Add(l.leaseDuration),
 		AcquiredAt: time.Now(),
 	}
 
@@ -406,6 +503,28 @@ func (l *Leaser) waitForLease(ctx context.Context) error {
 				// Lease still held by someone else
 				timeUntilExpiry := time.Until(currentLease.ExpiresAt)
 
+				// In Fly environment, check if we've become the only instance
+				if l.isFlyEnvironment && currentLease.MachineID != l.machineID {
+					if l.isOnlyInstance() {
+						timeSinceAcquired := time.Since(currentLease.AcquiredAt)
+						if timeSinceAcquired > 5*time.Minute {
+							l.logger.Info("Became only instance with stale lease during wait, attempting takeover",
+								"currentHolder", currentLease.MachineID,
+								"timeSinceAcquired", timeSinceAcquired)
+
+							acquired, etag, err := l.tryAcquireLease(ctx, currentETag)
+							if err != nil {
+								l.logger.Error("Failed to takeover stale lease", "error", err)
+							} else if acquired {
+								l.currentETag = etag
+								l.logger.Info("Successfully took over stale lease as only instance", "etag", etag)
+								l.startLeaseRefresh()
+								return nil
+							}
+						}
+					}
+				}
+
 				// Adjust check interval based on time until expiry
 				if timeUntilExpiry <= 0 {
 					// Already expired, check immediately on next iteration
@@ -440,7 +559,7 @@ func (l *Leaser) waitForLease(ctx context.Context) error {
 
 // startLeaseRefresh starts the background lease refresh goroutine
 func (l *Leaser) startLeaseRefresh() {
-	l.refreshTicker = time.NewTicker(30 * time.Minute) // Refresh every 30 minutes
+	l.refreshTicker = time.NewTicker(l.refreshInterval)
 
 	go func() {
 		for {
