@@ -85,6 +85,14 @@ RUN chmod +x /tmp/deno.sh && /tmp/deno.sh && rm /tmp/deno.sh
 COPY languages/java.sh /tmp/
 RUN chmod +x /tmp/java.sh && /tmp/java.sh && rm /tmp/java.sh
 
+COPY languages/python.sh /tmp/
+RUN chmod +x /tmp/python.sh && /tmp/python.sh && rm /tmp/python.sh
+
+# install some agents
+RUN npm install -g @anthropic-ai/claude-code && \
+    npm install -g @google/gemini-cli
+    
+
 ############################
 # asdf Languages ONLY
 ############################
