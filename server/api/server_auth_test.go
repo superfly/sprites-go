@@ -60,39 +60,39 @@ func TestExtractToken(t *testing.T) {
 	}{
 		{
 			name:       "valid Authorization Bearer token",
-			authHeader: "Bearer mysecrettoken",
-			wantToken:  "mysecrettoken",
+			authHeader: "Bearer test-token",
+			wantToken:  "test-token",
 			wantErr:    false,
 		},
 		{
 			name:       "valid Authorization Bearer token with extra spaces",
-			authHeader: "Bearer   mysecrettoken  ",
-			wantToken:  "mysecrettoken",
+			authHeader: "Bearer   test-token  ",
+			wantToken:  "test-token",
 			wantErr:    false,
 		},
 		{
 			name:         "valid fly-replay-src header",
-			replayHeader: "state=api:token123",
-			wantToken:    "token123",
+			replayHeader: "state=test-token",
+			wantToken:    "test-token",
 			wantErr:      false,
 		},
 		{
 			name:         "fly-replay-src with other parameters",
-			replayHeader: "region=ord;state=api:mytoken;app=myapp",
-			wantToken:    "mytoken",
+			replayHeader: "region=ord;state=test-token;app=myapp",
+			wantToken:    "test-token",
 			wantErr:      false,
 		},
 		{
 			name:         "fly-replay-src with spaces",
-			replayHeader: "state= api: token456 ",
-			wantToken:    "token456",
+			replayHeader: "state= test-token ",
+			wantToken:    "test-token",
 			wantErr:      false,
 		},
 		{
 			name:         "Authorization header takes precedence",
-			authHeader:   "Bearer bearertoken",
-			replayHeader: "state=api:replaytoken",
-			wantToken:    "bearertoken",
+			authHeader:   "Bearer test-token",
+			replayHeader: "state=invalid-token",
+			wantToken:    "test-token",
 			wantErr:      false,
 		},
 		{
@@ -126,14 +126,14 @@ func TestExtractToken(t *testing.T) {
 		},
 		{
 			name:       "case insensitive Bearer",
-			authHeader: "bearer mysecrettoken",
-			wantToken:  "mysecrettoken",
+			authHeader: "bearer test-token",
+			wantToken:  "test-token",
 			wantErr:    false,
 		},
 		{
 			name:       "BEARER uppercase",
-			authHeader: "BEARER mysecrettoken",
-			wantToken:  "mysecrettoken",
+			authHeader: "BEARER test-token",
+			wantToken:  "test-token",
 			wantErr:    false,
 		},
 	}
@@ -194,7 +194,7 @@ func TestAuthMiddleware(t *testing.T) {
 		{
 			name:           "valid fly-replay-src token",
 			apiToken:       "secret123",
-			replayHeader:   "state=api:secret123",
+			replayHeader:   "state=secret123",
 			expectedStatus: http.StatusOK,
 		},
 		{
@@ -202,14 +202,14 @@ func TestAuthMiddleware(t *testing.T) {
 			apiToken:       "secret123",
 			authHeader:     "Bearer wrongtoken",
 			expectedStatus: http.StatusUnauthorized,
-			expectedBody:   "Invalid authentication token",
+			expectedBody:   "Missing or invalid authentication",
 		},
 		{
 			name:           "invalid fly-replay-src token",
 			apiToken:       "secret123",
-			replayHeader:   "state=api:wrongtoken",
+			replayHeader:   "state=wrongtoken",
 			expectedStatus: http.StatusUnauthorized,
-			expectedBody:   "Invalid authentication token",
+			expectedBody:   "Missing or invalid authentication",
 		},
 		{
 			name:           "missing authentication",
