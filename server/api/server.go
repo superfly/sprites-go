@@ -143,22 +143,9 @@ func (s *Server) Stop(ctx context.Context) error {
 // authMiddleware checks for authentication token
 func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token, err := s.extractToken(r)
+		_, err := s.extractToken(r)
 		if err != nil {
 			http.Error(w, "Missing or invalid authentication", http.StatusUnauthorized)
-			return
-		}
-
-		if token != s.config.APIToken {
-			// Log token mismatch with masked tokens for security
-			s.logger.Error("Authentication token mismatch",
-				"requestPath", r.URL.Path,
-				"requestMethod", r.Method,
-				"remoteAddr", r.RemoteAddr,
-				"tokenProvided", maskToken(token),
-				"tokenExpected", maskToken(s.config.APIToken),
-				"failedStep", "token validation")
-			http.Error(w, "Invalid authentication token", http.StatusUnauthorized)
 			return
 		}
 
@@ -171,38 +158,14 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 // Otherwise falls back to regular auth
 func (s *Server) adminAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token, err := s.extractToken(r)
+		_, err := s.extractAdminToken(r)
 		if err != nil {
-			http.Error(w, "Missing or invalid authentication", http.StatusUnauthorized)
-			return
-		}
-
-		// If admin token is configured, require it
-		if s.config.AdminToken != "" {
-			if token != s.config.AdminToken {
-				s.logger.Error("Admin authentication token mismatch",
-					"requestPath", r.URL.Path,
-					"requestMethod", r.Method,
-					"remoteAddr", r.RemoteAddr,
-					"tokenProvided", maskToken(token),
-					"tokenExpected", maskToken(s.config.AdminToken),
-					"failedStep", "admin token validation")
+			if s.config.AdminToken != "" {
 				http.Error(w, "Admin authentication required", http.StatusForbidden)
-				return
+			} else {
+				http.Error(w, "Missing or invalid authentication", http.StatusUnauthorized)
 			}
-		} else {
-			// Otherwise, accept regular API token
-			if token != s.config.APIToken {
-				s.logger.Error("Authentication token mismatch (admin endpoint with regular token)",
-					"requestPath", r.URL.Path,
-					"requestMethod", r.Method,
-					"remoteAddr", r.RemoteAddr,
-					"tokenProvided", maskToken(token),
-					"tokenExpected", maskToken(s.config.APIToken),
-					"failedStep", "regular token validation for admin endpoint")
-				http.Error(w, "Invalid authentication token", http.StatusUnauthorized)
-				return
-			}
+			return
 		}
 
 		next(w, r)
@@ -275,18 +238,28 @@ func (s *Server) waitForJuiceFSMiddleware(next http.HandlerFunc) http.HandlerFun
 
 // extractToken extracts authentication token from either Authorization Bearer or fly-replay-src header
 func (s *Server) extractToken(r *http.Request) (string, error) {
+	var authToken, flyReplayToken string
+
 	// First, check Authorization header
 	authHeader := r.Header.Get("Authorization")
 	if authHeader != "" {
 		// Expected format: "Bearer <token>"
 		parts := strings.SplitN(authHeader, " ", 2)
 		if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
-			return strings.TrimSpace(parts[1]), nil
+			authToken = strings.TrimSpace(parts[1])
+			// Check if this token matches
+			if authToken == s.config.APIToken {
+				return authToken, nil
+			}
+			// Log that we found a token but it didn't match
+			s.logger.Debug("Authorization header token found but doesn't match",
+				"tokenProvided", maskToken(authToken),
+				"tokenExpected", maskToken(s.config.APIToken))
+		} else {
+			s.logger.Debug("Authorization header present but not in Bearer format",
+				"authHeader", authHeader,
+				"expectedFormat", "Bearer <token>")
 		}
-		// Just debug log - this is not an error since we'll check fly-replay-src next
-		s.logger.Debug("Authorization header present but not in Bearer format",
-			"authHeader", authHeader,
-			"expectedFormat", "Bearer <token>")
 	}
 
 	// Then check fly-replay-src header
@@ -304,26 +277,114 @@ func (s *Server) extractToken(r *http.Request) (string, error) {
 
 			if key == "state" {
 				// Use the state value directly as the token
-				return strings.TrimSpace(value), nil
+				flyReplayToken = strings.TrimSpace(value)
+				// Check if this token matches
+				if flyReplayToken == s.config.APIToken {
+					return flyReplayToken, nil
+				}
+				// Log that we found a token but it didn't match
+				s.logger.Debug("fly-replay-src state token found but doesn't match",
+					"tokenProvided", maskToken(flyReplayToken),
+					"tokenExpected", maskToken(s.config.APIToken))
+				break
 			}
 		}
-		// Debug log if header exists but no state found
-		s.logger.Debug("fly-replay-src header present but no state parameter found",
-			"flyReplayHeader", replayHeader)
+		if flyReplayToken == "" {
+			// Debug log if header exists but no state found
+			s.logger.Debug("fly-replay-src header present but no state parameter found",
+				"flyReplayHeader", replayHeader)
+		}
 	}
 
-	// Log error only when both methods fail
-	s.logger.Error("Token extraction failed - no valid authentication found",
+	// Log error only when both methods fail, including any tokens that were found but not valid
+	s.logger.Error("Token authentication failed - no matching token found",
 		"authHeader", authHeader,
+		"authTokenFound", maskToken(authToken),
 		"flyReplayHeader", replayHeader,
+		"flyReplayTokenFound", maskToken(flyReplayToken),
+		"tokenExpected", maskToken(s.config.APIToken),
 		"requestPath", r.URL.Path,
 		"requestMethod", r.Method)
 
 	return "", fmt.Errorf("no valid authentication token found")
 }
 
+// extractAdminToken extracts admin authentication token with the same fallback logic as extractToken
+func (s *Server) extractAdminToken(r *http.Request) (string, error) {
+	// If no admin token is configured, fall back to regular auth
+	expectedToken := s.config.AdminToken
+	if expectedToken == "" {
+		expectedToken = s.config.APIToken
+	}
+
+	var authToken, flyReplayToken string
+
+	// First, check Authorization header
+	authHeader := r.Header.Get("Authorization")
+	if authHeader != "" {
+		// Expected format: "Bearer <token>"
+		parts := strings.SplitN(authHeader, " ", 2)
+		if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
+			authToken = strings.TrimSpace(parts[1])
+			// Check if this token matches
+			if authToken == expectedToken {
+				return authToken, nil
+			}
+			// Log that we found a token but it didn't match
+			s.logger.Debug("Authorization header token found but doesn't match admin token",
+				"tokenProvided", maskToken(authToken),
+				"tokenExpected", maskToken(expectedToken))
+		}
+	}
+
+	// Then check fly-replay-src header
+	replayHeader := r.Header.Get("fly-replay-src")
+	if replayHeader != "" {
+		// Parse the fly-replay-src header for state=token format
+		parts := strings.Split(replayHeader, ";")
+		for _, part := range parts {
+			kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+			if len(kv) != 2 {
+				continue
+			}
+			key := strings.TrimSpace(kv[0])
+			value := strings.TrimSpace(kv[1])
+
+			if key == "state" {
+				// Use the state value directly as the token
+				flyReplayToken = strings.TrimSpace(value)
+				// Check if this token matches
+				if flyReplayToken == expectedToken {
+					return flyReplayToken, nil
+				}
+				// Log that we found a token but it didn't match
+				s.logger.Debug("fly-replay-src state token found but doesn't match admin token",
+					"tokenProvided", maskToken(flyReplayToken),
+					"tokenExpected", maskToken(expectedToken))
+				break
+			}
+		}
+	}
+
+	// Log error only when both methods fail
+	s.logger.Error("Admin token authentication failed - no matching token found",
+		"authHeader", authHeader,
+		"authTokenFound", maskToken(authToken),
+		"flyReplayHeader", replayHeader,
+		"flyReplayTokenFound", maskToken(flyReplayToken),
+		"tokenExpected", maskToken(expectedToken),
+		"isAdminToken", s.config.AdminToken != "",
+		"requestPath", r.URL.Path,
+		"requestMethod", r.Method)
+
+	return "", fmt.Errorf("no valid admin authentication token found")
+}
+
 // maskToken masks a token for safe logging, showing only the first 4 and last 4 characters
 func maskToken(token string) string {
+	if token == "" {
+		return "(empty)"
+	}
 	if len(token) <= 10 {
 		// Too short to mask effectively
 		return strings.Repeat("*", len(token))

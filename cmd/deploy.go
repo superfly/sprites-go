@@ -135,15 +135,22 @@ func main() {
 
 	// Handle volume based on whether we found a machine
 	var volumeID string
-	var existingEnvVars map[string]string
+	var existingContainerEnvVars map[string]string
 
 	if existingMachine != nil {
-		// Extract existing environment variables
-		if existingMachine.Config.Env != nil {
-			existingEnvVars = make(map[string]string)
-			for k, v := range existingMachine.Config.Env {
-				existingEnvVars[k] = v
-				log.Printf("Found existing env var: %s\n", k)
+		// Extract existing container environment variables
+		if existingMachine.Config != nil && len(existingMachine.Config.Containers) > 0 {
+			// Look for the main container (usually named "sprite" or the first one)
+			for _, container := range existingMachine.Config.Containers {
+				if container.ExtraEnv != nil && len(container.ExtraEnv) > 0 {
+					existingContainerEnvVars = make(map[string]string)
+					for k, v := range container.ExtraEnv {
+						existingContainerEnvVars[k] = v
+						log.Printf("Found existing container env var: %s\n", k)
+					}
+					// Use env vars from first container with env vars
+					break
+				}
 			}
 		}
 
@@ -218,23 +225,57 @@ func main() {
 	}
 
 	// Merge existing environment variables with new config
-	if existingEnvVars != nil && len(existingEnvVars) > 0 {
-		log.Printf("Merging %d existing environment variables into new config\n", len(existingEnvVars))
+	if existingContainerEnvVars != nil && len(existingContainerEnvVars) > 0 {
+		log.Printf("Merging %d existing container environment variables into new config\n", len(existingContainerEnvVars))
 
-		// Initialize the env map if it doesn't exist
-		if machineConfig.Env == nil {
-			machineConfig.Env = make(map[string]string)
-		}
+		// Ensure we have at least one container in the new config
+		if machineConfig.Containers == nil || len(machineConfig.Containers) == 0 {
+			log.Printf("Warning: No containers found in new config, cannot merge environment variables\n")
+		} else {
+			// Initialize the env map if it doesn't exist
+			if machineConfig.Containers != nil && len(machineConfig.Containers) > 0 {
+				for i := range machineConfig.Containers {
+					if machineConfig.Containers[i].ExtraEnv == nil {
+						machineConfig.Containers[i].ExtraEnv = make(map[string]string)
+					}
+				}
+			}
 
-		// Copy existing env vars that aren't already in the new config
-		for k, v := range existingEnvVars {
-			if _, exists := machineConfig.Env[k]; !exists {
-				machineConfig.Env[k] = v
-				log.Printf("  - Preserving env var: %s\n", k)
-			} else {
-				log.Printf("  - Keeping new value for env var: %s\n", k)
+			// Copy existing env vars that aren't already in the new config
+			for k, v := range existingContainerEnvVars {
+				found := false
+				for i := range machineConfig.Containers {
+					if _, exists := machineConfig.Containers[i].ExtraEnv[k]; exists {
+						found = true
+						break
+					}
+				}
+				if !found {
+					machineConfig.Containers[0].ExtraEnv[k] = v // Assuming the first container is the one to merge into
+					log.Printf("  - Preserving env var: %s\n", k)
+				} else {
+					log.Printf("  - Keeping new value for env var: %s\n", k)
+				}
 			}
 		}
+	}
+
+	// Print the merged environment variables
+	if machineConfig.Containers != nil && len(machineConfig.Containers) > 0 && machineConfig.Containers[0].ExtraEnv != nil {
+		log.Printf("\n=== Final Merged Environment Variables ===")
+		log.Printf("Total env vars: %d\n", len(machineConfig.Containers[0].ExtraEnv))
+		for k, v := range machineConfig.Containers[0].ExtraEnv {
+			// Mask sensitive values
+			displayValue := v
+			if strings.Contains(strings.ToLower(k), "token") ||
+				strings.Contains(strings.ToLower(k), "secret") ||
+				strings.Contains(strings.ToLower(k), "password") {
+				displayValue = "***MASKED***"
+			}
+			log.Printf("  %s = %s\n", k, displayValue)
+		}
+	} else {
+		log.Printf("\n=== No container environment variables found ===")
 	}
 
 	// Print the config that will be sent
