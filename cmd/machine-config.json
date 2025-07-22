@@ -48,7 +48,7 @@
       ],
       "files":[{
         "guest_path": "/etc/app-image.json",
-        "image_config": "ghcr.io/superfly/sprite-ubuntu:25.04-b869a45"
+        "image_config": "ghcr.io/superfly/sprite-ubuntu:25.04-0395d5a"
       }
       ],
       "mounts": [
@@ -109,11 +109,11 @@
     },
     {
       "name": "languages-image",
-      "image": "ghcr.io/superfly/sprite-ubuntu:25.04-b869a45-languages"
+      "image": "ghcr.io/superfly/sprite-ubuntu:25.04-0395d5a-languages"
     },
     {
       "name": "system-base",
-      "image": "ghcr.io/superfly/sprite-ubuntu:25.04-b869a45"
+      "image": "ghcr.io/superfly/sprite-ubuntu:25.04-0395d5a"
     }
   ]
 }

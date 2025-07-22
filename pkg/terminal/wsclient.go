@@ -281,9 +281,20 @@ func (c *Cmd) start() {
 	if c.Request.URL.Scheme == "wss" {
 		dialer.TLSClientConfig = &tls.Config{}
 	}
-	conn, _, err := dialer.DialContext(c.ctx, c.Request.URL.String(), c.Request.Header)
+	conn, resp, err := dialer.DialContext(c.ctx, c.Request.URL.String(), c.Request.Header)
 	if err != nil {
-		c.startChan <- fmt.Errorf("failed to connect: %w", err)
+		// If we have a response, try to read the body to help with debugging
+		errMsg := fmt.Sprintf("failed to connect: %v", err)
+		if resp != nil {
+			body, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if readErr == nil && len(body) > 0 {
+				errMsg = fmt.Sprintf("failed to connect: %v (HTTP %d: %s)", err, resp.StatusCode, string(body))
+			} else if readErr == nil {
+				errMsg = fmt.Sprintf("failed to connect: %v (HTTP %d)", err, resp.StatusCode)
+			}
+		}
+		c.startChan <- fmt.Errorf(errMsg)
 		return
 	}
 	c.conn = conn

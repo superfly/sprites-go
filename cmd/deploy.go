@@ -115,23 +115,69 @@ func main() {
 		log.Fatal("Failed to create flaps client: ", err)
 	}
 
-	// Handle volume
-	var volumeID string
-	volumes, err := flapsClient.GetVolumes(ctx)
+	// First, find existing machine
+	var machineID string
+	var existingMachine *fly.Machine
+	machines, err := flapsClient.List(ctx, "")
 	if err != nil {
-		log.Fatal("Failed to list volumes: ", err)
+		log.Fatal("Failed to list machines: ", err)
 	}
 
-	// Look for existing sprite_data volume
-	for _, v := range volumes {
-		if v.Name == "sprite_data" || v.Name == "data" {
-			volumeID = v.ID
-			log.Printf("Found existing volume: %s\n", volumeID)
+	// Look for existing sprite_compute machine
+	for _, m := range machines {
+		if m.Name == "sprite_compute" || strings.HasPrefix(m.Name, "sprites-") {
+			machineID = m.ID
+			existingMachine = m
+			log.Printf("Found existing machine: %s (name: %s)\n", machineID, m.Name)
 			break
 		}
 	}
 
-	// Create volume if not found
+	// Handle volume based on whether we found a machine
+	var volumeID string
+	var existingEnvVars map[string]string
+
+	if existingMachine != nil {
+		// Extract existing environment variables
+		if existingMachine.Config.Env != nil {
+			existingEnvVars = make(map[string]string)
+			for k, v := range existingMachine.Config.Env {
+				existingEnvVars[k] = v
+				log.Printf("Found existing env var: %s\n", k)
+			}
+		}
+
+		// Check if the existing machine has a volume attached
+		for _, mount := range existingMachine.Config.Mounts {
+			if mount.Volume != "" {
+				volumeID = mount.Volume
+				log.Printf("Machine has attached volume: %s (mounted at %s)\n", volumeID, mount.Path)
+				break
+			}
+		}
+	}
+
+	// If no volume found (either no machine or machine has no volume), check all volumes
+	if volumeID == "" {
+		log.Println("No volume attached to machine, checking all volumes...")
+		volumes, err := flapsClient.GetVolumes(ctx)
+		if err != nil {
+			log.Fatal("Failed to list volumes: ", err)
+		}
+
+		log.Printf("Found %d volumes total\n", len(volumes))
+		// Look for existing sprite_data or data volume
+		for _, v := range volumes {
+			log.Printf("  - Volume: %s (name: %s, size: %dGB, state: %s)\n", v.ID, v.Name, v.SizeGb, v.State)
+			if v.Name == "sprite_data" || v.Name == "data" {
+				volumeID = v.ID
+				log.Printf("Using unattached volume: %s (name: %s)\n", volumeID, v.Name)
+				break
+			}
+		}
+	}
+
+	// Create volume if still not found
 	if volumeID == "" {
 		log.Println("Creating new sprite_data volume...")
 		sizeGb := 10
@@ -154,22 +200,6 @@ func main() {
 		time.Sleep(5 * time.Second)
 	}
 
-	// Handle machine
-	var machineID string
-	machines, err := flapsClient.List(ctx, "")
-	if err != nil {
-		log.Fatal("Failed to list machines: ", err)
-	}
-
-	// Look for existing sprite_compute machine
-	for _, m := range machines {
-		if m.Name == "sprite_compute" || strings.HasPrefix(m.Name, "sprites-") {
-			machineID = m.ID
-			log.Printf("Found existing machine: %s\n", machineID)
-			break
-		}
-	}
-
 	// Read machine config
 	configData, err := os.ReadFile("machine-config.json")
 	if err != nil {
@@ -187,6 +217,26 @@ func main() {
 		log.Fatal("Failed to parse machine config: ", err)
 	}
 
+	// Merge existing environment variables with new config
+	if existingEnvVars != nil && len(existingEnvVars) > 0 {
+		log.Printf("Merging %d existing environment variables into new config\n", len(existingEnvVars))
+
+		// Initialize the env map if it doesn't exist
+		if machineConfig.Env == nil {
+			machineConfig.Env = make(map[string]string)
+		}
+
+		// Copy existing env vars that aren't already in the new config
+		for k, v := range existingEnvVars {
+			if _, exists := machineConfig.Env[k]; !exists {
+				machineConfig.Env[k] = v
+				log.Printf("  - Preserving env var: %s\n", k)
+			} else {
+				log.Printf("  - Keeping new value for env var: %s\n", k)
+			}
+		}
+	}
+
 	// Print the config that will be sent
 	log.Printf("\n=== Machine Config to Deploy ===")
 	configJSON, err := json.MarshalIndent(machineConfig, "", "  ")
@@ -195,7 +245,7 @@ func main() {
 	}
 	log.Printf("%s\n", string(configJSON))
 
-	if machineID != "" {
+	if existingMachine != nil {
 		// Update existing machine
 		log.Printf("Updating machine %s...\n", machineID)
 

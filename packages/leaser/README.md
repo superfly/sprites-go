@@ -7,6 +7,7 @@ The leaser package provides a distributed lease management system using S3 (or c
 - **Optimistic lease acquisition**: Attempts to claim a lease without reading first
 - **ETag-based concurrency control**: Uses S3 ETags for atomic compare-and-swap operations
 - **Automatic lease refresh**: Keeps leases alive while the holder is running
+- **Refresh count tracking**: Tracks how many times a lease has been refreshed
 - **Graceful failure handling**: Handles machine crashes and network partitions
 - **No external dependencies**: Uses only S3 object storage for coordination
 - **Fly.io optimization**: Special behavior for faster failover in Fly.io environments
@@ -17,6 +18,19 @@ The leaser package provides a distributed lease management system using S3 (or c
 - **Refresh interval**: 5 minutes
 
 This provides a 10-minute buffer for temporary network issues while allowing relatively quick failover when instances crash.
+
+## Refresh Count Tracking
+
+The leaser tracks how many times a lease has been refreshed since it was first acquired. This information is:
+- Stored in the lease record in S3
+- Incremented on each successful refresh
+- Reset to 0 when a new lease is acquired
+- Preserved when taking over another machine's lease
+
+This can be useful for:
+- Monitoring lease stability
+- Detecting lease flapping
+- Debugging distributed system behavior
 
 ## Fly.io Environment
 
@@ -57,6 +71,10 @@ if err := lm.Wait(ctx); err != nil {
 if lm.LeaseAttemptCount() > 1 {
     // Lease required multiple attempts, may want to restore from backup
 }
+
+// Check refresh count (useful for monitoring)
+refreshCount := lm.RefreshCount()
+log.Printf("Lease refresh count: %d", refreshCount)
 
 // Lease is now held and will be automatically refreshed
 ```

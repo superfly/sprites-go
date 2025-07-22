@@ -21,9 +21,12 @@ func main() {
 	flag.StringVar(&machineID, "m", "", "Machine ID (optional, will look for sprite_compute if not specified)")
 	flag.Parse()
 
+	log.Printf("App name from flag: %s", appName)
+
 	// Check for app name from flag or env var
 	if appName == "" {
 		appName = os.Getenv("FLY_APP_NAME")
+		log.Printf("App name from env: %s", appName)
 	}
 	if appName == "" {
 		log.Fatal("App name required: use -a flag or set FLY_APP_NAME env var")
@@ -61,6 +64,7 @@ func main() {
 
 		// Look for sprite_compute machine
 		for _, m := range machines {
+			log.Printf("Machine: %s\n", m.Name)
 			if m.Name == "sprite_compute" {
 				machineID = m.ID
 				log.Printf("Found sprite_compute machine: %s\n", machineID)

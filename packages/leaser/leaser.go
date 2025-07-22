@@ -49,6 +49,9 @@ type Leaser struct {
 	flyPrivateIP     string
 	leaseDuration    time.Duration
 	refreshInterval  time.Duration
+
+	// Refresh tracking
+	currentRefreshCount int
 }
 
 // Config holds the configuration for the Leaser
@@ -64,9 +67,10 @@ type Config struct {
 
 // LeaseInfo represents the lease data stored in S3
 type LeaseInfo struct {
-	MachineID  string    `json:"machine_id"`
-	ExpiresAt  time.Time `json:"expires_at"`
-	AcquiredAt time.Time `json:"acquired_at"`
+	MachineID    string    `json:"machine_id"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	AcquiredAt   time.Time `json:"acquired_at"`
+	RefreshCount int       `json:"refresh_count"`
 }
 
 // New creates a new Leaser instance
@@ -131,42 +135,44 @@ func New(config Config) *Leaser {
 	})
 
 	return &Leaser{
-		s3Client:         s3Client,
-		bucketName:       config.S3Bucket,
-		primaryRegion:    primaryRegion,
-		machineID:        machineID,
-		leaseKey:         leaseKey,
-		baseDir:          config.BaseDir,
-		etagFilePath:     filepath.Join(config.BaseDir, ".sprite-lease-etag"),
-		stopCh:           make(chan struct{}),
-		stoppedCh:        make(chan struct{}),
-		logger:           logger,
-		isFlyEnvironment: isFlyEnvironment,
-		flyAppName:       flyAppName,
-		flyPrivateIP:     flyPrivateIP,
-		leaseDuration:    leaseDuration,
-		refreshInterval:  refreshInterval,
+		s3Client:            s3Client,
+		bucketName:          config.S3Bucket,
+		primaryRegion:       primaryRegion,
+		machineID:           machineID,
+		leaseKey:            leaseKey,
+		baseDir:             config.BaseDir,
+		etagFilePath:        filepath.Join(config.BaseDir, ".sprite-lease-etag"),
+		stopCh:              make(chan struct{}),
+		stoppedCh:           make(chan struct{}),
+		logger:              logger,
+		isFlyEnvironment:    isFlyEnvironment,
+		flyAppName:          flyAppName,
+		flyPrivateIP:        flyPrivateIP,
+		leaseDuration:       leaseDuration,
+		refreshInterval:     refreshInterval,
+		currentRefreshCount: 0,
 	}
 }
 
 // NewWithS3Client creates a Leaser with a custom S3 client (for testing)
 func NewWithS3Client(s3Client S3API, bucketName, leaseKey, machineID, baseDir string) *Leaser {
 	return &Leaser{
-		s3Client:         s3Client,
-		bucketName:       bucketName,
-		primaryRegion:    "test-region",
-		machineID:        machineID,
-		leaseKey:         leaseKey,
-		baseDir:          baseDir,
-		etagFilePath:     filepath.Join(baseDir, ".sprite-lease-etag"),
-		stopCh:           make(chan struct{}),
-		stoppedCh:        make(chan struct{}),
-		logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
-		isFlyEnvironment: false,
-		flyAppName:       "",
-		flyPrivateIP:     "",
-		leaseDuration:    15 * time.Minute, // Updated to match global default
-		refreshInterval:  5 * time.Minute,  // Updated to match global default
+		s3Client:            s3Client,
+		bucketName:          bucketName,
+		primaryRegion:       "test-region",
+		machineID:           machineID,
+		leaseKey:            leaseKey,
+		baseDir:             baseDir,
+		etagFilePath:        filepath.Join(baseDir, ".sprite-lease-etag"),
+		stopCh:              make(chan struct{}),
+		stoppedCh:           make(chan struct{}),
+		logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
+		isFlyEnvironment:    false,
+		flyAppName:          "",
+		flyPrivateIP:        "",
+		leaseDuration:       15 * time.Minute, // Updated to match global default
+		refreshInterval:     5 * time.Minute,  // Updated to match global default
+		currentRefreshCount: 0,
 	}
 }
 
@@ -267,6 +273,11 @@ func (l *Leaser) LeaseAttemptCount() int {
 	return l.attemptCount
 }
 
+// RefreshCount returns the current refresh count of the lease
+func (l *Leaser) RefreshCount() int {
+	return l.currentRefreshCount
+}
+
 // Stop stops the lease manager and cleanup
 func (l *Leaser) Stop() {
 	select {
@@ -328,10 +339,23 @@ func (l *Leaser) isOnlyInstance() bool {
 func (l *Leaser) tryAcquireLease(ctx context.Context, ifMatch string) (bool, string, error) {
 	l.attemptCount++
 
+	// If we have an ifMatch (doing a refresh), increment the refresh count
+	refreshCount := l.currentRefreshCount
+	if ifMatch != "" && ifMatch == l.currentETag {
+		// This is a refresh of our own lease
+		refreshCount++
+	} else if ifMatch == "" {
+		// This is a new lease acquisition
+		refreshCount = 0
+	}
+	// If ifMatch is set but doesn't match our currentETag, we're taking over someone else's lease
+	// In that case, keep the existing currentRefreshCount which should have been set from checkCurrentLease
+
 	leaseInfo := LeaseInfo{
-		MachineID:  l.machineID,
-		ExpiresAt:  time.Now().Add(l.leaseDuration),
-		AcquiredAt: time.Now(),
+		MachineID:    l.machineID,
+		ExpiresAt:    time.Now().Add(l.leaseDuration),
+		AcquiredAt:   time.Now(),
+		RefreshCount: refreshCount,
 	}
 
 	data, err := json.Marshal(leaseInfo)
@@ -401,7 +425,10 @@ func (l *Leaser) tryAcquireLease(ctx context.Context, ifMatch string) (bool, str
 		l.logger.Debug("Successfully wrote etag to file", "path", l.etagFilePath)
 	}
 
-	l.logger.Info("Successfully acquired/updated lease", "etag", etag)
+	// Update our current refresh count
+	l.currentRefreshCount = refreshCount
+
+	l.logger.Info("Successfully acquired/updated lease", "etag", etag, "refreshCount", refreshCount)
 	return true, etag, nil
 }
 
@@ -413,10 +440,21 @@ func (l *Leaser) checkCurrentLease(ctx context.Context) (*LeaseInfo, string, boo
 		Key:    aws.String(l.leaseKey),
 	}
 
+	l.logger.Debug("Checking current lease", "bucket", l.bucketName, "key", l.leaseKey)
+
 	output, err := l.s3Client.GetObject(ctx, getInput)
 	if err != nil {
+		// Log the actual error for debugging
+		l.logger.Debug("Error getting lease object", "error", err, "errorType", fmt.Sprintf("%T", err))
+
 		// If object doesn't exist, lease is available
-		if strings.Contains(err.Error(), "NoSuchKey") || strings.Contains(err.Error(), "404") {
+		errStr := err.Error()
+		if strings.Contains(errStr, "NoSuchKey") ||
+			strings.Contains(errStr, "404") ||
+			strings.Contains(errStr, "NotFound") ||
+			strings.Contains(errStr, "not found") ||
+			strings.Contains(errStr, "does not exist") {
+			l.logger.Info("Lease object does not exist, lease is available")
 			return nil, "", true, nil
 		}
 		return nil, "", false, fmt.Errorf("failed to get lease object: %w", err)
@@ -440,16 +478,21 @@ func (l *Leaser) checkCurrentLease(ctx context.Context) (*LeaseInfo, string, boo
 		return nil, "", false, fmt.Errorf("failed to unmarshal lease info: %w", err)
 	}
 
+	// Save the refresh count from the existing lease
+	l.currentRefreshCount = leaseInfo.RefreshCount
+
 	// Check if lease is expired
 	expired := time.Now().After(leaseInfo.ExpiresAt)
 	if expired {
 		l.logger.Info("Current lease has expired",
 			"holder", leaseInfo.MachineID,
-			"expiredAt", leaseInfo.ExpiresAt.Format(time.RFC3339))
+			"expiredAt", leaseInfo.ExpiresAt.Format(time.RFC3339),
+			"refreshCount", leaseInfo.RefreshCount)
 	} else {
 		l.logger.Info("Current lease is active",
 			"holder", leaseInfo.MachineID,
-			"expiresAt", leaseInfo.ExpiresAt.Format(time.RFC3339))
+			"expiresAt", leaseInfo.ExpiresAt.Format(time.RFC3339),
+			"refreshCount", leaseInfo.RefreshCount)
 	}
 
 	return &leaseInfo, etag, expired, nil
@@ -472,6 +515,31 @@ func (l *Leaser) getCurrentETag(ctx context.Context) (string, error) {
 	}
 
 	return strings.Trim(*output.ETag, `"`), nil
+}
+
+// verifyLeaseExists checks if the lease object actually exists
+func (l *Leaser) verifyLeaseExists(ctx context.Context) bool {
+	headInput := &s3.HeadObjectInput{
+		Bucket: aws.String(l.bucketName),
+		Key:    aws.String(l.leaseKey),
+	}
+
+	_, err := l.s3Client.HeadObject(ctx, headInput)
+	if err != nil {
+		errStr := err.Error()
+		if strings.Contains(errStr, "NoSuchKey") ||
+			strings.Contains(errStr, "404") ||
+			strings.Contains(errStr, "NotFound") ||
+			strings.Contains(errStr, "not found") ||
+			strings.Contains(errStr, "does not exist") {
+			l.logger.Debug("HeadObject confirms lease does not exist")
+			return false
+		}
+		l.logger.Debug("HeadObject error (assuming exists)", "error", err)
+		return true // Assume it exists if we get other errors
+	}
+	l.logger.Debug("HeadObject confirms lease exists")
+	return true
 }
 
 // waitForLease waits for the lease to become available
@@ -503,47 +571,54 @@ func (l *Leaser) waitForLease(ctx context.Context) error {
 				// Lease still held by someone else
 				timeUntilExpiry := time.Until(currentLease.ExpiresAt)
 
-				// In Fly environment, check if we've become the only instance
-				if l.isFlyEnvironment && currentLease.MachineID != l.machineID {
-					if l.isOnlyInstance() {
-						timeSinceAcquired := time.Since(currentLease.AcquiredAt)
-						if timeSinceAcquired > 5*time.Minute {
-							l.logger.Info("Became only instance with stale lease during wait, attempting takeover",
-								"currentHolder", currentLease.MachineID,
-								"timeSinceAcquired", timeSinceAcquired)
+				// Double-check if the lease really exists (handle eventual consistency)
+				if !l.verifyLeaseExists(ctx) {
+					l.logger.Info("Lease appeared active but verification shows it doesn't exist, retrying immediately")
+					// Force immediate retry
+					checkInterval = 1 * time.Millisecond
+				} else {
+					// In Fly environment, check if we've become the only instance
+					if l.isFlyEnvironment && currentLease.MachineID != l.machineID {
+						if l.isOnlyInstance() {
+							timeSinceAcquired := time.Since(currentLease.AcquiredAt)
+							if timeSinceAcquired > 5*time.Minute {
+								l.logger.Info("Became only instance with stale lease during wait, attempting takeover",
+									"currentHolder", currentLease.MachineID,
+									"timeSinceAcquired", timeSinceAcquired)
 
-							acquired, etag, err := l.tryAcquireLease(ctx, currentETag)
-							if err != nil {
-								l.logger.Error("Failed to takeover stale lease", "error", err)
-							} else if acquired {
-								l.currentETag = etag
-								l.logger.Info("Successfully took over stale lease as only instance", "etag", etag)
-								l.startLeaseRefresh()
-								return nil
+								acquired, etag, err := l.tryAcquireLease(ctx, currentETag)
+								if err != nil {
+									l.logger.Error("Failed to takeover stale lease", "error", err)
+								} else if acquired {
+									l.currentETag = etag
+									l.logger.Info("Successfully took over stale lease as only instance", "etag", etag)
+									l.startLeaseRefresh()
+									return nil
+								}
 							}
 						}
 					}
-				}
 
-				// Adjust check interval based on time until expiry
-				if timeUntilExpiry <= 0 {
-					// Already expired, check immediately on next iteration
-					checkInterval = 1 * time.Millisecond
-				} else if timeUntilExpiry < 30*time.Second {
-					checkInterval = 5 * time.Second
-				} else if timeUntilExpiry < 5*time.Minute {
-					checkInterval = 15 * time.Second
-				} else {
-					checkInterval = checkInterval * 2
-					if checkInterval > maxCheckInterval {
-						checkInterval = maxCheckInterval
+					// Adjust check interval based on time until expiry
+					if timeUntilExpiry <= 0 {
+						// Already expired, check immediately on next iteration
+						checkInterval = 1 * time.Millisecond
+					} else if timeUntilExpiry < 30*time.Second {
+						checkInterval = 5 * time.Second
+					} else if timeUntilExpiry < 5*time.Minute {
+						checkInterval = 15 * time.Second
+					} else {
+						checkInterval = checkInterval * 2
+						if checkInterval > maxCheckInterval {
+							checkInterval = maxCheckInterval
+						}
 					}
-				}
 
-				l.logger.Info("Lease held by another machine, waiting",
-					"holder", currentLease.MachineID,
-					"expiresIn", timeUntilExpiry.Round(time.Second),
-					"nextCheckIn", checkInterval)
+					l.logger.Info("Lease held by another machine, waiting",
+						"holder", currentLease.MachineID,
+						"expiresIn", timeUntilExpiry.Round(time.Second),
+						"nextCheckIn", checkInterval)
+				}
 			}
 		}
 

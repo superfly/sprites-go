@@ -170,6 +170,13 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	checkpointDB := filepath.Join(j.config.BaseDir, "checkpoints.db")
 	mountPath := filepath.Join(j.config.BaseDir, "data")
 
+	j.logger.Info("JuiceFS paths configured",
+		"baseDir", j.config.BaseDir,
+		"metaDB", metaDB,
+		"checkpointDB", checkpointDB,
+		"cacheDir", cacheDir,
+		"mountPath", mountPath)
+
 	dirs := []string{
 		cacheDir,
 		filepath.Dir(metaDB),
@@ -224,15 +231,23 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 			j.logger.Info("Acquired lease after multiple attempts, will restore from litestream", "attempts", j.leaseMgr.LeaseAttemptCount())
 		} else {
 			// We got the lease immediately, check if we can use existing data
+			j.logger.Debug("Checking existing metadata database", "metaDB", metaDB)
 			existingBucket, err := j.getExistingBucket(metaDB)
 			if err != nil {
-				j.logger.Info("Acquired lease but no existing metadata DB found, will restore", "error", err)
+				j.logger.Info("Acquired lease but no existing metadata DB found, will restore",
+					"metaDB", metaDB,
+					"error", err)
 				needsRestore = true
 			} else if existingBucket != j.config.S3Bucket {
-				j.logger.Info("Acquired lease but bucket mismatch, will restore", "existingBucket", existingBucket, "currentBucket", j.config.S3Bucket)
+				j.logger.Info("Acquired lease but bucket mismatch, will restore",
+					"metaDB", metaDB,
+					"existingBucket", existingBucket,
+					"currentBucket", j.config.S3Bucket)
 				needsRestore = true
 			} else {
-				j.logger.Info("Acquired lease on first attempt and bucket matches, using existing databases on disk", "bucket", existingBucket)
+				j.logger.Info("Acquired lease on first attempt and bucket matches, using existing databases on disk",
+					"metaDB", metaDB,
+					"bucket", existingBucket)
 				needsRestore = false
 			}
 		}
@@ -246,13 +261,18 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	if needsRestore {
 		stepStart = time.Now()
 		if j.config.LocalMode {
-			j.logger.Info("Restoring from local litestream backup")
+			j.logger.Info("Restoring from local litestream backup",
+				"metaDB", metaDB,
+				"checkpointDB", checkpointDB)
 		} else {
 			// Remove existing databases and cache before restore
 			os.Remove(metaDB)
 			os.Remove(checkpointDB)
 			os.RemoveAll(cacheDir)
-			j.logger.Info("Restoring databases from S3", "bucket", j.config.S3Bucket)
+			j.logger.Info("Restoring databases from S3",
+				"bucket", j.config.S3Bucket,
+				"metaDB", metaDB,
+				"checkpointDB", checkpointDB)
 		}
 
 		// Restore metadata database
@@ -273,9 +293,18 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 			)
 		}
 
-		if output, err := restoreCmd.CombinedOutput(); err != nil {
+		// Pipe stdout and stderr for real-time output
+		restoreCmd.Stdout = os.Stdout
+		restoreCmd.Stderr = os.Stderr
+
+		if err := restoreCmd.Run(); err != nil {
 			// If restore fails, it's okay - we'll format a new filesystem
-			j.logger.Debug("Litestream restore output for metadata", "output", string(output))
+			j.logger.Warn("Litestream restore failed for metadata",
+				"error", err,
+				"dbPath", metaDB)
+		} else {
+			j.logger.Info("Litestream restore succeeded for metadata",
+				"dbPath", metaDB)
 		}
 		j.logger.Debug("Metadata database restore completed", "duration", time.Since(metaRestoreStart).Seconds())
 
@@ -290,9 +319,13 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 			restoreCheckpointCmd.Env = restoreCmd.Env // Use same environment
 		}
 
-		if output, err := restoreCheckpointCmd.CombinedOutput(); err != nil {
+		// Pipe stdout and stderr for real-time output
+		restoreCheckpointCmd.Stdout = os.Stdout
+		restoreCheckpointCmd.Stderr = os.Stderr
+
+		if err := restoreCheckpointCmd.Run(); err != nil {
 			// If restore fails, it's okay - checkpoint DB will be created fresh
-			j.logger.Debug("Litestream restore output for checkpoints", "output", string(output))
+			j.logger.Debug("Litestream restore failed for checkpoints", "error", err)
 		}
 		j.logger.Debug("Checkpoint database restore completed", "duration", time.Since(checkpointRestoreStart).Seconds())
 		j.logger.Debug("Total restore process completed", "duration", time.Since(stepStart).Seconds())
@@ -306,14 +339,21 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	// Format JuiceFS if needed
 	stepStart = time.Now()
 	metaURL := fmt.Sprintf("sqlite3://%s", metaDB)
+	j.logger.Debug("Checking if JuiceFS is formatted",
+		"metaDB", metaDB,
+		"metaURL", metaURL)
+
 	if !j.isFormatted(metaURL) {
-		j.logger.Debug("JuiceFS not formatted, formatting...")
+		j.logger.Info("JuiceFS not formatted, will format new filesystem",
+			"metaDB", metaDB,
+			"volumeName", j.config.VolumeName)
 		if err := j.formatJuiceFS(ctx, metaURL); err != nil {
 			return fmt.Errorf("failed to format JuiceFS: %w", err)
 		}
 		j.logger.Debug("JuiceFS formatting completed", "duration", time.Since(stepStart).Seconds())
 	} else {
-		j.logger.Debug("JuiceFS already formatted, skipped formatting", "duration", time.Since(stepStart).Seconds())
+		j.logger.Info("JuiceFS already formatted, skipping format",
+			"duration", time.Since(stepStart).Seconds())
 	}
 
 	// Calculate cache and buffer sizes
@@ -681,9 +721,17 @@ dbs:
 // Returns the bucket name and whether the database is properly formatted
 func (j *JuiceFS) getJuiceFSFormatInfo(metaDB string) (bucketName string, isFormatted bool, err error) {
 	// Check if database file exists
-	if _, err := os.Stat(metaDB); os.IsNotExist(err) {
+	fileInfo, err := os.Stat(metaDB)
+	if os.IsNotExist(err) {
 		return "", false, fmt.Errorf("metadata database file does not exist")
 	}
+	if err != nil {
+		return "", false, fmt.Errorf("failed to stat metadata database: %w", err)
+	}
+	j.logger.Debug("Metadata database file found",
+		"path", metaDB,
+		"size", fileInfo.Size(),
+		"modTime", fileInfo.ModTime())
 
 	db, err := sql.Open("sqlite", metaDB)
 	if err != nil {
@@ -698,6 +746,20 @@ func (j *JuiceFS) getJuiceFSFormatInfo(metaDB string) (bucketName string, isForm
 		return "", false, fmt.Errorf("failed to check for jfs_setting table: %w", err)
 	}
 	if tableExists == 0 {
+		// List all tables for debugging
+		var tables []string
+		rows, _ := db.Query("SELECT name FROM sqlite_master WHERE type='table'")
+		if rows != nil {
+			defer rows.Close()
+			for rows.Next() {
+				var tableName string
+				if err := rows.Scan(&tableName); err == nil {
+					tables = append(tables, tableName)
+				}
+			}
+		}
+		j.logger.Debug("Database missing jfs_setting table",
+			"existingTables", tables)
 		return "", false, fmt.Errorf("database exists but is not fully formatted (missing jfs_setting table)")
 	}
 
@@ -705,6 +767,13 @@ func (j *JuiceFS) getJuiceFSFormatInfo(metaDB string) (bucketName string, isForm
 	var bucketURL string
 	err = db.QueryRow("SELECT json_extract(value, '$.Bucket') FROM jfs_setting WHERE name = 'format'").Scan(&bucketURL)
 	if err != nil {
+		// Try to get any format settings for debugging
+		var formatValue string
+		if err2 := db.QueryRow("SELECT value FROM jfs_setting WHERE name = 'format'").Scan(&formatValue); err2 == nil {
+			j.logger.Debug("Format setting exists but failed to extract bucket",
+				"rawValue", formatValue,
+				"error", err)
+		}
 		return "", true, fmt.Errorf("failed to read bucket from format setting: %w", err)
 	}
 
@@ -728,11 +797,22 @@ func (j *JuiceFS) getExistingBucket(metaDB string) (string, error) {
 func (j *JuiceFS) isFormatted(metaURL string) bool {
 	// Extract database path from sqlite3:// URL
 	if !strings.HasPrefix(metaURL, "sqlite3://") {
+		j.logger.Debug("isFormatted check failed: invalid URL format", "metaURL", metaURL)
 		return false
 	}
 	metaDB := strings.TrimPrefix(metaURL, "sqlite3://")
 
-	_, isFormatted, _ := j.getJuiceFSFormatInfo(metaDB)
+	bucketName, isFormatted, err := j.getJuiceFSFormatInfo(metaDB)
+	if err != nil {
+		j.logger.Debug("isFormatted check failed",
+			"metaDB", metaDB,
+			"error", err,
+			"isFormatted", isFormatted)
+	} else if isFormatted {
+		j.logger.Debug("isFormatted check passed",
+			"metaDB", metaDB,
+			"bucketName", bucketName)
+	}
 	return isFormatted
 }
 
