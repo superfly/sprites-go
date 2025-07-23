@@ -68,8 +68,11 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 	ctx := r.Context()
 	exitCode, err := h.session.Run(ctx, wsStreams, wsStreams, wsStreams)
 
-	// Give a moment for any remaining output to be sent
-	time.Sleep(50 * time.Millisecond)
+	// Flush all pending writes with a reasonable timeout
+	// This ensures all buffered output is sent before closing
+	if flushErr := wsStreams.Flush(2 * time.Second); flushErr != nil {
+		// Log flush error but don't fail the whole operation
+	}
 
 	// Send exit code
 	if err := wsStreams.WriteExit(exitCode); err != nil {
@@ -147,6 +150,16 @@ func (ws *webSocketStreams) writeLoop() {
 	for {
 		select {
 		case req := <-ws.writeChan:
+			// Handle flush request
+			if req.messageType == -1 {
+				// This is a flush request, just signal completion
+				if req.result != nil {
+					req.result <- nil
+				}
+				continue
+			}
+
+			// Normal write request
 			err := ws.conn.WriteMessage(req.messageType, req.data)
 			if req.result != nil {
 				req.result <- err
@@ -295,6 +308,34 @@ func (ws *webSocketStreams) WriteControlMessage(msg ControlMessage) error {
 		return err
 	}
 	return ws.WriteTextMessage(data)
+}
+
+// Flush waits for all pending writes to complete
+func (ws *webSocketStreams) Flush(timeout time.Duration) error {
+	// Create a flush request with a result channel
+	result := make(chan error, 1)
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case ws.writeChan <- writeRequest{
+		messageType: -1, // Special marker for flush
+		result:      result,
+	}:
+		// Wait for the flush to complete or timeout
+		select {
+		case err := <-result:
+			return err
+		case <-timer.C:
+			return errors.New("flush timeout")
+		case <-ws.done:
+			return errors.New("adapter closed")
+		}
+	case <-timer.C:
+		return errors.New("flush timeout - write channel full")
+	case <-ws.done:
+		return errors.New("adapter closed")
+	}
 }
 
 // Close closes the WebSocket streams

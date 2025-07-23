@@ -294,7 +294,7 @@ func (c *Cmd) start() {
 				errMsg = fmt.Sprintf("failed to connect: %v (HTTP %d)", err, resp.StatusCode)
 			}
 		}
-		c.startChan <- fmt.Errorf(errMsg)
+		c.startChan <- fmt.Errorf("%s", errMsg)
 		return
 	}
 	c.conn = conn
