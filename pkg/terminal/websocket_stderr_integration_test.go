@@ -303,7 +303,7 @@ wait
 	}
 }
 
-// TestWebSocketStderrBuffer tests that buffered stderr is properly flushed
+// TestWebSocketStderrBuffer tests that buffered stderr is properly handled
 func TestWebSocketStderrBuffer(t *testing.T) {
 	// Command that writes without newlines to test buffering
 	session := NewSession(

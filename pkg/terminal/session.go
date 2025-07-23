@@ -375,7 +375,7 @@ func (s *Session) runWithoutTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Rea
 		}
 	}
 
-	done := make(chan struct{})
+	done := make(chan struct{}, 2) // Buffered channel for stdout and stderr
 
 	// Stdin: copy from input to command
 	go func() {
@@ -386,22 +386,16 @@ func (s *Session) runWithoutTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Rea
 
 	// Stdout: copy from command to output
 	go func() {
-		defer func() { done <- struct{}{} }()
 		multiWriter := io.MultiWriter(stdout, transcript.StreamWriter("stdout"))
 		io.Copy(multiWriter, stdoutPipe)
+		done <- struct{}{}
 	}()
 
 	// Stderr: copy from command to output
 	go func() {
-		defer func() { done <- struct{}{} }()
 		multiWriter := io.MultiWriter(stderr, transcript.StreamWriter("stderr"))
 		io.Copy(multiWriter, stderrPipe)
-	}()
-
-	go func() {
-		<-done // stdout done
-		<-done // stderr done
-		close(done)
+		done <- struct{}{}
 	}()
 
 	// IMPORTANT: Wait for the command to exit first
@@ -411,7 +405,8 @@ func (s *Session) runWithoutTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Rea
 	// has been copied before we return. This fixes the race condition where
 	// fast-exiting commands would return before their output was fully captured.
 	// We MUST wait for I/O to complete, even if the context is cancelled.
-	<-done
+	<-done // wait for stdout
+	<-done // wait for stderr
 
 	return getExitCode(cmdErr), nil
 }

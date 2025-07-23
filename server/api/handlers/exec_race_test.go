@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -53,6 +54,13 @@ func TestExecRaceCondition(t *testing.T) {
 			name:        "ultra short output",
 			command:     []string{"sh", "-c", "printf 'x'"},
 			expectedOut: "x",
+			expectedErr: "",
+			iterations:  50,
+		},
+		{
+			name:        "single character echo",
+			command:     []string{"echo", "1"},
+			expectedOut: "1\n",
 			expectedErr: "",
 			iterations:  50,
 		},
@@ -177,7 +185,7 @@ func TestExecConcurrentCommands(t *testing.T) {
 				}
 
 				if stdout.String() != expected {
-					errors <- "output mismatch: got " + stdout.String()
+					errors <- fmt.Sprintf("output mismatch: got %q, expected %q (len=%d)", stdout.String(), expected, len(stdout.String()))
 					return
 				}
 

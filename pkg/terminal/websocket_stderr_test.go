@@ -238,8 +238,8 @@ func TestWebSocketStderrRaceCondition(t *testing.T) {
 	}
 }
 
-// TestWebSocketFlushEffectiveness tests if the flush mechanism works properly
-func TestWebSocketFlushEffectiveness(t *testing.T) {
+// TestWebSocketStderrCompletion tests that all stderr output is received before connection closes
+func TestWebSocketStderrCompletion(t *testing.T) {
 	// Create a command that outputs to stderr and exits
 	session := NewSession(
 		WithCommand("sh", "-c", "for i in 1 2 3; do echo \"line$i\" >&2; done"),
@@ -248,10 +248,7 @@ func TestWebSocketFlushEffectiveness(t *testing.T) {
 
 	handler := NewWebSocketHandler(session)
 
-	// Wrap the handler to track flush behavior
 	instrumentedHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// We need to instrument the flush call somehow
-		// For now, just run the normal handler
 		if err := handler.Handle(w, r); err != nil {
 			t.Errorf("handler error: %v", err)
 		}
