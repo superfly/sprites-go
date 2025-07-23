@@ -65,9 +65,11 @@
           "path": "/mnt/languages-image"
         }
       ],
+	"xxxentrypoint": ["tail", "-f", "/dev/null"],
       "restart": {
         "policy": "no"
       }
+
     }
   ],
   "services": [

@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 
+	"github.com/superfly/sprite-env/pkg/sync"
 	"github.com/superfly/sprite-env/pkg/terminal"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/term"
@@ -307,6 +307,46 @@ func main() {
 				},
 			},
 			{
+				Name:  "sync",
+				Usage: "Synchronize git repository to sprite environment",
+				Description: "Synchronize the current git repository (or specified path) to the sprite environment. " +
+					"By default, only committed files are synchronized. Use --include-uncommitted to include all files.",
+				ArgsUsage: "[source-path]",
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:     "target",
+						Aliases:  []string{"T"},
+						Usage:    "Target directory in sprite environment",
+						Required: true,
+					},
+					&cli.StringFlag{
+						Name:    "branch",
+						Aliases: []string{"b"},
+						Usage:   "Specific branch to sync (defaults to current branch)",
+					},
+					&cli.BoolFlag{
+						Name:    "include-uncommitted",
+						Aliases: []string{"u"},
+						Usage:   "Include uncommitted files in sync",
+					},
+				},
+				Action: func(ctx *cli.Context) error {
+					sourcePath := "."
+					if ctx.Args().Len() > 0 {
+						sourcePath = ctx.Args().First()
+					}
+
+					return runSyncCommand(
+						sourcePath,
+						ctx.String("target"),
+						ctx.String("branch"),
+						ctx.Bool("include-uncommitted"),
+						ctx.String("url"),
+						ctx.String("token"),
+					)
+				},
+			},
+			{
 				Name:  "run",
 				Usage: "Run any command",
 				Description: "Run any command inside a sprite environment. " +
@@ -407,4 +447,58 @@ func shouldUseTTY(cmd string) bool {
 	}
 
 	return false
+}
+
+// Simple logger implementation for sync client
+type cliLogger struct {
+	logger *slog.Logger
+}
+
+func (l *cliLogger) Info(msg string, args ...interface{}) {
+	l.logger.Info(msg, args...)
+}
+
+func (l *cliLogger) Error(msg string, args ...interface{}) {
+	l.logger.Error(msg, args...)
+}
+
+func (l *cliLogger) Debug(msg string, args ...interface{}) {
+	l.logger.Debug(msg, args...)
+} // runSyncCommand executes the sync command to synchronize a git repository
+
+// runSyncCommand executes the sync command using WebSocket-based sync
+func runSyncCommand(sourcePath, targetPath, branch string, includeUncommitted bool, spriteURL, token string) error {
+	fmt.Printf("Starting sync from %s to %s\n", sourcePath, targetPath)
+
+	// Create logger
+	logger := &cliLogger{
+		logger: slog.Default(),
+	}
+
+	// Create sync client config
+	config := sync.ClientConfig{
+		TargetPath:         targetPath,
+		Branch:             branch,
+		IncludeUncommitted: includeUncommitted,
+		UploadChannels:     4,         // Use 4 parallel upload channels
+		ChunkSize:          64 * 1024, // 64KB chunks
+		Logger:             slog.Default(),
+		ProgressCallback: func(progress sync.Progress) {
+			fmt.Printf("\rProgress: %d/%d files, %d/%d bytes",
+				progress.FilesProcessed, progress.FilesTotal,
+				progress.BytesUploaded, progress.BytesTotal)
+		},
+	}
+
+	// Create sync client
+	client := sync.NewClient(sourcePath, config)
+
+	// Perform sync
+	ctx := context.Background()
+	if err := client.Sync(ctx, spriteURL, token); err != nil {
+		return fmt.Errorf("sync failed: %w", err)
+	}
+
+	fmt.Printf("\nSync completed successfully!\n")
+	return nil
 }

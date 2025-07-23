@@ -126,6 +126,21 @@ sprite-client proxy 8080 3000 5432
 
 This is useful for accessing services running in the sprite environment from your local machine.
 
+## Synchronize Files (Sync)
+
+Synchronize the current git repository (or specified path) to the sprite environment. By default, only committed files are synchronized. Use `--include-uncommitted` to include all files.
+
+```bash
+# Sync committed files in current directory to /app in the sprite environment
+sprite-client sync --target /app
+
+# Sync branch 'develop' and include uncommitted files to /app
+sprite-client sync --target /app --branch develop --include-uncommitted
+
+# Sync from a specific source path
+sprite-client sync --target /app /path/to/repo
+```
+
 ## Examples
 
 ```bash

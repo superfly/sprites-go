@@ -24,6 +24,8 @@ COPY packages/supervisor/go.mod packages/supervisor/go.sum* ./packages/superviso
 COPY packages/leaser/go.mod packages/leaser/go.sum* ./packages/leaser/
 COPY packages/api-docs/go.mod packages/api-docs/go.sum* ./packages/api-docs/
 COPY pkg/terminal/go.mod pkg/terminal/go.sum* ./pkg/terminal/
+COPY pkg/sync/go.mod pkg/sync/go.sum* ./pkg/sync/
+COPY cmd/sprite-run/go.mod cmd/sprite-run/go.sum* ./cmd/sprite-run/
 COPY packages/port-watcher/go.mod packages/port-watcher/go.sum* ./packages/port-watcher/
 
 # Download dependencies for all modules in the workspace

@@ -160,12 +160,22 @@ func NewApplication(config Config) (*Application, error) {
 
 	// Set up API server if configured
 	if config.APIListenAddr != "" {
+		// Calculate the sync target path
+		var syncTargetPath string
+		if config.JuiceFSBaseDir != "" {
+			syncTargetPath = filepath.Join(config.JuiceFSBaseDir, "mount", "active", "fs")
+		} else {
+			// Fallback to /tmp/sync if JuiceFS is not configured
+			syncTargetPath = "/tmp/sync"
+		}
+
 		apiConfig := serverapi.Config{
 			ListenAddr:         config.APIListenAddr,
 			APIToken:           config.APIToken,
 			AdminToken:         config.AdminToken,
 			MaxWaitTime:        30 * time.Second,
 			ExecWrapperCommand: config.ExecWrapperCommand,
+			SyncTargetPath:     syncTargetPath,
 		}
 
 		apiServer, err := serverapi.NewServer(apiConfig, app.system, logger)

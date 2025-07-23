@@ -13,4 +13,7 @@ type Config struct {
 
 	// Exec configuration
 	ExecWrapperCommand []string
+
+	// Sync configuration
+	SyncTargetPath string
 }

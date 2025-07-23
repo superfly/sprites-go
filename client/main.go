@@ -123,6 +123,8 @@ func main() {
 		commands.TranscriptsCommand(globalCtx, subArgs)
 	case "proxy":
 		commands.ProxyCommand(globalCtx, subArgs)
+	case "sync":
+		commands.SyncCommand(cfg, subArgs)
 	case "admin":
 		commands.AdminCommand(globalCtx, subArgs)
 	case "api":
@@ -156,7 +158,12 @@ Commands:
     enable                  Enable transcript recording for future exec calls
     disable                 Disable transcript recording for future exec calls
   proxy <port1> [port2...]  Forward local ports through the remote server proxy
+<<<<<<< HEAD
   api [options] <path>      Make authenticated API calls with curl
+||||||| parent of a02b9dc (bug fixes)
+=======
+  sync                      Synchronize git repository to sprite environment
+>>>>>>> a02b9dc (bug fixes)
 
 Organization Commands:
   org auth                  Add an API token (aliases: orgs, organizations)

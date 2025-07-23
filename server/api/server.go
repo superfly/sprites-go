@@ -10,25 +10,29 @@ import (
 	"time"
 
 	"github.com/sprite-env/server/api/handlers"
+	"github.com/superfly/sprite-env/pkg/sync"
+)
+
+var (
+	ErrNoAuth = errors.New("API token must be set - server cannot run without authentication")
 )
 
 // Server provides the HTTP API with authentication
 type Server struct {
-	server   *http.Server
-	logger   *slog.Logger
-	config   Config
-	handlers *handlers.Handlers
-	system   handlers.SystemManager
+	server     *http.Server
+	logger     *slog.Logger
+	config     Config
+	handlers   *handlers.Handlers
+	system     handlers.SystemManager
+	syncServer *sync.Server
 }
 
 // NewServer creates a new API server
 func NewServer(config Config, system handlers.SystemManager, logger *slog.Logger) (*Server, error) {
-	// Enforce authentication requirement
 	if config.APIToken == "" {
-		return nil, errors.New("API token must be set - server cannot run without authentication")
+		return nil, ErrNoAuth
 	}
 
-	// Set default max wait time
 	if config.MaxWaitTime == 0 {
 		config.MaxWaitTime = 30 * time.Second
 	}
@@ -42,11 +46,20 @@ func NewServer(config Config, system handlers.SystemManager, logger *slog.Logger
 	// Create handlers
 	h := handlers.NewHandlers(logger, system, handlersConfig)
 
+	// Create sync server
+	syncConfig := sync.ServerConfig{
+		TargetBasePath: config.SyncTargetPath,
+		MaxConnections: 10,
+		Logger:         logger,
+	}
+	syncServer := sync.NewServer(syncConfig)
+
 	s := &Server{
-		logger:   logger,
-		config:   config,
-		handlers: h,
-		system:   system,
+		logger:     logger,
+		config:     config,
+		handlers:   h,
+		system:     system,
+		syncServer: syncServer,
 	}
 
 	// Set up server
@@ -75,9 +88,13 @@ func NewServer(config Config, system handlers.SystemManager, logger *slog.Logger
 		})
 	}
 
+	handler := stripSpritePrefix(mux)
 	s.server = &http.Server{
-		Addr:    config.ListenAddr,
-		Handler: stripSpritePrefix(mux),
+		Addr: config.ListenAddr,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			s.logger.Info("request", "url", r.URL.String())
+			handler.ServeHTTP(w, r)
+		}),
 	}
 
 	return s, nil
@@ -89,6 +106,8 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 
 	// Exec endpoint - waits for process to be running
 	mux.HandleFunc("/exec", s.authMiddleware(s.waitForProcessMiddleware(s.handlers.HandleExec)))
+
+	mux.HandleFunc("/sync", s.authMiddleware(s.waitForProcessMiddleware(s.syncServer.HandleWebSocket)))
 
 	// Checkpoint endpoint - waits for JuiceFS to be ready
 	mux.HandleFunc("/checkpoint", s.authMiddleware(s.waitForJuiceFSMiddleware(s.handlers.HandleCheckpoint)))
