@@ -11,9 +11,16 @@ shift
 
 CMD=(crun exec)
 
-# Add --cwd if EXEC_DIR is set
-if [ -n "${EXEC_DIR:-}" ]; then
-  CMD+=(--cwd "$EXEC_DIR")
+# Get working directory - prefer EXEC_DIR, fallback to WORKDIR from app-image.json
+WORKING_DIR="${EXEC_DIR:-}"
+if [ -z "$WORKING_DIR" ] && [ -f "/etc/app-image.json" ]; then
+  # Extract WorkingDir from config, providing "/" as default
+  WORKING_DIR=$(jq -r '.Config.WorkingDir // .config.WorkingDir // "/"' /etc/app-image.json 2>/dev/null || echo "/")
+fi
+
+# Add --cwd if we have a working directory
+if [ -n "$WORKING_DIR" ]; then
+  CMD+=(--cwd "$WORKING_DIR")
 fi
 
 # Add environment variables if EXEC_ENV is set
