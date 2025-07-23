@@ -516,6 +516,26 @@ func (m *Manager) AddOrgWithoutSetting(name, token, url string) error {
 	return m.Save()
 }
 
+// AddOrgMetadataOnly adds an organization to config without touching any existing token in keyring
+func (m *Manager) AddOrgMetadataOnly(name, url string) error {
+	if m.config.Orgs == nil {
+		m.config.Orgs = make(map[string]*Organization)
+	}
+
+	// Create new organization
+	org := &Organization{
+		Name:       name,
+		URL:        url,
+		UseKeyring: true, // Assume keyring usage since we're not storing token
+	}
+
+	// Don't call SetToken - leave existing keyring entry untouched
+	m.config.Orgs[name] = org
+
+	// Don't auto-set as current - let user choose through interactive selector
+	return m.Save()
+}
+
 // IsKeyringDisabled returns whether keyring usage is disabled
 func (m *Manager) IsKeyringDisabled() bool {
 	return m.config.DisableKeyring

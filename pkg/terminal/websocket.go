@@ -93,6 +93,11 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 		}
 	}
 
+	// Give client additional time to read any buffered data
+	// This is important for clients that might still be processing
+	// data from their TCP receive buffer
+	time.Sleep(100 * time.Millisecond)
+
 	return err
 }
 

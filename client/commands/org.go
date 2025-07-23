@@ -245,12 +245,91 @@ func orgListCommand(cfg *config.Manager, args []string) {
 	}
 
 	orgs := cfg.GetOrgs()
+	slog.Debug("Loaded organizations from config", "count", len(orgs))
 
-	// If no organizations in config, try to discover from keyring
+	// If no organizations in config, try to discover from Fly API
 	if len(orgs) == 0 {
-		_, err := cfg.DiscoverFromKeyring()
-		if err == nil {
+		fmt.Println("No organizations found in config. Checking Fly.io account...")
+
+		// Get Fly token
+		flyToken, source, err := GetFlyToken()
+		if err != nil {
+			slog.Debug("Failed to get Fly token", "error", err)
+			fmt.Println("No API tokens configured.")
+			fmt.Println("Run 'sprite org auth' to add one.")
+			return
+		}
+
+		slog.Debug("Found Fly token", "source", source)
+
+		// Fetch organizations from Fly API
+		flyOrgs, err := FetchFlyOrganizations(flyToken)
+		if err != nil {
+			slog.Debug("Failed to fetch organizations", "error", err)
+			fmt.Printf("Failed to fetch organizations from Fly.io: %v\n", err)
+			fmt.Println("Run 'sprite org auth' to authenticate.")
+			return
+		}
+
+		if len(flyOrgs) == 0 {
+			fmt.Println("No organizations found in your Fly.io account.")
+			return
+		}
+
+		// For each discovered org, check if we can get its sprite token from keyring
+		discoveredOrgs := 0
+		for _, flyOrg := range flyOrgs {
+			// Try to get the sprite token from keyring
+			org := &config.Organization{
+				Name: flyOrg.Slug,
+				URL:  "https://api.sprites.dev",
+			}
+			if envURL := os.Getenv("SPRITES_API_URL"); envURL != "" {
+				org.URL = envURL
+			}
+
+			// Check if we can get token from keyring
+			_, err := org.GetToken()
+			if err == nil {
+				// Found a valid token in keyring, add to config
+				if err := cfg.AddOrgMetadataOnly(flyOrg.Slug, org.URL); err == nil {
+					discoveredOrgs++
+					slog.Debug("Discovered organization from keyring", "org", flyOrg.Slug)
+				}
+			}
+		}
+
+		if discoveredOrgs > 0 {
+			// Save config with discovered orgs
+			if err := cfg.Save(); err != nil {
+				slog.Debug("Failed to save config with discovered orgs", "error", err)
+			}
 			// Reload orgs after discovery
+			orgs = cfg.GetOrgs()
+		} else {
+			fmt.Println("No authenticated organizations found.")
+			fmt.Println("Run 'sprite org auth' to authenticate.")
+			return
+		}
+	} else {
+		// We have orgs in config, validate they still have tokens in keyring
+		invalidOrgs := []string{}
+		for name, org := range orgs {
+			_, err := org.GetToken()
+			if err != nil {
+				invalidOrgs = append(invalidOrgs, name)
+				slog.Debug("Organization has no valid token in keyring", "org", name, "error", err)
+			}
+		}
+
+		// Remove invalid orgs
+		if len(invalidOrgs) > 0 {
+			for _, name := range invalidOrgs {
+				if err := cfg.RemoveOrg(name); err != nil {
+					slog.Debug("Failed to remove invalid org", "org", name, "error", err)
+				}
+			}
+			// Reload orgs after cleanup
 			orgs = cfg.GetOrgs()
 		}
 	}
