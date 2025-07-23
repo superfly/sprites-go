@@ -409,35 +409,7 @@ Tests cover:
 - Wrapper command support
 - Error conditions and cancellation
 
-## Migration from wsexec
 
-If you're migrating from the old `wsexec` package:
-
-### Before (wsexec)
-```go
-cmd := wsexec.NewServerCommand("bash", "-l")
-cmd.SetTTY(true)
-cmd.SetWorkingDir("/tmp")
-cmd.SetEnv([]string{"VAR=value"})
-cmd.SetLogger(logger)
-err := cmd.Handle(w, r) // WebSocket-specific
-```
-
-### After (terminal)
-```go
-session := terminal.NewSession(
-    terminal.WithCommand("bash", "-l"),
-    terminal.WithTTY(true),
-    terminal.WithDir("/tmp"),
-    terminal.WithEnv([]string{"VAR=value"}),
-    terminal.WithLogger(logger),
-)
-
-// For WebSocket usage:
-wsHandler := terminal.NewWebSocketHandler(session)
-err := wsHandler.Handle(w, r)
-
-// For direct usage:
 exitCode, err := session.Run(ctx, stdin, stdout, stderr)
 ```
 

@@ -404,12 +404,14 @@ func (s *Session) runWithoutTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Rea
 		close(done)
 	}()
 
+	// IMPORTANT: Wait for the command to exit first
 	cmdErr := cmd.Wait()
 
-	select {
-	case <-done:
-	case <-ctx.Done():
-	}
+	// Then wait for all I/O to complete - this ensures all stdout/stderr
+	// has been copied before we return. This fixes the race condition where
+	// fast-exiting commands would return before their output was fully captured.
+	// We MUST wait for I/O to complete, even if the context is cancelled.
+	<-done
 
 	return getExitCode(cmdErr), nil
 }

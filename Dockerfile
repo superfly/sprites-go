@@ -21,7 +21,6 @@ COPY client/go.mod client/go.sum* ./client/
 COPY packages/container/go.mod packages/container/go.sum* ./packages/container/
 COPY packages/juicefs/go.mod packages/juicefs/go.sum* ./packages/juicefs/
 COPY packages/supervisor/go.mod packages/supervisor/go.sum* ./packages/supervisor/
-COPY packages/wsexec/go.mod packages/wsexec/go.sum* ./packages/wsexec/
 COPY packages/leaser/go.mod packages/leaser/go.sum* ./packages/leaser/
 COPY packages/api-docs/go.mod packages/api-docs/go.sum* ./packages/api-docs/
 COPY pkg/terminal/go.mod pkg/terminal/go.sum* ./pkg/terminal/

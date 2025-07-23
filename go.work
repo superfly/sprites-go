@@ -8,7 +8,6 @@ use (
 	./packages/leaser
 	./packages/port-watcher
 	./packages/supervisor
-	./packages/wsexec
 	./pkg/terminal
 	./server
 )
