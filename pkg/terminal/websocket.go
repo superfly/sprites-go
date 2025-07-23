@@ -64,9 +64,9 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 		h.onConnected(wsStreams)
 	}
 
-	// Run the session
+	// Run the session - pass separate wrappers for stdout and stderr
 	ctx := r.Context()
-	exitCode, err := h.session.Run(ctx, wsStreams, wsStreams, wsStreams)
+	exitCode, err := h.session.Run(ctx, wsStreams, &streamWrapper{ws: wsStreams, streamID: StreamStdout}, &streamWrapper{ws: wsStreams, streamID: StreamStderr})
 
 	// Flush all pending writes with a reasonable timeout
 	// This ensures all buffered output is sent before closing
@@ -128,6 +128,30 @@ type writeRequest struct {
 	messageType int
 	data        []byte
 	result      chan error
+}
+
+// streamWrapper wraps webSocketStreams to write to a specific stream
+type streamWrapper struct {
+	ws       *webSocketStreams
+	streamID StreamID
+}
+
+// Write implements io.Writer for a specific stream
+func (w *streamWrapper) Write(p []byte) (int, error) {
+	if w.ws.isPTY {
+		// In PTY mode, write raw data
+		err := w.ws.writeRaw(p)
+		if err != nil {
+			return 0, err
+		}
+		return len(p), nil
+	}
+	// In non-PTY mode, write with the specific stream ID
+	err := w.ws.writeStream(w.streamID, p)
+	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
 
 // newWebSocketStreams creates a new WebSocket stream handler
