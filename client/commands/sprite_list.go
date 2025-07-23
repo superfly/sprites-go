@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss/table"
 	"github.com/sprite-env/client/config"
 	"github.com/sprite-env/client/format"
+	"golang.org/x/term"
 )
 
 // ListCommand handles the list command - lists all sprites
@@ -92,6 +93,15 @@ func ListCommand(ctx *GlobalContext, args []string) {
 		os.Exit(1)
 	}
 
+	// Check if output is being piped
+	if !term.IsTerminal(int(os.Stdout.Fd())) {
+		// Just output names when piped
+		for _, sprite := range sprites {
+			fmt.Println(sprite.Name)
+		}
+		return
+	}
+
 	// Display results
 	if len(sprites) == 0 {
 		if prefix != "" {
@@ -116,73 +126,41 @@ func ListCommand(ctx *GlobalContext, args []string) {
 
 		rows[i] = []string{
 			sprite.Name,
-			sprite.Status,
 			createdStr,
 		}
 	}
 
 	// Create table with lipgloss
 	t := table.New().
-		Headers("NAME", "STATUS", "CREATED").
+		Headers("NAME", "CREATED").
 		Rows(rows...).
 		Border(lipgloss.NormalBorder()).
-		BorderStyle(lipgloss.NewStyle().Foreground(lipgloss.Color("240"))).
+		BorderStyle(lipgloss.NewStyle().Foreground(format.BorderColor)).
 		StyleFunc(func(row, col int) lipgloss.Style {
-			if row == 0 {
-				// Header style
+			// Headers are at row -1
+			if row == -1 {
 				return lipgloss.NewStyle().
 					Bold(true).
-					Foreground(lipgloss.Color("229")).
+					Foreground(format.HeaderColor).
 					Align(lipgloss.Center)
 			}
 
-			// Cell styles
+			// Data rows start at 0
 			switch col {
-			case 0: // Name column
+			case 0: // Name column - sprite names should use SpriteColor
 				return lipgloss.NewStyle().
-					Foreground(lipgloss.Color("86")).
-					PaddingRight(2)
-			case 1: // Status column
-				status := rows[row-1][1] // This will panic with index out of range
-				return getStatusStyle(status).
-					Align(lipgloss.Center).
-					PaddingLeft(1).
-					PaddingRight(1)
-			case 2: // Created column
+					Foreground(format.SpriteColor)
+			case 1: // Created column
 				return lipgloss.NewStyle().
-					Foreground(lipgloss.Color("241")).
+					Foreground(format.SecondaryTextColor).
 					Align(lipgloss.Right)
 			default:
 				return lipgloss.NewStyle()
 			}
 		})
 
-	// Debug: catch panic to see stacktrace
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Fprintf(os.Stderr, "Panic in table rendering: %v\n", r)
-			panic(r) // re-panic to get stacktrace
-		}
-	}()
-
-	// Render the table to a string first to trigger panic outside of fmt.Println
-	tableStr := t.String()
-	fmt.Print(tableStr)
+	fmt.Println(t)
 	fmt.Printf("\nTotal: %d sprite(s)\n", len(sprites))
-}
-
-// getStatusStyle returns the appropriate style for a given status
-func getStatusStyle(status string) lipgloss.Style {
-	switch status {
-	case "running", "active", "ready":
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("82")) // green
-	case "stopped", "exited", "failed", "error":
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("196")) // red
-	case "creating", "starting", "stopping", "pending":
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("226")) // yellow
-	default:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("245")) // gray
-	}
 }
 
 // formatDuration formats a duration in a human-readable way

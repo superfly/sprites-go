@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 // ANSI color codes - using theme-adaptive colors
@@ -22,6 +24,27 @@ const (
 	// Subtle colors for secondary information
 	Gray = "\033[37m" // Light gray - works on both light and dark
 	Dim  = "\033[2m"  // Dim text - lets terminal choose appropriate dimming
+)
+
+// Lipgloss adaptive colors for rich terminal UI components
+var (
+	// Core semantic colors for entities
+	OrgColor     = lipgloss.AdaptiveColor{Light: "39", Dark: "87"}   // Cyan - for organizations
+	SpriteColor  = lipgloss.AdaptiveColor{Light: "34", Dark: "82"}   // Green - for sprites
+	CommandColor = lipgloss.AdaptiveColor{Light: "178", Dark: "220"} // Yellow - for commands
+
+	// Status colors
+	SuccessColor = lipgloss.AdaptiveColor{Light: "34", Dark: "82"}   // Green
+	ErrorColor   = lipgloss.AdaptiveColor{Light: "124", Dark: "196"} // Red
+	InfoColor    = lipgloss.AdaptiveColor{Light: "27", Dark: "117"}  // Blue
+	WarningColor = lipgloss.AdaptiveColor{Light: "178", Dark: "220"} // Yellow
+
+	// UI element colors
+	BorderColor        = lipgloss.AdaptiveColor{Light: "240", Dark: "238"} // Subtle border
+	HeaderColor        = lipgloss.AdaptiveColor{Light: "27", Dark: "117"}  // Blue accent for headers
+	PrimaryTextColor   = lipgloss.AdaptiveColor{Light: "16", Dark: "255"}  // Main text
+	SecondaryTextColor = lipgloss.AdaptiveColor{Light: "240", Dark: "245"} // Secondary/subtle text
+	AccentColor        = lipgloss.AdaptiveColor{Light: "33", Dark: "87"}   // Accent color for highlights
 )
 
 // Check if we should use colors (not disabled, and terminal supports it)
