@@ -32,7 +32,7 @@ RUN git clone https://github.com/asdf-vm/asdf.git --branch v0.14.0 --depth 1 "$A
       echo '# /etc/profile.d/asdf.sh'; \
       echo 'export ASDF_DIR=/opt/asdf'; \
       echo 'export ASDF_DATA_DIR=/opt/asdf'; \
-      echo 'export ASDF_DEFAULT_TOOL_VERSIONS_FILE=/etc/asdf-default-tool-versions'; \
+      echo 'export ASDF_DEFAULT_TOOL_VERSIONS_FILENAME=/etc/asdf-default-tool-versions'; \
       echo 'export PATH="$ASDF_DATA_DIR/shims:$ASDF_DIR/bin:$PATH"'; \
       echo '. "$ASDF_DIR/asdf.sh"'; \
       echo '. "$ASDF_DIR/completions/asdf.bash"'; \
