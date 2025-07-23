@@ -14,10 +14,11 @@ type SpriteFile struct {
 }
 
 // ReadSpriteFile reads the .sprite file from the current directory or parent directories
-func ReadSpriteFile() (*SpriteFile, error) {
+// Returns the sprite file contents and the path where it was found
+func ReadSpriteFile() (*SpriteFile, string, error) {
 	dir, err := os.Getwd()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	// Look for .sprite file in current directory and parent directories
@@ -27,15 +28,15 @@ func ReadSpriteFile() (*SpriteFile, error) {
 			// Found .sprite file
 			data, err := os.ReadFile(spriteFile)
 			if err != nil {
-				return nil, fmt.Errorf("failed to read .sprite file: %w", err)
+				return nil, "", fmt.Errorf("failed to read .sprite file: %w", err)
 			}
 
 			var sf SpriteFile
 			if err := json.Unmarshal(data, &sf); err != nil {
-				return nil, fmt.Errorf("failed to parse .sprite file: %w", err)
+				return nil, "", fmt.Errorf("failed to parse .sprite file: %w", err)
 			}
 
-			return &sf, nil
+			return &sf, spriteFile, nil
 		}
 
 		// Move to parent directory
@@ -47,7 +48,7 @@ func ReadSpriteFile() (*SpriteFile, error) {
 		dir = parent
 	}
 
-	return nil, nil
+	return nil, "", nil
 }
 
 // WriteSpriteFile writes a .sprite file in the current directory

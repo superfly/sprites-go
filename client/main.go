@@ -113,6 +113,10 @@ func main() {
 		commands.CreateCommand(globalCtx, subArgs)
 	case "destroy":
 		commands.DestroyCommand(globalCtx, subArgs)
+	case "use":
+		commands.UseCommand(globalCtx, subArgs)
+	case "list":
+		commands.ListCommand(globalCtx, subArgs)
 	case "org", "orgs", "organizations":
 		commands.OrgCommand(globalCtx, subArgs)
 	case "transcripts":
@@ -140,6 +144,8 @@ Commands:
   exec                      Execute a command in the sprite environment
   console                   Open an interactive shell in the sprite environment
   create <name>             Create a new sprite
+  use [sprite]              Activate a sprite for the current directory
+  list                      List all sprites
   checkpoint [subcommand]   Manage checkpoints (aliases: checkpoints, c)
     create                  Create a new checkpoint
     list                    List all checkpoints
@@ -174,6 +180,15 @@ Examples:
   # Create a new sprite
   sprite create my-sprite
   sprite create -o myorg dev-sprite
+
+  # List all sprites
+  sprite list
+  sprite list -o myorg
+
+  # Activate a sprite for the current directory
+  sprite use my-sprite
+  sprite use -o myorg dev-sprite
+  sprite use --unset
 
   # Execute a command
   sprite exec ls -la

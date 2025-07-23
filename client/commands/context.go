@@ -44,7 +44,76 @@ func PromptForConfirmationOrExit(title, description string) bool {
 	return confirmed
 }
 
-// EnsureOrgAndSprite ensures we have an organization and sprite selected.
+// EnsureOrg ensures we have a valid organization for API calls.
+// It returns the organization.
+func EnsureOrg(cfg *config.Manager, orgOverride string) (*config.Organization, error) {
+	// First check if we have environment variables set
+	envURL := os.Getenv("SPRITE_URL")
+	envToken := os.Getenv("SPRITE_TOKEN")
+
+	var org *config.Organization
+
+	// If env vars are set, use them (backward compatibility)
+	if envURL != "" && envToken != "" {
+		// This is using environment-based config, not org-based
+		// Create a temporary org structure
+		org = &config.Organization{
+			Name:  "env",
+			URL:   envURL,
+			Token: envToken,
+		}
+		return org, nil
+	}
+
+	// Check if we have command-line overrides
+	if orgOverride != "" {
+		// Find the organization by name
+		orgs := cfg.GetOrgs()
+		for _, o := range orgs {
+			if o.Name == orgOverride {
+				org = o
+				// Set as current for this session
+				cfg.SetCurrentOrg(o.Name)
+				break
+			}
+		}
+		if org == nil {
+			return nil, fmt.Errorf("organization '%s' not found", orgOverride)
+		}
+		return org, nil
+	}
+
+	// Check .sprite file for organization
+	spriteFile, _, err := config.ReadSpriteFile()
+	if err == nil && spriteFile != nil && spriteFile.Organization != "" {
+		// Find the organization
+		orgs := cfg.GetOrgs()
+		for _, o := range orgs {
+			if o.Name == spriteFile.Organization {
+				return o, nil
+			}
+		}
+	}
+
+	// Use current organization
+	org = cfg.GetCurrentOrg()
+	if org == nil {
+		// If no current org, try to get the first available one
+		orgs := cfg.GetOrgs()
+		if len(orgs) == 0 {
+			return nil, fmt.Errorf("no organizations configured. Please run 'sprite org auth' first")
+		}
+		// Get the first org from the map
+		for _, o := range orgs {
+			org = o
+			break
+		}
+	}
+
+	return org, nil
+}
+
+// EnsureOrgAndSprite ensures we have valid organization and sprite for API calls.
 // It returns the organization and sprite name.
 func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string) (*config.Organization, string, error) {
 	// First check if we have environment variables set
@@ -93,7 +162,7 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 	// If no org override, check .sprite file or use current config
 	if org == nil {
 		// Check if we have a .sprite file in the current directory or parent directories
-		spriteFile, err := config.ReadSpriteFile()
+		spriteFile, spritePath, err := config.ReadSpriteFile()
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to read .sprite file: %w", err)
 		}
@@ -114,6 +183,13 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 			}
 
 			if org != nil {
+				// Print where we loaded the sprite from
+				if spritePath != "" && spriteName != "" {
+					fmt.Printf("Using %s %s (from %s)\n",
+						format.Org(format.GetOrgDisplayName(org.Name, org.URL)),
+						format.Sprite(spriteName),
+						format.Subtle(spritePath))
+				}
 				// Only show .sprite file usage message in debug mode
 				logger := slog.Default()
 				if logger.Enabled(context.Background(), slog.LevelDebug) {
@@ -172,22 +248,6 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 		// Don't check sprite existence - let API endpoints handle it
 	}
 
-	// Save .sprite file if we have both org and sprite and no overrides were used
-	if spriteName != "" && org != nil && orgOverride == "" && spriteOverride == "" {
-		if err := config.WriteSpriteFile(org.Name, spriteName); err != nil {
-			// Log but don't fail - .sprite file is a convenience feature
-			slog.Debug("Failed to write .sprite file", "error", err)
-		} else {
-			// Only show .sprite file creation message in debug mode
-			logger := slog.Default()
-			if logger.Enabled(context.Background(), slog.LevelDebug) {
-				fmt.Printf("Created .sprite file for %s:%s\n",
-					format.Org(format.GetOrgDisplayName(org.Name, org.URL)),
-					format.Sprite(spriteName))
-			}
-		}
-	}
-
 	return org, spriteName, nil
 }
 
@@ -202,32 +262,8 @@ func promptForSpriteName() (string, error) {
 
 // SaveSprite is now a no-op since we don't store sprites locally
 func SaveSprite(cfg *config.Manager, name, id string) error {
-	// Check if .sprite file already exists
-	existingSpriteFile, _ := config.ReadSpriteFile()
-	org := cfg.GetCurrentOrg()
-
-	// Only create .sprite file if it doesn't exist or has different content
-	if org != nil {
-		needsUpdate := true
-		if existingSpriteFile != nil && existingSpriteFile.Organization == org.Name && existingSpriteFile.Sprite == name {
-			needsUpdate = false
-		}
-
-		if needsUpdate {
-			if err := config.WriteSpriteFile(org.Name, name); err != nil {
-				slog.Debug("Failed to write .sprite file", "error", err)
-			} else {
-				// Only show .sprite file update message in debug mode
-				logger := slog.Default()
-				if logger.Enabled(context.Background(), slog.LevelDebug) {
-					fmt.Printf("Updated .sprite file for %s:%s\n",
-						format.Org(format.GetOrgDisplayName(org.Name, org.URL)),
-						format.Sprite(name))
-				}
-			}
-		}
-	}
-
+	// Sprites are no longer stored in local config
+	// They are fetched from API when needed or passed through to API calls
 	return nil
 }
 

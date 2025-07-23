@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/sprite-env/client/config"
 	"github.com/sprite-env/client/format"
 )
 
@@ -19,13 +20,15 @@ func ApiCommand(ctx *GlobalContext, args []string) {
 		Description: "Make authenticated API calls with curl",
 		FlagSet:     flag.NewFlagSet("api", flag.ContinueOnError),
 		Examples: []string{
+			"sprite api -o myorg /sprites",
 			"sprite api -o myorg -s my-sprite /upgrade -X POST",
 			"sprite api -o myorg -s my-sprite /exec -X GET",
 			"sprite api -o myorg -s my-sprite /checkpoints",
 		},
 		Notes: []string{
 			"This command wraps curl to automatically add authentication headers.",
-			"The path is relative to /v1/sprites/<sprite-name>/",
+			"If a sprite is specified with -s, the path is relative to /v1/sprites/<sprite-name>/",
+			"If no sprite is specified, the path is relative to /v1/",
 			"All arguments after the path are passed directly to curl.",
 		},
 	}
@@ -137,17 +140,30 @@ func ApiCommand(ctx *GlobalContext, args []string) {
 	path := remainingArgs[0]
 	curlArgs := remainingArgs[1:]
 
-	// Ensure we have org and sprite
-	org, spriteName, err := EnsureOrgAndSprite(ctx.ConfigMgr, flags.Org, flags.Sprite)
+	// Get organization (required)
+	org, err := EnsureOrg(ctx.ConfigMgr, flags.Org)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
+	// Get sprite name if provided
+	spriteName := flags.Sprite
 	if spriteName == "" {
-		fmt.Fprintf(os.Stderr, "Error: sprite name is required. Use -s flag or set it via .sprite file\n")
-		os.Exit(1)
+		// Check .sprite file for sprite name
+		spriteFile, spritePath, err := config.ReadSpriteFile()
+		if err == nil && spriteFile != nil && spriteFile.Sprite != "" {
+			spriteName = spriteFile.Sprite
+			if spritePath != "" && org != nil {
+				fmt.Printf("Using %s %s (from %s)\n",
+					format.Org(format.GetOrgDisplayName(org.Name, org.URL)),
+					format.Sprite(spriteName),
+					format.Subtle(spritePath))
+			}
+		}
 	}
+
+	// Note: sprite is optional for this command
 
 	// Get auth token
 	token, err := org.GetTokenWithKeyringDisabled(ctx.ConfigMgr.IsKeyringDisabled())
@@ -164,7 +180,14 @@ func ApiCommand(ctx *GlobalContext, args []string) {
 		path = "/" + path
 	}
 
-	fullURL := baseURL + "/v1/sprites/" + spriteName + path
+	var fullURL string
+	if spriteName != "" {
+		// If sprite is specified, use the sprite-specific path
+		fullURL = baseURL + "/v1/sprites/" + spriteName + path
+	} else {
+		// If no sprite, use the general v1 path
+		fullURL = baseURL + "/v1" + path
+	}
 
 	// Check if curl is installed
 	curlPath, err := exec.LookPath("curl")
@@ -184,9 +207,14 @@ func ApiCommand(ctx *GlobalContext, args []string) {
 	curlCmd = append(curlCmd, curlArgs...)
 
 	// Show what we're doing
-	fmt.Printf("Calling API: %s %s\n",
-		format.Org(format.GetOrgDisplayName(org.Name, org.URL)),
-		format.Sprite(spriteName))
+	if spriteName != "" {
+		fmt.Printf("Calling API: %s %s\n",
+			format.Org(format.GetOrgDisplayName(org.Name, org.URL)),
+			format.Sprite(spriteName))
+	} else {
+		fmt.Printf("Calling API: %s\n",
+			format.Org(format.GetOrgDisplayName(org.Name, org.URL)))
+	}
 	fmt.Printf("URL: %s\n\n", fullURL)
 
 	// Execute curl

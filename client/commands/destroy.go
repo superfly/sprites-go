@@ -108,7 +108,7 @@ func DestroyCommand(ctx *GlobalContext, args []string) {
 	}
 
 	// Remove .sprite file if it exists and matches this sprite
-	if spriteFile, _ := config.ReadSpriteFile(); spriteFile != nil {
+	if spriteFile, _, _ := config.ReadSpriteFile(); spriteFile != nil {
 		if spriteFile.Organization == org.Name && spriteFile.Sprite == spriteName {
 			if err := config.RemoveSpriteFile(); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: Failed to remove .sprite file: %v\n", err)

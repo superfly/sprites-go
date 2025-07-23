@@ -2,14 +2,205 @@ package commands
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/lipgloss/table"
 	"github.com/sprite-env/client/config"
+	"github.com/sprite-env/client/format"
 )
+
+// ListCommand handles the list command - lists all sprites
+func ListCommand(ctx *GlobalContext, args []string) {
+	// Create command structure
+	cmd := &Command{
+		Name:        "list",
+		Usage:       "list [options]",
+		Description: "List all sprites",
+		FlagSet:     flag.NewFlagSet("list", flag.ContinueOnError),
+		Examples: []string{
+			"sprite list",
+			"sprite list -o myorg",
+			"sprite list --prefix dev",
+		},
+		Notes: []string{
+			"Lists all sprites in the selected organization.",
+			"Use --prefix to filter sprites by name prefix.",
+		},
+	}
+
+	// Set up flags
+	flags := NewSpriteFlags(cmd.FlagSet)
+	var prefix string
+	cmd.FlagSet.StringVar(&prefix, "prefix", "", "Filter sprites by name prefix")
+
+	// Parse flags
+	_, err := ParseFlags(cmd, args)
+	if err != nil {
+		os.Exit(1)
+	}
+
+	// Ensure we have an organization
+	orgs := ctx.ConfigMgr.GetOrgs()
+	if len(orgs) == 0 {
+		fmt.Fprintf(os.Stderr, "Error: No organizations configured. Please run 'sprite org auth' first.\n")
+		os.Exit(1)
+	}
+
+	// Get the organization (use override if provided)
+	var org *config.Organization
+	if flags.Org != "" {
+		// Find the organization by name
+		found := false
+		for _, o := range orgs {
+			if o.Name == flags.Org {
+				org = o
+				found = true
+				break
+			}
+		}
+		if !found {
+			fmt.Fprintf(os.Stderr, "Error: Organization '%s' not found\n", flags.Org)
+			os.Exit(1)
+		}
+	} else {
+		// Use current org or first available
+		org = ctx.ConfigMgr.GetCurrentOrg()
+		if org == nil && len(orgs) > 0 {
+			// Get the first org from the map
+			for _, o := range orgs {
+				org = o
+				break
+			}
+		}
+		if org == nil {
+			fmt.Fprintf(os.Stderr, "Error: No organization selected\n")
+			os.Exit(1)
+		}
+	}
+
+	// List sprites with prefix filter if provided
+	sprites, err := ListSpritesWithPrefix(ctx.ConfigMgr, org, prefix)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error listing sprites: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Display results
+	if len(sprites) == 0 {
+		if prefix != "" {
+			fmt.Printf("No sprites found with prefix '%s' in organization %s\n",
+				prefix, format.Org(format.GetOrgDisplayName(org.Name, org.URL)))
+		} else {
+			fmt.Printf("No sprites found in organization %s\n",
+				format.Org(format.GetOrgDisplayName(org.Name, org.URL)))
+		}
+		return
+	}
+
+	// Print header
+	fmt.Printf("Sprites in organization %s:\n\n",
+		format.Org(format.GetOrgDisplayName(org.Name, org.URL)))
+
+	// Create table data
+	rows := make([][]string, len(sprites))
+	for i, sprite := range sprites {
+		createdAgo := time.Since(sprite.CreatedAt)
+		createdStr := formatDuration(createdAgo) + " ago"
+
+		rows[i] = []string{
+			sprite.Name,
+			sprite.Status,
+			createdStr,
+		}
+	}
+
+	// Create table with lipgloss
+	t := table.New().
+		Headers("NAME", "STATUS", "CREATED").
+		Rows(rows...).
+		Border(lipgloss.NormalBorder()).
+		BorderStyle(lipgloss.NewStyle().Foreground(lipgloss.Color("240"))).
+		StyleFunc(func(row, col int) lipgloss.Style {
+			if row == 0 {
+				// Header style
+				return lipgloss.NewStyle().
+					Bold(true).
+					Foreground(lipgloss.Color("229")).
+					Align(lipgloss.Center)
+			}
+
+			// Cell styles
+			switch col {
+			case 0: // Name column
+				return lipgloss.NewStyle().
+					Foreground(lipgloss.Color("86")).
+					PaddingRight(2)
+			case 1: // Status column
+				status := rows[row-1][1] // This will panic with index out of range
+				return getStatusStyle(status).
+					Align(lipgloss.Center).
+					PaddingLeft(1).
+					PaddingRight(1)
+			case 2: // Created column
+				return lipgloss.NewStyle().
+					Foreground(lipgloss.Color("241")).
+					Align(lipgloss.Right)
+			default:
+				return lipgloss.NewStyle()
+			}
+		})
+
+	// Debug: catch panic to see stacktrace
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "Panic in table rendering: %v\n", r)
+			panic(r) // re-panic to get stacktrace
+		}
+	}()
+
+	// Render the table to a string first to trigger panic outside of fmt.Println
+	tableStr := t.String()
+	fmt.Print(tableStr)
+	fmt.Printf("\nTotal: %d sprite(s)\n", len(sprites))
+}
+
+// getStatusStyle returns the appropriate style for a given status
+func getStatusStyle(status string) lipgloss.Style {
+	switch status {
+	case "running", "active", "ready":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("82")) // green
+	case "stopped", "exited", "failed", "error":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("196")) // red
+	case "creating", "starting", "stopping", "pending":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("226")) // yellow
+	default:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("245")) // gray
+	}
+}
+
+// formatDuration formats a duration in a human-readable way
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	} else if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	} else if d < 24*time.Hour {
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	} else {
+		days := int(d.Hours() / 24)
+		if days == 1 {
+			return "1 day"
+		}
+		return fmt.Sprintf("%d days", days)
+	}
+}
 
 // SpritesListResponse represents the response from listing sprites
 type SpritesListResponse struct {
@@ -18,8 +209,8 @@ type SpritesListResponse struct {
 	NextContinuationToken string       `json:"next_continuation_token,omitempty"`
 }
 
-// ListSprites fetches the list of sprites from the API
-func ListSprites(cfg *config.Manager, org *config.Organization) ([]SpriteInfo, error) {
+// ListSpritesWithPrefix fetches the list of sprites from the API with optional prefix filtering
+func ListSpritesWithPrefix(cfg *config.Manager, org *config.Organization, prefix string) ([]SpriteInfo, error) {
 	var allSprites []SpriteInfo
 	continuationToken := ""
 
@@ -35,6 +226,9 @@ func ListSprites(cfg *config.Manager, org *config.Organization) ([]SpriteInfo, e
 		q.Set("max_results", "100")
 		if continuationToken != "" {
 			q.Set("continuation_token", continuationToken)
+		}
+		if prefix != "" {
+			q.Set("prefix", prefix)
 		}
 		u.RawQuery = q.Encode()
 
@@ -86,6 +280,11 @@ func ListSprites(cfg *config.Manager, org *config.Organization) ([]SpriteInfo, e
 	}
 
 	return allSprites, nil
+}
+
+// ListSprites fetches the list of sprites from the API
+func ListSprites(cfg *config.Manager, org *config.Organization) ([]SpriteInfo, error) {
+	return ListSpritesWithPrefix(cfg, org, "")
 }
 
 // SyncSpritesWithConfig is now a no-op since we don't store sprites locally

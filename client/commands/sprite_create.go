@@ -132,18 +132,6 @@ func CreateCommand(ctx *GlobalContext, args []string) {
 	}
 
 	fmt.Printf("%s Sprite %s created successfully!\n", format.Success("✓"), format.Sprite(spriteName))
-
-	// Save .sprite file for convenience
-	if err := config.WriteSpriteFile(org.Name, spriteName); err != nil {
-		// Log but don't fail - .sprite file is a convenience feature
-		if ctx.IsDebugEnabled() {
-			fmt.Printf("Note: Failed to create .sprite file: %v\n", err)
-		}
-	} else if ctx.IsDebugEnabled() {
-		fmt.Printf("Created .sprite file for %s:%s\n",
-			format.Org(format.GetOrgDisplayName(org.Name, org.URL)),
-			format.Sprite(spriteName))
-	}
 }
 
 // CreateSprite creates a new sprite on the server
