@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -68,6 +69,9 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 	// Run the session - pass separate wrappers for stdout and stderr
 	ctx := r.Context()
 	exitCode, err := h.session.Run(ctx, wsStreams, &streamWrapper{ws: wsStreams, streamID: StreamStdout}, &streamWrapper{ws: wsStreams, streamID: StreamStderr})
+	if err != nil && h.session.logger != nil {
+		h.session.logger.Error("Session run failed", "error", err)
+	}
 
 	// Flush all pending writes with a longer timeout
 	// This ensures all buffered output is sent before closing
@@ -118,10 +122,40 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 	// Wait for client close
 	deadline := time.Now().Add(30 * time.Second) // Increased from 2 seconds to 30 seconds
 	conn.SetReadDeadline(deadline)
+
+	// Track if we received a proper close frame from client
+	clientClosedCleanly := false
+
 	for {
-		if _, _, err := conn.ReadMessage(); err != nil {
+		_, _, err := conn.ReadMessage()
+		if err != nil {
+			// Check if it's a close error with a close frame
+			if closeErr, ok := err.(*gorillaws.CloseError); ok {
+				clientClosedCleanly = true
+				if h.session.logger != nil {
+					h.session.logger.Debug("Client sent close frame",
+						"code", closeErr.Code,
+						"text", closeErr.Text)
+				}
+			} else if err == gorillaws.ErrReadLimit {
+				// Client tried to send a message that was too large
+				if h.session.logger != nil {
+					h.session.logger.Warn("Client message exceeded read limit during close")
+				}
+			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				// We hit our deadline - client didn't send close frame in time
+				if h.session.logger != nil {
+					h.session.logger.Warn("Client did not send close frame within deadline")
+				}
+			}
 			break
 		}
+		// If we're still receiving messages, just discard them
+		// The client should send a close frame, not more data
+	}
+
+	if !clientClosedCleanly && h.session.logger != nil {
+		h.session.logger.Warn("WebSocket closed without receiving client close frame")
 	}
 
 	return nil

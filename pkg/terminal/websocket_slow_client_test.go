@@ -32,6 +32,27 @@ func TestWebSocketSlowClient(t *testing.T) {
 			readBatchSize: 1,
 			expectedLines: 5,
 		},
+		{
+			name:          "slow_client_large_output",
+			command:       []string{"sh", "-c", "for i in $(seq 1 200); do echo line $i with some padding to make it longer; done"},
+			readDelay:     10 * time.Millisecond, // Slow reader
+			readBatchSize: 5,
+			expectedLines: 200,
+		},
+		{
+			name:          "very_slow_client_burst_output",
+			command:       []string{"sh", "-c", "for i in $(seq 1 150); do printf 'burst line %d\\n' $i; done"}, // Fast output
+			readDelay:     100 * time.Millisecond,                                                               // Very slow reader - should cause backpressure
+			readBatchSize: 1,
+			expectedLines: 150,
+		},
+		{
+			name:          "slow_client_with_stderr",
+			command:       []string{"sh", "-c", "for i in $(seq 1 50); do echo stdout $i; echo stderr $i >&2; done"},
+			readDelay:     20 * time.Millisecond,
+			readBatchSize: 2,
+			expectedLines: 100, // 50 stdout + 50 stderr
+		},
 	}
 
 	for _, tt := range tests {
@@ -131,7 +152,7 @@ func TestWebSocketSlowClient(t *testing.T) {
 			select {
 			case <-done:
 				// Reader finished
-			case <-time.After(10 * time.Second):
+			case <-time.After(60 * time.Second): // Increased timeout for slow clients
 				if !tt.expectTimeout {
 					t.Fatal("Test timed out - slow client couldn't keep up")
 				}
@@ -148,7 +169,7 @@ func TestWebSocketSlowClient(t *testing.T) {
 
 			// Verify no data was lost
 			if tt.name == "slow_client_small_output" {
-				for i := 1; i <= 10; i++ {
+				for i := 1; i <= 5; i++ {
 					expected := fmt.Sprintf("line %d", i)
 					assert.Contains(t, receivedLines, expected, "Should not lose any output lines")
 				}
