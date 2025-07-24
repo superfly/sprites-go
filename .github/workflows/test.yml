@@ -38,7 +38,9 @@ jobs:
         go-version: 1.24.4
 
     - name: Test
-      run: make test
+      run: |
+        chmod +x ./scripts/run-tests.sh
+        make test
   
   # validate-traces:
   #   name: Validate Traces
