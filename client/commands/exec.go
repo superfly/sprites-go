@@ -10,11 +10,9 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"os/signal"
 	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"encoding/json"
@@ -595,19 +593,8 @@ func handlePTYMode(wsCmd *terminal.Cmd) (cleanup func(), err error) {
 		fmt.Print("\033[?25h")
 	}
 
-	// Handle terminal resize
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGWINCH)
-
-	go func() {
-		for range sigCh {
-			// Get current terminal size and send to server
-			width, height, err := term.GetSize(int(os.Stdin.Fd()))
-			if err == nil {
-				wsCmd.Resize(uint16(width), uint16(height))
-			}
-		}
-	}()
+	// Handle terminal resize (platform-specific)
+	handleTerminalResize(wsCmd)
 
 	return cleanup, nil
 }

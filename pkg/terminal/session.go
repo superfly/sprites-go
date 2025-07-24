@@ -1,3 +1,6 @@
+//go:build !clientonly
+// +build !clientonly
+
 // Package terminal provides a reusable library for interactive and non-interactive
 // command execution with PTY support and transcript recording.
 package terminal

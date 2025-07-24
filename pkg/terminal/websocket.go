@@ -1,3 +1,6 @@
+//go:build !clientonly
+// +build !clientonly
+
 package terminal
 
 import (
@@ -141,25 +144,7 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 	return nil
 }
 
-// StreamID represents the stream identifier for non-PTY mode
-type StreamID byte
-
-const (
-	StreamStdin    StreamID = 0x00
-	StreamStdout   StreamID = 0x01
-	StreamStderr   StreamID = 0x02
-	StreamExit     StreamID = 0x03
-	StreamStdinEOF StreamID = 0x04 // Explicit EOF signal
-	StreamReady    StreamID = 0x05 // Indicates session is ready
-)
-
-// ControlMessage represents a control message sent via text WebSocket frames
-type ControlMessage struct {
-	Type string `json:"type"`
-	// Resize fields
-	Cols uint16 `json:"cols,omitempty"`
-	Rows uint16 `json:"rows,omitempty"`
-}
+// StreamID and ControlMessage types are now defined in stream_types.go
 
 // webSocketStreams implements io.Reader, io.Writer for WebSocket communication
 type webSocketStreams struct {
