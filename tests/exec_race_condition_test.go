@@ -77,7 +77,7 @@ func TestExecRaceCondition(t *testing.T) {
 			for i := 0; i < iterations; i++ {
 				args := append([]string{"exec"}, tc.args...)
 				cmd := exec.Command(spritePath, args...)
-				
+
 				output, err := cmd.CombinedOutput()
 				if err != nil {
 					t.Logf("Iteration %d: Command failed: %v", i, err)
@@ -98,7 +98,7 @@ func TestExecRaceCondition(t *testing.T) {
 					// Check exact output
 					if outputStr != tc.expected {
 						failureCount++
-						t.Logf("Iteration %d: Expected %q, got %q (len=%d)", 
+						t.Logf("Iteration %d: Expected %q, got %q (len=%d)",
 							i, tc.expected, outputStr, len(outputStr))
 					}
 				}
@@ -132,7 +132,7 @@ func TestExecConcurrentRaceCondition(t *testing.T) {
 
 	for iter := 0; iter < iterations; iter++ {
 		t.Logf("Concurrent iteration %d", iter)
-		
+
 		var wg sync.WaitGroup
 		errors := make(chan string, concurrency)
 
@@ -142,9 +142,9 @@ func TestExecConcurrentRaceCondition(t *testing.T) {
 				defer wg.Done()
 
 				// Each goroutine runs a unique command
-				cmd := exec.Command(spritePath, "exec", "sh", "-c", 
-					"echo 'worker " + string(rune('0'+id%10)) + "'")
-				
+				cmd := exec.Command(spritePath, "exec", "sh", "-c",
+					"echo 'worker "+string(rune('0'+id%10))+"'")
+
 				output, err := cmd.CombinedOutput()
 				if err != nil {
 					errors <- "Command error: " + err.Error()
@@ -167,7 +167,7 @@ func TestExecConcurrentRaceCondition(t *testing.T) {
 		}
 
 		if len(errorList) > 0 {
-			t.Errorf("Iteration %d: %d errors occurred: %v", 
+			t.Errorf("Iteration %d: %d errors occurred: %v",
 				iter, len(errorList), errorList)
 		}
 	}
@@ -207,7 +207,7 @@ func TestExecStderrRaceCondition(t *testing.T) {
 			for i := 0; i < 20; i++ {
 				args := append([]string{"exec"}, tc.args...)
 				cmd := exec.Command(spritePath, args...)
-				
+
 				output, err := cmd.CombinedOutput()
 				if err != nil {
 					t.Errorf("Iteration %d: Command failed: %v", i, err)
@@ -215,12 +215,12 @@ func TestExecStderrRaceCondition(t *testing.T) {
 				}
 
 				outputStr := string(output)
-				
+
 				// For stderr test, we expect to see "error" or "err" in output
 				if tc.expectStderr && !strings.Contains(outputStr, "err") {
 					t.Errorf("Iteration %d: No stderr output found in: %q", i, outputStr)
 				}
-				
+
 				// For both streams, check we got stdout too
 				if tc.name == "both streams" && !strings.Contains(outputStr, "out") {
 					t.Errorf("Iteration %d: No stdout output found in: %q", i, outputStr)
@@ -262,4 +262,4 @@ func TestExecTiming(t *testing.T) {
 	}
 
 	t.Logf("Command completed in %v", duration)
-} 
+}

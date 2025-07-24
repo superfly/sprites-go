@@ -68,10 +68,36 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 	ctx := r.Context()
 	exitCode, err := h.session.Run(ctx, wsStreams, &streamWrapper{ws: wsStreams, streamID: StreamStdout}, &streamWrapper{ws: wsStreams, streamID: StreamStderr})
 
-	// Flush all pending writes with a reasonable timeout
+	// Flush all pending writes with a longer timeout
 	// This ensures all buffered output is sent before closing
-	if flushErr := wsStreams.Flush(2 * time.Second); flushErr != nil {
-		// Log flush error but don't fail the whole operation
+	flushStart := time.Now()
+	flushTimeout := 2 * time.Second
+	if flushErr := wsStreams.Flush(flushTimeout); flushErr != nil {
+		flushDuration := time.Since(flushStart)
+		if flushErr.Error() == "flush timeout" || flushErr.Error() == "flush timeout - write channel full" {
+			// This is a serious issue - data may be lost
+			if h.session.logger != nil {
+				h.session.logger.Error("WebSocket flush timed out - data may be lost",
+					"timeout", flushTimeout,
+					"duration", flushDuration,
+					"error", flushErr)
+			}
+		} else {
+			// Other flush errors (like adapter closed)
+			if h.session.logger != nil {
+				h.session.logger.Warn("WebSocket flush error",
+					"duration", flushDuration,
+					"error", flushErr)
+			}
+		}
+	} else {
+		// Flush succeeded
+		flushDuration := time.Since(flushStart)
+		if h.session.logger != nil && flushDuration > 100*time.Millisecond {
+			// Log if flush took longer than expected
+			h.session.logger.Debug("WebSocket flush completed",
+				"duration", flushDuration)
+		}
 	}
 
 	// Send exit code
@@ -176,10 +202,34 @@ func (ws *webSocketStreams) writeLoop() {
 		case req := <-ws.writeChan:
 			// Handle flush request
 			if req.messageType == -1 {
-				// This is a flush request, just signal completion
-				if req.result != nil {
-					req.result <- nil
+				// This is a flush request
+				// First, process any remaining items in the channel
+				processed := 0
+				for {
+					select {
+					case pendingReq := <-ws.writeChan:
+						if pendingReq.messageType == -1 {
+							// Another flush request, skip it
+							if pendingReq.result != nil {
+								pendingReq.result <- nil
+							}
+							continue
+						}
+						// Process the pending write
+						err := ws.conn.WriteMessage(pendingReq.messageType, pendingReq.data)
+						if pendingReq.result != nil {
+							pendingReq.result <- err
+						}
+						processed++
+					default:
+						// No more pending writes
+						if req.result != nil {
+							req.result <- nil
+						}
+						goto flushComplete
+					}
 				}
+			flushComplete:
 				continue
 			}
 
