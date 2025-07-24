@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	gorillaws "github.com/gorilla/websocket"
@@ -105,13 +106,17 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 		// Log error but don't fail
 	}
 
-	// Graceful close
-	deadline := time.Now().Add(2 * time.Second)
-	conn.WriteControl(gorillaws.CloseMessage,
-		gorillaws.FormatCloseMessage(gorillaws.CloseNormalClosure, ""),
-		deadline)
+	// Send close message through the write channel to ensure proper ordering
+	// This guarantees the close frame is sent after all data frames
+	if err := wsStreams.WriteClose(); err != nil {
+		if h.session.logger != nil {
+			h.session.logger.Warn("Failed to send WebSocket close message",
+				"error", err)
+		}
+	}
 
 	// Wait for client close
+	deadline := time.Now().Add(2 * time.Second)
 	conn.SetReadDeadline(deadline)
 	for {
 		if _, _, err := conn.ReadMessage(); err != nil {
@@ -143,11 +148,14 @@ type ControlMessage struct {
 
 // webSocketStreams implements io.Reader, io.Writer for WebSocket communication
 type webSocketStreams struct {
-	conn      *gorillaws.Conn
-	isPTY     bool
-	writeChan chan writeRequest
-	done      chan struct{}
-	readBuf   []byte // Buffer for partial reads
+	conn        *gorillaws.Conn
+	readBuf     []byte
+	readMu      sync.Mutex
+	writeChan   chan writeRequest
+	done        chan struct{}
+	tty         bool
+	writeErrorMu sync.RWMutex
+	lastWriteErr error
 }
 
 type writeRequest struct {
@@ -164,7 +172,7 @@ type streamWrapper struct {
 
 // Write implements io.Writer for a specific stream
 func (w *streamWrapper) Write(p []byte) (int, error) {
-	if w.ws.isPTY {
+	if w.ws.tty {
 		// In PTY mode, write raw data
 		err := w.ws.writeRaw(p)
 		if err != nil {
@@ -181,10 +189,10 @@ func (w *streamWrapper) Write(p []byte) (int, error) {
 }
 
 // newWebSocketStreams creates a new WebSocket stream handler
-func newWebSocketStreams(conn *gorillaws.Conn, isPTY bool) *webSocketStreams {
+func newWebSocketStreams(conn *gorillaws.Conn, tty bool) *webSocketStreams {
 	ws := &webSocketStreams{
 		conn:      conn,
-		isPTY:     isPTY,
+		tty:       tty,
 		writeChan: make(chan writeRequest, 100),
 		done:      make(chan struct{}),
 	}
@@ -202,41 +210,40 @@ func (ws *webSocketStreams) writeLoop() {
 		case req := <-ws.writeChan:
 			// Handle flush request
 			if req.messageType == -1 {
-				// This is a flush request
-				// First, process any remaining items in the channel
-				processed := 0
-				for {
-					select {
-					case pendingReq := <-ws.writeChan:
-						if pendingReq.messageType == -1 {
-							// Another flush request, skip it
-							if pendingReq.result != nil {
-								pendingReq.result <- nil
-							}
-							continue
-						}
-						// Process the pending write
-						err := ws.conn.WriteMessage(pendingReq.messageType, pendingReq.data)
-						if pendingReq.result != nil {
-							pendingReq.result <- err
-						}
-						processed++
-					default:
-						// No more pending writes
-						if req.result != nil {
-							req.result <- nil
-						}
-						goto flushComplete
-					}
+				// This is a flush request - marker that all previous writes are done
+				if req.result != nil {
+					ws.writeErrorMu.RLock()
+					err := ws.lastWriteErr
+					ws.writeErrorMu.RUnlock()
+					req.result <- err
 				}
-			flushComplete:
 				continue
 			}
 
 			// Normal write request
-			err := ws.conn.WriteMessage(req.messageType, req.data)
-			if req.result != nil {
-				req.result <- err
+			if req.messageType == gorillaws.CloseMessage {
+				// Use WriteControl for close messages
+				deadline := time.Now().Add(2 * time.Second)
+				err := ws.conn.WriteControl(req.messageType, req.data, deadline)
+				if err != nil {
+					ws.writeErrorMu.Lock()
+					ws.lastWriteErr = err
+					ws.writeErrorMu.Unlock()
+				}
+				if req.result != nil {
+					req.result <- err
+				}
+			} else {
+				// Use WriteMessage for regular messages
+				err := ws.conn.WriteMessage(req.messageType, req.data)
+				if err != nil {
+					ws.writeErrorMu.Lock()
+					ws.lastWriteErr = err
+					ws.writeErrorMu.Unlock()
+				}
+				if req.result != nil {
+					req.result <- err
+				}
 			}
 		case <-ws.done:
 			return
@@ -262,7 +269,7 @@ func (ws *webSocketStreams) Read(p []byte) (n int, err error) {
 	// Handle different message types
 	switch messageType {
 	case gorillaws.BinaryMessage:
-		if ws.isPTY {
+		if ws.tty {
 			// In PTY mode, all binary data is stdin
 			n = copy(p, data)
 			if n < len(data) {
@@ -292,7 +299,7 @@ func (ws *webSocketStreams) Read(p []byte) (n int, err error) {
 		}
 	case gorillaws.TextMessage:
 		// Control messages are handled separately for PTY mode
-		if ws.isPTY {
+		if ws.tty {
 			return ws.Read(p) // Try again
 		}
 		// For non-PTY mode, text messages are not expected for data
@@ -304,7 +311,7 @@ func (ws *webSocketStreams) Read(p []byte) (n int, err error) {
 
 // Write implements io.Writer for the WebSocket streams
 func (ws *webSocketStreams) Write(p []byte) (n int, err error) {
-	if ws.isPTY {
+	if ws.tty {
 		// In PTY mode, write raw data
 		err = ws.writeRaw(p)
 	} else {
@@ -334,7 +341,7 @@ func (ws *webSocketStreams) writeRaw(data []byte) error {
 
 // writeStream writes data with a stream ID prefix
 func (ws *webSocketStreams) writeStream(stream StreamID, data []byte) error {
-	if ws.isPTY {
+	if ws.tty {
 		// In PTY mode, just write raw data
 		return ws.writeRaw(data)
 	}
@@ -353,6 +360,26 @@ func (ws *webSocketStreams) WriteExit(code int) error {
 		code = 255 // Cap at 255 for byte representation
 	}
 	return ws.writeStream(StreamExit, []byte{byte(code)})
+}
+
+// WriteClose sends a close message through the write channel to ensure proper ordering
+func (ws *webSocketStreams) WriteClose() error {
+	closeData := gorillaws.FormatCloseMessage(gorillaws.CloseNormalClosure, "")
+	
+	// Create a result channel to wait for the write to complete
+	result := make(chan error, 1)
+	
+	select {
+	case ws.writeChan <- writeRequest{
+		messageType: gorillaws.CloseMessage,
+		data:        closeData,
+		result:      result,
+	}:
+		// Wait for the write to complete
+		return <-result
+	case <-ws.done:
+		return errors.New("adapter closed")
+	}
 }
 
 // WriteTextMessage writes a raw text message as a text WebSocket frame
