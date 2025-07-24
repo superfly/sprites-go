@@ -116,7 +116,7 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 	}
 
 	// Wait for client close
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(30 * time.Second) // Increased from 2 seconds to 30 seconds
 	conn.SetReadDeadline(deadline)
 	for {
 		if _, _, err := conn.ReadMessage(); err != nil {
@@ -124,7 +124,7 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 		}
 	}
 
-	return err
+	return nil
 }
 
 // StreamID represents the stream identifier for non-PTY mode
@@ -148,12 +148,12 @@ type ControlMessage struct {
 
 // webSocketStreams implements io.Reader, io.Writer for WebSocket communication
 type webSocketStreams struct {
-	conn        *gorillaws.Conn
-	readBuf     []byte
-	readMu      sync.Mutex
-	writeChan   chan writeRequest
-	done        chan struct{}
-	tty         bool
+	conn         *gorillaws.Conn
+	readBuf      []byte
+	readMu       sync.Mutex
+	writeChan    chan writeRequest
+	done         chan struct{}
+	tty          bool
 	writeErrorMu sync.RWMutex
 	lastWriteErr error
 }
@@ -365,10 +365,10 @@ func (ws *webSocketStreams) WriteExit(code int) error {
 // WriteClose sends a close message through the write channel to ensure proper ordering
 func (ws *webSocketStreams) WriteClose() error {
 	closeData := gorillaws.FormatCloseMessage(gorillaws.CloseNormalClosure, "")
-	
+
 	// Create a result channel to wait for the write to complete
 	result := make(chan error, 1)
-	
+
 	select {
 	case ws.writeChan <- writeRequest{
 		messageType: gorillaws.CloseMessage,
