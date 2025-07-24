@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"sync"
 	"time"
 
 	gorillaws "github.com/gorilla/websocket"
@@ -61,6 +60,13 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 	wsStreams := newWebSocketStreams(conn, h.session.tty)
 	defer wsStreams.Close()
 
+	// Send ready signal to indicate session is starting
+	readyData := []byte{byte(StreamReady)}
+	wsStreams.writeChan <- writeRequest{
+		messageType: gorillaws.BinaryMessage,
+		data:        readyData,
+	}
+
 	// Call onConnected callback if set
 	if h.onConnected != nil {
 		h.onConnected(wsStreams)
@@ -73,54 +79,37 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 		h.session.logger.Error("Session run failed", "error", err)
 	}
 
-	// Flush all pending writes with a longer timeout
-	// This ensures all buffered output is sent before closing
-	flushStart := time.Now()
-	flushTimeout := 2 * time.Second
-	if flushErr := wsStreams.Flush(flushTimeout); flushErr != nil {
-		flushDuration := time.Since(flushStart)
-		if flushErr.Error() == "flush timeout" || flushErr.Error() == "flush timeout - write channel full" {
-			// This is a serious issue - data may be lost
-			if h.session.logger != nil {
-				h.session.logger.Error("WebSocket flush timed out - data may be lost",
-					"timeout", flushTimeout,
-					"duration", flushDuration,
-					"error", flushErr)
-			}
-		} else {
-			// Other flush errors (like adapter closed)
-			if h.session.logger != nil {
-				h.session.logger.Warn("WebSocket flush error",
-					"duration", flushDuration,
-					"error", flushErr)
-			}
-		}
-	} else {
-		// Flush succeeded
-		flushDuration := time.Since(flushStart)
-		if h.session.logger != nil && flushDuration > 100*time.Millisecond {
-			// Log if flush took longer than expected
-			h.session.logger.Debug("WebSocket flush completed",
-				"duration", flushDuration)
-		}
+	// Wait for all pending writes to complete
+	wsStreams.WaitForWrites()
+
+	// Send the exit code through the channel to ensure ordering
+	exitData := make([]byte, 2)
+	exitData[0] = byte(StreamExit)
+	if exitCode < 0 || exitCode > 255 {
+		exitCode = 255
+	}
+	exitData[1] = byte(exitCode)
+
+	// Send through the write channel to maintain order
+	wsStreams.writeChan <- writeRequest{
+		messageType: gorillaws.BinaryMessage,
+		data:        exitData,
 	}
 
-	// Send exit code
-	if err := wsStreams.WriteExit(exitCode); err != nil {
-		// Log error but don't fail
-	}
+	// Close the streams which will flush remaining writes
+	wsStreams.Close()
 
-	// Send close message through the write channel to ensure proper ordering
-	// This guarantees the close frame is sent after all data frames
-	if err := wsStreams.WriteClose(); err != nil {
+	// Send close message directly after the writeLoop has finished
+	closeData := gorillaws.FormatCloseMessage(gorillaws.CloseNormalClosure, "")
+	closeDeadline := time.Now().Add(2 * time.Second)
+	if err := conn.WriteControl(gorillaws.CloseMessage, closeData, closeDeadline); err != nil {
 		if h.session.logger != nil {
-			h.session.logger.Warn("Failed to send WebSocket close message",
-				"error", err)
+			h.session.logger.Warn("Failed to send WebSocket close message", "error", err)
 		}
 	}
 
 	// Wait for client close
-	deadline := time.Now().Add(30 * time.Second) // Increased from 2 seconds to 30 seconds
+	deadline := time.Now().Add(30 * time.Second)
 	conn.SetReadDeadline(deadline)
 
 	// Track if we received a proper close frame from client
@@ -170,6 +159,7 @@ const (
 	StreamStderr   StreamID = 0x02
 	StreamExit     StreamID = 0x03
 	StreamStdinEOF StreamID = 0x04 // Explicit EOF signal
+	StreamReady    StreamID = 0x05 // Indicates session is ready
 )
 
 // ControlMessage represents a control message sent via text WebSocket frames
@@ -182,20 +172,28 @@ type ControlMessage struct {
 
 // webSocketStreams implements io.Reader, io.Writer for WebSocket communication
 type webSocketStreams struct {
-	conn         *gorillaws.Conn
-	readBuf      []byte
-	readMu       sync.Mutex
-	writeChan    chan writeRequest
-	done         chan struct{}
-	tty          bool
-	writeErrorMu sync.RWMutex
-	lastWriteErr error
+	stdout io.Writer
+	stderr io.Writer
+	stdin  io.Reader
+
+	conn    *gorillaws.Conn
+	tty     bool
+	readBuf []byte
+
+	// Channel for write requests
+	writeChan chan writeRequest
+
+	// Signal to stop the write loop
+	closeChan chan struct{}
+
+	// Signal when write loop has finished
+	doneChan chan struct{}
 }
 
 type writeRequest struct {
 	messageType int
 	data        []byte
-	result      chan error
+	done        chan error // nil for fire-and-forget
 }
 
 // streamWrapper wraps webSocketStreams to write to a specific stream
@@ -208,7 +206,7 @@ type streamWrapper struct {
 func (w *streamWrapper) Write(p []byte) (int, error) {
 	if w.ws.tty {
 		// In PTY mode, write raw data
-		err := w.ws.writeRaw(p)
+		err := w.ws.writeRaw(w.streamID, p)
 		if err != nil {
 			return 0, err
 		}
@@ -222,13 +220,14 @@ func (w *streamWrapper) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// newWebSocketStreams creates a new WebSocket stream handler
+// newWebSocketStreams creates new websocket streams for binary mode
 func newWebSocketStreams(conn *gorillaws.Conn, tty bool) *webSocketStreams {
 	ws := &webSocketStreams{
 		conn:      conn,
 		tty:       tty,
-		writeChan: make(chan writeRequest, 100),
-		done:      make(chan struct{}),
+		writeChan: make(chan writeRequest, 100), // Buffered for performance
+		closeChan: make(chan struct{}),
+		doneChan:  make(chan struct{}),
 	}
 
 	// Start the write loop
@@ -237,57 +236,37 @@ func newWebSocketStreams(conn *gorillaws.Conn, tty bool) *webSocketStreams {
 	return ws
 }
 
-// writeLoop handles all writes to ensure only one goroutine writes at a time
+// writeLoop handles all writes sequentially, ensuring ordering
 func (ws *webSocketStreams) writeLoop() {
+	defer close(ws.doneChan)
+
 	for {
 		select {
 		case req := <-ws.writeChan:
-			// Handle flush request
-			if req.messageType == -1 {
-				// This is a flush request - marker that all previous writes are done
-				if req.result != nil {
-					ws.writeErrorMu.RLock()
-					err := ws.lastWriteErr
-					ws.writeErrorMu.RUnlock()
-					req.result <- err
-				}
-				continue
+			err := ws.conn.WriteMessage(req.messageType, req.data)
+			if req.done != nil {
+				req.done <- err
 			}
-
-			// Normal write request
-			if req.messageType == gorillaws.CloseMessage {
-				// Use WriteControl for close messages
-				deadline := time.Now().Add(2 * time.Second)
-				err := ws.conn.WriteControl(req.messageType, req.data, deadline)
-				if err != nil {
-					ws.writeErrorMu.Lock()
-					ws.lastWriteErr = err
-					ws.writeErrorMu.Unlock()
-				}
-				if req.result != nil {
-					req.result <- err
-				}
-			} else {
-				// Use WriteMessage for regular messages
-				err := ws.conn.WriteMessage(req.messageType, req.data)
-				if err != nil {
-					ws.writeErrorMu.Lock()
-					ws.lastWriteErr = err
-					ws.writeErrorMu.Unlock()
-				}
-				if req.result != nil {
-					req.result <- err
+		case <-ws.closeChan:
+			// Drain any remaining writes before exiting
+			for {
+				select {
+				case req := <-ws.writeChan:
+					err := ws.conn.WriteMessage(req.messageType, req.data)
+					if req.done != nil {
+						req.done <- err
+					}
+				default:
+					return
 				}
 			}
-		case <-ws.done:
-			return
 		}
 	}
 }
 
 // Read implements io.Reader for the WebSocket streams
 func (ws *webSocketStreams) Read(p []byte) (n int, err error) {
-	// If we have buffered data, return it first
+	// Return buffered data first
 	if len(ws.readBuf) > 0 {
 		n = copy(p, ws.readBuf)
 		ws.readBuf = ws.readBuf[n:]
@@ -304,7 +283,7 @@ func (ws *webSocketStreams) Read(p []byte) (n int, err error) {
 	switch messageType {
 	case gorillaws.BinaryMessage:
 		if ws.tty {
-			// In PTY mode, all binary data is stdin
+			// PTY mode: all binary data is stdin
 			n = copy(p, data)
 			if n < len(data) {
 				// Buffer remaining data
@@ -312,7 +291,7 @@ func (ws *webSocketStreams) Read(p []byte) (n int, err error) {
 			}
 			return n, nil
 		} else {
-			// In non-PTY mode, check stream ID
+			// Non-PTY mode: check stream ID
 			if len(data) == 0 {
 				return 0, errors.New("empty message")
 			}
@@ -346,10 +325,10 @@ func (ws *webSocketStreams) Read(p []byte) (n int, err error) {
 // Write implements io.Writer for the WebSocket streams
 func (ws *webSocketStreams) Write(p []byte) (n int, err error) {
 	if ws.tty {
-		// In PTY mode, write raw data
-		err = ws.writeRaw(p)
+		// PTY mode: write raw data
+		err = ws.writeRaw(StreamStdout, p)
 	} else {
-		// In non-PTY mode, write with stdout stream ID
+		// Non-PTY mode: write with stdout stream ID
 		err = ws.writeStream(StreamStdout, p)
 	}
 	if err != nil {
@@ -358,34 +337,39 @@ func (ws *webSocketStreams) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
-// writeRaw writes raw bytes to the WebSocket
-func (ws *webSocketStreams) writeRaw(data []byte) error {
-	result := make(chan error, 1)
-	select {
-	case ws.writeChan <- writeRequest{
-		messageType: gorillaws.BinaryMessage,
-		data:        data,
-		result:      result,
-	}:
-		return <-result
-	case <-ws.done:
-		return errors.New("adapter closed")
+// writeRaw writes raw data to the websocket
+func (s *webSocketStreams) writeRaw(streamID StreamID, data []byte) error {
+	var msgData []byte
+	if s.tty {
+		// PTY mode: no stream ID
+		msgData = data
+	} else {
+		// Non-PTY mode: add stream ID prefix
+		msgData = make([]byte, len(data)+1)
+		msgData[0] = byte(streamID)
+		copy(msgData[1:], data)
 	}
+
+	req := writeRequest{
+		messageType: gorillaws.BinaryMessage,
+		data:        msgData,
+	}
+
+	s.writeChan <- req
+	return nil
 }
 
-// writeStream writes data with a stream ID prefix
+// writeStream writes data to the WebSocket with the specified stream ID
 func (ws *webSocketStreams) writeStream(stream StreamID, data []byte) error {
-	if ws.tty {
-		// In PTY mode, just write raw data
-		return ws.writeRaw(data)
+	req := writeRequest{
+		messageType: gorillaws.BinaryMessage,
+		data:        make([]byte, len(data)+1), // +1 for stream ID
 	}
+	req.data[0] = byte(stream)
+	copy(req.data[1:], data)
 
-	// Prepend stream ID to data
-	msg := make([]byte, len(data)+1)
-	msg[0] = byte(stream)
-	copy(msg[1:], data)
-
-	return ws.writeRaw(msg)
+	ws.writeChan <- req
+	return nil
 }
 
 // WriteExit writes an exit code message
@@ -396,39 +380,24 @@ func (ws *webSocketStreams) WriteExit(code int) error {
 	return ws.writeStream(StreamExit, []byte{byte(code)})
 }
 
-// WriteClose sends a close message through the write channel to ensure proper ordering
+// WriteClose sends a close message
 func (ws *webSocketStreams) WriteClose() error {
-	closeData := gorillaws.FormatCloseMessage(gorillaws.CloseNormalClosure, "")
-
-	// Create a result channel to wait for the write to complete
-	result := make(chan error, 1)
-
-	select {
-	case ws.writeChan <- writeRequest{
+	req := writeRequest{
 		messageType: gorillaws.CloseMessage,
-		data:        closeData,
-		result:      result,
-	}:
-		// Wait for the write to complete
-		return <-result
-	case <-ws.done:
-		return errors.New("adapter closed")
+		data:        gorillaws.FormatCloseMessage(gorillaws.CloseNormalClosure, ""),
 	}
+	ws.writeChan <- req
+	return nil
 }
 
 // WriteTextMessage writes a raw text message as a text WebSocket frame
 func (ws *webSocketStreams) WriteTextMessage(data []byte) error {
-	result := make(chan error, 1)
-	select {
-	case ws.writeChan <- writeRequest{
+	req := writeRequest{
 		messageType: gorillaws.TextMessage,
 		data:        data,
-		result:      result,
-	}:
-		return <-result
-	case <-ws.done:
-		return errors.New("adapter closed")
 	}
+	ws.writeChan <- req
+	return nil
 }
 
 // SendTextMessage implements the TextMessageSender interface
@@ -445,36 +414,20 @@ func (ws *webSocketStreams) WriteControlMessage(msg ControlMessage) error {
 	return ws.WriteTextMessage(data)
 }
 
-// Flush waits for all pending writes to complete
-func (ws *webSocketStreams) Flush(timeout time.Duration) error {
-	// Create a flush request with a result channel
-	result := make(chan error, 1)
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-
-	select {
-	case ws.writeChan <- writeRequest{
-		messageType: -1, // Special marker for flush
-		result:      result,
-	}:
-		// Wait for the flush to complete or timeout
-		select {
-		case err := <-result:
-			return err
-		case <-timer.C:
-			return errors.New("flush timeout")
-		case <-ws.done:
-			return errors.New("adapter closed")
-		}
-	case <-timer.C:
-		return errors.New("flush timeout - write channel full")
-	case <-ws.done:
-		return errors.New("adapter closed")
-	}
-}
-
 // Close closes the WebSocket streams
 func (ws *webSocketStreams) Close() error {
-	close(ws.done)
+	// Non-blocking close - if already closed, this is a no-op
+	select {
+	case <-ws.closeChan:
+		// Already closed
+	default:
+		close(ws.closeChan)
+	}
+	<-ws.doneChan
 	return nil
+}
+
+// WaitForWrites waits for all outstanding writes to complete
+func (s *webSocketStreams) WaitForWrites() {
+	// No-op - writeLoop handles all writes
 }

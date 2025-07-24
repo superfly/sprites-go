@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	creackpty "github.com/creack/pty"
 	"github.com/superfly/sprite-env/packages/container"
@@ -350,20 +351,49 @@ func (s *Session) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd, stdin
 
 // runWithoutTTY executes the command without PTY, using separate streams.
 func (s *Session) runWithoutTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Reader, stdout, stderr io.Writer, transcript TranscriptCollector) (int, error) {
+	// Use io.Pipe to let exec manage the goroutines
+	stdoutReader, stdoutWriter := io.Pipe()
+	stderrReader, stderrWriter := io.Pipe()
+
+	// Assign writers to cmd
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = stderrWriter
+
+	// Set up stdin pipe
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
 		return -1, fmt.Errorf("failed to create stdin pipe: %w", err)
 	}
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return -1, fmt.Errorf("failed to create stdout pipe: %w", err)
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return -1, fmt.Errorf("failed to create stderr pipe: %w", err)
-	}
 
+	// Start I/O goroutines
+	stdoutDone := make(chan struct{})
+	stderrDone := make(chan struct{})
+
+	// Copy stdin to the process
+	go func() {
+		defer stdinPipe.Close()
+		teeReader := io.TeeReader(stdin, transcript.StreamWriter("stdin"))
+		io.Copy(stdinPipe, teeReader)
+	}()
+
+	// Stream stdout to destination
+	go func() {
+		defer close(stdoutDone)
+		multiWriter := io.MultiWriter(stdout, transcript.StreamWriter("stdout"))
+		io.Copy(multiWriter, stdoutReader)
+	}()
+
+	// Stream stderr to destination
+	go func() {
+		defer close(stderrDone)
+		multiWriter := io.MultiWriter(stderr, transcript.StreamWriter("stderr"))
+		io.Copy(multiWriter, stderrReader)
+	}()
+
+	// Start the command
 	if err := cmd.Start(); err != nil {
+		stdoutWriter.Close()
+		stderrWriter.Close()
 		return -1, fmt.Errorf("failed to start command: %w", err)
 	}
 
@@ -375,38 +405,16 @@ func (s *Session) runWithoutTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Rea
 		}
 	}
 
-	done := make(chan struct{}, 2) // Buffered channel for stdout and stderr
-
-	// Stdin: copy from input to command
-	go func() {
-		defer stdinPipe.Close()
-		teeReader := io.TeeReader(stdin, transcript.StreamWriter("stdin"))
-		io.Copy(stdinPipe, teeReader)
-	}()
-
-	// Stdout: copy from command to output
-	go func() {
-		multiWriter := io.MultiWriter(stdout, transcript.StreamWriter("stdout"))
-		io.Copy(multiWriter, stdoutPipe)
-		done <- struct{}{}
-	}()
-
-	// Stderr: copy from command to output
-	go func() {
-		multiWriter := io.MultiWriter(stderr, transcript.StreamWriter("stderr"))
-		io.Copy(multiWriter, stderrPipe)
-		done <- struct{}{}
-	}()
-
-	// IMPORTANT: Wait for the command to exit first
+	// Wait for command to complete
 	cmdErr := cmd.Wait()
 
-	// Then wait for all I/O to complete - this ensures all stdout/stderr
-	// has been copied before we return. This fixes the race condition where
-	// fast-exiting commands would return before their output was fully captured.
-	// We MUST wait for I/O to complete, even if the context is cancelled.
-	<-done // wait for stdout
-	<-done // wait for stderr
+	// Close writers to signal EOF
+	stdoutWriter.Close()
+	stderrWriter.Close()
+
+	// Wait for readers to finish
+	<-stdoutDone
+	<-stderrDone
 
 	return getExitCode(cmdErr), nil
 }
@@ -433,10 +441,34 @@ func (s *Session) handlePTYIO(ctx context.Context, pty *os.File, stdin io.Reader
 		io.Copy(multiWriter, pty)
 	}()
 
-	select {
-	case <-stdinDone:
-	case <-stdoutDone:
-	case <-ctx.Done():
+	// Wait for both goroutines to complete or context cancellation
+	stdinComplete := false
+	stdoutComplete := false
+
+	for !stdinComplete || !stdoutComplete {
+		select {
+		case <-stdinDone:
+			stdinComplete = true
+		case <-stdoutDone:
+			stdoutComplete = true
+		case <-ctx.Done():
+			// Give a short grace period for I/O to complete
+			timer := time.NewTimer(100 * time.Millisecond)
+			defer timer.Stop()
+
+			for !stdinComplete || !stdoutComplete {
+				select {
+				case <-stdinDone:
+					stdinComplete = true
+				case <-stdoutDone:
+					stdoutComplete = true
+				case <-timer.C:
+					// Grace period expired
+					return
+				}
+			}
+			return
+		}
 	}
 }
 
