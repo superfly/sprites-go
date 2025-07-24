@@ -28,6 +28,16 @@ test-tty:
 	@echo "Running TTY functionality test..."
 	GOWORK=off go test -v -timeout $(TIMEOUT) -run TestTTYFunctionality
 
+# Run only large output test
+test-large-output:
+	@echo "Running large output test..."
+	GOWORK=off go test -v -timeout $(TIMEOUT) -run TestExecLargeOutput
+
+# Run only race condition test
+test-race-condition:
+	@echo "Running race condition test..."
+	GOWORK=off go test -v -timeout $(TIMEOUT) -run TestExecRaceCondition
+
 # Clean up built artifacts
 clean:
 	@echo "Cleaning up..."
@@ -36,11 +46,14 @@ clean:
 # Show help
 help:
 	@echo "Available targets:"
-	@echo "  test             - Run all integration tests"
-	@echo "  test-deploy      - Run only deployment test"
-	@echo "  test-zombie      - Run only zombie cleanup test"
-	@echo "  test-checkpoint  - Run only checkpoint/restore test"
-	@echo "  clean            - Remove built artifacts"
+	@echo "  test               - Run all integration tests"
+	@echo "  test-deploy        - Run only deployment test"
+	@echo "  test-zombie        - Run only zombie cleanup test"
+	@echo "  test-checkpoint    - Run only checkpoint/restore test"
+	@echo "  test-tty           - Run only TTY test"
+	@echo "  test-large-output  - Run only large output test"
+	@echo "  test-race-condition - Run only race condition test"
+	@echo "  clean              - Remove built artifacts"
 	@echo ""
 	@echo "Required environment variables:"
 	@echo "  FLY_APP_NAME    - Your Fly.io app name"
