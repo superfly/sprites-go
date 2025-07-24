@@ -1,0 +1,30 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+
+jobs:
+  test:
+    name: Run Tests
+    uses: ./.github/workflows/test.yml
+
+  release-images:
+    name: Release Docker Images
+    needs: test
+    uses: ./.github/workflows/release-images.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      tag_suffix: ${{ github.ref_name }}
+      tag_latest: ${{ !contains(github.ref_name, '-') }}
+
+  release-client:
+    name: Release Client
+    needs: test
+    uses: ./.github/workflows/release-client.yml
+    permissions:
+      contents: write 

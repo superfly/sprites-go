@@ -12,11 +12,19 @@ on:
         description: 'Also tag as latest'
         required: false
         type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      tag_suffix:
+        description: 'Tag suffix to append to 25.04 (defaults to short commit ID)'
+        required: false
+        default: ''
+        type: string
+      tag_latest:
+        description: 'Also tag as latest'
+        required: false
+        type: boolean
         default: true
-  push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
-      - 'v[0-9]+.[0-9]+.[0-9]+-*'
 
 env:
   REGISTRY: ghcr.io
