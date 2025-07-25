@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"time"
 
@@ -61,10 +60,13 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 	defer wsStreams.Close()
 
 	// Send ready signal to indicate session is starting
-	readyData := []byte{byte(StreamReady)}
-	wsStreams.writeChan <- writeRequest{
-		messageType: gorillaws.BinaryMessage,
-		data:        readyData,
+	// In TTY mode, we don't send stream-prefixed messages
+	if !h.session.tty {
+		readyData := []byte{byte(StreamReady)}
+		wsStreams.writeChan <- writeRequest{
+			messageType: gorillaws.BinaryMessage,
+			data:        readyData,
+		}
 	}
 
 	// Call onConnected callback if set
@@ -79,25 +81,29 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 		h.session.logger.Error("Session run failed", "error", err)
 	}
 
-	// Wait for all pending writes to complete
-	wsStreams.WaitForWrites()
-
 	// Send the exit code through the channel to ensure ordering
-	exitData := make([]byte, 2)
-	exitData[0] = byte(StreamExit)
-	if exitCode < 0 || exitCode > 255 {
-		exitCode = 255
-	}
-	exitData[1] = byte(exitCode)
+	// In TTY mode, we don't send exit codes as the client expects raw PTY data
+	if !h.session.tty {
+		exitData := make([]byte, 2)
+		exitData[0] = byte(StreamExit)
+		if exitCode < 0 || exitCode > 255 {
+			exitCode = 255
+		}
+		exitData[1] = byte(exitCode)
 
-	// Send through the write channel to maintain order
-	wsStreams.writeChan <- writeRequest{
-		messageType: gorillaws.BinaryMessage,
-		data:        exitData,
+		// Send through the write channel to maintain order
+		wsStreams.writeChan <- writeRequest{
+			messageType: gorillaws.BinaryMessage,
+			data:        exitData,
+		}
 	}
 
 	// Close the streams which will flush remaining writes
 	wsStreams.Close()
+
+	// Give a brief moment for network buffers to flush
+	// This helps ensure all messages reach the client before the close frame
+	time.Sleep(50 * time.Millisecond)
 
 	// Send close message directly after the writeLoop has finished
 	closeData := gorillaws.FormatCloseMessage(gorillaws.CloseNormalClosure, "")
@@ -108,43 +114,28 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 		}
 	}
 
-	// Wait for client close
-	deadline := time.Now().Add(30 * time.Second)
+	// Wait for client close frame (proper WebSocket close handshake)
+	// But use a short timeout to avoid hanging
+	deadline := time.Now().Add(2 * time.Second)
 	conn.SetReadDeadline(deadline)
 
-	// Track if we received a proper close frame from client
-	clientClosedCleanly := false
-
+	// Read until we get a close frame or timeout
 	for {
 		_, _, err := conn.ReadMessage()
 		if err != nil {
 			// Check if it's a close error with a close frame
-			if closeErr, ok := err.(*gorillaws.CloseError); ok {
-				clientClosedCleanly = true
+			if _, ok := err.(*gorillaws.CloseError); ok {
 				if h.session.logger != nil {
-					h.session.logger.Debug("Client sent close frame",
-						"code", closeErr.Code,
-						"text", closeErr.Text)
-				}
-			} else if err == gorillaws.ErrReadLimit {
-				// Client tried to send a message that was too large
-				if h.session.logger != nil {
-					h.session.logger.Warn("Client message exceeded read limit during close")
-				}
-			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				// We hit our deadline - client didn't send close frame in time
-				if h.session.logger != nil {
-					h.session.logger.Warn("Client did not send close frame within deadline")
+					h.session.logger.Debug("Client sent close frame, completing handshake")
 				}
 			}
 			break
 		}
-		// If we're still receiving messages, just discard them
-		// The client should send a close frame, not more data
+		// Client sent data after we initiated close - ignore it
 	}
 
-	if !clientClosedCleanly && h.session.logger != nil {
-		h.session.logger.Warn("WebSocket closed without receiving client close frame")
+	if h.session.logger != nil {
+		h.session.logger.Debug("WebSocket handler completed, closing connection")
 	}
 
 	return nil
@@ -423,11 +414,14 @@ func (ws *webSocketStreams) Close() error {
 	default:
 		close(ws.closeChan)
 	}
-	<-ws.doneChan
-	return nil
-}
 
-// WaitForWrites waits for all outstanding writes to complete
-func (s *webSocketStreams) WaitForWrites() {
-	// No-op - writeLoop handles all writes
+	// Wait for writeLoop to finish, but with a timeout to prevent hanging
+	select {
+	case <-ws.doneChan:
+		// Write loop exited cleanly
+	case <-time.After(5 * time.Second):
+		// Write loop didn't exit in time - probably blocked on a write
+		// Continue anyway to prevent hanging the entire process
+	}
+	return nil
 }

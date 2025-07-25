@@ -17,18 +17,26 @@ var (
 
 func setupLogger(debugFile string) {
 	if debugFile != "" {
-		// Create or open the debug log file
-		file, err := os.OpenFile(debugFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: Failed to open debug log file: %v\n", err)
-			os.Exit(1)
+		var writer io.Writer
+
+		// Special case: if debugFile is "-" or "stdout", log to stdout
+		if debugFile == "-" || debugFile == "stdout" {
+			writer = os.Stdout
+		} else {
+			// Create or open the debug log file
+			file, err := os.OpenFile(debugFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: Failed to open debug log file: %v\n", err)
+				os.Exit(1)
+			}
+			writer = file
 		}
 
-		// Create a text handler for the file with debug level
+		// Create a text handler with debug level
 		opts := &slog.HandlerOptions{
 			Level: slog.LevelDebug,
 		}
-		handler := slog.NewTextHandler(file, opts)
+		handler := slog.NewTextHandler(writer, opts)
 		clientLogger = slog.New(handler)
 		slog.SetDefault(clientLogger)
 	} else {
@@ -49,7 +57,7 @@ func main() {
 	var globalHelp bool
 
 	flag.CommandLine.Init("sprite", flag.ContinueOnError)
-	flag.StringVar(&globalDebug, "debug", "", "Enable debug logging to file (e.g., --debug=/tmp/debug.log)")
+	flag.StringVar(&globalDebug, "debug", "", "Enable debug logging (use 'stdout' or '-' for console, or specify a file path)")
 	flag.BoolVar(&globalHelp, "help", false, "Show help")
 	flag.BoolVar(&globalHelp, "h", false, "Show help")
 
@@ -58,8 +66,21 @@ func main() {
 		printUsage()
 	}
 
-	// Parse global flags
-	err := flag.CommandLine.Parse(os.Args[1:])
+	// Parse global flags, but we need to handle --debug specially
+	// Create a copy of os.Args to manipulate for --debug handling
+	modifiedArgs := make([]string, len(os.Args))
+	copy(modifiedArgs, os.Args)
+
+	// Check for standalone --debug flag and convert it to --debug=stdout
+	for i := 1; i < len(modifiedArgs); i++ {
+		if modifiedArgs[i] == "--debug" {
+			// Replace standalone --debug with --debug=stdout
+			modifiedArgs[i] = "--debug=stdout"
+		}
+	}
+
+	// Parse flags normally - flag package will handle --debug=value
+	err := flag.CommandLine.Parse(modifiedArgs[1:])
 	if err == flag.ErrHelp {
 		// Help was explicitly requested
 		printUsage()
@@ -158,12 +179,8 @@ Commands:
     enable                  Enable transcript recording for future exec calls
     disable                 Disable transcript recording for future exec calls
   proxy <port1> [port2...]  Forward local ports through the remote server proxy
-<<<<<<< HEAD
-  api [options] <path>      Make authenticated API calls with curl
-||||||| parent of a02b9dc (bug fixes)
-=======
   sync                      Synchronize git repository to sprite environment
->>>>>>> a02b9dc (bug fixes)
+  api [options] <path>      Make authenticated API calls with curl
 
 Organization Commands:
   org auth                  Add an API token (aliases: orgs, organizations)
@@ -171,7 +188,7 @@ Organization Commands:
   org logout                Remove all tokens
 
 Global Options:
-  --debug=/path/to/log      Enable debug logging to file (requires = format)
+  --debug[=<file>]          Enable debug logging (logs to stdout if no file specified)
   -h, --help                Show this help message
 
 Command Options:
@@ -206,7 +223,8 @@ Examples:
   sprite console -o myorg -s mysprite
 
   # Execute with debug logging
-  sprite --debug=/tmp/debug.log exec npm start
+  sprite --debug exec npm start              # logs to stdout
+  sprite --debug=/tmp/debug.log exec npm start  # logs to file
 
   # Create a checkpoint
   sprite checkpoint create

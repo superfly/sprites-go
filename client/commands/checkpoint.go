@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"log/slog"
+
 	"github.com/sprite-env/client/config"
 	"github.com/sprite-env/client/format"
 	"github.com/sprite-env/lib/api"
@@ -218,6 +220,9 @@ func checkpointListCommand(cfg *config.Manager, org *config.Organization, sprite
 	if historyFilter != "" {
 		url += fmt.Sprintf("?history=%s", historyFilter)
 	}
+
+	// Debug log the URL
+	slog.Debug("Checkpoint list request", "url", url, "org", org.Name, "sprite", spriteName)
 
 	httpReq, err := http.NewRequest("GET", url, nil)
 	if err != nil {

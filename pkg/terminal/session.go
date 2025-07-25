@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"time"
+	"sync"
+
+	"syscall"
 
 	creackpty "github.com/creack/pty"
 	"github.com/superfly/sprite-env/packages/container"
@@ -238,14 +240,43 @@ func (s *Session) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, stdin io.Rea
 		s.logger.Debug("Starting command with PTY", "cmd", cmd.Args)
 	}
 
-	ptmx, err := creackpty.Start(cmd)
+	// Open PTY manually to set up I/O before starting command
+	ptmx, tty, err := creackpty.Open()
 	if err != nil {
 		if s.logger != nil {
-			s.logger.Error("Failed to start with PTY", "error", err)
+			s.logger.Error("Failed to open PTY", "error", err)
 		}
-		return -1, fmt.Errorf("failed to start with PTY: %w", err)
+		return -1, fmt.Errorf("failed to open PTY: %w", err)
 	}
 	defer ptmx.Close()
+	defer tty.Close()
+
+	// Assign TTY to command stdio
+	cmd.Stdin = tty
+	cmd.Stdout = tty
+	cmd.Stderr = tty
+
+	// Start with special handling for controlling TTY
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setsid = true
+	cmd.SysProcAttr.Setctty = true
+
+	// Start PTY I/O handling BEFORE starting the command
+	// This ensures we're ready to receive output immediately
+	ioWg := s.startPTYIO(ctx, ptmx, stdin, stdout, transcript)
+
+	// Now start the command
+	if err := cmd.Start(); err != nil {
+		if s.logger != nil {
+			s.logger.Error("Failed to start command", "error", err)
+		}
+		return -1, fmt.Errorf("failed to start command: %w", err)
+	}
+
+	// Close the TTY file descriptor in parent process after starting child
+	tty.Close()
 
 	// Call process start callback if provided
 	if s.onProcessStart != nil && cmd.Process != nil {
@@ -269,8 +300,16 @@ func (s *Session) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, stdin io.Rea
 		}
 	}
 
-	s.handlePTYIO(ctx, ptmx, stdin, stdout, transcript)
+	// Wait for command to complete
 	cmdErr := cmd.Wait()
+
+	// Process has exited, PTY slave is closed.
+	// Wait for I/O to complete (goroutines will get EOF from PTY).
+	ioWg.Wait()
+
+	// All I/O is complete, now close the PTY master
+	// (already closed by defer, but being explicit about order)
+
 	return getExitCode(cmdErr), nil
 }
 
@@ -419,57 +458,39 @@ func (s *Session) runWithoutTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Rea
 	return getExitCode(cmdErr), nil
 }
 
-// handlePTYIO manages I/O between the PTY and the provided streams.
-func (s *Session) handlePTYIO(ctx context.Context, pty *os.File, stdin io.Reader, stdout io.Writer, transcript TranscriptCollector) {
+// startPTYIO starts I/O goroutines for PTY handling and returns a WaitGroup.
+// The caller should wait on the WaitGroup after the process exits to ensure
+// all data has been read before closing the PTY.
+func (s *Session) startPTYIO(ctx context.Context, pty *os.File, stdin io.Reader, stdout io.Writer, transcript TranscriptCollector) *sync.WaitGroup {
 	inLog := transcript.StreamWriter("stdin")
 	outLog := transcript.StreamWriter("stdout")
 
-	stdinDone := make(chan struct{})
-	stdoutDone := make(chan struct{})
+	var wg sync.WaitGroup
 
 	// Handle stdin -> PTY
 	go func() {
-		defer close(stdinDone)
 		teeReader := io.TeeReader(stdin, inLog)
 		io.Copy(pty, teeReader)
+		// This will exit when stdin is closed or PTY write fails
 	}()
 
 	// Handle PTY -> stdout
+	wg.Add(1)
 	go func() {
-		defer close(stdoutDone)
+		defer wg.Done()
 		multiWriter := io.MultiWriter(stdout, outLog)
 		io.Copy(multiWriter, pty)
+		// This will exit when PTY is closed (EOF)
 	}()
 
-	// Wait for both goroutines to complete or context cancellation
-	stdinComplete := false
-	stdoutComplete := false
+	return &wg
+}
 
-	for !stdinComplete || !stdoutComplete {
-		select {
-		case <-stdinDone:
-			stdinComplete = true
-		case <-stdoutDone:
-			stdoutComplete = true
-		case <-ctx.Done():
-			// Give a short grace period for I/O to complete
-			timer := time.NewTimer(100 * time.Millisecond)
-			defer timer.Stop()
-
-			for !stdinComplete || !stdoutComplete {
-				select {
-				case <-stdinDone:
-					stdinComplete = true
-				case <-stdoutDone:
-					stdoutComplete = true
-				case <-timer.C:
-					// Grace period expired
-					return
-				}
-			}
-			return
-		}
-	}
+// handlePTYIO manages I/O between the PTY and the provided streams.
+// This is now deprecated in favor of startPTYIO but kept for console socket compatibility.
+func (s *Session) handlePTYIO(ctx context.Context, pty *os.File, stdin io.Reader, stdout io.Writer, transcript TranscriptCollector) {
+	wg := s.startPTYIO(ctx, pty, stdin, stdout, transcript)
+	wg.Wait()
 }
 
 // getExitCode extracts the exit code from a command error.

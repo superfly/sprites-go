@@ -331,9 +331,12 @@ func (c *Cmd) runIO() {
 	}
 
 	if c.Tty {
+		// Start stdin copy in background if stdin is provided
+		// The adapter.Close() call below will cause io.Copy to return with an error
 		if c.Stdin != nil {
 			go io.Copy(adapter, c.Stdin)
 		}
+
 		var output io.Writer = stdout
 		if c.BrowserOpen != nil {
 			oscMonitor := NewOSCMonitor(c.handleOSCSequence)
@@ -342,7 +345,34 @@ func (c *Cmd) runIO() {
 		for {
 			messageType, data, err := conn.ReadMessage()
 			if err != nil {
-				break
+				// IMPORTANT: Close the adapter BEFORE returning to unblock the stdin goroutine
+				adapter.Close()
+
+				// Log the error for debugging
+				if c.ctx.Err() != nil {
+					// Context was cancelled
+					select {
+					case c.exitChan <- 1:
+					default:
+					}
+					return
+				}
+
+				// Connection closed - try to extract exit code from close error
+				if closeErr, ok := err.(*gorillaws.CloseError); ok && closeErr.Code == gorillaws.CloseNormalClosure {
+					// Normal close, default to exit code 0
+					select {
+					case c.exitChan <- 0:
+					default:
+					}
+				} else {
+					// Abnormal close, default to exit code 1
+					select {
+					case c.exitChan <- 1:
+					default:
+					}
+				}
+				return
 			}
 			switch messageType {
 			case gorillaws.BinaryMessage:
@@ -351,11 +381,6 @@ func (c *Cmd) runIO() {
 				c.handleTextMessage(data)
 			}
 		}
-		select {
-		case c.exitChan <- 0:
-		default:
-		}
-		return
 	}
 
 	if c.Stdin != nil {
@@ -369,6 +394,8 @@ func (c *Cmd) runIO() {
 	for {
 		messageType, data, err := conn.ReadMessage()
 		if err != nil {
+			// Close adapter to unblock stdin goroutine
+			adapter.Close()
 			return
 		}
 		switch messageType {
@@ -391,6 +418,8 @@ func (c *Cmd) runIO() {
 					default:
 					}
 				}
+				// Close adapter to unblock stdin goroutine
+				adapter.Close()
 				return
 			}
 		case gorillaws.TextMessage:

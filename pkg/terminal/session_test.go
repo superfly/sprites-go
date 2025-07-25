@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"runtime"
 	"strings"
 	"testing"
@@ -405,281 +403,76 @@ func TestRunWithOnProcessStartCallback(t *testing.T) {
 	}
 }
 
-// TestExecBufferVsPipe demonstrates the difference between using pipes and buffers
-func TestExecBufferVsPipe(t *testing.T) {
-	// Start CPU load to simulate the race condition
-	numCPU := runtime.NumCPU()
-	stopCPU := make(chan struct{})
+// TestRunWithoutTTYUnderLoad verifies that non-TTY mode doesn't drop output under scheduling pressure
+func TestRunWithoutTTYUnderLoad(t *testing.T) {
+	// This test verifies that our io.Pipe approach for non-TTY mode
+	// doesn't suffer from race conditions under scheduling pressure
+	t.Parallel()
 
-	for i := 0; i < numCPU-1; i++ {
-		go func() {
-			x := 0
-			for {
-				select {
-				case <-stopCPU:
-					return
-				default:
-					x = (x + 1) % 1000000
-					_ = x * x * x
-				}
-			}
-		}()
-	}
-	defer close(stopCPU)
-
-	time.Sleep(100 * time.Millisecond)
-
-	// Test with buffer approach (like CombinedOutput)
-	t.Run("Buffer", func(t *testing.T) {
-		failures := 0
-		for i := 0; i < 20; i++ {
-			cmd := exec.Command("echo", "hello")
-			var stdout bytes.Buffer
-			cmd.Stdout = &stdout
-
-			err := cmd.Run()
-			if err != nil {
-				t.Errorf("iteration %d: command failed: %v", i, err)
-				continue
-			}
-
-			if strings.TrimSpace(stdout.String()) != "hello" {
-				failures++
-				t.Logf("iteration %d: missing output", i)
-			}
-		}
-		t.Logf("Buffer approach: %d failures out of 20", failures)
-	})
-
-	// Test with pipe approach
-	t.Run("Pipe", func(t *testing.T) {
-		failures := 0
-		for i := 0; i < 20; i++ {
-			cmd := exec.Command("echo", "hello")
-			stdout, err := cmd.StdoutPipe()
-			if err != nil {
-				t.Errorf("iteration %d: pipe creation failed: %v", i, err)
-				continue
-			}
-
-			var output bytes.Buffer
-			done := make(chan struct{})
-
-			go func() {
-				defer close(done)
-				buf := make([]byte, 1024)
-				for {
-					n, err := stdout.Read(buf)
-					if n > 0 {
-						output.Write(buf[:n])
-					}
-					if err != nil {
-						break
-					}
-				}
-			}()
-
-			err = cmd.Start()
-			if err != nil {
-				t.Errorf("iteration %d: start failed: %v", i, err)
-				continue
-			}
-
-			err = cmd.Wait()
-			if err != nil {
-				t.Errorf("iteration %d: wait failed: %v", i, err)
-			}
-
-			<-done
-
-			if strings.TrimSpace(output.String()) != "hello" {
-				failures++
-				t.Logf("iteration %d: missing output, got %q", i, output.String())
-			}
-		}
-		t.Logf("Pipe approach: %d failures out of 20", failures)
-	})
-}
-
-// TestExecWithPipeWriter tests using io.Pipe to create a streaming solution
-func TestExecWithPipeWriter(t *testing.T) {
-	// Start CPU load
-	numCPU := runtime.NumCPU()
-	stopCPU := make(chan struct{})
-
-	for i := 0; i < numCPU-1; i++ {
-		go func() {
-			x := 0
-			for {
-				select {
-				case <-stopCPU:
-					return
-				default:
-					x = (x + 1) % 1000000
-					_ = x * x * x
-				}
-			}
-		}()
-	}
-	defer close(stopCPU)
-
-	time.Sleep(100 * time.Millisecond)
+	// Save current GOMAXPROCS and set to 1 to increase scheduling pressure
+	oldGOMAXPROCS := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(oldGOMAXPROCS)
 
 	failures := 0
-	for i := 0; i < 20; i++ {
-		// Create a pipe
-		reader, writer := io.Pipe()
+	for i := 0; i < 50; i++ { // More iterations since we're not burning CPU
+		var stdout, stderr bytes.Buffer
 
-		cmd := exec.Command("echo", "hello")
-		cmd.Stdout = writer // exec package will handle writing to this
+		session := NewSession(
+			WithCommand("sh", "-c", "echo stdout && echo stderr >&2"),
+			WithTTY(false),
+		)
 
-		var output bytes.Buffer
-		done := make(chan struct{})
-
-		// Start reading from the pipe
-		go func() {
-			defer close(done)
-			io.Copy(&output, reader)
-		}()
-
-		// Run the command - this will:
-		// 1. Start internal goroutines to copy from process stdout to our writer
-		// 2. Wait for the process to exit
-		// 3. Wait for the internal goroutines to finish
-		// 4. Return
-		err := cmd.Run()
+		ctx := context.Background()
+		exitCode, err := session.Run(ctx, &bytes.Buffer{}, &stdout, &stderr)
 		if err != nil {
-			t.Errorf("iteration %d: command failed: %v", i, err)
-			writer.Close()
+			t.Errorf("iteration %d: session failed: %v", i, err)
 			continue
 		}
 
-		// Close the writer to signal EOF to our reader
-		writer.Close()
+		if exitCode != 0 {
+			t.Errorf("iteration %d: unexpected exit code: %d", i, exitCode)
+		}
 
-		// Wait for our reader to finish
-		<-done
+		// Check outputs
+		stdoutStr := strings.TrimSpace(stdout.String())
+		stderrStr := strings.TrimSpace(stderr.String())
 
-		if strings.TrimSpace(output.String()) != "hello" {
+		if stdoutStr != "stdout" {
 			failures++
-			t.Logf("iteration %d: missing output, got %q", i, output.String())
+			t.Logf("iteration %d: missing stdout output: %q", i, stdoutStr)
 		}
-	}
-
-	t.Logf("io.Pipe approach: %d failures out of 20", failures)
-	if failures > 0 {
-		t.Errorf("Failed %d times", failures)
-	}
-}
-
-// TestRefactoredApproachUnderLoad tests our refactored io.Pipe approach
-func TestRefactoredApproachUnderLoad(t *testing.T) {
-	// Start CPU load
-	numCPU := runtime.NumCPU()
-	stopCPU := make(chan struct{})
-
-	for i := 0; i < numCPU-1; i++ {
-		go func() {
-			x := 0
-			for {
-				select {
-				case <-stopCPU:
-					return
-				default:
-					x = (x + 1) % 1000000
-					_ = x * x * x
-				}
-			}
-		}()
-	}
-	defer close(stopCPU)
-
-	time.Sleep(100 * time.Millisecond)
-
-	failures := 0
-	for i := 0; i < 50; i++ { // More iterations to stress test
-		cmd := exec.Command("sh", "-c", "echo hello && echo world >&2")
-
-		// Create pipes
-		stdoutReader, stdoutWriter := io.Pipe()
-		stderrReader, stderrWriter := io.Pipe()
-
-		cmd.Stdout = stdoutWriter
-		cmd.Stderr = stderrWriter
-
-		var stdoutBuf, stderrBuf bytes.Buffer
-		done := make(chan struct{})
-
-		// Start readers
-		go func() {
-			io.Copy(&stdoutBuf, stdoutReader)
-			io.Copy(&stderrBuf, stderrReader)
-			close(done)
-		}()
-
-		// Run command - exec ensures writers receive all data
-		err := cmd.Run()
-		if err != nil {
-			t.Errorf("iteration %d: command failed: %v", i, err)
-			stdoutWriter.Close()
-			stderrWriter.Close()
-			continue
-		}
-
-		// Close writers to signal EOF
-		stdoutWriter.Close()
-		stderrWriter.Close()
-
-		// Wait for readers
-		<-done
-
-		// Check results
-		gotStdout := strings.TrimSpace(stdoutBuf.String())
-		gotStderr := strings.TrimSpace(stderrBuf.String())
-
-		if gotStdout != "hello" || gotStderr != "world" {
+		if stderrStr != "stderr" {
 			failures++
-			t.Logf("iteration %d: stdout=%q, stderr=%q", i, gotStdout, gotStderr)
+			t.Logf("iteration %d: missing stderr output: %q", i, stderrStr)
 		}
+
+		// Add a small runtime.Gosched() to encourage the scheduler to switch
+		runtime.Gosched()
 	}
 
-	t.Logf("Refactored approach: %d failures out of 50", failures)
+	t.Logf("Non-TTY mode: %d failures out of 100 checks (50 iterations × 2 streams)", failures)
 	if failures > 0 {
-		t.Errorf("Failed %d times", failures)
+		t.Errorf("Non-TTY mode had %d failures - this is unexpected", failures)
 	}
 }
 
 // TestTTYModeUnderLoad verifies that TTY mode doesn't suffer from the race condition
 func TestTTYModeUnderLoad(t *testing.T) {
+	// This test checks that TTY mode works correctly under scheduling pressure
+	t.Parallel()
+
 	// Skip if not on a system with PTY support
 	if runtime.GOOS == "windows" {
 		t.Skip("PTY not supported on Windows")
 	}
 
-	// Start CPU load
-	numCPU := runtime.NumCPU()
-	stopCPU := make(chan struct{})
-
-	for i := 0; i < numCPU-1; i++ {
-		go func() {
-			x := 0
-			for {
-				select {
-				case <-stopCPU:
-					return
-				default:
-					x = (x + 1) % 1000000
-					_ = x * x * x
-				}
-			}
-		}()
-	}
-	defer close(stopCPU)
-
-	time.Sleep(100 * time.Millisecond)
+	// Save current GOMAXPROCS and set to 1 to increase scheduling pressure
+	// This makes race conditions more likely without burning CPU
+	oldGOMAXPROCS := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(oldGOMAXPROCS)
 
 	failures := 0
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 50; i++ { // More iterations since we're not burning CPU
 		var output bytes.Buffer
 
 		session := NewSession(
@@ -699,13 +492,17 @@ func TestTTYModeUnderLoad(t *testing.T) {
 		}
 
 		// Check output - in TTY mode we might get some extra control sequences
-		if !strings.Contains(output.String(), "hello") {
+		outputStr := output.String()
+		if !strings.Contains(outputStr, "hello") {
 			failures++
-			t.Logf("iteration %d: missing 'hello' in output: %q", i, output.String())
+			t.Logf("iteration %d: missing 'hello' in output: %q (len=%d)", i, outputStr, len(outputStr))
 		}
+
+		// Add runtime.Gosched() to encourage the scheduler to switch
+		runtime.Gosched()
 	}
 
-	t.Logf("TTY mode: %d failures out of 20", failures)
+	t.Logf("TTY mode: %d failures out of %d", failures, 50)
 	if failures > 0 {
 		t.Errorf("TTY mode had %d failures - this is unexpected", failures)
 	}

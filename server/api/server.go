@@ -93,6 +93,10 @@ func NewServer(config Config, system handlers.SystemManager, logger *slog.Logger
 	}
 
 	handler := stripSpritePrefix(mux)
+
+	// Add trailing slash normalization middleware
+	handler = stripTrailingSlash(handler)
+
 	s.server = &http.Server{
 		Addr: config.ListenAddr,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -102,6 +106,24 @@ func NewServer(config Config, system handlers.SystemManager, logger *slog.Logger
 	}
 
 	return s, nil
+}
+
+// stripTrailingSlash removes trailing slashes from request paths (except for root "/")
+func stripTrailingSlash(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+
+		// Remove trailing slash if it's not the root path
+		if len(path) > 1 && path[len(path)-1] == '/' {
+			// Clone request to avoid mutating the original
+			r2 := r.Clone(r.Context())
+			r2.URL.Path = path[:len(path)-1]
+			next.ServeHTTP(w, r2)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 // setupEndpoints configures HTTP endpoints for the API

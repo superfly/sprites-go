@@ -1,0 +1,20 @@
+time=2025-07-24T23:37:58.228-05:00 level=DEBUG msg="Starting WebSocket exec" url=wss://sprite-env-prime.fly.dev/v1/sprites/prime/exec cmd=[/bin/bash] workingDir="" env="[TERM=xterm-256color COLORTERM=truecolor LANG=en_US.UTF-8]" tty=true
+time=2025-07-24T23:37:58.228-05:00 level=DEBUG msg="Enabled TTY mode"
+time=2025-07-24T23:37:58.228-05:00 level=DEBUG msg="Set initial terminal size" cols=153 rows=40
+time=2025-07-24T23:37:58.228-05:00 level=DEBUG msg="Added environment variable" env="TERM=xterm-256color"
+time=2025-07-24T23:37:58.228-05:00 level=DEBUG msg="Added environment variable" env="COLORTERM=truecolor"
+time=2025-07-24T23:37:58.228-05:00 level=DEBUG msg="Added environment variable" env="LANG=en_US.UTF-8"
+time=2025-07-24T23:37:58.228-05:00 level=DEBUG msg="Final WebSocket URL with query parameters" url="wss://sprite-env-prime.fly.dev/v1/sprites/prime/exec?cmd=%2Fbin%2Fbash&cols=153&env=TERM%3Dxterm-256color&env=COLORTERM%3Dtruecolor&env=LANG%3Den_US.UTF-8&path=%2Fbin%2Fbash&rows=40&tty=true"
+time=2025-07-24T23:37:58.228-05:00 level=DEBUG msg="Created exec command" tty=true
+time=2025-07-24T23:37:58.228-05:00 level=DEBUG msg="Starting WebSocket command execution"
+time=2025-07-24T23:42:05.185-05:00 level=DEBUG msg="Starting WebSocket exec" url=wss://sprite-env-prime.fly.dev/v1/sprites/prime/exec cmd=[/bin/bash] workingDir="" env="[TERM=xterm-256color COLORTERM=truecolor LANG=en_US.UTF-8]" tty=true
+time=2025-07-24T23:42:05.186-05:00 level=DEBUG msg="Enabled TTY mode"
+time=2025-07-24T23:42:05.186-05:00 level=DEBUG msg="Set initial terminal size" cols=153 rows=40
+time=2025-07-24T23:42:05.186-05:00 level=DEBUG msg="Added environment variable" env="TERM=xterm-256color"
+time=2025-07-24T23:42:05.186-05:00 level=DEBUG msg="Added environment variable" env="COLORTERM=truecolor"
+time=2025-07-24T23:42:05.186-05:00 level=DEBUG msg="Added environment variable" env="LANG=en_US.UTF-8"
+time=2025-07-24T23:42:05.186-05:00 level=DEBUG msg="Final WebSocket URL with query parameters" url="wss://sprite-env-prime.fly.dev/v1/sprites/prime/exec?cmd=%2Fbin%2Fbash&cols=153&env=TERM%3Dxterm-256color&env=COLORTERM%3Dtruecolor&env=LANG%3Den_US.UTF-8&path=%2Fbin%2Fbash&rows=40&tty=true"
+time=2025-07-24T23:42:05.186-05:00 level=DEBUG msg="Created exec command" tty=true
+time=2025-07-24T23:42:05.186-05:00 level=DEBUG msg="Starting WebSocket command execution"
+time=2025-07-24T23:42:06.813-05:00 level=DEBUG msg="Command completed" exitCode=0
+time=2025-07-24T23:42:06.813-05:00 level=DEBUG msg="WebSocket exec completed" finalExitCode=0
