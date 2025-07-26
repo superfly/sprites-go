@@ -30,6 +30,14 @@ jobs:
             goos: darwin
             goarch: arm64
             binary_name: sprite
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            binary_name: sprite.exe
+          - os: windows-latest
+            goos: windows
+            goarch: arm64
+            binary_name: sprite.exe
     
     steps:
     - name: Checkout code
@@ -44,6 +52,9 @@ jobs:
       working-directory: ./client
       run: |
         go build -ldflags="-s -w -X main.Version=${{ github.ref_name }}" -o ${{ matrix.binary_name }}
+      env:
+        GOOS: ${{ matrix.goos }}
+        GOARCH: ${{ matrix.goarch }}
     
     - name: Create archive
       working-directory: ./client
@@ -104,6 +115,19 @@ jobs:
           curl -L https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/sprite-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/amd64/').tar.gz | tar xz
           chmod +x sprite
           sudo mv sprite /usr/local/bin/
+          ```
+          
+          #### Windows (PowerShell)
+          ```powershell
+          # For AMD64/x64
+          Invoke-WebRequest -Uri "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/sprite-windows-amd64.zip" -OutFile "sprite-windows-amd64.zip"
+          Expand-Archive -Path "sprite-windows-amd64.zip" -DestinationPath "."
+          Move-Item -Path "sprite.exe" -Destination "$env:USERPROFILE\AppData\Local\Microsoft\WindowsApps\" -Force
+          
+          # For ARM64
+          Invoke-WebRequest -Uri "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/sprite-windows-arm64.zip" -OutFile "sprite-windows-arm64.zip"
+          Expand-Archive -Path "sprite-windows-arm64.zip" -DestinationPath "."
+          Move-Item -Path "sprite.exe" -Destination "$env:USERPROFILE\AppData\Local\Microsoft\WindowsApps\" -Force
           ```
           
           #### Verify checksums
