@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -222,10 +223,18 @@ func ListSpritesWithPrefix(cfg *config.Manager, org *config.Organization, prefix
 		}
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 
+		slog.Debug("Sprite list request",
+			"url", u.String(),
+			"org", org.Name,
+			"prefix", prefix,
+			"continuation_token", continuationToken,
+			"authorization", fmt.Sprintf("Bearer %s", truncateToken(token)))
+
 		// Make request
 		client := &http.Client{Timeout: 30 * time.Second}
 		resp, err := client.Do(httpReq)
 		if err != nil {
+			slog.Debug("Sprite list request failed", "error", err)
 			return nil, fmt.Errorf("failed to list sprites: %w", err)
 		}
 		defer resp.Body.Close()
@@ -235,6 +244,10 @@ func ListSpritesWithPrefix(cfg *config.Manager, org *config.Organization, prefix
 		if err != nil {
 			return nil, fmt.Errorf("failed to read response: %w", err)
 		}
+
+		slog.Debug("Sprite list response",
+			"status", resp.StatusCode,
+			"body", string(body))
 
 		// Check status
 		if resp.StatusCode != http.StatusOK {

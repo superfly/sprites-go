@@ -33,7 +33,7 @@ type Command struct {
 // NewGlobalFlags creates a new GlobalFlags with flags registered
 func NewGlobalFlags(fs *flag.FlagSet) *GlobalFlags {
 	gf := &GlobalFlags{}
-	fs.BoolVar(&gf.Debug, "debug", false, "Enable debug logging")
+	// Debug flag is handled globally in main.go, not per-command
 	fs.BoolVar(&gf.Help, "help", false, "Show help for this command")
 	fs.BoolVar(&gf.Help, "h", false, "Show help for this command (shorthand)")
 	return gf
@@ -61,7 +61,7 @@ func ParseFlags(cmd *Command, args []string) ([]string, error) {
 			cmd.FlagSet.PrintDefaults()
 			fmt.Fprintln(os.Stderr)
 		}
-		
+
 		if len(cmd.Notes) > 0 {
 			fmt.Fprintf(os.Stderr, "Notes:\n")
 			for _, note := range cmd.Notes {
@@ -69,7 +69,7 @@ func ParseFlags(cmd *Command, args []string) ([]string, error) {
 			}
 			fmt.Fprintln(os.Stderr)
 		}
-		
+
 		if len(cmd.Examples) > 0 {
 			fmt.Fprintf(os.Stderr, "Examples:\n")
 			for _, example := range cmd.Examples {

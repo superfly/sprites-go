@@ -221,9 +221,6 @@ func checkpointListCommand(cfg *config.Manager, org *config.Organization, sprite
 		url += fmt.Sprintf("?history=%s", historyFilter)
 	}
 
-	// Debug log the URL
-	slog.Debug("Checkpoint list request", "url", url, "org", org.Name, "sprite", spriteName)
-
 	httpReq, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to create HTTP request: %v\n", err)
@@ -235,9 +232,17 @@ func checkpointListCommand(cfg *config.Manager, org *config.Organization, sprite
 		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
 		os.Exit(1)
 	}
+
 	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 
-	client := &http.Client{}
+	// Debug log the request
+	slog.Debug("Checkpoint list request",
+		"url", url,
+		"org", org.Name,
+		"sprite", spriteName,
+		"authorization", fmt.Sprintf("Bearer %s", truncateToken(token)))
+
+	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to make request: %v\n", err)

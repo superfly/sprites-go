@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -161,13 +162,27 @@ func CreateSprite(cfg *config.Manager, org *config.Organization, spriteName stri
 	if err != nil {
 		return fmt.Errorf("failed to get auth token: %w", err)
 	}
+
+	// Additional safety check for empty tokens
+	if token == "" {
+		return fmt.Errorf("auth token is empty for organization %s", org.Name)
+	}
+
 	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 	httpReq.Header.Set("Content-Type", "application/json")
+
+	slog.Debug("Sprite create request",
+		"url", url,
+		"org", org.Name,
+		"sprite", spriteName,
+		"authorization", fmt.Sprintf("Bearer %s", truncateToken(token)),
+		"request_body", string(jsonData))
 
 	// Make the request
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(httpReq)
 	if err != nil {
+		slog.Debug("Sprite create request failed", "error", err)
 		return fmt.Errorf("failed to create sprite: %w", err)
 	}
 	defer resp.Body.Close()
@@ -177,6 +192,10 @@ func CreateSprite(cfg *config.Manager, org *config.Organization, spriteName stri
 	if err != nil {
 		return fmt.Errorf("failed to read response: %w", err)
 	}
+
+	slog.Debug("Sprite create response",
+		"status", resp.StatusCode,
+		"body", string(body))
 
 	// Check status code
 	if resp.StatusCode != http.StatusCreated {

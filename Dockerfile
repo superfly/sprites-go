@@ -69,7 +69,7 @@ RUN apt-get update && \
     # Tools for DRBD
     drbd-utils \
     # Additional useful tools for disk management
-    parted gdisk util-linux fdisk xfsprogs fuse3 \
+    parted gdisk util-linux fdisk xfsprogs fuse3 tmux curl \
     # Cleanup
     && apt-get clean && \
     rm -rf /var/lib/apt/lists/*

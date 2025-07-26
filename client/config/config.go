@@ -1,10 +1,8 @@
 package config
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -71,8 +69,14 @@ func NewManager() (*Manager, error) {
 	}
 
 	// Load existing config if it exists
-	if err := m.Load(); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("failed to load config: %w", err)
+	err = m.Load()
+	if err != nil {
+		if os.IsNotExist(err) {
+			// File doesn't exist yet - this is OK for first-time use
+			return m, nil
+		}
+		// Any other error is fatal - don't continue with empty config
+		return nil, fmt.Errorf("failed to load config from %s: %w", configPath, err)
 	}
 
 	return m, nil
@@ -117,84 +121,7 @@ func (m *Manager) Load() error {
 		return err
 	}
 
-	// Discover organizations from keyring that might not be in config file
-	if err := m.discoverFromKeyring(); err != nil {
-		// Log but don't fail - keyring discovery is best effort
-		// We'll continue with whatever was in the config file
-	}
-
 	return nil
-}
-
-// discoverFromKeyring scans the keyring for sprites-cli entries and adds missing organizations
-func (m *Manager) discoverFromKeyring() error {
-	// Skip discovery if keyring is disabled
-	if m.config.DisableKeyring {
-		return fmt.Errorf("keyring discovery disabled in configuration")
-	}
-
-	// This is a best-effort approach since go-keyring doesn't provide a list function
-	// We'll try some common organization name patterns and see what we find
-
-	if m.config.Orgs == nil {
-		m.config.Orgs = make(map[string]*Organization)
-	}
-
-	// Try some common generic organization names
-	commonOrgNames := []string{
-		"default",
-		"sprites",
-		"main",
-		"org",
-	}
-
-	// Also try environment variables that might hint at org names
-	if envOrg := os.Getenv("SPRITE_ORG"); envOrg != "" {
-		commonOrgNames = append([]string{envOrg}, commonOrgNames...)
-	}
-
-	for _, orgName := range commonOrgNames {
-		// Try to get a token from keyring for this org name
-		token, err := keyring.Get(KeyringService, orgName)
-		if err != nil {
-			continue // This org name doesn't exist in keyring
-		}
-
-		// Found a token! Create organization entry
-		apiURL := "https://api.sprites.dev"
-		if envURL := os.Getenv("SPRITES_API_URL"); envURL != "" {
-			apiURL = envURL
-		}
-
-		// Add to config (but don't set as current - let user choose)
-		if err := m.AddOrgWithoutSetting(orgName, token, apiURL); err != nil {
-			continue // Failed to add, try next
-		}
-
-		// Only show discovery message in debug mode
-		// Import needed for context and slog
-		if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
-			fmt.Printf("✓ Discovered organization from keyring: %s\n", orgName)
-		}
-		return nil // Found one, that's enough
-	}
-
-	return fmt.Errorf("no organizations found in keyring")
-}
-
-// DiscoverFromKeyring is a public wrapper for discoverFromKeyring
-func (m *Manager) DiscoverFromKeyring() (*Organization, error) {
-	if err := m.discoverFromKeyring(); err != nil {
-		return nil, err
-	}
-
-	// Return the first organization we find
-	orgs := m.GetOrgs()
-	for _, org := range orgs {
-		return org, nil
-	}
-
-	return nil, fmt.Errorf("no organizations found after discovery")
 }
 
 // Save writes the configuration to disk
@@ -235,6 +162,17 @@ func (m *Manager) SetCurrentOrg(orgName string) error {
 
 // AddOrg adds a new organization or updates an existing one
 func (m *Manager) AddOrg(name, token, url string) error {
+	// Validate inputs
+	if name == "" {
+		return fmt.Errorf("organization name cannot be empty")
+	}
+	if token == "" {
+		return fmt.Errorf("organization token cannot be empty")
+	}
+	if url == "" {
+		return fmt.Errorf("organization URL cannot be empty")
+	}
+
 	if m.config.Orgs == nil {
 		m.config.Orgs = make(map[string]*Organization)
 	}
@@ -321,6 +259,10 @@ func (o *Organization) GetTokenWithKeyringDisabled(disableKeyring bool) (string,
 		// Try keyring first
 		token, err := keyring.Get(KeyringService, o.Name)
 		if err == nil {
+			// Check if token is empty even if keyring returned no error
+			if token == "" {
+				return "", fmt.Errorf("empty token found in keyring for organization %s", o.Name)
+			}
 			o.UseKeyring = true // Update flag to reflect we're using keyring
 			return token, nil
 		}
@@ -342,6 +284,11 @@ func (o *Organization) SetToken(token string) error {
 
 // SetTokenWithKeyringDisabled stores the token with optional keyring bypass
 func (o *Organization) SetTokenWithKeyringDisabled(token string, disableKeyring bool) error {
+	// Validate token is not empty
+	if token == "" {
+		return fmt.Errorf("cannot store empty token for organization %s", o.Name)
+	}
+
 	if !disableKeyring {
 		// Try to store in keyring first
 		err := keyring.Set(KeyringService, o.Name, token)

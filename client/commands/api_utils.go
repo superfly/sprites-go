@@ -24,6 +24,23 @@ func getSpritesAPIURL(org *config.Organization) string {
 	return "https://api.sprites.dev"
 }
 
+// truncateToken returns a truncated version of a token for safe logging
+// e.g. "abcdefghijklmnop" becomes "abc..nop"
+func truncateToken(token string) string {
+	if len(token) == 0 {
+		return "<blank>"
+	}
+	if len(token) < 10 {
+		// Very short token, just show partial
+		if len(token) <= 3 {
+			return token[:1] + "..."
+		}
+		return token[:3] + "..."
+	}
+	// Show first 3 and last 3 characters
+	return token[:3] + ".." + token[len(token)-3:]
+}
+
 // buildSpriteProxyURL builds the URL for sprite proxy endpoints
 func buildSpriteProxyURL(org *config.Organization, spriteName string, path string) string {
 	baseURL := getSpritesAPIURL(org)

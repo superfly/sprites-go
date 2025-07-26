@@ -36,8 +36,8 @@ Add `.sprite` to your `.gitignore` as it contains user-specific context.
 
 ## Environment Variables
 
-### For Backward Compatibility
-The client supports these environment variables for backward compatibility with direct sprite connections:
+### For Developing Compatibility
+The client supports these environment variables for developing with direct sprite connections:
 - `SPRITE_URL`: The sprite server URL
 - `SPRITE_TOKEN`: Authentication token
 

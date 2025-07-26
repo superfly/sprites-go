@@ -73,7 +73,9 @@ func EnsureOrg(cfg *config.Manager, orgOverride string) (*config.Organization, e
 			if o.Name == orgOverride {
 				org = o
 				// Set as current for this session
-				cfg.SetCurrentOrg(o.Name)
+				if err := cfg.SetCurrentOrg(o.Name); err != nil {
+					return nil, fmt.Errorf("failed to set current org: %w", err)
+				}
 				break
 			}
 		}
@@ -150,7 +152,9 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 			if o.Name == orgOverride {
 				org = o
 				// Set as current for this session
-				cfg.SetCurrentOrg(o.Name)
+				if err := cfg.SetCurrentOrg(o.Name); err != nil {
+					return nil, "", fmt.Errorf("failed to set current org: %w", err)
+				}
 				break
 			}
 		}
@@ -197,7 +201,9 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 						format.Org(org.Name), format.Sprite(spriteName))
 				}
 				// Set as current in the config
-				cfg.SetCurrentOrg(org.Name)
+				if err := cfg.SetCurrentOrg(org.Name); err != nil {
+					return nil, "", fmt.Errorf("failed to set current org: %w", err)
+				}
 				// Don't check sprite existence - let API endpoints handle it
 			}
 		}
@@ -208,19 +214,13 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 		// Check if we have any organizations configured
 		orgs := cfg.GetOrgs()
 		if len(orgs) == 0 {
-			// Try to discover organizations from keyring first
-			discoveredOrg, err := cfg.DiscoverFromKeyring()
-			if err == nil && discoveredOrg != nil {
-				org = discoveredOrg
-			} else {
-				// No organizations found - try Fly authentication
-				selectedOrg, err := AuthenticateWithFly(cfg)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-					os.Exit(1)
-				}
-				org = selectedOrg
+			// No organizations found - try Fly authentication
+			selectedOrg, err := AuthenticateWithFly(cfg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
 			}
+			org = selectedOrg
 		} else {
 			// Otherwise, use config-based org selection
 			org = cfg.GetCurrentOrg()
