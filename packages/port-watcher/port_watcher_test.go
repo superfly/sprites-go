@@ -434,7 +434,7 @@ func TestPortDeduplication(t *testing.T) {
    0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 100 0 0 10 0`
 
 	seenPorts := nm.parseAndNotify(strings.NewReader(mockTCP), watcher, false)
-	
+
 	// Update currentPorts
 	for k, v := range seenPorts {
 		watcher.currentPorts[k] = v
@@ -451,7 +451,7 @@ func TestPortDeduplication(t *testing.T) {
 
 	// Second scan with the same port
 	nm.parseAndNotify(strings.NewReader(mockTCP), watcher, false)
-	
+
 	// Should NOT receive another notification
 	select {
 	case <-notificationsChan:
@@ -506,7 +506,7 @@ func TestPortOpenClose(t *testing.T) {
 
 	// parseAndNotify returns seen ports
 	seenPorts1 := nm.parseAndNotify(strings.NewReader(mockTCP1), watcher, false)
-	
+
 	// Update currentPorts manually (as scanNamespace would do)
 	for k, v := range seenPorts1 {
 		watcher.currentPorts[k] = v
@@ -527,7 +527,7 @@ func TestPortOpenClose(t *testing.T) {
 	mockTCP2 := `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode`
 
 	seenPorts2 := nm.parseAndNotify(strings.NewReader(mockTCP2), watcher, false)
-	
+
 	// Simulate scanNamespace behavior - detect closed ports
 	for portKey, pid := range watcher.currentPorts {
 		if _, stillExists := seenPorts2[portKey]; !stillExists {
@@ -537,10 +537,10 @@ func TestPortOpenClose(t *testing.T) {
 				portStr := parts[len(parts)-1]
 				port, _ := strconv.Atoi(portStr)
 				addr := strings.Join(parts[:len(parts)-1], ":")
-				
+
 				log.Printf("Port watcher: port closed in namespace %s - %s (PID: %d)",
 					watcher.namespaceID, portKey, pid)
-				
+
 				nm.notifySubscribers(Port{
 					Port:    port,
 					PID:     pid,
@@ -550,7 +550,7 @@ func TestPortOpenClose(t *testing.T) {
 			}
 		}
 	}
-	
+
 	// Update currentPorts
 	watcher.currentPorts = seenPorts2
 
@@ -567,7 +567,7 @@ func TestPortOpenClose(t *testing.T) {
 
 	// Third scan - port 8080 is back
 	seenPorts3 := nm.parseAndNotify(strings.NewReader(mockTCP1), watcher, false)
-	
+
 	// Update currentPorts
 	for k, v := range seenPorts3 {
 		watcher.currentPorts[k] = v

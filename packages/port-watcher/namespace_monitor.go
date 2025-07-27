@@ -165,7 +165,7 @@ func (nm *NamespaceMonitor) monitorNamespace(watcher *namespaceWatcher) {
 func (nm *NamespaceMonitor) scanNamespace(watcher *namespaceWatcher) {
 	// Collect all seen ports from both IPv4 and IPv6
 	allSeenPorts := make(map[string]int)
-	
+
 	// Use nsenter to read TCP information from the namespace
 	cmd := exec.Command("nsenter", "-t", strconv.Itoa(watcher.namespacePID), "-n", "cat", "/proc/net/tcp")
 	output, err := cmd.Output()
@@ -194,6 +194,12 @@ func (nm *NamespaceMonitor) scanNamespace(watcher *namespaceWatcher) {
 		}
 	}
 
+	// Debug: log current state
+	if len(watcher.currentPorts) > 0 || len(allSeenPorts) > 0 {
+		log.Printf("Port watcher DEBUG: namespace %s - before: %d ports, after scan: %d ports",
+			watcher.namespaceID, len(watcher.currentPorts), len(allSeenPorts))
+	}
+
 	// Now update currentPorts based on ALL seen ports
 	// Remove ports that are no longer present
 	for portKey := range watcher.currentPorts {
@@ -206,7 +212,7 @@ func (nm *NamespaceMonitor) scanNamespace(watcher *namespaceWatcher) {
 				port, _ := strconv.Atoi(portStr)
 				// Reconstruct address by joining all parts except the last
 				addr := strings.Join(parts[:len(parts)-1], ":")
-				
+
 				pid := watcher.currentPorts[portKey]
 				// Check if anyone cares about this closed port
 				inMonitoredTree := false
@@ -219,10 +225,9 @@ func (nm *NamespaceMonitor) scanNamespace(watcher *namespaceWatcher) {
 				}
 				nm.mu.RUnlock()
 
-				if inMonitoredTree {
-					log.Printf("Port watcher: port closed in namespace %s - %s (PID: %d)",
-						watcher.namespaceID, portKey, pid)
-				}
+				// Always log port closures for debugging
+				log.Printf("Port watcher: detected closed port in namespace %s - %s (PID: %d, monitored: %v)",
+					watcher.namespaceID, portKey, pid, inMonitoredTree)
 
 				// Notify subscribers
 				nm.notifySubscribers(Port{
@@ -235,7 +240,7 @@ func (nm *NamespaceMonitor) scanNamespace(watcher *namespaceWatcher) {
 			delete(watcher.currentPorts, portKey)
 		}
 	}
-	
+
 	// Add new ports
 	for portKey, pid := range allSeenPorts {
 		if watcher.currentPorts[portKey] == 0 {
@@ -381,7 +386,20 @@ func (nm *NamespaceMonitor) notifySubscribers(port Port) {
 
 	// Check all subscriptions to see if this port's PID is in their tree
 	for rootPID, subs := range nm.subscribers {
-		if isPIDInTree(port.PID, rootPID) {
+		shouldNotify := false
+		
+		if port.State == "closed" {
+			// For closed ports, the process might have already exited
+			// So we can't reliably check if it's in the tree
+			// Instead, notify if this subscriber was monitoring anything in this namespace
+			// (they likely got the open event and need the close event)
+			shouldNotify = true
+		} else {
+			// For open ports, check if the PID is in the subscriber's tree
+			shouldNotify = isPIDInTree(port.PID, rootPID)
+		}
+		
+		if shouldNotify {
 			for _, sub := range subs {
 				// Call the callback in a goroutine to avoid blocking
 				go sub.callback(port)
