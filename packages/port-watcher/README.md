@@ -86,7 +86,6 @@ func main() {
     - When a port is first detected, an "open" event is sent
     - When a port disappears (process exits or stops listening), a "closed" event is sent
     - If the same address:port is reopened, a new "open" event is sent
-    - **Note**: Close events are delivered to all subscribers in the namespace, even if the process has exited
 
 6. **IPv6 Filtering**:
    - Only monitors localhost (::1) and all interfaces (::) addresses
