@@ -11,9 +11,10 @@ type Port struct {
 	Port    int
 	PID     int
 	Address string
+	State   string // "open" or "closed"
 }
 
-// PortCallback is called when a new port is detected
+// PortCallback is called when a port state changes
 type PortCallback func(port Port)
 
 // portEvent is used internally for channel communication

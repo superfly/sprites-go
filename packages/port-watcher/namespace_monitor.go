@@ -30,7 +30,7 @@ type NamespaceMonitor struct {
 type namespaceWatcher struct {
 	namespaceID  string
 	namespacePID int
-	knownPorts   map[string]bool // key: "addr:port"
+	currentPorts map[string]int  // key: "addr:port" value: PID
 	loggedAddrs  map[string]bool // key: "addr:port" for unrecognized addresses
 	ctx          context.Context
 	cancel       context.CancelFunc
@@ -95,7 +95,7 @@ func (nm *NamespaceMonitor) Subscribe(pid int, callback PortCallback) error {
 		watcher := &namespaceWatcher{
 			namespacePID: namespacePID,
 			namespaceID:  namespaceID,
-			knownPorts:   make(map[string]bool),
+			currentPorts: make(map[string]int),
 			loggedAddrs:  make(map[string]bool),
 			ctx:          ctx,
 			cancel:       cancel,
@@ -184,112 +184,169 @@ func (nm *NamespaceMonitor) scanNamespace(watcher *namespaceWatcher) {
 	nm.parseAndNotify(strings.NewReader(string(output)), watcher, true)
 }
 
-// parseAndNotify parses TCP data and notifies subscribers of new ports
+// parseAndNotify parses TCP data and notifies subscribers
 func (nm *NamespaceMonitor) parseAndNotify(r io.Reader, watcher *namespaceWatcher, isIPv6 bool) {
 	scanner := bufio.NewScanner(r)
 
+	// Track ports seen in this scan
+	seenPorts := make(map[string]int) // key: "addr:port" value: PID
+
 	// Skip header line
 	if scanner.Scan() {
-		// Header line, ignore
-	}
+		// Process data lines
+		for scanner.Scan() {
+			line := scanner.Text()
+			fields := strings.Fields(line)
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		fields := strings.Fields(line)
-
-		if len(fields) < 10 {
-			continue
-		}
-
-		// Parse local address (field 1)
-		localAddr := fields[1]
-		parts := strings.Split(localAddr, ":")
-		if len(parts) != 2 {
-			continue
-		}
-
-		// Parse hex address and port
-		addrHex := parts[0]
-		portHex := parts[1]
-
-		// Convert port from hex
-		port64, err := strconv.ParseInt(portHex, 16, 32)
-		if err != nil {
-			continue
-		}
-		port := int(port64)
-
-		// Parse address
-		var addr string
-		if isIPv6 {
-			if strings.HasPrefix(addrHex, "00000000000000000000000001") {
-				addr = "::1"
-			} else if addrHex == "00000000000000000000000000000000" {
-				addr = "::"
-			} else if strings.HasPrefix(addrHex, "00000000000000000000FFFF0000") {
-				// IPv4-mapped IPv6 address for 0.0.0.0
-				addr = "::"
-			} else if addrHex == "00000000000000000000000000000001" {
-				// Alternative representation of ::1
-				addr = "::1"
-			} else {
-				// Log unrecognized IPv6 patterns for debugging
-				if len(addrHex) >= 32 {
-					logKey := fmt.Sprintf("%s:%d", addrHex, port)
-					if !watcher.loggedAddrs[logKey] {
-						watcher.loggedAddrs[logKey] = true
-						log.Printf("Port watcher: skipping unrecognized IPv6 address: %s (port %d)", addrHex, port)
-					}
-				}
+			if len(fields) < 10 {
 				continue
 			}
-		} else {
-			// IPv4 address in hex (little-endian)
-			addrInt, err := strconv.ParseUint(addrHex, 16, 32)
+
+			// Parse local address (field 1)
+			localAddr := fields[1]
+			parts := strings.Split(localAddr, ":")
+			if len(parts) != 2 {
+				continue
+			}
+
+			// Parse hex address and port
+			addrHex := parts[0]
+			portHex := parts[1]
+
+			// Convert port from hex
+			port64, err := strconv.ParseInt(portHex, 16, 32)
 			if err != nil {
 				continue
 			}
+			port := int(port64)
 
-			b1 := byte(addrInt & 0xFF)
-			b2 := byte((addrInt >> 8) & 0xFF)
-			b3 := byte((addrInt >> 16) & 0xFF)
-			b4 := byte((addrInt >> 24) & 0xFF)
+			// Parse address
+			var addr string
+			if isIPv6 {
+				if strings.HasPrefix(addrHex, "00000000000000000000000001") {
+					addr = "::1"
+				} else if addrHex == "00000000000000000000000000000000" {
+					addr = "::"
+				} else if strings.HasPrefix(addrHex, "00000000000000000000FFFF0000") {
+					// IPv4-mapped IPv6 address for 0.0.0.0
+					addr = "::"
+				} else if addrHex == "00000000000000000000000000000001" {
+					// Alternative representation of ::1
+					addr = "::1"
+				} else {
+					// Log unrecognized IPv6 patterns for debugging
+					if len(addrHex) >= 32 {
+						logKey := fmt.Sprintf("%s:%d", addrHex, port)
+						if !watcher.loggedAddrs[logKey] {
+							watcher.loggedAddrs[logKey] = true
+							readableAddr := hexToIPv6(addrHex)
+							log.Printf("Port watcher: skipping unrecognized IPv6 address: %s (port %d)", readableAddr, port)
+						}
+					}
+					continue
+				}
+			} else {
+				// IPv4 address in hex (little-endian)
+				addrInt, err := strconv.ParseUint(addrHex, 16, 32)
+				if err != nil {
+					continue
+				}
 
-			addr = fmt.Sprintf("%d.%d.%d.%d", b1, b2, b3, b4)
+				b1 := byte(addrInt & 0xFF)
+				b2 := byte((addrInt >> 8) & 0xFF)
+				b3 := byte((addrInt >> 16) & 0xFF)
+				b4 := byte((addrInt >> 24) & 0xFF)
 
-			if addr != "127.0.0.1" && addr != "0.0.0.0" {
+				addr = fmt.Sprintf("%d.%d.%d.%d", b1, b2, b3, b4)
+
+				if addr != "127.0.0.1" && addr != "0.0.0.0" {
+					continue
+				}
+			}
+
+			// Parse socket inode
+			inode := fields[9]
+
+			// Find PID for this socket
+			pid := findPIDForSocketFunc(inode)
+			if pid == 0 {
+				log.Printf("Port watcher: found listening port %s:%d but couldn't determine PID (inode: %s)\n", addr, port, inode)
 				continue
 			}
+
+			// Track this port as seen
+			portKey := fmt.Sprintf("%s:%d", addr, port)
+			if seenPorts[portKey] != 0 {
+				continue // Already seen in this scan
+			}
+			seenPorts[portKey] = pid
+
+			// Check if this is a new port
+			if watcher.currentPorts[portKey] == 0 {
+				// New port opened - check if anyone cares about it
+				inMonitoredTree := false
+				nm.mu.RLock()
+				for rootPID := range nm.subscribers {
+					if isPIDInTree(pid, rootPID) {
+						inMonitoredTree = true
+						break
+					}
+				}
+				nm.mu.RUnlock()
+
+				if inMonitoredTree {
+					log.Printf("Port watcher: new port detected in namespace %s - %s:%d (PID: %d)",
+						watcher.namespaceID, addr, port, pid)
+				}
+
+				// Notify subscribers
+				nm.notifySubscribers(Port{
+					Port:    port,
+					PID:     pid,
+					Address: addr,
+					State:   "open",
+				})
+			}
 		}
-
-		// Parse socket inode
-		inode := fields[9]
-
-		// Find PID for this socket
-		pid := findPIDForSocketFunc(inode)
-		if pid == 0 {
-			log.Printf("Port watcher: found listening port %s:%d but couldn't determine PID (inode: %s)\n", addr, port, inode)
-			continue
-		}
-
-		// Check if this is a new port
-		portKey := fmt.Sprintf("%s:%d", addr, port)
-		if watcher.knownPorts[portKey] {
-			continue // Already seen this port
-		}
-		watcher.knownPorts[portKey] = true
-
-		// Log the new port
-		log.Printf("Port watcher: new port detected in namespace %s - %s:%d (PID: %d)",
-			watcher.namespaceID, addr, port, pid)
-
-		// Notify subscribers
-		nm.notifySubscribers(Port{
-			Port:    port,
-			PID:     pid,
-			Address: addr,
-		})
 	}
+
+	// Check for closed ports
+	for portKey, pid := range watcher.currentPorts {
+		if seenPorts[portKey] == 0 {
+			// Port was closed - check if anyone cares about it
+			inMonitoredTree := false
+			nm.mu.RLock()
+			for rootPID := range nm.subscribers {
+				if isPIDInTree(pid, rootPID) {
+					inMonitoredTree = true
+					break
+				}
+			}
+			nm.mu.RUnlock()
+
+			// Port was closed
+			parts := strings.Split(portKey, ":")
+			if len(parts) == 2 {
+				port, _ := strconv.Atoi(parts[1])
+				
+				if inMonitoredTree {
+					log.Printf("Port watcher: port closed in namespace %s - %s (PID: %d)",
+						watcher.namespaceID, portKey, pid)
+				}
+
+				// Notify subscribers
+				nm.notifySubscribers(Port{
+					Port:    port,
+					PID:     pid,
+					Address: parts[0],
+					State:   "closed",
+				})
+			}
+		}
+	}
+
+	// Update current ports
+	watcher.currentPorts = seenPorts
 }
 
 // notifySubscribers notifies all relevant subscribers about a new port
@@ -406,7 +463,24 @@ func getNamedNamespaceID(name string) (string, error) {
 
 // Helper functions (these should be shared with the original implementation)
 
-// findPIDForSocketFunc is a variable to allow mocking in tests
+// hexToIPv6 converts a hex string to IPv6 address format
+func hexToIPv6(hex string) string {
+	if len(hex) != 32 {
+		return hex // Return as-is if not valid length
+	}
+
+	// Convert to IPv6 format (e.g., "2001:0db8:0000:0000:0000:0000:0000:0001")
+	var parts []string
+	for i := 0; i < 32; i += 4 {
+		part := strings.ToLower(hex[i : i+4])
+		parts = append(parts, part)
+	}
+
+	// Join with colons
+	return strings.Join(parts, ":")
+}
+
+// findPIDForSocket scans /proc/*/fd/* to find which process owns a socket
 var findPIDForSocketFunc = findPIDForSocket
 
 func findPIDForSocket(inode string) int {
