@@ -30,7 +30,7 @@ type NamespaceMonitor struct {
 type namespaceWatcher struct {
 	namespaceID  string
 	namespacePID int
-	knownPorts   map[string]bool // key: "addr:port:pid"
+	knownPorts   map[string]bool // key: "addr:port"
 	loggedAddrs  map[string]bool // key: "addr:port" for unrecognized addresses
 	ctx          context.Context
 	cancel       context.CancelFunc
@@ -273,7 +273,7 @@ func (nm *NamespaceMonitor) parseAndNotify(r io.Reader, watcher *namespaceWatche
 		}
 
 		// Check if this is a new port
-		portKey := fmt.Sprintf("%s:%d:%d", addr, port, pid)
+		portKey := fmt.Sprintf("%s:%d", addr, port)
 		if watcher.knownPorts[portKey] {
 			continue // Already seen this port
 		}

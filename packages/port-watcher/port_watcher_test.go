@@ -377,3 +377,78 @@ func TestParseTCPDataExpandedAddresses(t *testing.T) {
 		}
 	}
 }
+
+// TestPortDeduplication verifies that the same address:port is only reported once
+func TestPortDeduplication(t *testing.T) {
+	nm := GetGlobalMonitor()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	watcher := &namespaceWatcher{
+		namespacePID: 1,
+		namespaceID:  "test-namespace",
+		knownPorts:   make(map[string]bool),
+		loggedAddrs:  make(map[string]bool),
+		ctx:          ctx,
+		cancel:       cancel,
+	}
+
+	// Collect detected ports
+	detectedPorts := make(chan Port, 10)
+
+	// Add a subscription
+	nm.subscribers[os.Getpid()] = []*subscription{
+		{
+			rootPID: os.Getpid(),
+			callback: func(port Port) {
+				select {
+				case detectedPorts <- port:
+				case <-time.After(1 * time.Second):
+					t.Error("Timeout sending port to channel")
+				}
+			},
+		},
+	}
+
+	// Mock TCP data with same port but different PIDs
+	mockTCP := `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 100 0 0 10 0
+   1: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 67890 1 0000000000000000 100 0 0 10 0`
+
+	// Override the findPIDForSocket to return different PIDs
+	oldFindPIDForSocket := findPIDForSocketFunc
+	pidMap := map[string]int{
+		"12345": os.Getpid(), // Use current PID so it's in the tree
+		"67890": os.Getpid(), // Same PID but different inode
+	}
+	findPIDForSocketFunc = func(inode string) int {
+		return pidMap[inode]
+	}
+	defer func() { findPIDForSocketFunc = oldFindPIDForSocket }()
+
+	// First parse - should detect port 8080
+	reader := strings.NewReader(mockTCP)
+	nm.parseAndNotify(reader, watcher, false)
+
+	// Should receive one notification
+	select {
+	case port := <-detectedPorts:
+		if port.Port != 8080 || port.Address != "127.0.0.1" {
+			t.Errorf("Expected port 127.0.0.1:8080, got %s:%d", port.Address, port.Port)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Error("Did not receive expected port notification")
+	}
+
+	// Second parse with same data - should NOT receive another notification
+	reader2 := strings.NewReader(mockTCP)
+	nm.parseAndNotify(reader2, watcher, false)
+
+	// Should NOT receive another notification
+	select {
+	case port := <-detectedPorts:
+		t.Errorf("Received unexpected duplicate notification for %s:%d", port.Address, port.Port)
+	case <-time.After(100 * time.Millisecond):
+		// Good - no duplicate notification
+	}
+}

@@ -80,7 +80,7 @@ func main() {
 4. **Subscription System**: 
    - PortWatcher instances subscribe to their PID tree
    - Global monitor notifies relevant subscribers when ports are detected
-   - Deduplication ensures each port is reported only once
+   - Deduplication ensures each address:port combination is reported only once (regardless of PID)
 
 5. **IPv6 Filtering**:
    - Only monitors localhost (::1) and all interfaces (::) addresses
