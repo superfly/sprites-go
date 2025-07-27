@@ -387,7 +387,7 @@ func (nm *NamespaceMonitor) notifySubscribers(port Port) {
 	// Check all subscriptions to see if this port's PID is in their tree
 	for rootPID, subs := range nm.subscribers {
 		shouldNotify := false
-		
+
 		if port.State == "closed" {
 			// For closed ports, the process might have already exited
 			// So we can't reliably check if it's in the tree
@@ -398,7 +398,7 @@ func (nm *NamespaceMonitor) notifySubscribers(port Port) {
 			// For open ports, check if the PID is in the subscriber's tree
 			shouldNotify = isPIDInTree(port.PID, rootPID)
 		}
-		
+
 		if shouldNotify {
 			for _, sub := range subs {
 				// Call the callback in a goroutine to avoid blocking
