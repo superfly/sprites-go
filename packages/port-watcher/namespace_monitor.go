@@ -173,24 +173,6 @@ func (nm *NamespaceMonitor) scanNamespace(watcher *namespaceWatcher) {
 
 	allSeenPorts := nm.parseSSOutput(string(output), watcher)
 
-	// Debug: log current state
-	if len(watcher.currentPorts) > 0 || len(allSeenPorts) > 0 {
-		log.Printf("Port watcher DEBUG: namespace %s - before: %d ports, after scan: %d ports",
-			watcher.namespaceID, len(watcher.currentPorts), len(allSeenPorts))
-
-		// Log specific ports for debugging
-		for portKey, pid := range watcher.currentPorts {
-			if _, exists := allSeenPorts[portKey]; !exists {
-				log.Printf("Port watcher DEBUG: port %s (PID: %d) is no longer present", portKey, pid)
-			}
-		}
-		for portKey, pid := range allSeenPorts {
-			if watcher.currentPorts[portKey] == 0 {
-				log.Printf("Port watcher DEBUG: new port %s (PID: %d) detected", portKey, pid)
-			}
-		}
-	}
-
 	// Now update currentPorts based on ALL seen ports
 	// Remove ports that are no longer present
 	for portKey := range watcher.currentPorts {
@@ -373,39 +355,39 @@ func (nm *NamespaceMonitor) parseAndNotify(r io.Reader, watcher *namespaceWatche
 // parseSSOutput parses ss command output and returns seen ports
 func (nm *NamespaceMonitor) parseSSOutput(output string, watcher *namespaceWatcher) map[string]int {
 	seenPorts := make(map[string]int)
-	
+
 	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || !strings.HasPrefix(line, "LISTEN") {
 			continue
 		}
-		
+
 		// Parse ss output format: State Recv-Q Send-Q Local-Address:Port Peer-Address:Port Process
 		fields := strings.Fields(line)
 		if len(fields) < 6 {
 			continue
 		}
-		
-		localAddr := fields[3] // Local Address:Port
+
+		localAddr := fields[3]   // Local Address:Port
 		processInfo := fields[5] // Process info like users:(("claude",pid=9506,fd=29))
-		
+
 		// Extract address and port
 		parts := strings.Split(localAddr, ":")
 		if len(parts) < 2 {
 			continue
 		}
-		
+
 		// Get port (last part)
 		portStr := parts[len(parts)-1]
 		port, err := strconv.Atoi(portStr)
 		if err != nil {
 			continue
 		}
-		
+
 		// Get address (everything except last part)
 		addr := strings.Join(parts[:len(parts)-1], ":")
-		
+
 		// Normalize addresses we care about
 		var normalizedAddr string
 		switch addr {
@@ -421,20 +403,20 @@ func (nm *NamespaceMonitor) parseSSOutput(output string, watcher *namespaceWatch
 			// Skip addresses we don't monitor
 			continue
 		}
-		
+
 		// Extract PID from process info: users:(("claude",pid=9506,fd=29))
 		pid := nm.extractPIDFromProcessInfo(processInfo)
 		if pid == 0 {
 			log.Printf("Port watcher: found listening port %s:%d but couldn't determine PID from: %s", normalizedAddr, port, processInfo)
 			continue
 		}
-		
+
 		portKey := fmt.Sprintf("%s:%d", normalizedAddr, port)
 		if seenPorts[portKey] != 0 {
 			continue // Already seen
 		}
 		seenPorts[portKey] = pid
-		
+
 		// Check if this is a new port
 		if watcher.currentPorts[portKey] == 0 {
 			// New port opened - check if anyone cares about it
@@ -462,7 +444,7 @@ func (nm *NamespaceMonitor) parseSSOutput(output string, watcher *namespaceWatch
 			})
 		}
 	}
-	
+
 	return seenPorts
 }
 
@@ -473,19 +455,19 @@ func (nm *NamespaceMonitor) extractPIDFromProcessInfo(processInfo string) int {
 	if pidStart == -1 {
 		return 0
 	}
-	
+
 	pidStart += 4 // Skip "pid="
 	pidEnd := strings.IndexAny(processInfo[pidStart:], ",)")
 	if pidEnd == -1 {
 		return 0
 	}
-	
+
 	pidStr := processInfo[pidStart : pidStart+pidEnd]
 	pid, err := strconv.Atoi(pidStr)
 	if err != nil {
 		return 0
 	}
-	
+
 	return pid
 }
 
