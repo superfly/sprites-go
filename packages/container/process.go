@@ -192,32 +192,20 @@ func (p *Process) findContainerProcess() {
 		p.config.Logger.Debug("Looking for container process", "wrapperPID", wrapperPID)
 	}
 
-	// Look for child processes of the wrapper
-	children, err := getChildProcesses(wrapperPID)
+	// Use the shared GetContainerPID function
+	containerPID, err := GetContainerPID(wrapperPID)
 	if err != nil {
 		if p.config.Logger != nil {
-			p.config.Logger.Warn("Failed to get child processes", "error", err, "wrapperPID", wrapperPID)
+			p.config.Logger.Warn("Failed to find container process", "error", err, "wrapperPID", wrapperPID)
 		}
 		return
 	}
 
+	p.containerPID = containerPID
 	if p.config.Logger != nil {
-		p.config.Logger.Debug("Found child processes", "children", children, "count", len(children))
-	}
-
-	// For crun, we're typically looking for the first child process
-	if len(children) > 0 {
-		p.containerPID = children[0]
-		if p.config.Logger != nil {
-			p.config.Logger.Debug("Successfully discovered container process",
-				"containerPID", p.containerPID,
-				"wrapperPID", wrapperPID,
-				"allChildren", children)
-		}
-	} else {
-		if p.config.Logger != nil {
-			p.config.Logger.Warn("No child processes found for container wrapper", "wrapperPID", wrapperPID)
-		}
+		p.config.Logger.Debug("Successfully discovered container process",
+			"containerPID", p.containerPID,
+			"wrapperPID", wrapperPID)
 	}
 }
 
@@ -248,6 +236,24 @@ func getChildProcesses(parentPID int) ([]int, error) {
 	}
 
 	return pids, nil
+}
+
+// GetContainerPID finds the actual container process PID given a wrapper process PID.
+// This is useful when using crun/runc with console-socket, where the command you start
+// is a wrapper that spawns the actual container process as its child.
+// Returns the first child PID if found, or an error if no children exist.
+func GetContainerPID(wrapperPID int) (int, error) {
+	children, err := getChildProcesses(wrapperPID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get child processes: %w", err)
+	}
+
+	if len(children) == 0 {
+		return 0, fmt.Errorf("no child processes found for PID %d", wrapperPID)
+	}
+
+	// For crun/runc, we typically want the first child process
+	return children[0], nil
 }
 
 // cleanupContainer runs crun delete -f to clean up orphaned containers

@@ -14,8 +14,8 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-
 	"syscall"
+	"time"
 
 	creackpty "github.com/creack/pty"
 	"github.com/superfly/sprite-env/packages/container"
@@ -349,11 +349,35 @@ func (s *Session) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd, stdin
 		return -1, fmt.Errorf("failed to start command: %w", err)
 	}
 
-	// Call process start callback if provided
-	if s.onProcessStart != nil && cmd.Process != nil {
-		s.onProcessStart(cmd.Process.Pid)
+	// Wait a bit for the container process to spawn
+	time.Sleep(50 * time.Millisecond)
+
+	// Try to find the actual container process PID
+	wrapperPID := cmd.Process.Pid
+	containerPID := wrapperPID // Default to wrapper PID if we can't find child
+
+	if childPID, err := container.GetContainerPID(wrapperPID); err == nil {
+		containerPID = childPID
 		if s.logger != nil {
-			s.logger.Debug("Terminal session process started with console socket", "pid", cmd.Process.Pid)
+			s.logger.Debug("Found container child process",
+				"wrapperPID", wrapperPID,
+				"containerPID", containerPID)
+		}
+	} else {
+		if s.logger != nil {
+			s.logger.Warn("Could not find container child process, using wrapper PID",
+				"wrapperPID", wrapperPID,
+				"error", err)
+		}
+	}
+
+	// Call process start callback with the actual container PID
+	if s.onProcessStart != nil {
+		s.onProcessStart(containerPID)
+		if s.logger != nil {
+			s.logger.Debug("Terminal session process started with console socket",
+				"wrapperPID", wrapperPID,
+				"containerPID", containerPID)
 		}
 	}
 

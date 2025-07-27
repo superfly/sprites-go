@@ -281,6 +281,12 @@ func (nm *NamespaceMonitor) parseAndNotify(r io.Reader, watcher *namespaceWatche
 			}
 			seenPorts[portKey] = pid
 
+			// Debug log for port 54545
+			if port == 54545 {
+				log.Printf("Port watcher DEBUG: Processing port %s:%d, currentPorts has it: %v (PID: %d)", 
+					addr, port, watcher.currentPorts[portKey] != 0, watcher.currentPorts[portKey])
+			}
+
 			// Check if this is a new port
 			if watcher.currentPorts[portKey] == 0 {
 				// New port opened - check if anyone cares about it
@@ -347,6 +353,12 @@ func (nm *NamespaceMonitor) parseAndNotify(r io.Reader, watcher *namespaceWatche
 
 	// Update current ports with ALL seen ports
 	watcher.currentPorts = seenPorts
+	
+	// Debug log for port 54545
+	if _, exists := seenPorts[":::54545"]; exists {
+		log.Printf("Port watcher DEBUG: After scan, currentPorts now has :::54545: %v", exists)
+		log.Printf("Port watcher DEBUG: Total ports in currentPorts: %d", len(watcher.currentPorts))
+	}
 }
 
 // notifySubscribers notifies all relevant subscribers about a new port
