@@ -299,7 +299,7 @@ func (nm *NamespaceMonitor) parseAndNotify(r io.Reader, watcher *namespaceWatche
 						watcher.namespaceID, addr, port, pid)
 				}
 
-				// Notify subscribers
+				// Notify subscribers (only those whose tree contains this PID)
 				nm.notifySubscribers(Port{
 					Port:    port,
 					PID:     pid,
@@ -328,13 +328,13 @@ func (nm *NamespaceMonitor) parseAndNotify(r io.Reader, watcher *namespaceWatche
 			parts := strings.Split(portKey, ":")
 			if len(parts) == 2 {
 				port, _ := strconv.Atoi(parts[1])
-				
+
 				if inMonitoredTree {
 					log.Printf("Port watcher: port closed in namespace %s - %s (PID: %d)",
 						watcher.namespaceID, portKey, pid)
 				}
 
-				// Notify subscribers
+				// Notify subscribers (only those whose tree contains this PID)
 				nm.notifySubscribers(Port{
 					Port:    port,
 					PID:     pid,
@@ -345,7 +345,7 @@ func (nm *NamespaceMonitor) parseAndNotify(r io.Reader, watcher *namespaceWatche
 		}
 	}
 
-	// Update current ports
+	// Update current ports with ALL seen ports
 	watcher.currentPorts = seenPorts
 }
 
@@ -354,22 +354,14 @@ func (nm *NamespaceMonitor) notifySubscribers(port Port) {
 	nm.mu.RLock()
 	defer nm.mu.RUnlock()
 
-	notified := false
 	// Check all subscriptions to see if this port's PID is in their tree
 	for rootPID, subs := range nm.subscribers {
 		if isPIDInTree(port.PID, rootPID) {
-			notified = true
 			for _, sub := range subs {
 				// Call the callback in a goroutine to avoid blocking
 				go sub.callback(port)
 			}
 		}
-	}
-
-	// Log when a port is detected but not in any monitored process tree
-	if !notified && len(nm.subscribers) > 0 {
-		log.Printf("Port watcher: detected port %s:%d (PID: %d) but it's not in any monitored process tree",
-			port.Address, port.Port, port.PID)
 	}
 }
 

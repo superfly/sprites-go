@@ -1,8 +1,10 @@
 package portwatcher
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"strconv"
@@ -692,5 +694,119 @@ func TestPortPersistenceAcrossScans(t *testing.T) {
 		if event.Port == 8888 {
 			t.Errorf("Unexpected event for port 8888 which is not in our process tree: %s", event.State)
 		}
+	}
+}
+
+// TestUnmonitoredPortsNoRepeatLogs verifies that ports from unmonitored processes don't generate repeated log messages
+func TestUnmonitoredPortsNoRepeatLogs(t *testing.T) {
+	// Create a custom NamespaceMonitor so we can control logging
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	nm := &NamespaceMonitor{
+		monitors:     make(map[string]*namespaceWatcher),
+		subscribers:  make(map[int][]*subscription),
+		ctx:          ctx,
+		cancel:       cancel,
+		pollInterval: 1 * time.Second,
+		mu:           sync.RWMutex{},
+	}
+
+	watcher := &namespaceWatcher{
+		namespacePID: 1,
+		namespaceID:  "test-namespace",
+		currentPorts: make(map[string]int),
+		loggedAddrs:  make(map[string]bool),
+		ctx:          ctx,
+		cancel:       cancel,
+	}
+
+	// Capture log output
+	var logBuffer bytes.Buffer
+	oldLogOutput := log.Writer()
+	log.SetOutput(&logBuffer)
+	defer log.SetOutput(oldLogOutput)
+
+	// Override findPIDForSocket to return a PID not in any tree
+	oldFindPIDForSocket := findPIDForSocketFunc
+	findPIDForSocketFunc = func(inode string) int {
+		return 9999 // Not in any monitored tree
+	}
+	defer func() { findPIDForSocketFunc = oldFindPIDForSocket }()
+
+	// Add a subscription for a different PID
+	nm.mu.Lock()
+	nm.subscribers[1234] = []*subscription{
+		{
+			rootPID: 1234,
+			callback: func(port Port) {
+				// Should never be called for PID 9999
+			},
+		},
+	}
+	nm.mu.Unlock()
+
+	// Mock TCP data with a port from unmonitored process
+	mockTCP := `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 100 0 0 10 0`
+
+	// First scan
+	logBuffer.Reset()
+	reader1 := strings.NewReader(mockTCP)
+	nm.parseAndNotify(reader1, watcher, false)
+	firstScanLogs := logBuffer.String()
+
+	// Second scan with same data
+	logBuffer.Reset()
+	reader2 := strings.NewReader(mockTCP)
+	nm.parseAndNotify(reader2, watcher, false)
+	secondScanLogs := logBuffer.String()
+
+	// Third scan
+	logBuffer.Reset()
+	reader3 := strings.NewReader(mockTCP)
+	nm.parseAndNotify(reader3, watcher, false)
+	thirdScanLogs := logBuffer.String()
+
+	// Log the results for debugging
+	t.Logf("First scan logs:\n%s", firstScanLogs)
+	t.Logf("Second scan logs:\n%s", secondScanLogs)
+	t.Logf("Third scan logs:\n%s", thirdScanLogs)
+
+	// With the new implementation, unmonitored ports should NOT generate any logs at all
+	if len(strings.TrimSpace(firstScanLogs)) > 0 {
+		t.Errorf("First scan should not log anything for unmonitored port, but got: %s", firstScanLogs)
+	}
+
+	// Second and third scans should also have NO log messages
+	if len(strings.TrimSpace(secondScanLogs)) > 0 {
+		t.Errorf("Second scan should not log anything for unmonitored port, but got: %s", secondScanLogs)
+	}
+
+	if len(strings.TrimSpace(thirdScanLogs)) > 0 {
+		t.Errorf("Third scan should not log anything for unmonitored port, but got: %s", thirdScanLogs)
+	}
+
+	// Verify the port is being tracked internally by checking it doesn't generate new notifications
+	var notificationCount int
+	nm.mu.Lock()
+	nm.subscribers[1234] = []*subscription{
+		{
+			rootPID: 1234,
+			callback: func(port Port) {
+				notificationCount++
+			},
+		},
+	}
+	nm.mu.Unlock()
+
+	// Even though we're not monitoring this port, it should be tracked in currentPorts
+	if len(watcher.currentPorts) != 1 {
+		t.Errorf("Expected 1 port in currentPorts, got %d", len(watcher.currentPorts))
+	}
+
+	// Verify the port is tracked with correct PID
+	if pid, exists := watcher.currentPorts["127.0.0.1:8080"]; !exists || pid != 9999 {
+		t.Errorf("Port 127.0.0.1:8080 should be tracked with PID 9999, got exists=%v pid=%d", exists, pid)
 	}
 }
