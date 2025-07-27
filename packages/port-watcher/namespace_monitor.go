@@ -163,6 +163,9 @@ func (nm *NamespaceMonitor) monitorNamespace(watcher *namespaceWatcher) {
 
 // scanNamespace scans for new ports in a namespace
 func (nm *NamespaceMonitor) scanNamespace(watcher *namespaceWatcher) {
+	// Collect all seen ports from both IPv4 and IPv6
+	allSeenPorts := make(map[string]int)
+	
 	// Use nsenter to read TCP information from the namespace
 	cmd := exec.Command("nsenter", "-t", strconv.Itoa(watcher.namespacePID), "-n", "cat", "/proc/net/tcp")
 	output, err := cmd.Output()
@@ -171,21 +174,79 @@ func (nm *NamespaceMonitor) scanNamespace(watcher *namespaceWatcher) {
 		return
 	}
 
-	nm.parseAndNotify(strings.NewReader(string(output)), watcher, false)
+	ipv4Ports := nm.parseAndNotify(strings.NewReader(string(output)), watcher, false)
+	// Merge IPv4 ports into allSeenPorts
+	for k, v := range ipv4Ports {
+		allSeenPorts[k] = v
+	}
 
 	// Also scan IPv6
 	cmd = exec.Command("nsenter", "-t", strconv.Itoa(watcher.namespacePID), "-n", "cat", "/proc/net/tcp6")
 	output, err = cmd.Output()
 	if err != nil {
 		// Non-fatal - some systems might not have IPv6
-		return
+		log.Printf("Port watcher: failed to read /proc/net/tcp6 for namespace %s: %v", watcher.namespaceID, err)
+	} else {
+		ipv6Ports := nm.parseAndNotify(strings.NewReader(string(output)), watcher, true)
+		// Merge IPv6 ports into allSeenPorts
+		for k, v := range ipv6Ports {
+			allSeenPorts[k] = v
+		}
 	}
 
-	nm.parseAndNotify(strings.NewReader(string(output)), watcher, true)
+	// Now update currentPorts based on ALL seen ports
+	// Remove ports that are no longer present
+	for portKey := range watcher.currentPorts {
+		if _, stillExists := allSeenPorts[portKey]; !stillExists {
+			// Port was closed - notify subscribers
+			parts := strings.Split(portKey, ":")
+			if len(parts) >= 2 {
+				// For IPv6, we might have multiple colons, so take the last part
+				portStr := parts[len(parts)-1]
+				port, _ := strconv.Atoi(portStr)
+				// Reconstruct address by joining all parts except the last
+				addr := strings.Join(parts[:len(parts)-1], ":")
+				
+				pid := watcher.currentPorts[portKey]
+				// Check if anyone cares about this closed port
+				inMonitoredTree := false
+				nm.mu.RLock()
+				for rootPID := range nm.subscribers {
+					if isPIDInTree(pid, rootPID) {
+						inMonitoredTree = true
+						break
+					}
+				}
+				nm.mu.RUnlock()
+
+				if inMonitoredTree {
+					log.Printf("Port watcher: port closed in namespace %s - %s (PID: %d)",
+						watcher.namespaceID, portKey, pid)
+				}
+
+				// Notify subscribers
+				nm.notifySubscribers(Port{
+					Port:    port,
+					PID:     pid,
+					Address: addr,
+					State:   "closed",
+				})
+			}
+			delete(watcher.currentPorts, portKey)
+		}
+	}
+	
+	// Add new ports
+	for portKey, pid := range allSeenPorts {
+		if watcher.currentPorts[portKey] == 0 {
+			// This is handled in parseAndNotify already
+		}
+		watcher.currentPorts[portKey] = pid
+	}
 }
 
 // parseAndNotify parses TCP data and notifies subscribers
-func (nm *NamespaceMonitor) parseAndNotify(r io.Reader, watcher *namespaceWatcher, isIPv6 bool) {
+func (nm *NamespaceMonitor) parseAndNotify(r io.Reader, watcher *namespaceWatcher, isIPv6 bool) map[string]int {
 	scanner := bufio.NewScanner(r)
 
 	// Track ports seen in this scan
@@ -281,12 +342,6 @@ func (nm *NamespaceMonitor) parseAndNotify(r io.Reader, watcher *namespaceWatche
 			}
 			seenPorts[portKey] = pid
 
-			// Debug log for port 54545
-			if port == 54545 {
-				log.Printf("Port watcher DEBUG: Processing port %s:%d, currentPorts has it: %v (PID: %d)", 
-					addr, port, watcher.currentPorts[portKey] != 0, watcher.currentPorts[portKey])
-			}
-
 			// Check if this is a new port
 			if watcher.currentPorts[portKey] == 0 {
 				// New port opened - check if anyone cares about it
@@ -316,49 +371,7 @@ func (nm *NamespaceMonitor) parseAndNotify(r io.Reader, watcher *namespaceWatche
 		}
 	}
 
-	// Check for closed ports
-	for portKey, pid := range watcher.currentPorts {
-		if seenPorts[portKey] == 0 {
-			// Port was closed - check if anyone cares about it
-			inMonitoredTree := false
-			nm.mu.RLock()
-			for rootPID := range nm.subscribers {
-				if isPIDInTree(pid, rootPID) {
-					inMonitoredTree = true
-					break
-				}
-			}
-			nm.mu.RUnlock()
-
-			// Port was closed
-			parts := strings.Split(portKey, ":")
-			if len(parts) == 2 {
-				port, _ := strconv.Atoi(parts[1])
-
-				if inMonitoredTree {
-					log.Printf("Port watcher: port closed in namespace %s - %s (PID: %d)",
-						watcher.namespaceID, portKey, pid)
-				}
-
-				// Notify subscribers (only those whose tree contains this PID)
-				nm.notifySubscribers(Port{
-					Port:    port,
-					PID:     pid,
-					Address: parts[0],
-					State:   "closed",
-				})
-			}
-		}
-	}
-
-	// Update current ports with ALL seen ports
-	watcher.currentPorts = seenPorts
-	
-	// Debug log for port 54545
-	if _, exists := seenPorts[":::54545"]; exists {
-		log.Printf("Port watcher DEBUG: After scan, currentPorts now has :::54545: %v", exists)
-		log.Printf("Port watcher DEBUG: Total ports in currentPorts: %d", len(watcher.currentPorts))
-	}
+	return seenPorts
 }
 
 // notifySubscribers notifies all relevant subscribers about a new port

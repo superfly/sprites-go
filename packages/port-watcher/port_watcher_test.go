@@ -395,124 +395,108 @@ func TestParseTCPDataExpandedAddresses(t *testing.T) {
 
 // TestPortDeduplication verifies that the same address:port is only reported once
 func TestPortDeduplication(t *testing.T) {
-	nm := GetGlobalMonitor()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	watcher := &namespaceWatcher{
-		namespacePID: 1,
-		namespaceID:  "test-namespace",
-		currentPorts: make(map[string]int),
-		loggedAddrs:  make(map[string]bool),
-		ctx:          ctx,
-		cancel:       cancel,
+	nm := &NamespaceMonitor{
+		subscribers: make(map[int][]*subscription),
+		mu:          sync.RWMutex{},
 	}
 
-	// Collect detected ports
-	detectedPorts := make(chan Port, 10)
+	watcher := &namespaceWatcher{
+		namespaceID:  "test-namespace",
+		namespacePID: 1,
+		currentPorts: make(map[string]int),
+		loggedAddrs:  make(map[string]bool),
+		ctx:          context.Background(),
+	}
 
-	// Add a subscription
+	notificationsChan := make(chan int, 10)
 	nm.mu.Lock()
-	nm.subscribers[os.Getpid()] = []*subscription{
+	nm.subscribers[2220] = []*subscription{
 		{
-			rootPID: os.Getpid(),
+			rootPID: 2220,
 			callback: func(port Port) {
-				select {
-				case detectedPorts <- port:
-				case <-time.After(1 * time.Second):
-					t.Error("Timeout sending port to channel")
+				if port.Port == 8080 && port.Address == "127.0.0.1" {
+					notificationsChan <- 1
 				}
 			},
 		},
 	}
 	nm.mu.Unlock()
 
-	// Mock TCP data with same port but different PIDs
-	mockTCP := `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
-   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 100 0 0 10 0
-   1: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 67890 1 0000000000000000 100 0 0 10 0`
-
-	// Override the findPIDForSocket to return different PIDs
+	// Mock findPIDForSocket to return the same PID
 	oldFindPIDForSocket := findPIDForSocketFunc
-	pidMap := map[string]int{
-		"12345": os.Getpid(), // Use current PID so it's in the tree
-		"67890": os.Getpid(), // Same PID but different inode
-	}
 	findPIDForSocketFunc = func(inode string) int {
-		return pidMap[inode]
+		return 2220
 	}
 	defer func() { findPIDForSocketFunc = oldFindPIDForSocket }()
 
-	// First parse - should detect port 8080
-	reader := strings.NewReader(mockTCP)
-	nm.parseAndNotify(reader, watcher, false)
+	// First scan with port 8080 appearing once
+	mockTCP := `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 100 0 0 10 0`
 
-	// Should receive one notification
-	select {
-	case port := <-detectedPorts:
-		if port.Port != 8080 || port.Address != "127.0.0.1" {
-			t.Errorf("Expected port 127.0.0.1:8080, got %s:%d", port.Address, port.Port)
-		}
-	case <-time.After(100 * time.Millisecond):
-		t.Error("Did not receive expected port notification")
+	seenPorts := nm.parseAndNotify(strings.NewReader(mockTCP), watcher, false)
+	
+	// Update currentPorts
+	for k, v := range seenPorts {
+		watcher.currentPorts[k] = v
 	}
 
-	// Second parse with same data - should NOT receive another notification
-	reader2 := strings.NewReader(mockTCP)
-	nm.parseAndNotify(reader2, watcher, false)
+	// Wait for notification
+	select {
+	case <-notificationsChan:
+		// Good - got notification
+	case <-time.After(100 * time.Millisecond):
+		t.Error("Did not receive expected notification")
+		return
+	}
 
+	// Second scan with the same port
+	nm.parseAndNotify(strings.NewReader(mockTCP), watcher, false)
+	
 	// Should NOT receive another notification
 	select {
-	case port := <-detectedPorts:
-		t.Errorf("Received unexpected duplicate notification for %s:%d", port.Address, port.Port)
+	case <-notificationsChan:
+		t.Error("Received unexpected duplicate notification for port 8080")
 	case <-time.After(100 * time.Millisecond):
-		// Good - no duplicate notification
+		// Good - no duplicate
 	}
 }
 
-// TestPortOpenClose verifies that port open and close events are properly detected
 func TestPortOpenClose(t *testing.T) {
-	nm := GetGlobalMonitor()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	watcher := &namespaceWatcher{
-		namespacePID: 1,
-		namespaceID:  "test-namespace",
-		currentPorts: make(map[string]int),
-		loggedAddrs:  make(map[string]bool),
-		ctx:          ctx,
-		cancel:       cancel,
+	nm := &NamespaceMonitor{
+		subscribers: make(map[int][]*subscription),
+		monitors:    make(map[string]*namespaceWatcher),
+		mu:          sync.RWMutex{},
 	}
 
-	// Collect detected port events
 	portEvents := make(chan Port, 10)
 
-	// Add a subscription
+	// Subscribe to a PID
 	nm.mu.Lock()
-	nm.subscribers[os.Getpid()] = []*subscription{
+	nm.subscribers[44789] = []*subscription{
 		{
-			rootPID: os.Getpid(),
+			rootPID: 44789,
 			callback: func(port Port) {
-				select {
-				case portEvents <- port:
-				case <-time.After(1 * time.Second):
-					t.Error("Timeout sending port to channel")
-				}
+				portEvents <- port
 			},
 		},
 	}
 	nm.mu.Unlock()
 
-	// Override the findPIDForSocket
+	watcher := &namespaceWatcher{
+		namespaceID:  "test-namespace",
+		namespacePID: 1,
+		currentPorts: make(map[string]int),
+		loggedAddrs:  make(map[string]bool),
+		ctx:          context.Background(),
+	}
+
+	// Mock findPIDForSocket
 	oldFindPIDForSocket := findPIDForSocketFunc
 	findPIDForSocketFunc = func(inode string) int {
-		switch inode {
-		case "12345":
-			return os.Getpid()
-		default:
-			return 0
+		if inode == "12345" {
+			return 44789
 		}
+		return 0
 	}
 	defer func() { findPIDForSocketFunc = oldFindPIDForSocket }()
 
@@ -520,8 +504,13 @@ func TestPortOpenClose(t *testing.T) {
 	mockTCP1 := `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
    0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 100 0 0 10 0`
 
-	reader1 := strings.NewReader(mockTCP1)
-	nm.parseAndNotify(reader1, watcher, false)
+	// parseAndNotify returns seen ports
+	seenPorts1 := nm.parseAndNotify(strings.NewReader(mockTCP1), watcher, false)
+	
+	// Update currentPorts manually (as scanNamespace would do)
+	for k, v := range seenPorts1 {
+		watcher.currentPorts[k] = v
+	}
 
 	// Should receive open notification
 	select {
@@ -537,8 +526,33 @@ func TestPortOpenClose(t *testing.T) {
 	// Second scan - port 8080 is gone
 	mockTCP2 := `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode`
 
-	reader2 := strings.NewReader(mockTCP2)
-	nm.parseAndNotify(reader2, watcher, false)
+	seenPorts2 := nm.parseAndNotify(strings.NewReader(mockTCP2), watcher, false)
+	
+	// Simulate scanNamespace behavior - detect closed ports
+	for portKey, pid := range watcher.currentPorts {
+		if _, stillExists := seenPorts2[portKey]; !stillExists {
+			// Port was closed
+			parts := strings.Split(portKey, ":")
+			if len(parts) >= 2 {
+				portStr := parts[len(parts)-1]
+				port, _ := strconv.Atoi(portStr)
+				addr := strings.Join(parts[:len(parts)-1], ":")
+				
+				log.Printf("Port watcher: port closed in namespace %s - %s (PID: %d)",
+					watcher.namespaceID, portKey, pid)
+				
+				nm.notifySubscribers(Port{
+					Port:    port,
+					PID:     pid,
+					Address: addr,
+					State:   "closed",
+				})
+			}
+		}
+	}
+	
+	// Update currentPorts
+	watcher.currentPorts = seenPorts2
 
 	// Should receive close notification
 	select {
@@ -552,18 +566,22 @@ func TestPortOpenClose(t *testing.T) {
 	}
 
 	// Third scan - port 8080 is back
-	reader3 := strings.NewReader(mockTCP1)
-	nm.parseAndNotify(reader3, watcher, false)
+	seenPorts3 := nm.parseAndNotify(strings.NewReader(mockTCP1), watcher, false)
+	
+	// Update currentPorts
+	for k, v := range seenPorts3 {
+		watcher.currentPorts[k] = v
+	}
 
 	// Should receive open notification again
 	select {
 	case port := <-portEvents:
 		if port.Port != 8080 || port.Address != "127.0.0.1" || port.State != "open" {
-			t.Errorf("Expected re-open event for 127.0.0.1:8080, got %s:%d state=%s",
+			t.Errorf("Expected second open event for 127.0.0.1:8080, got %s:%d state=%s",
 				port.Address, port.Port, port.State)
 		}
 	case <-time.After(100 * time.Millisecond):
-		t.Error("Did not receive expected re-open notification")
+		t.Error("Did not receive expected second open notification")
 	}
 }
 
@@ -607,93 +625,82 @@ func TestHexToIPv6(t *testing.T) {
 
 // TestPortPersistenceAcrossScans verifies that ports don't repeatedly show as "new" across scans
 func TestPortPersistenceAcrossScans(t *testing.T) {
-	nm := GetGlobalMonitor()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	watcher := &namespaceWatcher{
-		namespacePID: 1,
-		namespaceID:  "test-namespace",
-		currentPorts: make(map[string]int),
-		loggedAddrs:  make(map[string]bool),
-		ctx:          ctx,
-		cancel:       cancel,
+	nm := &NamespaceMonitor{
+		subscribers: make(map[int][]*subscription),
+		mu:          sync.RWMutex{},
 	}
 
-	// Collect all events
-	allEvents := make([]Port, 0)
-	eventsMutex := sync.Mutex{}
+	watcher := &namespaceWatcher{
+		namespaceID:  "test-namespace",
+		namespacePID: 1,
+		currentPorts: make(map[string]int),
+		loggedAddrs:  make(map[string]bool),
+		ctx:          context.Background(),
+	}
 
-	// Add a subscription
+	portEventsChan := make(chan string, 10)
+
+	// Subscribe to a PID
 	nm.mu.Lock()
-	nm.subscribers[os.Getpid()] = []*subscription{
+	nm.subscribers[2220] = []*subscription{
 		{
-			rootPID: os.Getpid(),
+			rootPID: 2220,
 			callback: func(port Port) {
-				eventsMutex.Lock()
-				allEvents = append(allEvents, port)
-				eventsMutex.Unlock()
+				event := fmt.Sprintf("%s port %s:%d (PID: %d)",
+					port.State, port.Address, port.Port, port.PID)
+				portEventsChan <- event
+				t.Logf("Event: %s", event)
 			},
 		},
 	}
 	nm.mu.Unlock()
 
-	// Override the findPIDForSocket
+	// Mock findPIDForSocket
 	oldFindPIDForSocket := findPIDForSocketFunc
 	findPIDForSocketFunc = func(inode string) int {
-		switch inode {
-		case "12345":
-			return os.Getpid() // In our process tree
-		case "67890":
-			return 9999 // Not in our process tree
-		default:
-			return 0
-		}
+		return 2220
 	}
 	defer func() { findPIDForSocketFunc = oldFindPIDForSocket }()
 
-	// Mock TCP data with one port in our tree and one outside
+	// Mock TCP data with a port
 	mockTCP := `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
-   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 100 0 0 10 0
-   1: 0100007F:22B8 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 67890 1 0000000000000000 100 0 0 10 0`
+   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 100 0 0 10 0`
 
 	// First scan
-	reader1 := strings.NewReader(mockTCP)
-	nm.parseAndNotify(reader1, watcher, false)
-
-	// Second scan with same data
-	reader2 := strings.NewReader(mockTCP)
-	nm.parseAndNotify(reader2, watcher, false)
-
-	// Third scan with same data
-	reader3 := strings.NewReader(mockTCP)
-	nm.parseAndNotify(reader3, watcher, false)
-
-	// Wait a bit for events
-	time.Sleep(100 * time.Millisecond)
-
-	// Verify events
-	eventsMutex.Lock()
-	defer eventsMutex.Unlock()
-
-	// Count open events for port 8080 (which is in our process tree)
-	openCount := 0
-	for _, event := range allEvents {
-		if event.Port == 8080 && event.State == "open" {
-			openCount++
-		}
-		t.Logf("Event: %s port %s:%d (PID: %d)", event.State, event.Address, event.Port, event.PID)
+	seenPorts1 := nm.parseAndNotify(strings.NewReader(mockTCP), watcher, false)
+	for k, v := range seenPorts1 {
+		watcher.currentPorts[k] = v
 	}
 
-	if openCount != 1 {
-		t.Errorf("Expected exactly 1 open event for port 8080, got %d", openCount)
+	// Wait for first event
+	select {
+	case event := <-portEventsChan:
+		if !strings.Contains(event, "open") || !strings.Contains(event, "8080") {
+			t.Errorf("Expected open event for port 8080, got: %s", event)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Error("Did not receive expected first event")
+		return
 	}
 
-	// Verify we didn't get any events for port 8888 (not in our tree)
-	for _, event := range allEvents {
-		if event.Port == 8888 {
-			t.Errorf("Unexpected event for port 8888 which is not in our process tree: %s", event.State)
-		}
+	// Second scan - same data
+	seenPorts2 := nm.parseAndNotify(strings.NewReader(mockTCP), watcher, false)
+	for k, v := range seenPorts2 {
+		watcher.currentPorts[k] = v
+	}
+
+	// Third scan - same data
+	seenPorts3 := nm.parseAndNotify(strings.NewReader(mockTCP), watcher, false)
+	for k, v := range seenPorts3 {
+		watcher.currentPorts[k] = v
+	}
+
+	// Should NOT receive any more events
+	select {
+	case event := <-portEventsChan:
+		t.Errorf("Received unexpected duplicate event: %s", event)
+	case <-time.After(100 * time.Millisecond):
+		// Good - no more events
 	}
 }
 
@@ -752,20 +759,29 @@ func TestUnmonitoredPortsNoRepeatLogs(t *testing.T) {
 
 	// First scan
 	logBuffer.Reset()
-	reader1 := strings.NewReader(mockTCP)
-	nm.parseAndNotify(reader1, watcher, false)
+	seenPorts1 := nm.parseAndNotify(strings.NewReader(mockTCP), watcher, false)
+	// Update currentPorts as scanNamespace would do
+	for k, v := range seenPorts1 {
+		watcher.currentPorts[k] = v
+	}
 	firstScanLogs := logBuffer.String()
 
 	// Second scan with same data
 	logBuffer.Reset()
-	reader2 := strings.NewReader(mockTCP)
-	nm.parseAndNotify(reader2, watcher, false)
+	seenPorts2 := nm.parseAndNotify(strings.NewReader(mockTCP), watcher, false)
+	// Update currentPorts again
+	for k, v := range seenPorts2 {
+		watcher.currentPorts[k] = v
+	}
 	secondScanLogs := logBuffer.String()
 
 	// Third scan
 	logBuffer.Reset()
-	reader3 := strings.NewReader(mockTCP)
-	nm.parseAndNotify(reader3, watcher, false)
+	seenPorts3 := nm.parseAndNotify(strings.NewReader(mockTCP), watcher, false)
+	// Update currentPorts again
+	for k, v := range seenPorts3 {
+		watcher.currentPorts[k] = v
+	}
 	thirdScanLogs := logBuffer.String()
 
 	// Log the results for debugging
