@@ -34,6 +34,8 @@ RUN go mod download -x
 # Copy all source code
 COPY . .
 
+FROM builder as builder-server
+
 ARG VERSION=dev
 RUN cd server && \
     CGO_ENABLED=1 GOOS=linux go build \
@@ -41,6 +43,10 @@ RUN cd server && \
     -tags 'netgo osusergo' \
     -o ../spritectl .
 
+
+FROM builder as builder-client
+
+ARG VERSION=dev
 # Also build the client
 RUN cd client && \
     CGO_ENABLED=0 GOOS=linux go build \
@@ -50,8 +56,15 @@ RUN cd client && \
 
 # Download crun binary
 FROM alpine:latest AS crun
+ARG TARGETARCH
 RUN apk add --no-cache curl
-RUN curl -L https://github.com/containers/crun/releases/download/1.21/crun-1.21-linux-amd64-disable-systemd -o /crun && \
+# Map Docker's TARGETARCH to crun's naming convention
+RUN case ${TARGETARCH} in \
+        amd64) CRUN_ARCH="amd64" ;; \
+        arm64) CRUN_ARCH="aarch64" ;; \
+        *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
+    esac && \
+    curl -L https://github.com/containers/crun/releases/download/1.21/crun-1.21-linux-${CRUN_ARCH}-disable-systemd -o /crun && \
     chmod +x /crun
 
 # Get litestream binary
@@ -69,7 +82,7 @@ RUN apt-get update && \
     # Tools for DRBD
     drbd-utils \
     # Additional useful tools for disk management
-    parted gdisk util-linux fdisk xfsprogs fuse3 tmux curl \
+    parted gdisk util-linux fdisk xfsprogs fuse3 tmux curl iproute2 nftables iputils-ping vim \
     # Cleanup
     && apt-get clean && \
     rm -rf /var/lib/apt/lists/*
@@ -84,8 +97,8 @@ ENV SPRITE_WRITE_DIR=/dev/fly_vol \
     SPRITE_HOME=/home/sprite
 
 # Copy the appropriate binaries based on target platform
-COPY --from=builder /build/spritectl /usr/local/bin/spritectl
-COPY --from=builder /build/sprite /usr/local/bin/sprite
+COPY --from=builder-server /build/spritectl /usr/local/bin/spritectl
+COPY --from=builder-client /build/sprite /usr/local/bin/sprite
 
 # Set working directory for spritectl components
 WORKDIR ${SPRITE_HOME}

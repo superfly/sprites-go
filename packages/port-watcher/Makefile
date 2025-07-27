@@ -30,7 +30,7 @@ docker-build:
 # Run tests in Docker container
 test-docker: docker-build
 	@echo "Running tests in Docker..."
-	@docker run --rm --privileged -v $(PWD):/host-packages port-watcher-test
+	@docker run --rm --privileged -v $(PWD):/workspace/server/packages/port-watcher -w /workspace/server/packages/port-watcher port-watcher-test go test -v -race -coverprofile=coverage.out -covermode=atomic -run ^Test ./...
 
 # Generate coverage report
 coverage: test-docker

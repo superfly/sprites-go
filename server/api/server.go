@@ -41,6 +41,8 @@ func NewServer(config Config, system handlers.SystemManager, logger *slog.Logger
 	handlersConfig := handlers.Config{
 		MaxWaitTime:        config.MaxWaitTime,
 		ExecWrapperCommand: config.ExecWrapperCommand,
+		ProxyLocalhostIPv4: config.ProxyLocalhostIPv4,
+		ProxyLocalhostIPv6: config.ProxyLocalhostIPv6,
 	}
 
 	// Create handlers

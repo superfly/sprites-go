@@ -67,6 +67,10 @@ type Config struct {
 
 	// Transcript configuration
 	TranscriptDBPath string // Path to SQLite database file
+
+	// Proxy configuration
+	ProxyLocalhostIPv4 string // IPv4 address to use when proxying to localhost
+	ProxyLocalhostIPv6 string // IPv6 address to use when proxying to localhost
 }
 
 // GetOverlayLowerPaths returns the overlay lower paths with priority and fallback logic
@@ -176,6 +180,8 @@ func NewApplication(config Config) (*Application, error) {
 			MaxWaitTime:        30 * time.Second,
 			ExecWrapperCommand: config.ExecWrapperCommand,
 			SyncTargetPath:     syncTargetPath,
+			ProxyLocalhostIPv4: config.ProxyLocalhostIPv4,
+			ProxyLocalhostIPv6: config.ProxyLocalhostIPv6,
 		}
 
 		apiServer, err := serverapi.NewServer(apiConfig, app.system, logger)
@@ -399,6 +405,10 @@ func parseCommandLine() (Config, error) {
 
 			// Transcript configuration
 			TranscriptDBPath string `json:"transcript_db_path"`
+
+			// Proxy configuration
+			ProxyLocalhostIPv4 string `json:"proxy_localhost_ipv4"`
+			ProxyLocalhostIPv6 string `json:"proxy_localhost_ipv6"`
 		}
 
 		if err := json.Unmarshal(data, &fileConfig); err != nil {
@@ -453,6 +463,8 @@ func parseCommandLine() (Config, error) {
 		config.OverlayTargetPath = fileConfig.OverlayTargetPath
 		config.OverlaySkipOverlayFS = fileConfig.OverlaySkipOverlayFS
 		config.TranscriptDBPath = fileConfig.TranscriptDBPath
+		config.ProxyLocalhostIPv4 = fileConfig.ProxyLocalhostIPv4
+		config.ProxyLocalhostIPv6 = fileConfig.ProxyLocalhostIPv6
 	}
 
 	// Apply command-line overrides

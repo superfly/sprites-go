@@ -1,0 +1,30 @@
+# Local .dockerignore for port-watcher package
+# This allows test files to be included in the test Docker build
+
+# Git
+.git
+.gitignore
+
+# Documentation
+*.md
+LICENSE
+
+# Build artifacts
+coverage.out
+coverage.html
+*.prof
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+*.log 

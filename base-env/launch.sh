@@ -1,12 +1,21 @@
 #!/bin/bash
 set -euo pipefail
 
+# Check required environment variables
+if [ -z "${SPRITE_WRITE_DIR:-}" ]; then
+    echo "Error: SPRITE_WRITE_DIR environment variable is not set" >&2
+    exit 1
+fi
+
 # Debug function
 function debug() {
     if [[ "${APP_STORAGE_DEBUG:-false}" == "true" ]]; then
         echo "$@"
     fi
 }
+
+# Run network setup
+/home/sprite/network-setup.sh
 
 # Check if cgroup2 is mounted, if not mount it
 if ! mountpoint -q /sys/fs/cgroup; then
@@ -20,6 +29,11 @@ if ! mount | grep -q "^overlay on /mnt/newroot type overlay"; then
   echo "Overlay is not mounted, skipping"
   exit 1
 fi
+
+mount -o remount,rw /proc/sys
+
+sysctl -w net.ipv4.ip_forward=1
+sysctl -w net.ipv6.conf.all.forwarding=1
 
 mkdir -p /tmp/sprite
 
@@ -225,7 +239,7 @@ CONFIG_JSON='{
     {
       "destination": "/etc/resolv.conf",
       "type": "bind",
-      "source": "/etc/resolv.conf",
+      "source": "/dev/fly_vol/container/resolv.conf",
       "options": ["ro", "nosuid", "noexec", "nodev", "bind"]
     }
   ],
@@ -347,6 +361,10 @@ CONFIG_JSON='{
       },
       {
         "type": "cgroup"
+      },
+      {
+        "type": "network",
+        "path": "/run/netns/sprite"
       }
     ],
     "maskedPaths": [

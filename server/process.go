@@ -162,6 +162,14 @@ func (s *System) StartProcess() error {
 		}
 	}
 
+	// Log the full command and environment for debugging
+	s.logger.Info("StartProcess: Full command details",
+		"command", s.config.ProcessCommand[0],
+		"args", s.config.ProcessCommand[1:],
+		"workingDir", workingDir,
+		"envCount", len(s.config.ProcessEnvironment),
+		"env", s.config.ProcessEnvironment)
+
 	supervisorConfig := supervisor.Config{
 		Command:     s.config.ProcessCommand[0],
 		Args:        s.config.ProcessCommand[1:],
@@ -179,19 +187,41 @@ func (s *System) StartProcess() error {
 		"envCount", len(supervisorConfig.Env))
 
 	// Validate that the command exists and is executable
-	if _, err := exec.LookPath(supervisorConfig.Command); err != nil {
-		s.logger.Error("StartProcess: Command not found in PATH", "command", supervisorConfig.Command, "error", err)
-		return fmt.Errorf("command not found: %s: %w", supervisorConfig.Command, err)
+	cmdPath := supervisorConfig.Command
+	if !filepath.IsAbs(cmdPath) {
+		// For relative paths, check in PATH
+		if resolvedPath, err := exec.LookPath(cmdPath); err != nil {
+			s.logger.Error("StartProcess: Command not found in PATH",
+				"command", cmdPath,
+				"error", err,
+				"PATH", os.Getenv("PATH"))
+			// Try to provide more context about what's available
+			if cmdPath == "crun" {
+				s.logger.Error("StartProcess: crun is required but not found. Ensure crun is installed and in PATH")
+			}
+			return fmt.Errorf("command not found in PATH: %s: %w", cmdPath, err)
+		} else {
+			s.logger.Info("StartProcess: Command resolved in PATH",
+				"command", cmdPath,
+				"resolvedPath", resolvedPath)
+			cmdPath = resolvedPath
+		}
 	}
 
 	// Check if it's an absolute path that exists
-	if filepath.IsAbs(supervisorConfig.Command) {
-		if stat, err := os.Stat(supervisorConfig.Command); err != nil {
-			s.logger.Error("StartProcess: Command file does not exist", "command", supervisorConfig.Command, "error", err)
-			return fmt.Errorf("command file does not exist: %s: %w", supervisorConfig.Command, err)
+	if filepath.IsAbs(cmdPath) {
+		if stat, err := os.Stat(cmdPath); err != nil {
+			s.logger.Error("StartProcess: Command file does not exist", "command", cmdPath, "error", err)
+			return fmt.Errorf("command file does not exist: %s: %w", cmdPath, err)
 		} else if stat.Mode()&0111 == 0 {
-			s.logger.Error("StartProcess: Command file is not executable", "command", supervisorConfig.Command)
-			return fmt.Errorf("command file is not executable: %s", supervisorConfig.Command)
+			s.logger.Error("StartProcess: Command file is not executable",
+				"command", cmdPath,
+				"mode", stat.Mode())
+			return fmt.Errorf("command file is not executable: %s", cmdPath)
+		} else {
+			s.logger.Info("StartProcess: Command file exists and is executable",
+				"command", cmdPath,
+				"mode", stat.Mode())
 		}
 	}
 
@@ -200,6 +230,20 @@ func (s *System) StartProcess() error {
 	// Use container-wrapped process if containers are enabled, otherwise use basic supervisor
 	if s.config.ContainerEnabled {
 		s.logger.Info("StartProcess: Creating container-wrapped process")
+
+		// For container processes, we need to ensure the command exists in the container context
+		// The exec.sh wrapper will handle the actual command execution
+		if s.config.ProcessCommand[0] == "/home/sprite/launch.sh" {
+			// Check if the file exists before trying to run it
+			if _, err := os.Stat(s.config.ProcessCommand[0]); err != nil {
+				s.logger.Error("StartProcess: launch.sh not found or not accessible",
+					"path", s.config.ProcessCommand[0],
+					"error", err,
+					"cwd", workingDir)
+				// This might be expected if the file is in the container, not the host
+				s.logger.Info("StartProcess: Note - file may exist inside container even if not found on host")
+			}
+		}
 
 		processConfig := container.ProcessConfig{
 			Config: supervisor.Config{

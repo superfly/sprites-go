@@ -1,6 +1,6 @@
 # Port Watcher
 
-A Go package that monitors when a process or its children start listening on ports bound to localhost or all interfaces.
+A Go package that monitors when a process or its children start listening on ports bound to localhost or all interfaces. It uses an efficient global namespace monitor that runs one monitoring loop per network namespace.
 
 ## Features
 
@@ -8,8 +8,10 @@ A Go package that monitors when a process or its children start listening on por
 - Detects new TCP ports bound to:
   - **IPv4**: `127.0.0.1` (localhost) and `0.0.0.0` (all interfaces)
   - **IPv6**: `::1` (localhost) and `::` (all interfaces)
-- Uses fsnotify to watch `/proc/net/tcp` and `/proc/net/tcp6` for changes
+- Uses `nsenter` to access network namespaces without requiring the monitor to run inside the namespace
+- Polls network state every second (configurable)
 - Provides callbacks when new ports are detected
+- Logs port discoveries with PID information
 
 ## Installation
 
@@ -57,11 +59,33 @@ func main() {
 
 ## How It Works
 
-1. The package uses `fsnotify` to monitor changes to `/proc/net/tcp` and `/proc/net/tcp6`
-2. When changes are detected, it parses the TCP connection table
-3. For each listening socket on monitored addresses (127.0.0.1, 0.0.0.0, ::1, ::), it finds the owning process by checking `/proc/*/fd/*`
-4. It verifies if the process is in the target process tree (the monitored PID or its children)
-5. New ports trigger the callback function
+1. **Global Namespace Monitor**: A singleton monitor manages all network namespaces efficiently
+   - One monitoring loop per network namespace (not per process)
+   - Finds PID 1 in each namespace for `nsenter` access
+   - Uses subscription model for multiple watchers per namespace
+
+2. **Network Namespace Detection**: When monitoring a new PID:
+   - Determines the process's network namespace via `/proc/[pid]/ns/net`
+   - Finds the namespace's init process (PID 1 in that namespace)
+   - Creates or reuses a namespace watcher for that namespace
+
+3. **Port Detection**: The namespace monitor polls every second via:
+   ```bash
+   nsenter -t <namespace_pid_1> -n cat /proc/net/tcp
+   ```
+   - Parses TCP connection tables for listening sockets
+   - Finds process ownership via `/proc/*/fd/*` socket inodes
+   - Only reports ports from subscribed process trees
+
+4. **Subscription System**: 
+   - PortWatcher instances subscribe to their PID tree
+   - Global monitor notifies relevant subscribers when ports are detected
+   - Deduplication ensures each port is reported only once
+
+5. **IPv6 Filtering**:
+   - Only monitors localhost (::1) and all interfaces (::) addresses
+   - Unrecognized IPv6 addresses are logged once for debugging
+   - Other IPv6 addresses (like public IPs) are intentionally skipped
 
 ## API
 
@@ -105,12 +129,20 @@ Run the tests with:
 make test
 ```
 
+The package includes comprehensive tests including:
+- Unit tests for parsing TCP data
+- Integration tests for port detection
+- Network namespace tests (Linux only) that verify namespace isolation and monitoring
+- Tests are automatically skipped on non-Linux systems
+
 ## Limitations
 
 - Only monitors TCP ports (not UDP)
 - Only monitors specific addresses: localhost (127.0.0.1, ::1) and all interfaces (0.0.0.0, ::)
 - Requires access to `/proc` filesystem (Linux only)
+- Requires `nsenter` command (Linux only)
 - May require appropriate permissions to read `/proc/*/fd/*` for other processes
+- Requires CAP_SYS_ADMIN capability or root privileges to use `nsenter`
 
 ## License
 

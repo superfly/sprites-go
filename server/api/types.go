@@ -16,4 +16,8 @@ type Config struct {
 
 	// Sync configuration
 	SyncTargetPath string
+
+	// Proxy configuration
+	ProxyLocalhostIPv4 string
+	ProxyLocalhostIPv6 string
 }

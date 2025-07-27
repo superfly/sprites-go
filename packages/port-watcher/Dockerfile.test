@@ -8,7 +8,9 @@ RUN apk add --no-cache \
     musl-dev \
     bash \
     ca-certificates \
-    util-linux
+    util-linux \
+    iproute2 \
+    netcat-openbsd
 
 # Create directory structure
 RUN mkdir -p /workspace/server/packages/port-watcher
@@ -23,7 +25,8 @@ COPY packages/port-watcher/go.mod packages/port-watcher/go.sum ./
 RUN go mod download
 
 # Now copy the source code
-COPY packages/port-watcher/ ./
+COPY packages/port-watcher/*.go ./
+COPY packages/port-watcher/README.md ./
 
 # Run tests with coverage as root (needed for /proc access)
 CMD ["go", "test", "-v", "-race", "-coverprofile=coverage.out", "-covermode=atomic", "-run", "^Test", "./..."] 

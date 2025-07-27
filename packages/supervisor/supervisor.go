@@ -107,8 +107,22 @@ func (s *Supervisor) Start() (int, error) {
 	default:
 	}
 
+	// Log the command being executed for debugging
+	s.logger.Info("Starting process",
+		"command", s.cmd.Path,
+		"args", s.cmd.Args,
+		"dir", s.cmd.Dir)
+
 	// Start the process
 	if err := s.cmd.Start(); err != nil {
+		// Log additional debugging information for command not found errors
+		if exitErr, ok := err.(*exec.Error); ok {
+			s.logger.Error("Failed to start process",
+				"error", err,
+				"command", s.cmd.Path,
+				"lookup_error", exitErr.Err,
+				"type", "exec_error")
+		}
 		return -1, fmt.Errorf("failed to start process: %w", err)
 	}
 
@@ -233,7 +247,26 @@ func (s *Supervisor) monitor() {
 	// Channel to receive process exit
 	exitCh := make(chan error, 1)
 	go func() {
-		exitCh <- s.cmd.Wait()
+		err := s.cmd.Wait()
+		// If process exited with an error, try to provide more context
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				// Log the exit code for debugging
+				if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+					s.logger.Error("Process exited with non-zero status",
+						"exitCode", status.ExitStatus(),
+						"signal", status.Signal(),
+						"command", s.cmd.Path,
+						"args", s.cmd.Args)
+
+					// Exit code 127 typically means command not found
+					if status.ExitStatus() == 127 {
+						s.logger.Error("Exit code 127 usually means 'command not found'. Check that the command exists and is executable.")
+					}
+				}
+			}
+		}
+		exitCh <- err
 	}()
 
 	// Main monitoring loop

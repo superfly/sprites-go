@@ -88,9 +88,24 @@ func (h *Handlers) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		initMsg.Host = "localhost"
 	}
 
+	// When in container namespace, use configured bridge IP instead of localhost
+	// This allows access to services running on localhost inside the container
+	targetHost := initMsg.Host
+	if targetHost == "localhost" || targetHost == "127.0.0.1" {
+		// Use configured IPv4 bridge address for localhost connections
+		if h.proxyLocalhostIPv4 != "" {
+			targetHost = h.proxyLocalhostIPv4
+		}
+	} else if targetHost == "::1" {
+		// Use configured IPv6 bridge address for IPv6 localhost
+		if h.proxyLocalhostIPv6 != "" {
+			targetHost = h.proxyLocalhostIPv6
+		}
+	}
+
 	// Connect to target
-	targetAddr := fmt.Sprintf("%s:%d", initMsg.Host, initMsg.Port)
-	h.logger.Info("Attempting to connect to target", "target", targetAddr)
+	targetAddr := fmt.Sprintf("%s:%d", targetHost, initMsg.Port)
+	h.logger.Info("Attempting to connect to target", "target", targetAddr, "original_host", initMsg.Host)
 
 	targetConn, err := net.Dial("tcp", targetAddr)
 	if err != nil {

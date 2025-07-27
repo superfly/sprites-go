@@ -20,12 +20,16 @@ type Handlers struct {
 	// Config fields
 	maxWaitTime        time.Duration
 	execWrapperCommand []string
+	proxyLocalhostIPv4 string
+	proxyLocalhostIPv6 string
 }
 
 // Config holds handler configuration
 type Config struct {
 	MaxWaitTime        time.Duration
 	ExecWrapperCommand []string
+	ProxyLocalhostIPv4 string
+	ProxyLocalhostIPv6 string
 }
 
 // NewHandlers creates a new Handlers instance
@@ -35,6 +39,8 @@ func NewHandlers(logger *slog.Logger, system SystemManager, config Config) *Hand
 		system:             system,
 		maxWaitTime:        config.MaxWaitTime,
 		execWrapperCommand: config.ExecWrapperCommand,
+		proxyLocalhostIPv4: config.ProxyLocalhostIPv4,
+		proxyLocalhostIPv6: config.ProxyLocalhostIPv6,
 	}
 }
 
