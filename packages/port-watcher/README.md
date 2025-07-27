@@ -71,10 +71,11 @@ func main() {
 
 3. **Port Detection**: The namespace monitor polls every second via:
    ```bash
-   nsenter -t <namespace_pid_1> -n cat /proc/net/tcp
+   nsenter -t <namespace_pid_1> -n ss -ltnp
    ```
-   - Parses TCP connection tables for listening sockets
-   - Finds process ownership via `/proc/*/fd/*` socket inodes
+   - Uses `ss` command for more reliable port detection than `/proc/net/tcp`
+   - Parses listening TCP ports with process information
+   - Finds process ownership directly from `ss` output
    - Only reports ports from subscribed process trees
 
 4. **Subscription System**: 
@@ -144,9 +145,7 @@ The package includes comprehensive tests including:
 
 - Only monitors TCP ports (not UDP)
 - Only monitors specific addresses: localhost (127.0.0.1, ::1) and all interfaces (0.0.0.0, ::)
-- Requires access to `/proc` filesystem (Linux only)
-- Requires `nsenter` command (Linux only)
-- May require appropriate permissions to read `/proc/*/fd/*` for other processes
+- Requires `ss` and `nsenter` commands (Linux only)
 - Requires CAP_SYS_ADMIN capability or root privileges to use `nsenter`
 
 ## License
