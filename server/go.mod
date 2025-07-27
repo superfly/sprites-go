@@ -38,9 +38,9 @@ require (
 require github.com/sprite-env/lib v0.0.0
 
 require (
-	github.com/sprite-env/packages/juicefs v0.0.0-00010101000000-000000000000
-	github.com/sprite-env/packages/leaser v0.0.0-00010101000000-000000000000
-	github.com/sprite-env/packages/supervisor v0.0.0
+	github.com/superfly/sprite-env/packages/juicefs v0.0.0-00010101000000-000000000000
+	github.com/superfly/sprite-env/packages/leaser v0.0.0-00010101000000-000000000000
+	github.com/superfly/sprite-env/packages/supervisor v0.0.0
 	github.com/superfly/sprite-env/packages/container v0.0.0
 	github.com/superfly/sprite-env/packages/port-watcher v0.0.0-00010101000000-000000000000
 	github.com/superfly/sprite-env/pkg/terminal v0.0.0-00010101000000-000000000000
@@ -49,11 +49,11 @@ require (
 
 replace github.com/sprite-env/lib => ../lib
 
-replace github.com/sprite-env/packages/juicefs => ../packages/juicefs
+replace github.com/superfly/sprite-env/packages/juicefs => ../packages/juicefs
 
-replace github.com/sprite-env/packages/leaser => ../packages/leaser
+replace github.com/superfly/sprite-env/packages/leaser => ../packages/leaser
 
-replace github.com/sprite-env/packages/supervisor => ../packages/supervisor
+replace github.com/superfly/sprite-env/packages/supervisor => ../packages/supervisor
 
 
 

@@ -4,6 +4,9 @@ package portwatcher
 import (
 	"fmt"
 	"log"
+	"time"
+
+	"github.com/superfly/sprite-env/packages/container"
 )
 
 // Port represents a listening port
@@ -33,13 +36,27 @@ type PortWatcher struct {
 
 // New creates a new PortWatcher for the given PID
 func New(pid int, callback PortCallback) (*PortWatcher, error) {
+	// Wait a bit for the container process to spawn
+	time.Sleep(50 * time.Millisecond)
+
+	// Try to find the actual container process PID
+	wrapperPID := pid
+	containerPID := wrapperPID // Default to wrapper PID if we can't find child
+
+	if childPID, err := container.GetContainerPID(wrapperPID); err == nil {
+		containerPID = childPID
+		log.Printf("Port watcher: found container child process - wrapperPID: %d, containerPID: %d\n", wrapperPID, containerPID)
+	} else {
+		log.Printf("Port watcher: could not find container child process, using wrapper PID - wrapperPID: %d, error: %v\n", wrapperPID, err)
+	}
+
 	pw := &PortWatcher{
-		pid:      pid,
+		pid:      containerPID,
 		callback: callback,
 		monitor:  GetGlobalMonitor(),
 	}
 
-	log.Printf("Port watcher: creating watcher for PID %d\n", pid)
+	log.Printf("Port watcher: creating watcher for PID %d\n", containerPID)
 
 	return pw, nil
 }

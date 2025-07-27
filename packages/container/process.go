@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sprite-env/packages/supervisor"
+	"github.com/superfly/sprite-env/packages/supervisor"
 )
 
 // ProcessConfig extends supervisor.Config with optional TTY timeout

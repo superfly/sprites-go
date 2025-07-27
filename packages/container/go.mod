@@ -4,7 +4,7 @@ go 1.24.4
 
 require (
 	github.com/creack/pty v1.1.24
-	github.com/sprite-env/packages/supervisor v0.0.0
+	github.com/superfly/sprite-env/packages/supervisor v0.0.0
 )
 
-replace github.com/sprite-env/packages/supervisor => ../supervisor
+replace github.com/superfly/sprite-env/packages/supervisor => ../supervisor

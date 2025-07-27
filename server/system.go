@@ -6,11 +6,11 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/sprite-env/packages/juicefs"
-	"github.com/sprite-env/packages/leaser"
-	"github.com/sprite-env/packages/supervisor"
 	"github.com/superfly/sprite-env/packages/container"
+	"github.com/superfly/sprite-env/packages/juicefs"
+	"github.com/superfly/sprite-env/packages/leaser"
 	portwatcher "github.com/superfly/sprite-env/packages/port-watcher"
+	"github.com/superfly/sprite-env/packages/supervisor"
 	"github.com/superfly/sprite-env/pkg/terminal"
 )
 

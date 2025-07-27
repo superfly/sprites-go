@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
-	"github.com/sprite-env/packages/supervisor"
+	"github.com/superfly/sprite-env/packages/supervisor"
 )
 
 func TestProcessCrunSimulation(t *testing.T) {

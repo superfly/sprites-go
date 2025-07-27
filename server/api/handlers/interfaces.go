@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/sprite-env/lib/api"
-	"github.com/sprite-env/packages/juicefs"
+	"github.com/superfly/sprite-env/packages/juicefs"
 	"github.com/superfly/sprite-env/pkg/terminal"
 )
 

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sprite-env/packages/supervisor"
+	"github.com/superfly/sprite-env/packages/supervisor"
 )
 
 func TestConfigure(t *testing.T) {

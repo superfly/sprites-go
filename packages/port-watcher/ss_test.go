@@ -144,4 +144,4 @@ func TestExtractPIDFromProcessInfo(t *testing.T) {
 			t.Errorf("Input %q: expected %d, got %d", tc.input, tc.expected, result)
 		}
 	}
-} 
+}
