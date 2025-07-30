@@ -47,10 +47,11 @@ func TestSQLiteTranscript_StreamWriting(t *testing.T) {
 	env := []string{"TEST_VAR=test_value"}
 
 	config := SQLiteTranscriptConfig{
-		DBPath: dbPath,
-		Env:    env,
-		TTY:    true,
-		Logger: slog.Default(),
+		DBPath:     dbPath,
+		Env:        env,
+		TTY:        true,
+		WorkingDir: "/tmp",
+		Logger:     slog.Default(),
 	}
 
 	// Create SQLite transcript

@@ -21,6 +21,10 @@ WORKDIR /workspace/server/packages/port-watcher
 # Copy go.mod and go.sum files for dependency caching
 COPY packages/port-watcher/go.mod packages/port-watcher/go.sum ./
 
+# Copy the dependencies required by replace directives
+COPY packages/container /workspace/server/packages/container
+COPY packages/supervisor /workspace/server/packages/supervisor
+
 # Download dependencies
 RUN go mod download
 

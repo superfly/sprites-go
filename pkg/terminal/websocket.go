@@ -59,7 +59,7 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 	conn.SetReadLimit(10 * 1024 * 1024)
 
 	// Create WebSocket streams
-	wsStreams := newWebSocketStreams(conn, h.session.tty)
+	wsStreams := newWebSocketStreams(conn, h.session.tty, h.session)
 	defer wsStreams.Close()
 
 	// Send ready signal to indicate session is starting
@@ -101,45 +101,11 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 		}
 	}
 
+	// Send WebSocket close frame before closing streams
+	wsStreams.WriteClose()
+
 	// Close the streams which will flush remaining writes
 	wsStreams.Close()
-
-	// Give a brief moment for network buffers to flush
-	// This helps ensure all messages reach the client before the close frame
-	time.Sleep(50 * time.Millisecond)
-
-	// Send close message directly after the writeLoop has finished
-	closeData := gorillaws.FormatCloseMessage(gorillaws.CloseNormalClosure, "")
-	closeDeadline := time.Now().Add(2 * time.Second)
-	if err := conn.WriteControl(gorillaws.CloseMessage, closeData, closeDeadline); err != nil {
-		if h.session.logger != nil {
-			h.session.logger.Warn("Failed to send WebSocket close message", "error", err)
-		}
-	}
-
-	// Wait for client close frame (proper WebSocket close handshake)
-	// But use a short timeout to avoid hanging
-	deadline := time.Now().Add(2 * time.Second)
-	conn.SetReadDeadline(deadline)
-
-	// Read until we get a close frame or timeout
-	for {
-		_, _, err := conn.ReadMessage()
-		if err != nil {
-			// Check if it's a close error with a close frame
-			if _, ok := err.(*gorillaws.CloseError); ok {
-				if h.session.logger != nil {
-					h.session.logger.Debug("Client sent close frame, completing handshake")
-				}
-			}
-			break
-		}
-		// Client sent data after we initiated close - ignore it
-	}
-
-	if h.session.logger != nil {
-		h.session.logger.Debug("WebSocket handler completed, closing connection")
-	}
 
 	return nil
 }
@@ -155,6 +121,7 @@ type webSocketStreams struct {
 	conn    *gorillaws.Conn
 	tty     bool
 	readBuf []byte
+	session *Session // Reference to session for resize calls
 
 	// Channel for write requests
 	writeChan chan writeRequest
@@ -197,11 +164,12 @@ func (w *streamWrapper) Write(p []byte) (int, error) {
 }
 
 // newWebSocketStreams creates new websocket streams for binary mode
-func newWebSocketStreams(conn *gorillaws.Conn, tty bool) *webSocketStreams {
+func newWebSocketStreams(conn *gorillaws.Conn, tty bool, session *Session) *webSocketStreams {
 	ws := &webSocketStreams{
 		conn:      conn,
 		tty:       tty,
-		writeChan: make(chan writeRequest, 100), // Buffered for performance
+		session:   session,
+		writeChan: make(chan writeRequest), // Unbuffered to ensure ordering
 		closeChan: make(chan struct{}),
 		doneChan:  make(chan struct{}),
 	}
@@ -287,11 +255,25 @@ func (ws *webSocketStreams) Read(p []byte) (n int, err error) {
 			return ws.Read(p)
 		}
 	case gorillaws.TextMessage:
-		// Control messages are handled separately for PTY mode
+		// Handle control messages
 		if ws.tty {
-			return ws.Read(p) // Try again
+			// Parse control message
+			var controlMsg ControlMessage
+			if err := json.Unmarshal(data, &controlMsg); err == nil {
+				switch controlMsg.Type {
+				case "resize":
+					// Handle resize in PTY mode
+					if ws.session.logger != nil {
+						ws.session.logger.Debug("Received terminal resize via WebSocket",
+							"cols", controlMsg.Cols, "rows", controlMsg.Rows)
+					}
+					ws.session.Resize(controlMsg.Cols, controlMsg.Rows)
+					// Continue reading after handling resize
+					return ws.Read(p)
+				}
+			}
 		}
-		// For non-PTY mode, text messages are not expected for data
+		// For non-PTY mode or unhandled text messages, try again
 		return ws.Read(p)
 	default:
 		return 0, errors.New("unsupported message type")
@@ -326,6 +308,19 @@ func (s *webSocketStreams) writeRaw(streamID StreamID, data []byte) error {
 		copy(msgData[1:], data)
 	}
 
+	// For PTY mode, use synchronous write to ensure ordering
+	if s.tty {
+		done := make(chan error, 1)
+		req := writeRequest{
+			messageType: gorillaws.BinaryMessage,
+			data:        msgData,
+			done:        done,
+		}
+		s.writeChan <- req
+		return <-done
+	}
+
+	// For non-PTY mode, use fire-and-forget
 	req := writeRequest{
 		messageType: gorillaws.BinaryMessage,
 		data:        msgData,

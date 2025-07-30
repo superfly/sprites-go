@@ -88,6 +88,10 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 			if cols, err := strconv.ParseUint(colsStr, 10, 16); err == nil {
 				if rowsStr := query.Get("rows"); rowsStr != "" {
 					if rows, err := strconv.ParseUint(rowsStr, 10, 16); err == nil {
+						h.logger.Info("Received initial terminal size from client",
+							"cols", cols,
+							"rows", rows,
+							"source", "query_params")
 						options = append(options, terminal.WithTerminalSize(uint16(cols), uint16(rows)))
 						h.logger.Debug("HandleExec: Initial terminal size set", "cols", cols, "rows", rows)
 					}

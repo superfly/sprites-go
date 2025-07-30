@@ -20,7 +20,7 @@ import (
 	"github.com/superfly/sprite-env/packages/container"
 )
 
-// Session represents a terminal session configuration and execution environment.
+// Session represents a terminal session that can execute commands.
 type Session struct {
 	// Command configuration
 	path string
@@ -45,6 +45,9 @@ type Session struct {
 
 	// Process start callback
 	onProcessStart func(pid int)
+
+	// PTY management for resize handling
+	ptyFile *os.File // Current PTY file for resize operations
 }
 
 // Option represents a configuration option for a Session.
@@ -136,6 +139,45 @@ func WithOnProcessStart(callback func(pid int)) Option {
 	}
 }
 
+// Resize resizes the terminal to the specified dimensions.
+// This method is thread-safe and can be called from WebSocket handlers.
+func (s *Session) Resize(cols, rows uint16) error {
+	if !s.tty || s.ptyFile == nil {
+		return nil // Ignore resize for non-TTY sessions or when PTY is not available
+	}
+
+	// Try to get current PTY size for comparison
+	var currentCols, currentRows uint16
+	if currentSize, err := creackpty.GetsizeFull(s.ptyFile); err == nil {
+		currentCols = currentSize.Cols
+		currentRows = currentSize.Rows
+	}
+
+	if s.logger != nil {
+		s.logger.Debug("Resizing terminal PTY",
+			"newCols", cols,
+			"newRows", rows,
+			"currentCols", currentCols,
+			"currentRows", currentRows)
+	}
+
+	if err := creackpty.Setsize(s.ptyFile, &creackpty.Winsize{
+		Cols: cols,
+		Rows: rows,
+	}); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("Failed to resize terminal PTY", "error", err)
+		}
+		return err
+	}
+
+	if s.logger != nil {
+		s.logger.Debug("Terminal PTY resized successfully - SIGWINCH should be sent to foreground process group", "cols", cols, "rows", rows)
+	}
+
+	return nil
+}
+
 // Run executes the configured command with the given I/O streams.
 // Returns the exit code and any error that occurred during execution.
 func (s *Session) Run(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
@@ -172,15 +214,15 @@ func (s *Session) buildCommand(ctx context.Context) (*exec.Cmd, error) {
 
 	cmd := exec.CommandContext(ctx, cmdArgs[0], cmdArgs[1:]...)
 
+	// Start with environment from system
+	cmd.Env = os.Environ()
+
+	// Apply user-provided environment variables, which will override system ones
 	if len(s.env) > 0 {
-		cmd.Env = append(cmd.Environ(), s.env...)
+		cmd.Env = append(cmd.Env, s.env...)
 	}
 
 	if len(s.wrapperCommand) > 0 {
-		if cmd.Env == nil {
-			cmd.Env = os.Environ()
-		}
-
 		if len(s.env) > 0 {
 			execEnv := strings.Join(s.env, "\n")
 			cmd.Env = append(cmd.Env, fmt.Sprintf("EXEC_ENV=%s", execEnv))
@@ -193,9 +235,6 @@ func (s *Session) buildCommand(ctx context.Context) (*exec.Cmd, error) {
 	if s.dir != "" {
 		if len(s.wrapperCommand) > 0 {
 			// When using a wrapper command, pass the directory as an environment variable
-			if cmd.Env == nil {
-				cmd.Env = os.Environ()
-			}
 			cmd.Env = append(cmd.Env, fmt.Sprintf("EXEC_DIR=%s", s.dir))
 			if s.logger != nil {
 				s.logger.Debug("Passing working directory to wrapper via EXEC_DIR", "dir", s.dir)
@@ -223,23 +262,31 @@ func (s *Session) runWithTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Reader
 
 // runWithNewPTY runs the command with a newly allocated PTY.
 func (s *Session) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, stdin io.Reader, stdout io.Writer, transcript TranscriptCollector) (int, error) {
-	// Ensure TERM is set for PTY mode
-	if cmd.Env == nil {
-		cmd.Env = os.Environ()
-	}
+	// Ensure TERM is set for PTY mode (only if not already set)
 	termSet := false
+	colorTermSet := false
 	for _, env := range cmd.Env {
 		if strings.HasPrefix(env, "TERM=") {
 			termSet = true
-			break
+		}
+		if strings.HasPrefix(env, "COLORTERM=") {
+			colorTermSet = true
 		}
 	}
 	if !termSet {
-		cmd.Env = append(cmd.Env, "TERM=xterm")
+		// Default to xterm-256color for better compatibility
+		cmd.Env = append(cmd.Env, "TERM=xterm-256color")
+		if s.logger != nil {
+			s.logger.Debug("No TERM set, defaulting to xterm-256color")
+		}
+	}
+	// Also ensure COLORTERM is set for better color support
+	if !colorTermSet {
+		cmd.Env = append(cmd.Env, "COLORTERM=truecolor")
 	}
 
 	if s.logger != nil {
-		s.logger.Debug("Starting command with PTY", "cmd", cmd.Args)
+		s.logger.Debug("Starting command with PTY", "cmd", cmd.Args, "env", cmd.Env)
 	}
 
 	// Open PTY manually to set up I/O before starting command
@@ -252,6 +299,38 @@ func (s *Session) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, stdin io.Rea
 	}
 	defer ptmx.Close()
 	defer tty.Close()
+
+	// Store PTY reference for resize operations
+	s.ptyFile = ptmx
+
+	// Apply initial terminal size if specified
+	if s.initialCols > 0 && s.initialRows > 0 {
+		// Try to get current PTY size for comparison
+		var currentCols, currentRows uint16
+		if currentSize, err := creackpty.GetsizeFull(ptmx); err == nil {
+			currentCols = currentSize.Cols
+			currentRows = currentSize.Rows
+		}
+
+		if s.logger != nil {
+			s.logger.Info("Setting initial PTY size (before command start)",
+				"cols", s.initialCols,
+				"rows", s.initialRows,
+				"currentCols", currentCols,
+				"currentRows", currentRows,
+				"location", "runWithTTY:beforeStart")
+		}
+		if err := creackpty.Setsize(ptmx, &creackpty.Winsize{
+			Cols: s.initialCols,
+			Rows: s.initialRows,
+		}); err != nil {
+			if s.logger != nil {
+				s.logger.Warn("Failed to set initial PTY size", "error", err)
+			}
+		} else if s.logger != nil {
+			s.logger.Debug("Set initial PTY size", "cols", s.initialCols, "rows", s.initialRows)
+		}
+	}
 
 	// Assign TTY to command stdio
 	cmd.Stdin = tty
@@ -290,6 +369,22 @@ func (s *Session) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, stdin io.Rea
 
 	// Set initial terminal size if specified
 	if s.initialCols > 0 && s.initialRows > 0 {
+		// Try to get current PTY size for comparison
+		var currentCols, currentRows uint16
+		if currentSize, err := creackpty.GetsizeFull(ptmx); err == nil {
+			currentCols = currentSize.Cols
+			currentRows = currentSize.Rows
+		}
+
+		if s.logger != nil {
+			s.logger.Info("Setting initial PTY size (after command start)",
+				"cols", s.initialCols,
+				"rows", s.initialRows,
+				"currentCols", currentCols,
+				"currentRows", currentRows,
+				"location", "runWithTTY:afterStart",
+				"pid", cmd.Process.Pid)
+		}
 		if err := creackpty.Setsize(ptmx, &creackpty.Winsize{
 			Cols: s.initialCols,
 			Rows: s.initialRows,
@@ -326,10 +421,22 @@ func (s *Session) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd, stdin
 	}
 	defer tty.Close()
 
-	if cmd.Env == nil {
-		cmd.Env = os.Environ()
+	// Ensure TERM is set for PTY mode (only if not already set)
+	termSet := false
+	for _, env := range cmd.Env {
+		if strings.HasPrefix(env, "TERM=") {
+			termSet = true
+			break
+		}
 	}
-	cmd.Env = append(cmd.Env, "TERM=xterm")
+	if !termSet {
+		// Default to xterm-256color for better compatibility
+		cmd.Env = append(cmd.Env, "TERM=xterm-256color")
+		if s.logger != nil {
+			s.logger.Debug("No TERM set, defaulting to xterm-256color")
+		}
+	}
+
 	cmd.Env = append(cmd.Env, fmt.Sprintf("CONSOLE_SOCKET=%s", s.consoleSocket))
 
 	// Clear standard streams - crun will create them
@@ -374,7 +481,26 @@ func (s *Session) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd, stdin
 		s.logger.Debug("Received PTY from console socket")
 	}
 
+	// Store PTY reference for resize operations
+	s.ptyFile = ptyFile
+
 	if s.initialCols > 0 && s.initialRows > 0 {
+		// Try to get current PTY size for comparison
+		var currentCols, currentRows uint16
+		if currentSize, err := creackpty.GetsizeFull(ptyFile); err == nil {
+			currentCols = currentSize.Cols
+			currentRows = currentSize.Rows
+		}
+
+		if s.logger != nil {
+			s.logger.Info("Setting initial PTY size (console socket mode)",
+				"cols", s.initialCols,
+				"rows", s.initialRows,
+				"currentCols", currentCols,
+				"currentRows", currentRows,
+				"location", "runWithConsoleSocket",
+				"pid", cmd.Process.Pid)
+		}
 		if err := creackpty.Setsize(ptyFile, &creackpty.Winsize{
 			Cols: s.initialCols,
 			Rows: s.initialRows,
@@ -385,6 +511,15 @@ func (s *Session) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd, stdin
 		} else if s.logger != nil {
 			s.logger.Debug("Set initial PTY size", "cols", s.initialCols, "rows", s.initialRows)
 		}
+	}
+
+	// Disable local echo on the PTY to prevent duplicate characters
+	// The client terminal is already in raw mode and handling echo
+	if err := disablePTYEcho(ptyFile); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("Failed to disable PTY echo", "error", err)
+		}
+		// Continue anyway - PTY will work but might have echo issues
 	}
 
 	s.handlePTYIO(ctx, ptyFile, stdin, stdout, transcript)

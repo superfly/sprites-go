@@ -13,6 +13,7 @@ import (
 	"time"
 
 	gorillaws "github.com/gorilla/websocket"
+	"golang.org/x/term"
 )
 
 // Adapter wraps a gorilla WebSocket connection for client-side terminal communication.
@@ -299,6 +300,22 @@ func (c *Cmd) start() {
 	}
 	c.conn = conn
 	c.adapter = NewAdapter(conn, c.Tty)
+
+	// Send initial resize message for TTY mode
+	if c.Tty {
+		go func() {
+			// Give a brief moment for the connection to stabilize
+			time.Sleep(10 * time.Millisecond)
+
+			// Try to get current terminal size and send initial resize
+			if term.IsTerminal(int(os.Stdin.Fd())) {
+				if width, height, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
+					c.Resize(uint16(width), uint16(height))
+				}
+			}
+		}()
+	}
+
 	c.startChan <- nil
 	c.runIO()
 }
@@ -430,8 +447,12 @@ func (c *Cmd) runIO() {
 
 func (c *Cmd) handleTextMessage(data []byte) {
 	var controlMsg ControlMessage
-	if err := json.Unmarshal(data, &controlMsg); err == nil && controlMsg.Type == "resize" {
-		return
+	if err := json.Unmarshal(data, &controlMsg); err == nil {
+		switch controlMsg.Type {
+		case "resize":
+			// Handle resize message (existing behavior)
+			return
+		}
 	}
 	if c.TextMessageHandler != nil {
 		c.TextMessageHandler(data)

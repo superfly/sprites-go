@@ -10,7 +10,10 @@ require (
 	github.com/superfly/sprite-env/packages/container v0.0.0
 )
 
-require github.com/sprite-env/packages/supervisor v0.0.0 // indirect
+require (
+	github.com/Netflix/go-expect v0.0.0-20220104043353-73e0943537d2 // indirect
+	github.com/sprite-env/packages/supervisor v0.0.0 // indirect
+)
 
 replace github.com/superfly/sprite-env/packages/container => ../../packages/container
 

@@ -22,23 +22,25 @@ var schemaSQL string
 
 // SQLiteTranscript implements TranscriptCollector using SQLite backend.
 type SQLiteTranscript struct {
-	db        *sql.DB
-	logger    *slog.Logger
-	sessionID string
-	env       []string
-	tty       bool
-	startTime time.Time
-	sequence  int64 // Global sequence counter for all streams in this session
-	mu        sync.Mutex
-	closed    bool
+	db         *sql.DB
+	logger     *slog.Logger
+	sessionID  string
+	env        []string
+	tty        bool
+	workingDir string
+	startTime  time.Time
+	sequence   int64 // Global sequence counter for all streams in this session
+	mu         sync.Mutex
+	closed     bool
 }
 
 type SQLiteTranscriptConfig struct {
-	DBPath    string
-	SessionID string
-	Env       []string
-	TTY       bool
-	Logger    *slog.Logger
+	DBPath     string
+	SessionID  string
+	Env        []string
+	TTY        bool
+	WorkingDir string
+	Logger     *slog.Logger
 }
 
 // NewSQLiteTranscript creates a new SQLite-based transcript collector.
@@ -73,13 +75,14 @@ func NewSQLiteTranscript(config SQLiteTranscriptConfig) (*SQLiteTranscript, erro
 	}
 
 	t := &SQLiteTranscript{
-		db:        db,
-		logger:    logger,
-		sessionID: sessionID,
-		env:       config.Env,
-		tty:       config.TTY,
-		startTime: time.Now(),
-		sequence:  0,
+		db:         db,
+		logger:     logger,
+		sessionID:  sessionID,
+		env:        config.Env,
+		tty:        config.TTY,
+		workingDir: config.WorkingDir,
+		startTime:  time.Now(),
+		sequence:   0,
 	}
 
 	// record the transcript session
@@ -108,13 +111,14 @@ func (t *SQLiteTranscript) createSession() error {
 	}
 
 	query := `
-		INSERT INTO sessions (session_id, start_time, environment, tty)
-		VALUES (?, ?, ?, ?)
+		INSERT INTO sessions (session_id, start_time, working_dir, environment, tty)
+		VALUES (?, ?, ?, ?, ?)
 	`
 
 	_, err := t.db.Exec(query,
 		t.sessionID,
 		t.startTime.UnixNano(),
+		t.workingDir,
 		envJSON,
 		t.tty,
 	)
