@@ -96,9 +96,6 @@ func NewServer(config Config, system handlers.SystemManager, logger *slog.Logger
 
 	handler := stripSpritePrefix(mux)
 
-	// Add trailing slash normalization middleware
-	handler = stripTrailingSlash(handler)
-
 	s.server = &http.Server{
 		Addr: config.ListenAddr,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -108,24 +105,6 @@ func NewServer(config Config, system handlers.SystemManager, logger *slog.Logger
 	}
 
 	return s, nil
-}
-
-// stripTrailingSlash removes trailing slashes from request paths (except for root "/")
-func stripTrailingSlash(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := r.URL.Path
-
-		// Remove trailing slash if it's not the root path
-		if len(path) > 1 && path[len(path)-1] == '/' {
-			// Clone request to avoid mutating the original
-			r2 := r.Clone(r.Context())
-			r2.URL.Path = path[:len(path)-1]
-			next.ServeHTTP(w, r2)
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
 }
 
 // setupEndpoints configures HTTP endpoints for the API
@@ -145,7 +124,8 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 	mux.HandleFunc("/transcripts/disable", s.authMiddleware(s.waitForJuiceFSMiddleware(s.handlers.HandleTranscriptsDisable)))
 
 	// Checkpoint management endpoints - wait for JuiceFS to be ready
-	mux.HandleFunc("/checkpoints/", s.authMiddleware(s.waitForJuiceFSMiddleware(func(w http.ResponseWriter, r *http.Request) {
+	// This pattern matches /checkpoints and any subpaths like /checkpoints/{id} or /checkpoints/{id}/restore
+	checkpointsHandler := s.authMiddleware(s.waitForJuiceFSMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		// Route to appropriate handler based on path
 		path := r.URL.Path
 		parts := strings.Split(strings.Trim(path, "/"), "/")
@@ -153,16 +133,20 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 		if len(parts) == 1 && parts[0] == "checkpoints" {
 			// GET /checkpoints - list all checkpoints
 			s.handlers.HandleListCheckpoints(w, r)
-		} else if len(parts) == 2 {
+		} else if len(parts) == 2 && parts[0] == "checkpoints" {
 			// GET /checkpoints/{id} - get specific checkpoint
 			s.handlers.HandleGetCheckpoint(w, r)
-		} else if len(parts) == 3 && parts[2] == "restore" {
+		} else if len(parts) == 3 && parts[0] == "checkpoints" && parts[2] == "restore" {
 			// POST /checkpoints/{id}/restore - restore from checkpoint
 			s.handlers.HandleCheckpointRestore(w, r)
 		} else {
 			http.NotFound(w, r)
 		}
-	})))
+	}))
+
+	// Register both exact and prefix patterns to handle all checkpoint routes
+	mux.HandleFunc("/checkpoints", checkpointsHandler)
+	mux.HandleFunc("/checkpoints/", checkpointsHandler)
 
 	// Proxy endpoint - waits for process to be running
 	mux.HandleFunc("/proxy", s.authMiddleware(s.waitForProcessMiddleware(s.handlers.HandleProxy)))

@@ -416,6 +416,13 @@ func RestoreCommand(ctx *GlobalContext, args []string) {
 		url = fmt.Sprintf("%s/checkpoints/%s/restore", org.URL, checkpointID)
 	}
 
+	// Debug log the request
+	slog.Debug("Restore request",
+		"url", url,
+		"org", org.Name,
+		"sprite", spriteName,
+		"checkpointID", checkpointID)
+
 	httpReq, err := http.NewRequest("POST", url, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to create HTTP request: %v\n", err)

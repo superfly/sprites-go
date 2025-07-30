@@ -276,34 +276,57 @@ func (j *JuiceFS) Restore(ctx context.Context, checkpointID string) error {
 		"path", checkpointPath,
 		"sourceInfo", srcInfo)
 
-	cloneStart := time.Now()
-	cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", fullCheckpointPath, activeDir)
-
-	// Add verbose output to see what JuiceFS is doing
-	cloneCmd.Env = append(os.Environ(), "JUICEFS_DEBUG=1")
-	cloneCmd.Stdout = os.Stdout
-	cloneCmd.Stderr = os.Stderr
-
-	j.logger.Info("JuiceFS clone command started", "cmd", cloneCmd.String())
-
-	// Start progress monitoring in background
-	progressCtx, progressCancel := context.WithCancel(ctx)
-	go j.monitorCloneProgress(progressCtx, fmt.Sprintf("restore v%d->active", record.ID), cloneStart)
-	defer progressCancel()
-
-	if err := cloneCmd.Run(); err != nil {
-		cloneDuration := time.Since(cloneStart)
-		j.logger.Error("JuiceFS clone failed",
-			"duration", cloneDuration,
-			"error", err)
-		return fmt.Errorf("failed to restore from checkpoint after %v: %w", cloneDuration, err)
+	// Special handling for empty checkpoint directories (like v0)
+	// Check if the checkpoint directory is empty
+	entries, err := os.ReadDir(fullCheckpointPath)
+	if err != nil {
+		return fmt.Errorf("failed to read checkpoint directory: %w", err)
 	}
 
-	cloneDuration := time.Since(cloneStart)
-	j.logger.Info("JuiceFS clone completed successfully",
-		"duration", cloneDuration,
-		"source", fullCheckpointPath,
-		"destination", activeDir)
+	if len(entries) == 0 {
+		// Empty checkpoint - just create empty active directory structure
+		j.logger.Info("Checkpoint is empty, creating empty active directory")
+
+		// Create active/fs directory structure
+		activeFsDir := filepath.Join(activeDir, "fs")
+		if err := os.MkdirAll(activeFsDir, 0755); err != nil {
+			return fmt.Errorf("failed to create active/fs directory: %w", err)
+		}
+
+		j.logger.Info("Empty checkpoint restored successfully",
+			"version", record.ID,
+			"destination", activeDir)
+	} else {
+		// Non-empty checkpoint - use juicefs clone
+		cloneStart := time.Now()
+		cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", fullCheckpointPath, activeDir)
+
+		// Add verbose output to see what JuiceFS is doing
+		cloneCmd.Env = append(os.Environ(), "JUICEFS_DEBUG=1")
+		cloneCmd.Stdout = os.Stdout
+		cloneCmd.Stderr = os.Stderr
+
+		j.logger.Info("JuiceFS clone command started", "cmd", cloneCmd.String())
+
+		// Start progress monitoring in background
+		progressCtx, progressCancel := context.WithCancel(ctx)
+		go j.monitorCloneProgress(progressCtx, fmt.Sprintf("restore v%d->active", record.ID), cloneStart)
+		defer progressCancel()
+
+		if err := cloneCmd.Run(); err != nil {
+			cloneDuration := time.Since(cloneStart)
+			j.logger.Error("JuiceFS clone failed",
+				"duration", cloneDuration,
+				"error", err)
+			return fmt.Errorf("failed to restore from checkpoint after %v: %w", cloneDuration, err)
+		}
+
+		cloneDuration := time.Since(cloneStart)
+		j.logger.Info("JuiceFS clone completed successfully",
+			"duration", cloneDuration,
+			"source", fullCheckpointPath,
+			"destination", activeDir)
+	}
 
 	// Mount the overlay from the restored active directory
 	if j.overlayMgr != nil {
