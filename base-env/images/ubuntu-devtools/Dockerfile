@@ -16,7 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         file which less nano vim-tiny \
         procps htop tree \
         zip gzip bzip2 locales iproute2 \
-        libffi-dev libyaml-dev gosu xdg-utils\
+        libffi-dev libyaml-dev gosu xdg-utils \
+        tmux \
     && locale-gen en_US.UTF-8 \
     && apt-get clean
 # we are keeping indexes for future apts

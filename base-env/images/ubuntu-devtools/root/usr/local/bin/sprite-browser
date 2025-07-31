@@ -80,12 +80,65 @@ check_process_tty() {
     echo "$tty_found"
 }
 
+# Function to detect if we're in a tmux session
+detect_tmux() {
+    # Method 1: Check TMUX environment variable
+    if [ -n "$TMUX" ]; then
+        log "TMUX_DETECTED: via \$TMUX env var"
+        return 0
+    fi
+    
+    # Method 2: Check TERM environment variable
+    if [[ "$TERM" =~ tmux ]] || [[ "$TERM" == "screen" ]]; then
+        log "TMUX_DETECTED: via TERM=$TERM"
+        return 0
+    fi
+    
+    # Method 3: Check for TMUX_PANE environment variable
+    if [ -n "$TMUX_PANE" ]; then
+        log "TMUX_DETECTED: via TMUX_PANE=$TMUX_PANE"
+        return 0
+    fi
+    
+    # Method 4: Try tmux command
+    if command -v tmux >/dev/null 2>&1; then
+        if tmux info >/dev/null 2>&1; then
+            log "TMUX_DETECTED: via tmux info command"
+            return 0
+        fi
+    fi
+    
+    # Method 5: Walk process tree looking for tmux
+    local check_pid=$PPID
+    local max_depth=10
+    local depth=0
+    while [ -n "$check_pid" ] && [ "$check_pid" -gt 1 ] && [ "$depth" -lt "$max_depth" ]; do
+        if [ -r "/proc/$check_pid/comm" ]; then
+            local comm=$(cat "/proc/$check_pid/comm" 2>/dev/null)
+            if [[ "$comm" == "tmux"* ]]; then
+                log "TMUX_DETECTED: found tmux in process tree at PID=$check_pid"
+                return 0
+            fi
+        fi
+        check_pid=$(get_parent_pid "$check_pid")
+        ((depth++))
+    done
+    
+    return 1
+}
+
+# Check if we're in a tmux session
+IN_TMUX=false
+if detect_tmux; then
+    IN_TMUX=true
+fi
+
 # Walk up the process tree to find a TTY
 FOUND_TTY=""
 FOUND_PID=""
 current_pid=$PPID
 
-log "WALKING_PROCESS_TREE: Starting from PID $current_pid"
+log "WALKING_PROCESS_TREE: Starting from PID $current_pid, IN_TMUX=$IN_TMUX"
 
 while [ -n "$current_pid" ] && [ "$current_pid" -gt 1 ]; do
     log "CHECKING_PID: $current_pid"
@@ -109,6 +162,54 @@ while [ -n "$current_pid" ] && [ "$current_pid" -gt 1 ]; do
     current_pid="$parent_pid"
 done
 
+# Function to get tmux client TTY
+get_tmux_client_tty() {
+    if command -v tmux >/dev/null 2>&1; then
+        # Get the client TTY for current pane
+        local client_tty=$(tmux display -p "#{client_tty}" 2>/dev/null)
+        if [ -n "$client_tty" ] && [ "$client_tty" != "#{client_tty}" ]; then
+            echo "$client_tty"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Function to send escape sequence directly to TTY
+send_escape_sequence() {
+    local tty_target="$1"
+    local url="$2"
+    local escape_seq=$(printf '\033]9999;browser-open;%s\033\\' "$url")
+    
+    if [ "$IN_TMUX" = true ]; then
+        # Try to get tmux client TTY and write directly to it
+        local client_tty=$(get_tmux_client_tty)
+        if [ -n "$client_tty" ]; then
+            log "TMUX_CLIENT_TTY: $client_tty"
+            if printf '%s' "$escape_seq" > "$client_tty" 2>/dev/null; then
+                log "DIRECT_WRITE_SUCCESS: $client_tty"
+                return 0
+            else
+                log "DIRECT_WRITE_FAILED: $client_tty"
+                echo "Error: Cannot write to tmux client TTY: $client_tty" >&2
+                exit 1
+            fi
+        else
+            echo "Error: Cannot find tmux client TTY" >&2
+            exit 1
+        fi
+    fi
+    
+    # Send to appropriate target
+    if [ "$tty_target" = "stdout" ]; then
+        printf "%s" "$escape_seq"
+    elif [ "$tty_target" = "stderr" ]; then
+        printf "%s" "$escape_seq" >&2
+    else
+        printf "%s" "$escape_seq" > "$tty_target"
+    fi
+}
+
 # Check TTY status and log the decision
 TTY_STATUS=""
 OUTPUT_TARGET=""
@@ -117,27 +218,27 @@ OUTPUT_TARGET=""
 if [ -n "$FOUND_TTY" ] && [ -w "$FOUND_TTY" ]; then
     TTY_STATUS="found_ancestor_tty"
     OUTPUT_TARGET="$FOUND_TTY (PID:$FOUND_PID)"
-    printf '\033]9999;browser-open;%s\033\\' "$URL" > "$FOUND_TTY"
+    send_escape_sequence "$FOUND_TTY" "$URL"
 elif [ -t 0 ] && [ -w /dev/tty ]; then
     # Fallback: We have a TTY, write directly to it
     TTY_STATUS="fallback_stdin_tty_writable"
     OUTPUT_TARGET="/dev/tty"
-    printf '\033]9999;browser-open;%s\033\\' "$URL" > /dev/tty
+    send_escape_sequence "/dev/tty" "$URL"
 elif [ -t 1 ]; then
     # Fallback: stdout is a TTY, use it
     TTY_STATUS="fallback_stdout_tty"
     OUTPUT_TARGET="stdout"
-    printf '\033]9999;browser-open;%s\033\\' "$URL"
+    send_escape_sequence "stdout" "$URL"
 elif [ -t 2 ]; then
     # Fallback: stderr is a TTY, use it
     TTY_STATUS="fallback_stderr_tty"
     OUTPUT_TARGET="stderr"
-    printf '\033]9999;browser-open;%s\033\\' "$URL" >&2
+    send_escape_sequence "stderr" "$URL"
 else
     # No TTY available, write to stdout anyway (might not work)
     TTY_STATUS="no_tty_fallback"
     OUTPUT_TARGET="stdout_fallback"
-    printf '\033]9999;browser-open;%s\033\\' "$URL"
+    send_escape_sequence "stdout" "$URL"
 fi
 
 log "ESCAPE_SENT: URL=$URL TTY_STATUS=$TTY_STATUS OUTPUT=$OUTPUT_TARGET"
