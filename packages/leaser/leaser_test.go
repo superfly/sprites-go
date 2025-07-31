@@ -448,3 +448,54 @@ func TestLeaser_RefreshLease(t *testing.T) {
 
 	leaser.Stop()
 }
+
+func TestMapFlyRegionToTigris(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		// Special cases
+		{"Empty string", "", ""},
+		{"Auto region", "auto", ""},
+
+		// Direct mappings
+		{"Amsterdam", "ams", "ams"},
+		{"Chicago", "ord", "ord"},
+		{"Dallas", "dfw", "dfw"},
+		{"Frankfurt", "fra", "fra"},
+		{"Ashburn", "iad", "iad"},
+		{"London", "lhr", "lhr"},
+		{"Newark", "ewr", "ewr"},
+		{"Sao Paulo", "gru", "gru"},
+		{"Singapore", "sin", "sin"},
+		{"San Jose", "sjc", "sjc"},
+		{"Sydney", "syd", "syd"},
+		{"Tokyo", "nrt", "nrt"},
+		{"Johannesburg", "jnb", "jnb"},
+
+		// Geographical mappings
+		{"Los Angeles to San Jose", "lax", "sjc"},
+		{"Seattle to San Jose", "sea", "sjc"},
+		{"Toronto to Chicago", "yyz", "ord"},
+		{"Boston to Newark", "bos", "ewr"},
+		{"Atlanta to Ashburn", "atl", "iad"},
+		{"Paris to Frankfurt", "cdg", "fra"},
+		{"Hong Kong to Singapore", "hkg", "sin"},
+		{"Buenos Aires to Sao Paulo", "eze", "gru"},
+		{"Melbourne to Sydney", "mel", "syd"},
+		{"Dubai to Johannesburg", "dxb", "jnb"},
+
+		// Unknown region
+		{"Unknown region", "xyz", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := MapFlyRegionToTigris(tt.input)
+			if result != tt.expected {
+				t.Errorf("MapFlyRegionToTigris(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}

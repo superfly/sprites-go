@@ -73,12 +73,96 @@ type LeaseInfo struct {
 	RefreshCount int       `json:"refresh_count"`
 }
 
+// MapFlyRegionToTigris maps Fly.io region codes to Tigris region codes.
+// Returns empty string if the region should not be mapped (e.g., "auto").
+// Based on geographical proximity and available Tigris regions from:
+// https://www.tigrisdata.com/docs/concepts/regions/
+func MapFlyRegionToTigris(flyRegion string) string {
+	// Handle special cases
+	if flyRegion == "" || flyRegion == "auto" {
+		return ""
+	}
+
+	// Direct mappings (regions that exist in both systems)
+	directMappings := map[string]string{
+		"ams": "ams", // Amsterdam
+		"ord": "ord", // Chicago
+		"dfw": "dfw", // Dallas
+		"fra": "fra", // Frankfurt
+		"iad": "iad", // Ashburn, Virginia
+		"lhr": "lhr", // London
+		"ewr": "ewr", // Newark
+		"gru": "gru", // Sao Paulo
+		"sin": "sin", // Singapore
+		"sjc": "sjc", // San Jose
+		"syd": "syd", // Sydney
+		"nrt": "nrt", // Tokyo
+		"jnb": "jnb", // Johannesburg
+	}
+
+	if tigrisRegion, ok := directMappings[flyRegion]; ok {
+		return tigrisRegion
+	}
+
+	// Geographical mappings for Fly regions not in Tigris
+	geoMappings := map[string]string{
+		// US West
+		"lax": "sjc", // Los Angeles -> San Jose
+		"sea": "sjc", // Seattle -> San Jose
+		"den": "sjc", // Denver -> San Jose
+		"phx": "sjc", // Phoenix -> San Jose
+
+		// US Central
+		"yyz": "ord", // Toronto -> Chicago
+		"yul": "ord", // Montreal -> Chicago
+		"yyc": "ord", // Calgary -> Chicago
+
+		// US East
+		"bos": "ewr", // Boston -> Newark
+		"atl": "iad", // Atlanta -> Ashburn
+		"mia": "iad", // Miami -> Ashburn
+
+		// Europe
+		"cdg": "fra", // Paris -> Frankfurt
+		"mad": "fra", // Madrid -> Frankfurt
+		"arn": "fra", // Stockholm -> Frankfurt
+		"waw": "fra", // Warsaw -> Frankfurt
+
+		// Asia Pacific
+		"hkg": "sin", // Hong Kong -> Singapore
+		"tpe": "nrt", // Taipei -> Tokyo
+		"bom": "sin", // Mumbai -> Singapore
+		"maa": "sin", // Chennai -> Singapore
+
+		// South America
+		"eze": "gru", // Buenos Aires -> Sao Paulo
+		"scl": "gru", // Santiago -> Sao Paulo
+		"bog": "gru", // Bogota -> Sao Paulo
+
+		// Oceania
+		"mel": "syd", // Melbourne -> Sydney
+		"akl": "syd", // Auckland -> Sydney
+
+		// Middle East/Africa
+		"dxb": "jnb", // Dubai -> Johannesburg (closest option)
+		"tlv": "fra", // Tel Aviv -> Frankfurt
+		"cpt": "jnb", // Cape Town -> Johannesburg
+	}
+
+	if tigrisRegion, ok := geoMappings[flyRegion]; ok {
+		return tigrisRegion
+	}
+
+	// Unknown region - return empty to let Tigris use default routing
+	return ""
+}
+
 // New creates a new Leaser instance
 func New(config Config) *Leaser {
 	// Use environment variables for Tigris configuration
 	primaryRegion := os.Getenv("SPRITE_PRIMARY_REGION")
 	if primaryRegion == "" {
-		primaryRegion = "ord" // Default region
+		primaryRegion = "iad" // Default region
 	}
 
 	machineID := os.Getenv("FLY_MACHINE_ID")
@@ -391,7 +475,11 @@ func (l *Leaser) tryAcquireLease(ctx context.Context, ifMatch string) (bool, str
 			) {
 				switch v := in.Request.(type) {
 				case *smithyhttp.Request:
-					v.Header.Set("X-Tigris-Regions", l.primaryRegion)
+					// Map Fly region to valid Tigris region
+					tigrisRegion := MapFlyRegionToTigris(l.primaryRegion)
+					if tigrisRegion != "" {
+						v.Header.Set("X-Tigris-Regions", tigrisRegion)
+					}
 				}
 				return next.HandleBuild(ctx, in)
 			}), middleware.After)
