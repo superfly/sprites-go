@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -15,6 +18,87 @@ import (
 	"github.com/superfly/fly-go/flaps"
 	"github.com/superfly/fly-go/tokens"
 )
+
+// apiRequest makes a request to the Fly.io API
+func apiRequest(method, url string, token string, body interface{}) (*http.Response, error) {
+	var reqBody io.Reader
+	if body != nil {
+		jsonBody, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request body: %w", err)
+		}
+		reqBody = bytes.NewReader(jsonBody)
+	}
+
+	req, err := http.NewRequest(method, url, reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	return client.Do(req)
+}
+
+// getMachineConfig fetches the current machine config via direct API call
+func getMachineConfig(appName, machineID, token string) (*fly.MachineConfig, error) {
+	url := fmt.Sprintf("https://api.machines.dev/v1/apps/%s/machines/%s", appName, machineID)
+
+	resp, err := apiRequest("GET", url, token, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("failed to get machine config: status %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	var machine struct {
+		Config fly.MachineConfig `json:"config"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&machine); err != nil {
+		return nil, fmt.Errorf("failed to decode machine response: %w", err)
+	}
+
+	return &machine.Config, nil
+}
+
+// updateMachineImageOnly updates only the image reference in an existing machine config
+func updateMachineImageOnly(config *fly.MachineConfig, newImageRef string) {
+	// Update top-level image reference
+	config.Image = newImageRef
+
+	// Update image reference in the first container
+	if config.Containers != nil && len(config.Containers) > 0 {
+		config.Containers[0].Image = newImageRef
+	}
+}
+
+// updateMachine updates a machine config via direct API call
+func updateMachine(appName, machineID, token string, config *fly.MachineConfig) error {
+	url := fmt.Sprintf("https://api.machines.dev/v1/apps/%s/machines/%s", appName, machineID)
+
+	updatePayload := map[string]interface{}{
+		"config": config,
+	}
+
+	resp, err := apiRequest("POST", url, token, updatePayload)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to update machine: status %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
 
 // waitForMachineStarted waits for a machine to reach "started" state
 // Returns an error if the machine is in "creating" or "updating" state
@@ -62,8 +146,10 @@ func waitForMachineStarted(ctx context.Context, client *flaps.Client, machineID 
 func main() {
 	var appName string
 	var skipBuild bool
+	var replaceConfig bool
 	flag.StringVar(&appName, "a", "", "Fly app name")
 	flag.BoolVar(&skipBuild, "skip-build", false, "Skip docker build step and just push the image")
+	flag.BoolVar(&replaceConfig, "replace-config", false, "Replace entire machine config instead of just updating the image")
 	flag.Parse()
 
 	// Check for app name from flag or env var
@@ -207,100 +293,125 @@ func main() {
 		time.Sleep(5 * time.Second)
 	}
 
-	// Read machine config
-	configData, err := os.ReadFile("machine-config.json")
-	if err != nil {
-		log.Fatal("Failed to read machine-config.json: ", err)
-	}
-
-	// Replace placeholders in memory
-	configStr := string(configData)
-	configStr = strings.ReplaceAll(configStr, "<volume_id>", volumeID)
-	configStr = strings.ReplaceAll(configStr, "<image_ref>", imageRef)
-
-	// Parse the config into machine config
 	var machineConfig fly.MachineConfig
-	if err := json.Unmarshal([]byte(configStr), &machineConfig); err != nil {
-		log.Fatal("Failed to parse machine config: ", err)
-	}
 
-	// Merge existing environment variables with new config
-	if existingContainerEnvVars != nil && len(existingContainerEnvVars) > 0 {
-		log.Printf("Merging %d existing container environment variables into new config\n", len(existingContainerEnvVars))
+	// Only read and process machine config if we're replacing the entire config
+	if replaceConfig || existingMachine == nil {
+		// Read machine config
+		configData, err := os.ReadFile("machine-config.json")
+		if err != nil {
+			log.Fatal("Failed to read machine-config.json: ", err)
+		}
 
-		// Ensure we have at least one container in the new config
-		if machineConfig.Containers == nil || len(machineConfig.Containers) == 0 {
-			log.Printf("Warning: No containers found in new config, cannot merge environment variables\n")
+		// Replace placeholders in memory
+		configStr := string(configData)
+		configStr = strings.ReplaceAll(configStr, "<volume_id>", volumeID)
+		configStr = strings.ReplaceAll(configStr, "<image_ref>", imageRef)
+
+		// Parse the config into machine config
+		if err := json.Unmarshal([]byte(configStr), &machineConfig); err != nil {
+			log.Fatal("Failed to parse machine config: ", err)
+		}
+
+		// Merge existing environment variables with new config
+		if existingContainerEnvVars != nil && len(existingContainerEnvVars) > 0 {
+			log.Printf("Merging %d existing container environment variables into new config\n", len(existingContainerEnvVars))
+
+			// Ensure we have at least one container in the new config
+			if machineConfig.Containers == nil || len(machineConfig.Containers) == 0 {
+				log.Printf("Warning: No containers found in new config, cannot merge environment variables\n")
+			} else {
+				// Initialize the env map if it doesn't exist
+				if machineConfig.Containers != nil && len(machineConfig.Containers) > 0 {
+					for i := range machineConfig.Containers {
+						if machineConfig.Containers[i].ExtraEnv == nil {
+							machineConfig.Containers[i].ExtraEnv = make(map[string]string)
+						}
+					}
+				}
+
+				// Copy existing env vars that aren't already in the new config
+				for k, v := range existingContainerEnvVars {
+					found := false
+					for i := range machineConfig.Containers {
+						if _, exists := machineConfig.Containers[i].ExtraEnv[k]; exists {
+							found = true
+							break
+						}
+					}
+					if !found {
+						machineConfig.Containers[0].ExtraEnv[k] = v // Assuming the first container is the one to merge into
+						log.Printf("  - Preserving env var: %s\n", k)
+					} else {
+						log.Printf("  - Keeping new value for env var: %s\n", k)
+					}
+				}
+			}
+		}
+
+		// Print the merged environment variables
+		if machineConfig.Containers != nil && len(machineConfig.Containers) > 0 && machineConfig.Containers[0].ExtraEnv != nil {
+			log.Printf("\n=== Final Merged Environment Variables ===")
+			log.Printf("Total env vars: %d\n", len(machineConfig.Containers[0].ExtraEnv))
+			for k, v := range machineConfig.Containers[0].ExtraEnv {
+				// Mask sensitive values
+				displayValue := v
+				if strings.Contains(strings.ToLower(k), "token") ||
+					strings.Contains(strings.ToLower(k), "secret") ||
+					strings.Contains(strings.ToLower(k), "password") {
+					displayValue = "***MASKED***"
+				}
+				log.Printf("  %s = %s\n", k, displayValue)
+			}
 		} else {
-			// Initialize the env map if it doesn't exist
-			if machineConfig.Containers != nil && len(machineConfig.Containers) > 0 {
-				for i := range machineConfig.Containers {
-					if machineConfig.Containers[i].ExtraEnv == nil {
-						machineConfig.Containers[i].ExtraEnv = make(map[string]string)
-					}
-				}
-			}
-
-			// Copy existing env vars that aren't already in the new config
-			for k, v := range existingContainerEnvVars {
-				found := false
-				for i := range machineConfig.Containers {
-					if _, exists := machineConfig.Containers[i].ExtraEnv[k]; exists {
-						found = true
-						break
-					}
-				}
-				if !found {
-					machineConfig.Containers[0].ExtraEnv[k] = v // Assuming the first container is the one to merge into
-					log.Printf("  - Preserving env var: %s\n", k)
-				} else {
-					log.Printf("  - Keeping new value for env var: %s\n", k)
-				}
-			}
+			log.Printf("\n=== No container environment variables found ===")
 		}
-	}
 
-	// Print the merged environment variables
-	if machineConfig.Containers != nil && len(machineConfig.Containers) > 0 && machineConfig.Containers[0].ExtraEnv != nil {
-		log.Printf("\n=== Final Merged Environment Variables ===")
-		log.Printf("Total env vars: %d\n", len(machineConfig.Containers[0].ExtraEnv))
-		for k, v := range machineConfig.Containers[0].ExtraEnv {
-			// Mask sensitive values
-			displayValue := v
-			if strings.Contains(strings.ToLower(k), "token") ||
-				strings.Contains(strings.ToLower(k), "secret") ||
-				strings.Contains(strings.ToLower(k), "password") {
-				displayValue = "***MASKED***"
-			}
-			log.Printf("  %s = %s\n", k, displayValue)
+		// Print the config that will be sent
+		log.Printf("\n=== Machine Config to Deploy ===")
+		configJSON, err := json.MarshalIndent(machineConfig, "", "  ")
+		if err != nil {
+			log.Fatal("Failed to marshal config for display: ", err)
 		}
-	} else {
-		log.Printf("\n=== No container environment variables found ===")
+		log.Printf("%s\n", string(configJSON))
 	}
-
-	// Print the config that will be sent
-	log.Printf("\n=== Machine Config to Deploy ===")
-	configJSON, err := json.MarshalIndent(machineConfig, "", "  ")
-	if err != nil {
-		log.Fatal("Failed to marshal config for display: ", err)
-	}
-	log.Printf("%s\n", string(configJSON))
 
 	if existingMachine != nil {
 		// Update existing machine
 		log.Printf("Updating machine %s...\n", machineID)
 
-		// Update the machine
-		updateInput := fly.LaunchMachineInput{
-			ID:     machineID,
-			Config: &machineConfig,
-		}
-		machine, err := flapsClient.Update(ctx, updateInput, "")
-		if err != nil {
-			log.Fatal("Failed to update machine: ", err)
-		}
+		if !replaceConfig {
+			// Fetch current config and only update the image
+			log.Printf("Fetching current machine config to preserve settings...")
+			currentConfig, err := getMachineConfig(appName, machineID, token)
+			if err != nil {
+				log.Fatal("Failed to get current machine config: ", err)
+			}
 
-		log.Printf("Updated machine: %s\n", machine.ID)
+			// Update only the image references
+			updateMachineImageOnly(currentConfig, imageRef)
+
+			// Update the machine using direct API
+			log.Printf("Updating machine with new image: %s\n", imageRef)
+			if err := updateMachine(appName, machineID, token, currentConfig); err != nil {
+				log.Fatal("Failed to update machine: ", err)
+			}
+
+			log.Printf("Updated machine: %s (image only)\n", machineID)
+		} else {
+			// Use the existing behavior - replace entire config
+			log.Printf("Replacing entire machine config...")
+			updateInput := fly.LaunchMachineInput{
+				ID:     machineID,
+				Config: &machineConfig,
+			}
+			machine, err := flapsClient.Update(ctx, updateInput, "")
+			if err != nil {
+				log.Fatal("Failed to update machine: ", err)
+			}
+
+			log.Printf("Updated machine: %s (full config)\n", machine.ID)
+		}
 	} else {
 		// Create new machine
 		log.Println("Creating new sprite_compute machine...")

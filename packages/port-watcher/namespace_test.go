@@ -46,14 +46,24 @@ func TestNamespaceCreation(t *testing.T) {
 	}
 
 	// Wait for detection
-	select {
-	case p := <-portChan:
-		if p.Port != port {
-			t.Errorf("Expected port %d, got %d", port, p.Port)
+	// Note: We may receive events for other ports (especially close events for ports
+	// that were already open when monitoring started), so we need to loop until we
+	// find our specific port opening
+	timeout := time.After(3 * time.Second)
+	for {
+		select {
+		case p := <-portChan:
+			// Skip close events and ports that aren't ours
+			if p.State == "open" && p.Port == port {
+				// Found our port!
+				t.Logf("Successfully detected port: %s:%d", p.Address, p.Port)
+				return
+			}
+			// Otherwise, keep looking for our port
+		case <-timeout:
+			t.Error("Timeout waiting for port detection")
+			return
 		}
-		t.Logf("Successfully detected port: %s:%d", p.Address, p.Port)
-	case <-time.After(3 * time.Second):
-		t.Error("Timeout waiting for port detection")
 	}
 }
 
@@ -187,16 +197,26 @@ func TestHostNetworkNamespace(t *testing.T) {
 	}
 
 	// Wait for detection
-	select {
-	case port := <-portChan:
-		if port.Port != expectedPort {
-			t.Errorf("Expected port %d, got %d", expectedPort, port.Port)
+	// Note: We may receive events for other ports (especially close events for ports
+	// that were already open when monitoring started), so we need to loop until we
+	// find our specific port opening
+	timeout := time.After(3 * time.Second)
+	for {
+		select {
+		case port := <-portChan:
+			// Skip close events and ports that aren't ours
+			if port.State == "open" && port.Port == expectedPort {
+				// Found our port!
+				if port.PID != os.Getpid() {
+					t.Errorf("Expected PID %d, got %d", os.Getpid(), port.PID)
+				}
+				t.Logf("Detected port in host namespace: %s:%d", port.Address, port.Port)
+				return
+			}
+			// Otherwise, keep looking for our port
+		case <-timeout:
+			t.Error("Timeout waiting for port detection in host namespace")
+			return
 		}
-		if port.PID != os.Getpid() {
-			t.Errorf("Expected PID %d, got %d", os.Getpid(), port.PID)
-		}
-		t.Logf("Detected port in host namespace: %s:%d", port.Address, port.Port)
-	case <-time.After(3 * time.Second):
-		t.Error("Timeout waiting for port detection in host namespace")
 	}
 }

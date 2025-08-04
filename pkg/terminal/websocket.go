@@ -4,6 +4,7 @@
 package terminal
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -62,6 +63,23 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 	wsStreams := newWebSocketStreams(conn, h.session.tty, h.session)
 	defer wsStreams.Close()
 
+		// Create a cancellable context that will be cancelled if websocket disconnects
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	// Monitor for websocket disconnection
+	go func() {
+		select {
+		case <-wsStreams.readErrChan:
+			// Websocket disconnected - kill container process first if tracked
+			h.session.killContainerProcess()
+			// Then cancel the context to kill the wrapper process
+			cancel()
+		case <-ctx.Done():
+			// Context cancelled for other reasons
+		}
+	}()
+
 	// Send ready signal to indicate session is starting
 	// In TTY mode, we don't send stream-prefixed messages
 	if !h.session.tty {
@@ -78,7 +96,6 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 	}
 
 	// Run the session - pass separate wrappers for stdout and stderr
-	ctx := r.Context()
 	exitCode, err := h.session.Run(ctx, wsStreams, &streamWrapper{ws: wsStreams, streamID: StreamStdout}, &streamWrapper{ws: wsStreams, streamID: StreamStderr})
 	if err != nil && h.session.logger != nil {
 		h.session.logger.Error("Session run failed", "error", err)
@@ -114,10 +131,6 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 
 // webSocketStreams implements io.Reader, io.Writer for WebSocket communication
 type webSocketStreams struct {
-	stdout io.Writer
-	stderr io.Writer
-	stdin  io.Reader
-
 	conn    *gorillaws.Conn
 	tty     bool
 	readBuf []byte
@@ -131,6 +144,9 @@ type webSocketStreams struct {
 
 	// Signal when write loop has finished
 	doneChan chan struct{}
+
+	// Signal when a read error occurs (websocket disconnection)
+	readErrChan chan error
 }
 
 type writeRequest struct {
@@ -166,12 +182,13 @@ func (w *streamWrapper) Write(p []byte) (int, error) {
 // newWebSocketStreams creates new websocket streams for binary mode
 func newWebSocketStreams(conn *gorillaws.Conn, tty bool, session *Session) *webSocketStreams {
 	ws := &webSocketStreams{
-		conn:      conn,
-		tty:       tty,
-		session:   session,
-		writeChan: make(chan writeRequest), // Unbuffered to ensure ordering
-		closeChan: make(chan struct{}),
-		doneChan:  make(chan struct{}),
+		conn:        conn,
+		tty:         tty,
+		session:     session,
+		writeChan:   make(chan writeRequest), // Unbuffered to ensure ordering
+		closeChan:   make(chan struct{}),
+		doneChan:    make(chan struct{}),
+		readErrChan: make(chan error, 1), // Buffered to avoid blocking
 	}
 
 	// Start the write loop
@@ -220,6 +237,12 @@ func (ws *webSocketStreams) Read(p []byte) (n int, err error) {
 	// Read new message from WebSocket
 	messageType, data, err := ws.conn.ReadMessage()
 	if err != nil {
+		// Signal read error (websocket disconnection) to the handler
+		select {
+		case ws.readErrChan <- err:
+		default:
+			// Channel already has an error, don't block
+		}
 		return 0, err
 	}
 

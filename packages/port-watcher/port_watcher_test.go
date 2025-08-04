@@ -195,19 +195,30 @@ func TestPortWatcherIntegration(t *testing.T) {
 	expectedPort := addr.Port
 
 	// Wait for the port to be detected
-	select {
-	case port := <-portChan:
-		if port.Port != expectedPort {
-			t.Errorf("Expected port %d, got %d", expectedPort, port.Port)
+	// Note: We may receive events for other ports (especially close events for ports
+	// that were already open when monitoring started), so we need to loop until we
+	// find our specific port opening
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case port := <-portChan:
+			// Skip close events and ports that aren't ours
+			if port.State == "open" && port.Port == expectedPort {
+				// Found our port!
+				if port.Address != "127.0.0.1" {
+					t.Errorf("Expected address 127.0.0.1, got %s", port.Address)
+				}
+				if port.PID != os.Getpid() {
+					t.Errorf("Expected PID %d, got %d", os.Getpid(), port.PID)
+				}
+				// Success - we found our port
+				return
+			}
+			// Otherwise, keep looking for our port
+		case <-timeout:
+			t.Error("Timeout waiting for port detection")
+			return
 		}
-		if port.Address != "127.0.0.1" {
-			t.Errorf("Expected address 127.0.0.1, got %s", port.Address)
-		}
-		if port.PID != os.Getpid() {
-			t.Errorf("Expected PID %d, got %d", os.Getpid(), port.PID)
-		}
-	case <-time.After(5 * time.Second):
-		t.Error("Timeout waiting for port detection")
 	}
 }
 
