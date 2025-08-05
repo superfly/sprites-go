@@ -1,81 +1,32 @@
 {
+  "init": {},
   "guest": {
     "cpu_kind": "shared",
-    "cpus": 4,
+    "cpus": 8,
     "memory_mb": 4096,
-    "kernel_args": ["cgroup_enable=memory", "io cgroup_no_v1=all", "systemd.unified_cgroup_hierarchy=1"]
+    "kernel_args": [
+      "cgroup_no_v1=all",
+      "systemd.unified_cgroup_hierarchy=1"
+    ]
+  },
+  "metadata": {
+    "sprite_config_version": "aa0774c40aaf0224bc69df451997c5f80fe64e590608d696a6d3693158bac768"
   },
   "mounts": [
     {
-    "volume": "<volume_id>",
-      "path": "/dev/fly_vol"
-    }
-  ],
-  "metadata": {
-    "sprite-version": "0.0.1"
-  },
-  "image": "<image_ref>", 
-  "containers": [
-    {
-      "name": "sprite",
-      "image": "<image_ref>",
-      "env": {
-        "SPRITE_HTTP_API_TOKEN": "f0e4c2f76c58916ec258f246851bea091d14d4247a2fc3e18694461b1816e13b",
-        "SPRITE_KEEP_ALIVE_ON_ERROR": "true",
-        "SPRITE_PRIMARY_REGION": "ord"
-      },
-      "secrets": [
-        {
-          "name": "SPRITE_S3_ACCESS_KEY",
-          "env_var": "SPRITE_S3_ACCESS_KEY"
-        },
-        {
-          "name": "SPRITE_S3_SECRET_ACCESS_KEY",
-          "env_var": "SPRITE_S3_SECRET_ACCESS_KEY"
-        },
-        {
-          "name": "SPRITE_S3_BUCKET",
-          "env_var": "SPRITE_S3_BUCKET"
-        },
-        {
-          "name": "SPRITE_S3_ENDPOINT_URL",
-          "env_var": "SPRITE_S3_ENDPOINT_URL"
-        },
-        {
-          "name": "SPRITE_S3_REGION",
-          "env_var": "SPRITE_S3_REGION"
-        }
-      ],
-      "files":[{
-        "guest_path": "/etc/app-image.json",
-        "image_config": "ghcr.io/superfly/sprite-ubuntu:25.04-0.0.1-pre2"
-      }
-      ],
-      "mounts": [
-        {
-          "name": "shared",
-          "path": "/data"
-        },
-        {
-          "name": "system-base",
-          "path": "/mnt/system-base"
-        },
-        {
-          "name": "languages-image",
-          "path": "/mnt/languages-image"
-        }
-      ],
-	"xxxentrypoint": ["tail", "-f", "/dev/null"],
-      "restart": {
-        "policy": "no"
-      }
-
+      "encrypted": true,
+      "path": "/dev/fly_vol",
+      "size_gb": 10,
+      "volume": "vol_vwj83kz62mzpl5mr",
+      "name": "data"
     }
   ],
   "services": [
     {
       "protocol": "tcp",
       "internal_port": 7778,
+      "autostop": false,
+      "autostart": true,
       "ports": [
         {
           "port": 80,
@@ -94,28 +45,82 @@
       "force_instance_key": null
     }
   ],
+  "image": "<image_ref>",
   "restart": {
-    "policy": "no"
+    "policy": "on-failure",
+    "max_retries": 3
   },
   "stop_config": {
-    "timeout": "300s",
+    "timeout": "5m0s",
     "signal": "SIGINT"
   },
+  "containers": [
+    {
+      "name": "sprite",
+      "image": "<image_ref>",
+      "env": {
+        "SPRITE_HTTP_API_TOKEN": "7e5fe8ddb0ce0293680b9670d8721ecd9947c13d41e5af7f6a9591eee4fe23de",
+        "SPRITE_PRIMARY_REGION": "iad",
+        "SPRITE_S3_REGION": "auto"
+      },
+      "secrets": [
+        {
+          "env_var": "SPRITE_S3_ACCESS_KEY",
+          "name": "SPRITE_S3_ACCESS_KEY"
+        },
+        {
+          "env_var": "SPRITE_S3_SECRET_ACCESS_KEY",
+          "name": "SPRITE_S3_SECRET_ACCESS_KEY"
+        },
+        {
+          "env_var": "SPRITE_S3_BUCKET",
+          "name": "SPRITE_S3_BUCKET"
+        },
+        {
+          "env_var": "SPRITE_S3_ENDPOINT_URL",
+          "name": "SPRITE_S3_ENDPOINT_URL"
+        }
+      ],
+      "files": [
+        {
+          "guest_path": "/etc/app-image.json",
+          "image_config": "ghcr.io/superfly/sprite-ubuntu:25.04-0.0.1-pre4"
+        }
+      ],
+      "restart": {
+        "policy": "no"
+      },
+      "mounts": [
+        {
+          "name": "shared",
+          "path": "/data"
+        },
+        {
+          "name": "system-base",
+          "path": "/mnt/system-base"
+        },
+        {
+          "name": "languages-image",
+          "path": "/mnt/languages-image"
+        }
+      ]
+    }
+  ],
   "volumes": [
     {
       "name": "shared",
       "temp_dir": {
-        "size_mb": 100,
-        "storage_type": "memory"
+        "storage_type": "memory",
+        "size_mb": 100
       }
     },
     {
       "name": "languages-image",
-      "image": "ghcr.io/superfly/sprite-ubuntu:25.04-0.0.1-pre2-languages"
+      "image": "ghcr.io/superfly/sprite-ubuntu:25.04-0.0.1-pre4-languages"
     },
     {
       "name": "system-base",
-      "image": "ghcr.io/superfly/sprite-ubuntu:25.04-0.0.1-pre2"
+      "image": "ghcr.io/superfly/sprite-ubuntu:25.04-0.0.1-pre4"
     }
   ]
 }

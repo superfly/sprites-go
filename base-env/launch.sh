@@ -22,6 +22,7 @@ if ! mountpoint -q /sys/fs/cgroup; then
     mkdir -p /sys/fs/cgroup
     mount -t cgroup2 -o nsdelegate,memory_recursiveprot cgroup2 /sys/fs/cgroup
 fi
+mkdir -p /dev/fly_vol/local-storage/var/lib/docker
 
 # This is a prerun script to do the overlay + loopback inside the namespace
 # Only copy mounts.sh if /mnt/newroot isn't already an overlayfs
@@ -225,6 +226,12 @@ CONFIG_JSON='{
         "type": "bind",
         "source": "/tmp/sprite",
         "options": ["rbind", "nosuid", "nodev"]
+    },
+    {
+        "destination": "/var/lib/docker",
+        "type": "bind",
+        "source": "/dev/fly_vol/local-storage/var/lib/docker",
+        "options": ["rbind","nosuid", "nodev"]
     },
     {
       "destination": "/.pilot/swapon",

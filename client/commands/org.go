@@ -312,26 +312,9 @@ func orgListCommand(cfg *config.Manager, args []string) {
 			return
 		}
 	} else {
-		// We have orgs in config, validate they still have tokens in keyring
-		invalidOrgs := []string{}
-		for name, org := range orgs {
-			_, err := org.GetToken()
-			if err != nil {
-				invalidOrgs = append(invalidOrgs, name)
-				slog.Debug("Organization has no valid token in keyring", "org", name, "error", err)
-			}
-		}
-
-		// Remove invalid orgs
-		if len(invalidOrgs) > 0 {
-			for _, name := range invalidOrgs {
-				if err := cfg.RemoveOrg(name); err != nil {
-					slog.Debug("Failed to remove invalid org", "org", name, "error", err)
-				}
-			}
-			// Reload orgs after cleanup
-			orgs = cfg.GetOrgs()
-		}
+		// We have orgs in config - do NOT remove them even if keyring access fails
+		// This preserves the user's configuration regardless of keychain/keyring state
+		slog.Debug("Found organizations in config", "count", len(orgs))
 	}
 
 	if len(orgs) == 0 {
@@ -346,7 +329,16 @@ func orgListCommand(cfg *config.Manager, args []string) {
 	i := 1
 	for _, org := range orgs {
 		displayName := format.GetOrgDisplayName(org.Name, org.URL)
-		fmt.Printf("  %d. %s\n", i, format.Org(displayName))
+
+		// Check if token is accessible (but don't remove the org if it's not)
+		tokenStatus := ""
+		if !cfg.IsKeyringDisabled() {
+			if _, err := org.GetToken(); err != nil {
+				tokenStatus = " " + format.Subtle("(token not accessible in keyring)")
+			}
+		}
+
+		fmt.Printf("  %d. %s%s\n", i, format.Org(displayName), tokenStatus)
 		i++
 	}
 

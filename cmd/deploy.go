@@ -374,6 +374,19 @@ func main() {
 			log.Fatal("Failed to marshal config for display: ", err)
 		}
 		log.Printf("%s\n", string(configJSON))
+
+		// Save config to tmp file
+		tmpDir := "tmp"
+		if err := os.MkdirAll(tmpDir, 0755); err != nil {
+			log.Printf("Warning: Failed to create tmp directory: %v", err)
+		} else {
+			configFile := fmt.Sprintf("%s/machine-%s-config.json", tmpDir, appName)
+			if err := os.WriteFile(configFile, configJSON, 0644); err != nil {
+				log.Printf("Warning: Failed to save config to %s: %v", configFile, err)
+			} else {
+				log.Printf("Config saved to: %s", configFile)
+			}
+		}
 	}
 
 	if existingMachine != nil {
@@ -390,6 +403,24 @@ func main() {
 
 			// Update only the image references
 			updateMachineImageOnly(currentConfig, imageRef)
+
+			// Save the updated config to tmp file
+			tmpDir := "tmp"
+			if err := os.MkdirAll(tmpDir, 0755); err != nil {
+				log.Printf("Warning: Failed to create tmp directory: %v", err)
+			} else {
+				configJSON, err := json.MarshalIndent(currentConfig, "", "  ")
+				if err != nil {
+					log.Printf("Warning: Failed to marshal config for saving: %v", err)
+				} else {
+					configFile := fmt.Sprintf("%s/machine-%s-config.json", tmpDir, appName)
+					if err := os.WriteFile(configFile, configJSON, 0644); err != nil {
+						log.Printf("Warning: Failed to save config to %s: %v", configFile, err)
+					} else {
+						log.Printf("Config saved to: %s", configFile)
+					}
+				}
+			}
 
 			// Update the machine using direct API
 			log.Printf("Updating machine with new image: %s\n", imageRef)
