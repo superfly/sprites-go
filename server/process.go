@@ -275,7 +275,30 @@ func (s *System) StartProcess() error {
 		// Store the container process (which embeds the supervisor)
 		s.supervisor = containerProcess.Supervisor
 		s.containerProcess = containerProcess
-		s.setState("processRunning", true)
+
+		s.logger.Info("StartProcess: Container process started, waiting for readiness", "pid", pid, "command", s.config.ProcessCommand)
+
+		// Start a goroutine to wait for container readiness
+		go func() {
+			// Wait for the container to be ready (PTY received)
+			readyTimeout := s.config.ContainerTTYTimeout
+			if readyTimeout == 0 {
+				readyTimeout = 10 * time.Second
+			}
+
+			if err := containerProcess.WaitReady(readyTimeout); err != nil {
+				s.logger.Warn("Container ready wait failed", "error", err)
+			}
+
+			// Now mark the process as running
+			s.setState("processRunning", true)
+
+			// Close the ready channel to unblock waiting requests
+			close(s.processReadyCh)
+			s.processReadyCh = make(chan struct{})
+
+			s.logger.Info("Container process ready for exec requests")
+		}()
 
 		s.logger.Info("StartProcess: Container process started successfully", "pid", pid, "command", s.config.ProcessCommand)
 
@@ -312,11 +335,11 @@ func (s *System) StartProcess() error {
 			s.logger.Error("StartProcess: Failed to start port watcher for basic supervisor process", "error", err)
 			return fmt.Errorf("failed to start port watcher for basic supervisor process: %w", err)
 		}
-	}
 
-	// Close the old channel and create a new one for future waits
-	close(s.processReadyCh)
-	s.processReadyCh = make(chan struct{})
+		// For non-container processes, close the ready channel immediately
+		close(s.processReadyCh)
+		s.processReadyCh = make(chan struct{})
+	}
 
 	// Monitor process in background
 	go func() {

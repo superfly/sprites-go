@@ -33,8 +33,9 @@ type Process struct {
 	*supervisor.Supervisor
 	tty          *Tty
 	config       ProcessConfig
-	containerPID int    // PID of the actual container process (not the crun wrapper)
-	containerID  string // ID of the container for cleanup operations
+	containerPID int           // PID of the actual container process (not the crun wrapper)
+	containerID  string        // ID of the container for cleanup operations
+	readyCh      chan struct{} // Signals when container is ready (PTY received)
 }
 
 // NewProcess creates a new process with automatic container support based on system config
@@ -95,6 +96,7 @@ func NewProcess(config ProcessConfig) (*Process, error) {
 		tty:         tty,
 		config:      config,
 		containerID: containerID,
+		readyCh:     make(chan struct{}),
 	}, nil
 }
 
@@ -149,6 +151,58 @@ func (p *Process) Start() (int, error) {
 	// Start TTY forwarding if configured and containers are enabled
 	if p.config.TTYOutput != nil && p.tty != nil {
 		go p.forwardTTY()
+	} else if p.tty != nil && p.isContainerProcess() {
+		// For container processes without TTY output, we still need to wait for the PTY
+		// and first byte to ensure the container is ready before signaling readiness
+		go func() {
+			pty, err := p.GetTTY()
+			if err != nil {
+				if p.config.Logger != nil {
+					p.config.Logger.Debug("Container PTY wait failed (non-TTY mode)", "error", err)
+				}
+				// Signal ready anyway
+				select {
+				case <-p.readyCh:
+					// Already closed
+				default:
+					close(p.readyCh)
+				}
+				return
+			}
+			defer pty.Close()
+
+			// Wait for first byte to ensure container is running
+			// Use timeout to avoid blocking indefinitely
+			readyChan := make(chan bool, 1)
+			go func() {
+				firstByte := make([]byte, 1)
+				_, err := pty.Read(firstByte)
+				readyChan <- (err == nil || err == io.EOF)
+			}()
+
+			// Wait for first byte or timeout
+			select {
+			case <-readyChan:
+				if p.config.Logger != nil {
+					p.config.Logger.Debug("Container ready check complete (non-TTY mode)")
+				}
+			case <-time.After(2 * time.Second):
+				if p.config.Logger != nil {
+					p.config.Logger.Debug("Timeout waiting for first byte (non-TTY mode)")
+				}
+			}
+
+			// Signal ready
+			select {
+			case <-p.readyCh:
+				// Already closed
+			default:
+				close(p.readyCh)
+			}
+
+			// Discard remaining output since no TTYOutput is configured
+			go io.Copy(io.Discard, pty)
+		}()
 	}
 
 	return pid, nil
@@ -289,11 +343,58 @@ func (p *Process) forwardTTY() {
 	pty, err := p.GetTTY()
 	if err != nil {
 		// TTY forwarding failed, but don't crash the process
+		// Still signal ready since the process started
+		select {
+		case <-p.readyCh:
+			// Already closed
+		default:
+			close(p.readyCh)
+		}
 		return
 	}
 	defer pty.Close()
 
-	// Forward PTY output to the configured writer
+	// Wait for first byte of output before signaling ready
+	// This ensures the container process is actually running
+	// Use a goroutine with timeout to avoid blocking indefinitely
+	readyChan := make(chan bool, 1)
+	go func() {
+		firstByte := make([]byte, 1)
+		n, err := pty.Read(firstByte)
+		if err == nil && n > 0 {
+			// Got first byte - write it to output
+			if p.config.TTYOutput != nil {
+				p.config.TTYOutput.Write(firstByte[:n])
+			}
+			readyChan <- true
+		} else {
+			readyChan <- false
+		}
+	}()
+
+	// Wait for first byte or timeout
+	select {
+	case gotByte := <-readyChan:
+		if gotByte && p.config.Logger != nil {
+			p.config.Logger.Debug("Container produced first byte of output, signaling ready")
+		} else if !gotByte && p.config.Logger != nil {
+			p.config.Logger.Debug("Failed to read first byte, but signaling ready anyway")
+		}
+	case <-time.After(2 * time.Second):
+		if p.config.Logger != nil {
+			p.config.Logger.Debug("Timeout waiting for first byte, signaling ready anyway")
+		}
+	}
+
+	// Signal ready
+	select {
+	case <-p.readyCh:
+		// Already closed
+	default:
+		close(p.readyCh)
+	}
+
+	// Forward remaining PTY output to the configured writer
 	io.Copy(p.config.TTYOutput, pty)
 }
 
@@ -339,6 +440,25 @@ func (p *Process) TTYPath() (string, error) {
 	}
 
 	return p.tty.SocketPath(), nil
+}
+
+// WaitReady waits for the container to be ready (PTY received)
+// Returns immediately if not a container process or already ready
+func (p *Process) WaitReady(timeout time.Duration) error {
+	if p.tty == nil || !p.isContainerProcess() {
+		// Not a container process, consider it ready
+		return nil
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-p.readyCh:
+		return nil
+	case <-timer.C:
+		return fmt.Errorf("timeout waiting for container to be ready after %v", timeout)
+	}
 }
 
 // Stop gracefully stops the process and cleans up resources
