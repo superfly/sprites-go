@@ -1,0 +1,1 @@
+docker: tmux new-session -d -s docker 'sudo dockerd > /tmp/docker.log 2>&1'

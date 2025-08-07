@@ -1,0 +1,50 @@
+# syntax=docker/dockerfile:1
+
+# Use the base sprite-env image built from the top-level Dockerfile
+FROM sprite-env-base:test
+
+# Install xz-utils and Node.js 22 LTS for the correct architecture
+RUN apt-get update && apt-get install -y xz-utils curl && \
+    ARCH=$(uname -m) && \
+    case $ARCH in \
+        x86_64) NODE_ARCH="x64" ;; \
+        aarch64|arm64) NODE_ARCH="arm64" ;; \
+        *) echo "Unsupported architecture: $ARCH"; exit 1 ;; \
+    esac && \
+    curl -fsSL https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-${NODE_ARCH}.tar.xz | tar -xJ -C /usr/local --strip-components=1 && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Create test config for spritectl
+RUN mkdir -p /etc/sprite && \
+    echo '{ \
+  "log_level": "debug", \
+  "log_json": false, \
+  "api_listen_addr": "0.0.0.0:28080", \
+  "juicefs_enabled": true, \
+  "juicefs_base_dir": "/tmp/sprite-data/juicefs", \
+  "juicefs_volume_name": "sprite-test-volume", \
+  "juicefs_local_mode": true \
+}' > /etc/sprite/test-config.json
+
+# Set up SDK directory (will be mounted from host)
+RUN mkdir -p /sdk
+
+# Set working directory for SDK
+WORKDIR /sdk
+
+# Set environment for tests
+ENV SPRITE_URL=http://localhost:28080
+ENV SPRITE_TOKEN=f0e4c2f76c58916ec258f246851bea091d14d4247a2fc3e18694461b1816e13b
+ENV SPRITE_HTTP_API_TOKEN=f0e4c2f76c58916ec258f246851bea091d14d4247a2fc3e18694461b1816e13b
+ENV SPRITE_ADMIN_TOKEN=admin-f0e4c2f76c58916ec258f246851bea091d14d4247a2fc3e18694461b1816e13b
+
+# Create a test runner script that works with mounted source
+RUN echo '#!/bin/bash\nset -e\n\necho "Starting JavaScript SDK test suite..."\necho "Current working directory: $(pwd)"\necho "PATH: $PATH"\n\n# Ensure we have the mounted source code\nif [ ! -f "/sdk/package.json" ]; then\n    echo "Error: No source code mounted at /sdk"\n    echo "Make sure to mount the JavaScript SDK source with: -v $(pwd):/sdk"\n    echo "Contents of /sdk:"\n    ls -la /sdk/ || echo "Cannot list /sdk"\n    exit 1\nfi\n\n# Change to the mounted source directory\ncd /sdk\necho "Changed to: $(pwd)"\necho "Contents:"\nls -la\n\n# Check Node.js and npm are available\necho "Node.js version: $(node --version)"\necho "npm version: $(npm --version)"\necho "npm location: $(which npm)"\n\n# Install dependencies if needed (node_modules might not be mounted)\necho "Installing dependencies..."\nnpm install || { echo "npm install failed with exit code $?"; exit 1; }\n\n# Build the project\necho "Building JavaScript SDK..."\nnpm run build || { echo "npm run build failed with exit code $?"; exit 1; }\n\n# Wait for sprite server to be ready\necho "Waiting for sprite server to be ready..."\nfor i in {1..30}; do\n    if curl -s http://localhost:28080 >/dev/null 2>&1; then\n        echo "Server is ready and listening on port 28080!"\n        break\n    fi\n    if [ $i -eq 30 ]; then\n        echo "Error: Sprite server not available on port 28080"\n        exit 1\n    fi\n    sleep 1\ndone\n\n# Run JavaScript tests\necho ""\necho "=== Running JavaScript SDK tests ==="\necho "Working directory: $(pwd)"\necho "Source files present: $(ls -la | wc -l) files"\n\n# Run basic connectivity tests\necho "Running basic connectivity tests..."\nnode test/basic-connectivity.js\n\n# Run SDK functionality tests\necho "Running SDK functionality tests..."\nnode test/sdk-test.js\n\necho ""\necho "=== JavaScript SDK tests completed! ==="\n' > /usr/local/bin/run-tests.sh
+
+RUN chmod +x /usr/local/bin/run-tests.sh
+
+# Override the entrypoint to use test config and correct port
+ENTRYPOINT ["/usr/local/bin/spritectl", "-config", "/etc/sprite/test-config.json", "-listen", "0.0.0.0:28080"]
+
+# Run tests after server starts with timeout
+CMD ["sh", "-c", "timeout 60 /usr/local/bin/run-tests.sh"]
