@@ -35,6 +35,14 @@ type CheckpointInfo struct {
 	CreateTime time.Time `json:"create_time"`
 	SourceID   string    `json:"source_id,omitempty"` // If this was restored from another checkpoint
 	History    []string  `json:"history,omitempty"`   // Restore history from .history file
+	// Statistics fields (optional, filled when stats are available)
+	FileCount  int    `json:"file_count,omitempty"`
+	DirCount   int    `json:"dir_count,omitempty"`
+	TotalSize  int64  `json:"total_size,omitempty"`
+	// Divergence info (only for active state)
+	DivergenceIndicator string `json:"divergence,omitempty"`
+	FilesDiff           int    `json:"files_diff,omitempty"`
+	SizeDiff            int64  `json:"size_diff,omitempty"`
 }
 
 // Checkpoint creates a checkpoint of the active directory using SQLite
@@ -422,8 +430,8 @@ func (j *JuiceFS) ListCheckpointsWithActive(ctx context.Context) ([]CheckpointIn
 		return checkpoints, nil
 	}
 
-	// Mark the active checkpoint ID with " (active)" suffix
-	activeInfo.ID = activeInfo.ID + " (active)"
+	// Mark as current working state instead of just active
+	activeInfo.ID = "Current"
 
 	// Prepend active to the list
 	result := make([]CheckpointInfo, 0, len(checkpoints)+1)

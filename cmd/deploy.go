@@ -222,17 +222,24 @@ func main() {
 	// Handle volume based on whether we found a machine
 	var volumeID string
 	var existingContainerEnvVars map[string]string
+	var existingSpriteToken string
 
 	if existingMachine != nil {
 		// Extract existing container environment variables
 		if existingMachine.Config != nil && len(existingMachine.Config.Containers) > 0 {
 			// Look for the main container (usually named "sprite" or the first one)
 			for _, container := range existingMachine.Config.Containers {
+				// Check ExtraEnv for environment variables
 				if container.ExtraEnv != nil && len(container.ExtraEnv) > 0 {
 					existingContainerEnvVars = make(map[string]string)
 					for k, v := range container.ExtraEnv {
 						existingContainerEnvVars[k] = v
 						log.Printf("Found existing container env var: %s\n", k)
+						// Capture SPRITE_HTTP_API_TOKEN if present
+						if k == "SPRITE_HTTP_API_TOKEN" {
+							existingSpriteToken = v
+							log.Printf("Found existing SPRITE_HTTP_API_TOKEN in container\n")
+						}
 					}
 					// Use env vars from first container with env vars
 					break
@@ -303,10 +310,23 @@ func main() {
 			log.Fatal("Failed to read machine-config.json: ", err)
 		}
 
+		// Use existing SPRITE_HTTP_API_TOKEN if available, otherwise check environment
+		spriteToken := existingSpriteToken
+		if spriteToken == "" {
+			spriteToken = os.Getenv("SPRITE_HTTP_TOKEN")
+			if spriteToken == "" {
+				log.Fatal("SPRITE_HTTP_TOKEN not found in existing machine config or environment variable")
+			}
+			log.Printf("Using SPRITE_HTTP_TOKEN from environment variable\n")
+		} else {
+			log.Printf("Using SPRITE_HTTP_API_TOKEN from existing machine config\n")
+		}
+
 		// Replace placeholders in memory
 		configStr := string(configData)
 		configStr = strings.ReplaceAll(configStr, "<volume_id>", volumeID)
 		configStr = strings.ReplaceAll(configStr, "<image_ref>", imageRef)
+		configStr = strings.ReplaceAll(configStr, "<sprite_token>", spriteToken)
 
 		// Parse the config into machine config
 		if err := json.Unmarshal([]byte(configStr), &machineConfig); err != nil {

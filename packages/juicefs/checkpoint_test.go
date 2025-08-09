@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -257,9 +256,9 @@ func TestListCheckpointsWithActive(t *testing.T) {
 		t.Errorf("Expected 5 checkpoints, got %d", len(checkpoints))
 	}
 
-	// First should be the active version (latest checkpoint ID - 1)
-	if !strings.HasSuffix(checkpoints[0].ID, " (active)") {
-		t.Errorf("Expected first checkpoint to end with ' (active)', got %s", checkpoints[0].ID)
+	// First should be the current working state
+	if checkpoints[0].ID != "Current" {
+		t.Errorf("Expected first checkpoint to be 'Current', got %s", checkpoints[0].ID)
 	}
 
 	// Verify we have the expected number of checkpoints (4 regular + 1 active)

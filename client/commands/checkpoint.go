@@ -278,13 +278,91 @@ func checkpointListCommand(cfg *config.Manager, org *config.Organization, sprite
 		return
 	}
 
-	fmt.Printf("%-30s %s\n", "ID", "CREATED")
-	fmt.Printf("%-30s %s\n", strings.Repeat("-", 30), strings.Repeat("-", 25))
+	// Check if we have stats available
+	hasStats := false
+	hasCurrent := false
+	for _, cp := range checkpoints {
+		if cp.FileCount > 0 || cp.TotalSize > 0 {
+			hasStats = true
+		}
+		if cp.ID == "Current" {
+			hasCurrent = true
+		}
+	}
+
+	// Display header based on available data
+	if hasStats {
+		fmt.Printf("%-25s %-20s %10s %10s %15s %s\n", "ID", "CREATED", "FILES", "DIRS", "SIZE", "DIVERGENCE")
+		fmt.Printf("%-25s %-20s %10s %10s %15s %s\n", 
+			strings.Repeat("-", 25), 
+			strings.Repeat("-", 20),
+			strings.Repeat("-", 10),
+			strings.Repeat("-", 10),
+			strings.Repeat("-", 15),
+			strings.Repeat("-", 20))
+	} else {
+		fmt.Printf("%-30s %s\n", "ID", "CREATED")
+		fmt.Printf("%-30s %s\n", strings.Repeat("-", 30), strings.Repeat("-", 25))
+	}
 
 	for _, cp := range checkpoints {
-		created := cp.CreateTime.Format(time.RFC3339)
-		fmt.Printf("%-30s %s\n", cp.ID, created)
+		created := cp.CreateTime.Format("2006-01-02 15:04:05")
+		
+		// Format the ID for display
+		displayID := cp.ID
+		if cp.ID == "Current" {
+			displayID = "→ Current (active)"
+		}
+		
+		if hasStats {
+			sizeStr := "-"
+			if cp.TotalSize > 0 {
+				sizeStr = formatSize(cp.TotalSize)
+			}
+			
+			filesStr := "-"
+			if cp.FileCount > 0 {
+				filesStr = fmt.Sprintf("%d", cp.FileCount)
+			}
+			
+			dirsStr := "-"
+			if cp.DirCount > 0 {
+				dirsStr = fmt.Sprintf("%d", cp.DirCount)
+			}
+			
+			divergence := ""
+			if cp.DivergenceIndicator != "" {
+				divergence = cp.DivergenceIndicator
+				if cp.FilesDiff != 0 {
+					divergence += fmt.Sprintf(" (%+d files)", cp.FilesDiff)
+				}
+			}
+			
+			fmt.Printf("%-25s %-20s %10s %10s %15s %s\n", 
+				displayID, created, filesStr, dirsStr, sizeStr, divergence)
+		} else {
+			fmt.Printf("%-30s %s\n", displayID, created)
+		}
 	}
+	
+	// Add a note about the current state
+	if hasCurrent {
+		fmt.Println("\n→ Current represents the active working state of your environment")
+	}
+}
+
+// formatSize formats bytes to human-readable format
+func formatSize(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.2f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
 func checkpointInfoCommand(cfg *config.Manager, org *config.Organization, spriteName string, args []string) {

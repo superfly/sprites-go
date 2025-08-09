@@ -17,7 +17,7 @@
       "encrypted": true,
       "path": "/dev/fly_vol",
       "size_gb": 10,
-      "volume": "vol_vwj83kz62mzpl5mr",
+      "volume": "<volume_id>",
       "name": "data"
     }
   ],
@@ -59,7 +59,7 @@
       "name": "sprite",
       "image": "<image_ref>",
       "env": {
-        "SPRITE_HTTP_API_TOKEN": "7e5fe8ddb0ce0293680b9670d8721ecd9947c13d41e5af7f6a9591eee4fe23de",
+        "SPRITE_HTTP_API_TOKEN": "<sprite_token>",
         "SPRITE_PRIMARY_REGION": "iad",
         "SPRITE_S3_REGION": "auto"
       },

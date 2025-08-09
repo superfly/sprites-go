@@ -18,6 +18,14 @@ type CheckpointInfo struct {
 	CreateTime time.Time `json:"create_time"`
 	SourceID   string    `json:"source_id,omitempty"`
 	History    []string  `json:"history,omitempty"`
+	// Statistics fields (optional, filled when stats are available)
+	FileCount  int    `json:"file_count,omitempty"`
+	DirCount   int    `json:"dir_count,omitempty"`
+	TotalSize  int64  `json:"total_size,omitempty"`
+	// Divergence info (only for active state)
+	DivergenceIndicator string `json:"divergence,omitempty"`
+	FilesDiff           int    `json:"files_diff,omitempty"`
+	SizeDiff            int64  `json:"size_diff,omitempty"`
 }
 
 // APIResponse represents a generic API response
