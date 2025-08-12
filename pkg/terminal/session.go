@@ -229,10 +229,16 @@ func (s *Session) buildCommand(ctx context.Context) (*exec.Cmd, error) {
 
 	if len(s.wrapperCommand) > 0 {
 		if len(s.env) > 0 {
-			execEnv := strings.Join(s.env, "\n")
-			cmd.Env = append(cmd.Env, fmt.Sprintf("EXEC_ENV=%s", execEnv))
+			// Pass each environment variable individually with a prefix
+			for _, envVar := range s.env {
+				// Extract the variable name (everything before the first =)
+				if idx := strings.Index(envVar, "="); idx > 0 {
+					varName := envVar[:idx]
+					cmd.Env = append(cmd.Env, fmt.Sprintf("EXEC_ENV_%s=%s", varName, envVar))
+				}
+			}
 			if s.logger != nil {
-				s.logger.Debug("Passing environment variables to wrapper via EXEC_ENV", "env", s.env)
+				s.logger.Debug("Passing environment variables to wrapper individually", "env", s.env)
 			}
 		}
 	}

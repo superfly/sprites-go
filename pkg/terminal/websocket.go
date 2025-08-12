@@ -63,7 +63,7 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 	wsStreams := newWebSocketStreams(conn, h.session.tty, h.session)
 	defer wsStreams.Close()
 
-		// Create a cancellable context that will be cancelled if websocket disconnects
+	// Create a cancellable context that will be cancelled if websocket disconnects
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
@@ -111,18 +111,26 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 		}
 		exitData[1] = byte(exitCode)
 
-		// Send through the write channel to maintain order
+		// Send exit code (guaranteed to be after all stdout/stderr)
 		wsStreams.writeChan <- writeRequest{
 			messageType: gorillaws.BinaryMessage,
 			data:        exitData,
 		}
 	}
 
-	// Send WebSocket close frame before closing streams
-	wsStreams.WriteClose()
-
-	// Close the streams which will flush remaining writes
-	wsStreams.Close()
+	// Don't close the WebSocket - let the client close it
+	// Start a timeout goroutine to close the connection if client doesn't close it
+	go func() {
+		select {
+		case <-time.After(30 * time.Second): // 30 second timeout
+			if h.session.logger != nil {
+				h.session.logger.Debug("Closing WebSocket connection after timeout")
+			}
+			conn.Close()
+		case <-ctx.Done():
+			// Context was cancelled, connection will be closed by defer
+		}
+	}()
 
 	return nil
 }
@@ -208,8 +216,9 @@ func (ws *webSocketStreams) writeLoop() {
 			if req.done != nil {
 				req.done <- err
 			}
+
 		case <-ws.closeChan:
-			// Drain any remaining writes before exiting
+			// Process any remaining writes in the channel
 			for {
 				select {
 				case req := <-ws.writeChan:
@@ -343,14 +352,14 @@ func (s *webSocketStreams) writeRaw(streamID StreamID, data []byte) error {
 		return <-done
 	}
 
-	// For non-PTY mode, use fire-and-forget
 	req := writeRequest{
 		messageType: gorillaws.BinaryMessage,
 		data:        msgData,
+		done:        make(chan error, 1),
 	}
 
 	s.writeChan <- req
-	return nil
+	return <-req.done
 }
 
 // writeStream writes data to the WebSocket with the specified stream ID
@@ -358,12 +367,13 @@ func (ws *webSocketStreams) writeStream(stream StreamID, data []byte) error {
 	req := writeRequest{
 		messageType: gorillaws.BinaryMessage,
 		data:        make([]byte, len(data)+1), // +1 for stream ID
+		done:        make(chan error, 1),
 	}
 	req.data[0] = byte(stream)
 	copy(req.data[1:], data)
 
 	ws.writeChan <- req
-	return nil
+	return <-req.done
 }
 
 // WriteExit writes an exit code message

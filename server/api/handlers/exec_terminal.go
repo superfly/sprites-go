@@ -37,14 +37,18 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	h.logger.Debug("HandleExec: Parsed query parameters", "query", query)
 
+	// Support both standard Go format (cmd=echo&cmd=test123) and PHP/Rails format (cmd[]=echo&cmd[]=test123)
 	cmdArgs := query["cmd"]
 	if len(cmdArgs) == 0 {
-		// Default to shell if no command specified
-		cmdArgs = []string{"bash", "-l"}
-		h.logger.Debug("HandleExec: No command specified, using default", "cmd", cmdArgs)
-	} else {
-		h.logger.Debug("HandleExec: Command arguments from query", "cmd", cmdArgs)
+		// Try PHP/Rails style array syntax
+		cmdArgs = query["cmd[]"]
 	}
+	if len(cmdArgs) == 0 {
+		h.logger.Error("HandleExec: No command specified")
+		http.Error(w, "No command specified", http.StatusBadRequest)
+		return
+	}
+	h.logger.Debug("HandleExec: Command arguments from query", "cmd", cmdArgs)
 
 	path := query.Get("path")
 	if path == "" && len(cmdArgs) > 0 {
