@@ -99,6 +99,7 @@ type Application struct {
 	apiServer        *serverapi.Server
 	keepAliveOnError bool
 	reaper           *Reaper
+	resourceMonitor  *ResourceMonitor
 }
 
 // NewApplication creates a new application instance
@@ -128,6 +129,9 @@ func NewApplication(config Config) (*Application, error) {
 
 	// Create Reaper instance
 	app.reaper = NewReaper(logger)
+
+	// Initialize resource monitor (linux only implementation)
+	app.resourceMonitor = NewResourceMonitor(logger)
 
 	// Create System instance
 	systemConfig := SystemConfig{
@@ -209,6 +213,11 @@ func (app *Application) Run() error {
 	// Boot the system
 	if err := app.system.Boot(app.ctx); err != nil {
 		return fmt.Errorf("failed to boot system: %w", err)
+	}
+
+	// Start resource monitor
+	if app.resourceMonitor != nil {
+		app.resourceMonitor.Start(app.ctx)
 	}
 
 	// Start API server if configured
