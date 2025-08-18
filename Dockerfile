@@ -70,7 +70,7 @@ RUN case ${TARGETARCH} in \
 # Get litestream binary
 FROM litestream/litestream:latest AS litestream
 
-FROM ghcr.io/superfly/juicefs:fname as juicefs
+FROM ghcr.io/superfly/juicefs:748b889 as juicefs
 
 # Final stage - based on juicedata/mount which includes juicefs
 FROM ubuntu:25.04

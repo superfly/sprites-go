@@ -412,6 +412,14 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	// Set JFS_SUPERVISOR=1 to enable proper signal handling
 	j.mountCmd.Env = append(os.Environ(), "JFS_SUPERVISOR=1")
 
+	// Add ACCESS_KEY and SECRET_KEY environment variables when available
+	if j.config.S3AccessKey != "" && j.config.S3SecretAccessKey != "" {
+		j.mountCmd.Env = append(j.mountCmd.Env,
+			fmt.Sprintf("ACCESS_KEY=%s", j.config.S3AccessKey),
+			fmt.Sprintf("SECRET_KEY=%s", j.config.S3SecretAccessKey),
+		)
+	}
+
 	// Start the mount command
 	if err := j.mountCmd.Start(); err != nil {
 		return fmt.Errorf("failed to start JuiceFS mount: %w", err)
@@ -824,6 +832,7 @@ func (j *JuiceFS) formatJuiceFS(ctx context.Context, metaURL string) error {
 		localStoragePath := filepath.Join(j.config.BaseDir, "local")
 		cmd = exec.CommandContext(ctx, "juicefs", "format",
 			"--storage", "file",
+			"--no-credential-store", // only use creds from env vars
 			"--bucket", localStoragePath,
 			"--trash-days", "7",
 			metaURL,
