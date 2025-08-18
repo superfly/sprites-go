@@ -304,11 +304,30 @@ func ExecCommand(ctx *GlobalContext, args []string) {
 		os.Exit(1)
 	}
 
+	// Use global context overrides if available
+	orgOverride := flags.Org
+	if ctx.OrgOverride != "" {
+		orgOverride = ctx.OrgOverride
+	}
+	spriteOverride := flags.Sprite
+	if ctx.SpriteOverride != "" {
+		spriteOverride = ctx.SpriteOverride
+	}
+
 	// Ensure we have an org and sprite
-	org, spriteName, err := EnsureOrgAndSprite(ctx.ConfigMgr, flags.Org, flags.Sprite)
+	org, spriteName, err := EnsureOrgAndSpriteWithContext(ctx, orgOverride, spriteOverride)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Debug: Log what we got
+	if ctx.IsDebugEnabled() {
+		fmt.Printf("DEBUG: After EnsureOrgAndSpriteWithContext:\n")
+		fmt.Printf("  org.Name='%s', org.URL='%s'\n", org.Name, org.URL)
+		fmt.Printf("  spriteName='%s'\n", spriteName)
+		fmt.Printf("  flags.Sprite='%s' (from command flags)\n", flags.Sprite)
+		fmt.Printf("  spriteOverride='%s' (final override used)\n", spriteOverride)
 	}
 
 	// Parse environment variables
@@ -371,8 +390,8 @@ func ExecCommand(ctx *GlobalContext, args []string) {
 
 	// Execute the command
 	var exitCode int
-	if spriteName != "" && org.Name != "env" {
-		// Use the new sprite proxy endpoint
+	if spriteName != "" {
+		// Use the new sprite proxy endpoint when we have a sprite name
 		exitCode = executeSpriteProxy(org, spriteName, remainingArgs, *workingDir, envList, *tty)
 	} else {
 		// Use direct WebSocket for backward compatibility with SPRITE_URL/SPRITE_TOKEN

@@ -168,10 +168,12 @@ func TestPortWatcherIntegration(t *testing.T) {
 		}
 	}
 
-	// Create port watcher for current process
-	pw, err := New(os.Getpid(), callback)
-	if err != nil {
-		t.Fatalf("Failed to create port watcher: %v", err)
+	// Create port watcher directly without container PID resolution
+	// since this is a test process, not a container
+	pw := &PortWatcher{
+		pid:      os.Getpid(),
+		callback: callback,
+		monitor:  GetGlobalMonitor(),
 	}
 	defer pw.Stop()
 

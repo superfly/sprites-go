@@ -58,7 +58,7 @@ func SyncCommand(cfg *config.Manager, args []string) {
 		sourcePath = remainingArgs[0]
 	}
 
-	org, spriteName, err := EnsureOrgAndSprite(cfg, flags.Org, flags.Sprite)
+	org, spriteName, err := EnsureOrgAndSpriteWithContext(&GlobalContext{ConfigMgr: cfg}, flags.Org, flags.Sprite)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

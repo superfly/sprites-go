@@ -65,7 +65,7 @@ func CheckpointCommand(ctx *GlobalContext, args []string) {
 	}
 
 	// Ensure we have an org and sprite
-	org, spriteName, err := EnsureOrgAndSprite(ctx.ConfigMgr, flags.Org, flags.Sprite)
+	org, spriteName, err := EnsureOrgAndSpriteWithContext(ctx, flags.Org, flags.Sprite)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -83,8 +83,8 @@ func CheckpointCommand(ctx *GlobalContext, args []string) {
 	switch subcommand {
 	case "create":
 		checkpointCreateCommand(ctx.ConfigMgr, org, spriteName, subArgs)
-	case "list":
-		checkpointListCommandWithFlags(ctx.ConfigMgr, org, spriteName, subArgs)
+	case "list", "ls":
+		checkpointListCommandWithFlags(ctx, org, spriteName, subArgs)
 	case "info":
 		if len(subArgs) < 1 {
 			fmt.Fprintf(os.Stderr, "Error: checkpoint info requires a checkpoint ID\n\n")
@@ -178,7 +178,7 @@ func checkpointCreateCommand(cfg *config.Manager, org *config.Organization, spri
 	os.Exit(exitCode)
 }
 
-func checkpointListCommandWithFlags(cfg *config.Manager, org *config.Organization, spriteName string, args []string) {
+func checkpointListCommandWithFlags(ctx *GlobalContext, org *config.Organization, spriteName string, args []string) {
 	// Create command structure
 	cmd := &Command{
 		Name:        "checkpoint list",
@@ -203,10 +203,10 @@ func checkpointListCommandWithFlags(cfg *config.Manager, org *config.Organizatio
 		os.Exit(1)
 	}
 
-	checkpointListCommand(cfg, org, spriteName, *historyFilter)
+	checkpointListCommand(ctx, org, spriteName, *historyFilter)
 }
 
-func checkpointListCommand(cfg *config.Manager, org *config.Organization, spriteName string, historyFilter string) {
+func checkpointListCommand(ctx *GlobalContext, org *config.Organization, spriteName string, historyFilter string) {
 	// Build the URL
 	var url string
 	if spriteName != "" && org.Name != "env" {
@@ -227,7 +227,7 @@ func checkpointListCommand(cfg *config.Manager, org *config.Organization, sprite
 		os.Exit(1)
 	}
 
-	token, err := org.GetTokenWithKeyringDisabled(cfg.IsKeyringDisabled())
+	token, err := org.GetTokenWithKeyringDisabled(ctx.ConfigMgr.IsKeyringDisabled())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
 		os.Exit(1)
@@ -242,6 +242,12 @@ func checkpointListCommand(cfg *config.Manager, org *config.Organization, sprite
 		"sprite", spriteName,
 		"authorization", fmt.Sprintf("Bearer %s", truncateToken(token)))
 
+	// Debug: Track request timing
+	startTime := time.Now()
+	if ctx.IsDebugEnabled() {
+		fmt.Printf("Making checkpoint list request to %s...\n", url)
+	}
+
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(httpReq)
 	if err != nil {
@@ -249,6 +255,12 @@ func checkpointListCommand(cfg *config.Manager, org *config.Organization, sprite
 		os.Exit(1)
 	}
 	defer resp.Body.Close()
+
+	// Debug: Log request timing
+	if ctx.IsDebugEnabled() {
+		duration := time.Since(startTime)
+		fmt.Printf("Request completed in %v\n", duration)
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -266,10 +278,16 @@ func checkpointListCommand(cfg *config.Manager, org *config.Organization, sprite
 	}
 
 	// Parse JSON response
+	if ctx.IsDebugEnabled() {
+		fmt.Printf("Parsing JSON response...\n")
+	}
 	var checkpoints []api.CheckpointInfo
 	if err := json.NewDecoder(resp.Body).Decode(&checkpoints); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to parse response: %v\n", err)
 		os.Exit(1)
+	}
+	if ctx.IsDebugEnabled() {
+		fmt.Printf("Parsed %d checkpoints\n", len(checkpoints))
 	}
 
 	// Display checkpoints
@@ -278,91 +296,21 @@ func checkpointListCommand(cfg *config.Manager, org *config.Organization, sprite
 		return
 	}
 
-	// Check if we have stats available
-	hasStats := false
-	hasCurrent := false
-	for _, cp := range checkpoints {
-		if cp.FileCount > 0 || cp.TotalSize > 0 {
-			hasStats = true
-		}
-		if cp.ID == "Current" {
-			hasCurrent = true
-		}
-	}
-
-	// Display header based on available data
-	if hasStats {
-		fmt.Printf("%-25s %-20s %10s %10s %15s %s\n", "ID", "CREATED", "FILES", "DIRS", "SIZE", "DIVERGENCE")
-		fmt.Printf("%-25s %-20s %10s %10s %15s %s\n", 
-			strings.Repeat("-", 25), 
-			strings.Repeat("-", 20),
-			strings.Repeat("-", 10),
-			strings.Repeat("-", 10),
-			strings.Repeat("-", 15),
-			strings.Repeat("-", 20))
-	} else {
-		fmt.Printf("%-30s %s\n", "ID", "CREATED")
-		fmt.Printf("%-30s %s\n", strings.Repeat("-", 30), strings.Repeat("-", 25))
-	}
+	// Display header
+	fmt.Printf("%-30s %s\n", "ID", "CREATED")
+	fmt.Printf("%-30s %s\n", strings.Repeat("-", 30), strings.Repeat("-", 25))
 
 	for _, cp := range checkpoints {
 		created := cp.CreateTime.Format("2006-01-02 15:04:05")
-		
+
 		// Format the ID for display
 		displayID := cp.ID
 		if cp.ID == "Current" {
 			displayID = "→ Current (active)"
 		}
-		
-		if hasStats {
-			sizeStr := "-"
-			if cp.TotalSize > 0 {
-				sizeStr = formatSize(cp.TotalSize)
-			}
-			
-			filesStr := "-"
-			if cp.FileCount > 0 {
-				filesStr = fmt.Sprintf("%d", cp.FileCount)
-			}
-			
-			dirsStr := "-"
-			if cp.DirCount > 0 {
-				dirsStr = fmt.Sprintf("%d", cp.DirCount)
-			}
-			
-			divergence := ""
-			if cp.DivergenceIndicator != "" {
-				divergence = cp.DivergenceIndicator
-				if cp.FilesDiff != 0 {
-					divergence += fmt.Sprintf(" (%+d files)", cp.FilesDiff)
-				}
-			}
-			
-			fmt.Printf("%-25s %-20s %10s %10s %15s %s\n", 
-				displayID, created, filesStr, dirsStr, sizeStr, divergence)
-		} else {
-			fmt.Printf("%-30s %s\n", displayID, created)
-		}
-	}
-	
-	// Add a note about the current state
-	if hasCurrent {
-		fmt.Println("\n→ Current represents the active working state of your environment")
-	}
-}
 
-// formatSize formats bytes to human-readable format
-func formatSize(bytes int64) string {
-	const unit = 1024
-	if bytes < unit {
-		return fmt.Sprintf("%d B", bytes)
+		fmt.Printf("%-30s %s\n", displayID, created)
 	}
-	div, exp := int64(unit), 0
-	for n := bytes / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.2f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
 func checkpointInfoCommand(cfg *config.Manager, org *config.Organization, spriteName string, args []string) {
@@ -473,7 +421,7 @@ func RestoreCommand(ctx *GlobalContext, args []string) {
 	checkpointID := remainingArgs[0]
 
 	// Ensure we have an org and sprite
-	org, spriteName, err := EnsureOrgAndSprite(ctx.ConfigMgr, flags.Org, flags.Sprite)
+	org, spriteName, err := EnsureOrgAndSpriteWithContext(ctx, flags.Org, flags.Sprite)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

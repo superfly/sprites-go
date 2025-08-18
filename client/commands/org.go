@@ -72,7 +72,7 @@ func OrgCommand(ctx *GlobalContext, args []string) {
 	switch subcommand {
 	case "auth":
 		orgAuthCommand(ctx.ConfigMgr, subArgs)
-	case "list":
+	case "list", "ls":
 		orgListCommand(ctx.ConfigMgr, subArgs)
 	case "logout":
 		orgLogoutCommand(ctx.ConfigMgr, subArgs)

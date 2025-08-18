@@ -15,9 +15,11 @@ import (
 
 // GlobalContext contains global state that should be available to all commands
 type GlobalContext struct {
-	Debug     string // Debug log file path (empty if not debugging)
-	ConfigMgr *config.Manager
-	Logger    *slog.Logger
+	Debug          string // Debug log file path (empty if not debugging)
+	ConfigMgr      *config.Manager
+	Logger         *slog.Logger
+	OrgOverride    string // Organization override from global flags
+	SpriteOverride string // Sprite override from global flags
 }
 
 // IsDebugEnabled returns true if debug logging is enabled
@@ -118,15 +120,46 @@ func EnsureOrg(cfg *config.Manager, orgOverride string) (*config.Organization, e
 // EnsureOrgAndSprite ensures we have valid organization and sprite for API calls.
 // It returns the organization and sprite name.
 func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string) (*config.Organization, string, error) {
-	// First check if we have environment variables set
-	envURL := os.Getenv("SPRITE_URL")
-	envToken := os.Getenv("SPRITE_TOKEN")
+	return EnsureOrgAndSpriteWithContext(&GlobalContext{ConfigMgr: cfg}, orgOverride, spriteOverride)
+}
+
+// EnsureOrgAndSpriteWithContext ensures we have valid organization and sprite for API calls.
+// It returns the organization and sprite name, using global overrides from the context.
+func EnsureOrgAndSpriteWithContext(ctx *GlobalContext, orgOverride, spriteOverride string) (*config.Organization, string, error) {
+	// Debug logging
+	slog.Debug("EnsureOrgAndSpriteWithContext called",
+		"orgOverride", orgOverride,
+		"spriteOverride", spriteOverride,
+		"ctx.OrgOverride", ctx.OrgOverride,
+		"ctx.SpriteOverride", ctx.SpriteOverride)
+
+	// Use global overrides if available
+	if ctx.OrgOverride != "" {
+		slog.Debug("Using org override from context", "org", ctx.OrgOverride)
+		orgOverride = ctx.OrgOverride
+	}
+	if ctx.SpriteOverride != "" {
+		slog.Debug("Using sprite override from context", "sprite", ctx.SpriteOverride)
+		spriteOverride = ctx.SpriteOverride
+	}
 
 	var org *config.Organization
 	var spriteName string
 
-	// If env vars are set, use them (backward compatibility)
-	if envURL != "" && envToken != "" {
+	// Only use environment variables if no org or sprite override is specified
+	// This allows users to override environment variables with explicit flags
+	envURL := os.Getenv("SPRITE_URL")
+	envToken := os.Getenv("SPRITE_TOKEN")
+	slog.Debug("Environment variables check", "SPRITE_URL", envURL != "", "SPRITE_TOKEN", envToken != "")
+
+	// If we have a sprite override but no org override, we should NOT use env vars
+	// Instead, we should use configured organizations
+	if spriteOverride != "" && orgOverride == "" && envURL != "" && envToken != "" {
+		slog.Debug("Sprite override specified with env vars present - ignoring env vars to use configured orgs")
+		// Don't use env vars, continue to org selection below
+	} else if envURL != "" && envToken != "" && orgOverride == "" && spriteOverride == "" {
+		// Only use env vars for backward compatibility when no overrides are specified
+		slog.Debug("Using environment variables for organization (no overrides specified)")
 		// This is using environment-based config, not org-based
 		// Create a temporary org structure
 		org = &config.Organization{
@@ -134,27 +167,24 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 			URL:   envURL,
 			Token: envToken,
 		}
-		// For env-based usage, check if sprite override is provided
-		if spriteOverride != "" {
-			// When using env vars with sprite override, we can track the sprite
-			spriteName = spriteOverride
-			return org, spriteName, nil
-		}
 		// Without sprite override, maintain backward compatibility (no sprite tracking)
+		slog.Debug("Returning env-based org without sprite", "org", "env")
 		return org, "", nil
 	}
 
 	// Check if we have command-line overrides
 	if orgOverride != "" {
+		slog.Debug("Checking for org override", "orgOverride", orgOverride)
 		// Find the organization by name
-		orgs := cfg.GetOrgs()
+		orgs := ctx.ConfigMgr.GetOrgs()
 		for _, o := range orgs {
 			if o.Name == orgOverride {
 				org = o
 				// Set as current for this session
-				if err := cfg.SetCurrentOrg(o.Name); err != nil {
+				if err := ctx.ConfigMgr.SetCurrentOrg(o.Name); err != nil {
 					return nil, "", fmt.Errorf("failed to set current org: %w", err)
 				}
+				slog.Debug("Found organization from override", "org", o.Name, "url", o.URL)
 				break
 			}
 		}
@@ -165,6 +195,7 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 
 	// If no org override, check .sprite file or use current config
 	if org == nil {
+		slog.Debug("No org override, checking .sprite file")
 		// Check if we have a .sprite file in the current directory or parent directories
 		spriteFile, spritePath, err := config.ReadSpriteFile()
 		if err != nil {
@@ -173,8 +204,9 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 
 		// If we have a .sprite file, use it
 		if spriteFile != nil {
+			slog.Debug("Found .sprite file", "path", spritePath, "org", spriteFile.Organization, "sprite", spriteFile.Sprite)
 			// Find the organization
-			orgs := cfg.GetOrgs()
+			orgs := ctx.ConfigMgr.GetOrgs()
 			for _, o := range orgs {
 				if o.Name == spriteFile.Organization {
 					org = o
@@ -201,7 +233,7 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 						format.Org(org.Name), format.Sprite(spriteName))
 				}
 				// Set as current in the config
-				if err := cfg.SetCurrentOrg(org.Name); err != nil {
+				if err := ctx.ConfigMgr.SetCurrentOrg(org.Name); err != nil {
 					return nil, "", fmt.Errorf("failed to set current org: %w", err)
 				}
 				// Don't check sprite existence - let API endpoints handle it
@@ -211,43 +243,34 @@ func EnsureOrgAndSprite(cfg *config.Manager, orgOverride, spriteOverride string)
 
 	// If still no org, check config or prompt
 	if org == nil {
-		// Check if we have any organizations configured
-		orgs := cfg.GetOrgs()
-		if len(orgs) == 0 {
-			// No organizations found - try Fly authentication
-			selectedOrg, err := AuthenticateWithFly(cfg)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+		slog.Debug("No org from .sprite file, checking current org")
+		// Use current organization
+		org = ctx.ConfigMgr.GetCurrentOrg()
+		if org == nil {
+			slog.Debug("No current org, checking available orgs")
+			// If no current org, try to get the first available one
+			orgs := ctx.ConfigMgr.GetOrgs()
+			if len(orgs) == 0 {
+				return nil, "", fmt.Errorf("no organizations configured. Please run 'sprite org auth' first")
 			}
-			org = selectedOrg
+			// Get the first org from the map
+			for _, o := range orgs {
+				org = o
+				slog.Debug("Using first available org", "org", o.Name, "url", o.URL)
+				break
+			}
 		} else {
-			// Otherwise, use config-based org selection
-			org = cfg.GetCurrentOrg()
-
-			// If no current org, prompt for one
-			if org == nil {
-				selectedOrg, err := prompts.SelectOrganization(cfg)
-				handlePromptError(err)
-				org = selectedOrg
-			}
+			slog.Debug("Using current org", "org", org.Name, "url", org.URL)
 		}
 	}
 
-	// Handle sprite override
+	// If we have a sprite override, use it
 	if spriteOverride != "" {
 		spriteName = spriteOverride
-		// Don't check sprite existence - let API endpoints handle it
+		slog.Debug("Using sprite override", "sprite", spriteName)
 	}
 
-	// If no sprite yet, prompt for one
-	if spriteName == "" {
-		var err error
-		spriteName, err = promptForSpriteName()
-		handlePromptError(err)
-		// Don't check sprite existence - let API endpoints handle it
-	}
-
+	slog.Debug("Final result", "org", org.Name, "url", org.URL, "sprite", spriteName)
 	return org, spriteName, nil
 }
 

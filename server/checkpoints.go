@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/sprite-env/lib/api"
@@ -227,54 +226,13 @@ func (s *System) ListCheckpoints(ctx context.Context) ([]juicefs.CheckpointInfo,
 		return nil, fmt.Errorf("JuiceFS not configured")
 	}
 
-	// Try to get checkpoints with stats if available
-	checkpointsWithStats, err := s.juicefs.ListCheckpointsWithStats(ctx)
+	// Use basic listing for fast performance
+	checkpoints, err := s.juicefs.ListCheckpointsWithActive(ctx)
 	if err != nil {
-		// Fall back to regular listing if stats aren't available
-		s.logger.Warn("Failed to get checkpoint stats, falling back to basic listing", "error", err)
-		checkpoints, err := s.juicefs.ListCheckpointsWithActive(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to list checkpoints: %w", err)
-		}
-		return checkpoints, nil
+		return nil, fmt.Errorf("failed to list checkpoints: %w", err)
 	}
 
-	// Convert to API format with stats included
-	result := make([]juicefs.CheckpointInfo, 0, len(checkpointsWithStats))
-	for _, cp := range checkpointsWithStats {
-		checkpoint := cp.CheckpointInfo
-		
-		// Add stats if available
-		if cp.Stats != nil {
-			checkpoint.FileCount = cp.Stats.FileCount
-			checkpoint.DirCount = cp.Stats.DirCount
-			checkpoint.TotalSize = cp.Stats.TotalSize
-		}
-		
-		// Add divergence info if available (for active)
-		if cp.Divergence != nil {
-			checkpoint.DivergenceIndicator = cp.Divergence.Indicator
-			checkpoint.FilesDiff = cp.Divergence.FileCountDiff
-			checkpoint.SizeDiff = cp.Divergence.SizeDiff
-		}
-		
-		result = append(result, checkpoint)
-	}
-
-	// Also check for source info in the active directory
-	if len(result) > 0 && s.config.JuiceFSBaseDir != "" {
-		activeDir := filepath.Join(s.config.JuiceFSBaseDir, "data", "active")
-		sourceFile := filepath.Join(activeDir, ".source")
-		if sourceData, err := os.ReadFile(sourceFile); err == nil {
-			// Find the active checkpoint (usually the newest) and mark its source
-			sourceID := strings.TrimSpace(string(sourceData))
-			// The active state doesn't have its own checkpoint, but we can indicate
-			// what it was restored from
-			s.logger.Info("Active directory was restored from checkpoint", "source", sourceID)
-		}
-	}
-
-	return result, nil
+	return checkpoints, nil
 }
 
 // ListCheckpointsByHistory returns checkpoints that were restored from a specific version

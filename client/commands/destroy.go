@@ -44,7 +44,7 @@ func DestroyCommand(ctx *GlobalContext, args []string) {
 	}
 
 	// Ensure we have an org and sprite
-	org, spriteName, err := EnsureOrgAndSprite(ctx.ConfigMgr, flags.Org, flags.Sprite)
+	org, spriteName, err := EnsureOrgAndSpriteWithContext(ctx, flags.Org, flags.Sprite)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

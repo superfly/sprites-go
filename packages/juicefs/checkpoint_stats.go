@@ -27,36 +27,64 @@ type CheckpointDivergence struct {
 
 // GetDirectoryStats calculates statistics for a directory
 func GetDirectoryStats(dirPath string) (*DirectoryStats, error) {
+	return GetDirectoryStatsWithTimeout(dirPath, 5*time.Second)
+}
+
+// GetDirectoryStatsWithTimeout calculates statistics for a directory with a timeout
+func GetDirectoryStatsWithTimeout(dirPath string, timeout time.Duration) (*DirectoryStats, error) {
 	stats := &DirectoryStats{}
 	
-	err := filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			// Skip inaccessible files
-			return nil
-		}
-		
-		info, err := d.Info()
-		if err != nil {
-			// Skip files we can't stat
-			return nil
-		}
-		
-		if d.IsDir() {
-			stats.DirCount++
-		} else {
-			stats.FileCount++
-			stats.TotalSize += info.Size()
-		}
-		
-		if info.ModTime().After(stats.LastModified) {
-			stats.LastModified = info.ModTime()
-		}
-		
-		return nil
-	})
+	// Create a context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 	
-	if err != nil {
-		return nil, fmt.Errorf("failed to walk directory: %w", err)
+	// Use a channel to signal completion
+	done := make(chan error, 1)
+	
+	go func() {
+		err := filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
+			// Check if context is cancelled
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			
+			if err != nil {
+				// Skip inaccessible files
+				return nil
+			}
+			
+			info, err := d.Info()
+			if err != nil {
+				// Skip files we can't stat
+				return nil
+			}
+			
+			if d.IsDir() {
+				stats.DirCount++
+			} else {
+				stats.FileCount++
+				stats.TotalSize += info.Size()
+			}
+			
+			if info.ModTime().After(stats.LastModified) {
+				stats.LastModified = info.ModTime()
+			}
+			
+			return nil
+		})
+		done <- err
+	}()
+	
+	// Wait for completion or timeout
+	select {
+	case err := <-done:
+		if err != nil {
+			return nil, fmt.Errorf("failed to walk directory: %w", err)
+		}
+	case <-ctx.Done():
+		return nil, fmt.Errorf("directory stats calculation timed out after %v", timeout)
 	}
 	
 	return stats, nil

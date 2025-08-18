@@ -79,23 +79,27 @@ func main() {
 		}
 	}
 
-	// Parse flags normally - flag package will handle --debug=value
-	err := flag.CommandLine.Parse(modifiedArgs[1:])
-	if err == flag.ErrHelp {
-		// Help was explicitly requested
-		printUsage()
-		os.Exit(0)
-	} else if err != nil {
-		// Some other parsing error
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	// Use our global flag parser for everything
+	cleanedArgs, globalFlags, err := commands.ParseGlobalFlagsFromAnyPosition(modifiedArgs[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing global flags: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Setup logging based on debug flag
-	setupLogger(globalDebug)
+	// Check for help flag from global parsing
+	if globalFlags.Help {
+		printUsage()
+		os.Exit(0)
+	}
 
-	// Get remaining args after global flags
-	args := flag.Args()
+	args := cleanedArgs
+
+	// Setup logging based on debug flag
+	debugFile := globalDebug
+	if globalFlags.DebugFile != "" {
+		debugFile = globalFlags.DebugFile
+	}
+	setupLogger(debugFile)
 
 	// Check if we need help or have no command
 	if globalHelp || len(args) == 0 {
@@ -112,22 +116,35 @@ func main() {
 
 	// Create global context to pass to commands
 	globalCtx := &commands.GlobalContext{
-		Debug:     globalDebug,
+		Debug:     debugFile,
 		ConfigMgr: cfg,
 		Logger:    clientLogger,
 	}
 
 	// Get subcommand
+	if len(args) == 0 {
+		printUsage()
+		os.Exit(0)
+	}
+
 	subcommand := args[0]
 	subArgs := args[1:]
 
+	// Add global flags to the context for commands to use
+	if globalFlags.Org != "" {
+		globalCtx.OrgOverride = globalFlags.Org
+	}
+	if globalFlags.Sprite != "" {
+		globalCtx.SpriteOverride = globalFlags.Sprite
+	}
+
 	switch subcommand {
-	case "exec":
+	case "exec", "x":
 		commands.ExecCommand(globalCtx, subArgs)
-	case "console":
-		commands.ConsoleCommand(globalCtx, subArgs)
-	case "checkpoint", "checkpoints", "c":
+	case "checkpoint", "checkpoints":
 		commands.CheckpointCommand(globalCtx, subArgs)
+	case "console", "c":
+		commands.ConsoleCommand(globalCtx, subArgs)
 	case "restore":
 		commands.RestoreCommand(globalCtx, subArgs)
 	case "create":
@@ -136,9 +153,9 @@ func main() {
 		commands.DestroyCommand(globalCtx, subArgs)
 	case "use":
 		commands.UseCommand(globalCtx, subArgs)
-	case "list":
+	case "list", "ls":
 		commands.ListCommand(globalCtx, subArgs)
-	case "org", "orgs", "organizations":
+	case "org", "orgs", "organizations", "organization", "o":
 		commands.OrgCommand(globalCtx, subArgs)
 	case "transcripts":
 		commands.TranscriptsCommand(globalCtx, subArgs)
@@ -164,73 +181,82 @@ Usage:
   sprite [global options] <command> [command options] [arguments]
 
 Commands:
-  exec                      Execute a command in the sprite environment
-  console                   Open an interactive shell in the sprite environment
-  create <name>             Create a new sprite
-  use [sprite]              Activate a sprite for the current directory
-  list                      List all sprites
-  checkpoint [subcommand]   Manage checkpoints (aliases: checkpoints, c)
-    create                  Create a new checkpoint
-    list                    List all checkpoints
-    info <id>               Show information about a specific checkpoint
-  restore <id>              Restore from a checkpoint
-  destroy                   Destroy the current sprite
-  transcripts <subcommand>  Manage transcript recording
-    enable                  Enable transcript recording for future exec calls
-    disable                 Disable transcript recording for future exec calls
-  proxy <port1> [port2...]  Forward local ports through the remote server proxy
-  sync                      Synchronize git repository to sprite environment
-  api [options] <path>      Make authenticated API calls with curl
+  exec (x)                   Execute a command in the sprite environment
+  console (c)                Open an interactive shell in the sprite environment
+  create <name>              Create a new sprite
+  use [sprite]               Activate a sprite for the current directory
+  list (ls)                  List all sprites
+  checkpoint [subcommand]    Manage checkpoints (aliases: checkpoints)
+    create                   Create a new checkpoint
+    list (ls)                List all checkpoints
+    info <id>                Show information about a specific checkpoint
+  restore <id>               Restore from a checkpoint
+  destroy                    Destroy the current sprite
+  transcripts <subcommand>   Manage transcript recording
+    enable                   Enable transcript recording for future exec calls
+    disable                  Disable transcript recording for future exec calls
+  proxy <port1> [port2...]   Forward local ports through the remote server proxy
+  sync                       Synchronize git repository to sprite environment
+  api [options] <path>       Make authenticated API calls with curl
 
 Organization Commands:
-  org auth                  Add an API token (aliases: orgs, organizations)
-  org list                  Show configured tokens
-  org logout                Remove all tokens
+  org auth                   Add an API token (aliases: orgs, organizations, organization, o)
+  org list (ls)              Show configured tokens
+  org logout                 Remove all tokens
 
 Global Options:
-  --debug[=<file>]          Enable debug logging (logs to stdout if no file specified)
-  -h, --help                Show this help message
-
-Command Options:
-  -o, --org <name>          Specify organization (for sprite commands)
-  -s, --sprite <name>       Specify sprite (for sprite commands)
-  -h, --help                Show help for specific command
+  --debug[=<file>]           Enable debug logging (logs to stdout if no file specified)
+  -o, --org <name>           Specify organization (can be used anywhere)
+  -s, --sprite <name>        Specify sprite (can be used anywhere)
+  -h, --help                 Show this help message
 
 Examples:
   # Authenticate with an organization
   sprite org auth
   sprite orgs auth
+  sprite o auth
 
   # Create a new sprite
   sprite create my-sprite
   sprite create -o myorg dev-sprite
+  sprite -o myorg create dev-sprite
 
   # List all sprites
   sprite list
+  sprite ls
   sprite list -o myorg
+  sprite -o myorg list
 
   # Activate a sprite for the current directory
   sprite use my-sprite
   sprite use -o myorg dev-sprite
+  sprite -o myorg -s dev-sprite use
   sprite use --unset
 
   # Execute a command
   sprite exec ls -la
+  sprite x ls -la
   sprite exec -o myorg -s mysprite npm start
+  sprite -o myorg -s mysprite exec npm start
 
   # Open an interactive shell
   sprite console
+  sprite c
   sprite console -o myorg -s mysprite
+  sprite -o myorg -s mysprite console
 
   # Execute with debug logging
   sprite --debug exec npm start              # logs to stdout
   sprite --debug=/tmp/debug.log exec npm start  # logs to file
+  sprite exec --debug npm start              # same as above
+  sprite -s mysprite --debug exec npm start  # debug from any position
 
   # Create a checkpoint
   sprite checkpoint create
 
   # List checkpoints
   sprite checkpoint list
+  sprite checkpoint ls
 
   # Restore from checkpoint
   sprite restore my-checkpoint-id
