@@ -65,9 +65,6 @@ type Config struct {
 	OverlayTargetPath    string   // Where to mount the final overlay
 	OverlaySkipOverlayFS bool     // Skip overlayfs, only mount loopback
 
-	// Transcript configuration
-	TranscriptDBPath string // Path to SQLite database file
-
 	// Proxy configuration
 	ProxyLocalhostIPv4 string // IPv4 address to use when proxying to localhost
 	ProxyLocalhostIPv6 string // IPv6 address to use when proxying to localhost
@@ -160,9 +157,6 @@ func NewApplication(config Config) (*Application, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create system: %w", err)
 	}
-
-	// Set transcript DB path
-	system.SetTranscriptDBPath(config.TranscriptDBPath)
 
 	app.system = system
 
@@ -412,9 +406,6 @@ func parseCommandLine() (Config, error) {
 			OverlayTargetPath    string   `json:"overlay_target_path"`
 			OverlaySkipOverlayFS bool     `json:"overlay_skip_overlayfs"`
 
-			// Transcript configuration
-			TranscriptDBPath string `json:"transcript_db_path"`
-
 			// Proxy configuration
 			ProxyLocalhostIPv4 string `json:"proxy_localhost_ipv4"`
 			ProxyLocalhostIPv6 string `json:"proxy_localhost_ipv6"`
@@ -471,7 +462,7 @@ func parseCommandLine() (Config, error) {
 		config.OverlayLowerPaths = fileConfig.OverlayLowerPaths
 		config.OverlayTargetPath = fileConfig.OverlayTargetPath
 		config.OverlaySkipOverlayFS = fileConfig.OverlaySkipOverlayFS
-		config.TranscriptDBPath = fileConfig.TranscriptDBPath
+
 		config.ProxyLocalhostIPv4 = fileConfig.ProxyLocalhostIPv4
 		config.ProxyLocalhostIPv6 = fileConfig.ProxyLocalhostIPv6
 	}
@@ -547,11 +538,6 @@ func parseCommandLine() (Config, error) {
 		config.OverlaySkipOverlayFS = false
 	}
 
-	// Transcript configuration - environment overrides file config
-	if transcriptDBPath := os.Getenv("SPRITE_TRANSCRIPT_DB_PATH"); transcriptDBPath != "" {
-		config.TranscriptDBPath = transcriptDBPath
-	}
-
 	// Debug configuration
 	if os.Getenv("SPRITE_KEEP_ALIVE_ON_ERROR") == "true" {
 		config.KeepAliveOnError = true
@@ -560,10 +546,6 @@ func parseCommandLine() (Config, error) {
 	// Validate - now API token is required if API server is configured
 	if config.APIListenAddr != "" && config.APIToken == "" {
 		return config, fmt.Errorf("API token must be set when API server is enabled")
-	}
-
-	if config.TranscriptDBPath == "" {
-		config.TranscriptDBPath = "/var/log/transcripts.db"
 	}
 
 	return config, nil

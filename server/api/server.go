@@ -119,10 +119,6 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 	// Checkpoint endpoint - waits for JuiceFS to be ready
 	mux.HandleFunc("/checkpoint", s.authMiddleware(s.waitForJuiceFSMiddleware(s.handlers.HandleCheckpoint)))
 
-	// Transcripts toggle endpoints - waits for JuiceFS (and process) to be ready
-	mux.HandleFunc("/transcripts/enable", s.authMiddleware(s.waitForJuiceFSMiddleware(s.handlers.HandleTranscriptsEnable)))
-	mux.HandleFunc("/transcripts/disable", s.authMiddleware(s.waitForJuiceFSMiddleware(s.handlers.HandleTranscriptsDisable)))
-
 	// Checkpoint management endpoints - wait for JuiceFS to be ready
 	// This pattern matches /checkpoints and any subpaths like /checkpoints/{id} or /checkpoints/{id}/restore
 	checkpointsHandler := s.authMiddleware(s.waitForJuiceFSMiddleware(func(w http.ResponseWriter, r *http.Request) {

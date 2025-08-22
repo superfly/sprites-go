@@ -1,113 +1,105 @@
 # Sprite Integration Tests
 
-This directory contains integration tests for the Sprite deployment and functionality.
+This directory contains comprehensive integration tests for the Sprite environment, with a focus on the `/exec` endpoint and WebSocket-based command execution.
+
+## Test Structure
+
+### Docker-Based Integration Tests
+All tests run in controlled Docker environments for consistency and reliability:
+
+- `docker_integration_test.go` - Full-stack testing with real server
+- `websocket_protocol_test.go` - WebSocket protocol compliance  
+- `exec_edge_cases_test.go` - Error handling and edge cases
+- `performance_test.go` - Load and performance testing
+- `exec_large_output_test.go` - Large data handling
+- `exec_race_condition_test.go` - Race condition detection
+- `tty_test.go` - TTY functionality
 
 ## Prerequisites
 
-1. Fly.io account and authenticated CLI (`flyctl`)
-2. Docker installed and running
-3. Go 1.21 or later
-4. Environment variables:
-   - `FLY_APP_NAME`: Your Fly.io app name
-   - `SPRITE_TOKEN`: Authentication token for the Sprite API (see below)
-   - `FLY_API_TOKEN` (optional): Fly API token; will use `flyctl auth token` if not set
-
-### Obtaining the Sprite API token
-
-When you deploy the Sprite environment (e.g. via `go run ../cmd/deploy.go` or `make build && make deploy`),
-the machine configuration (in `cmd/machine-config.json`) contains the HTTP API token under the
-`SPRITE_HTTP_API_TOKEN` field. You can extract and export it locally (using `jq`) before running tests:
-
-```bash
-export SPRITE_TOKEN=$(jq -r '.containers[0].env.SPRITE_HTTP_API_TOKEN' cmd/machine-config.json)
-```
-
-If you prefer, you can copy the token value manually from `cmd/machine-config.json`, or use a custom
-show command to retrieve it from the deployed machine.
+1. Docker installed and running
+2. Go 1.21 or later
+3. No external dependencies required
 
 ## Running the Tests
 
-### Full Integration Test
-
-This test will:
-1. Deploy the sprite to a Fly machine
-2. Build the sprite client binary
-3. Test basic exec commands
-4. Test zombie process cleanup
-5. Test checkpoint/restore functionality
-
 ```bash
-# Set required environment variables
-export FLY_APP_NAME=your-app-name
-export SPRITE_TOKEN=your-sprite-token
+# Run all tests
+make test-all
 
-# Run the integration test (using Makefile - recommended)
-make test
+# Run specific test categories
+make test-websocket-protocol
+make test-edge-cases
+make test-performance
+make test-large-output
+make test-race-condition
+make test-tty
 
-# Or run directly with go test (requires GOWORK=off)
-GOWORK=off go test -v -timeout 10m
+# Run with specific Docker image
+DOCKER_IMAGE=ubuntu:22.04 make test-all
 ```
 
-**Note:** `GOWORK=off` is required because the project uses Go workspaces. The Makefile targets automatically set this.
+## Test Categories
 
-### Individual Test Components
+### 1. WebSocket Protocol Tests
+- Message ordering verification
+- Stream ID handling (stdout, stderr, stdin, exit)
+- Connection lifecycle management
+- Protocol compliance with different clients
 
-You can also run individual test components:
+### 2. Command Execution Tests
+- Basic command execution
+- Complex command chains
+- Environment variable handling
+- Working directory management
+- Exit code propagation
 
-```bash
-# Using Makefile (recommended)
-make test-deploy      # Just test deployment
-make test-zombie      # Just test zombie cleanup
-make test-checkpoint  # Just test checkpoint/restore
+### 3. TTY Mode Tests
+- PTY setup and teardown
+- Terminal size handling
+- Raw mode functionality
+- Color and control sequence preservation
 
-# Or using go test directly
-GOWORK=off go test -v -run TestDeployAndFunctionality/Deploy
-GOWORK=off go test -v -run TestDeployAndFunctionality/ZombieCleanup
-GOWORK=off go test -v -run TestDeployAndFunctionality/CheckpointRestore
-```
+### 4. Error Handling Tests
+- Invalid commands
+- Network disconnections
+- Server restarts
+- Resource exhaustion
+- Authentication failures
 
-## What the Tests Do
+### 5. Performance Tests
+- Concurrent connections
+- Large data throughput
+- Memory usage under load
+- Connection stability
 
-### 1. Deployment Test
-- Builds and pushes the Docker image
-- Creates or updates a Fly machine with the sprite
-- Waits for the machine to reach "started" state
-- Handles stuck states by force-deleting and exiting with error
-
-### 2. Client Build Test
-- Builds the sprite client to `../dist/sprite`
-- Verifies the binary was created successfully
-
-### 3. Basic Commands Test
-- Tests `sprite exec` with simple echo commands
-- Tests file creation and verification
-
-### 4. Zombie Cleanup Test
-- Uses the `/debug/create-zombie` endpoint to create a zombie process
-- Verifies the process is initially a zombie
-- Waits and verifies that the sprite's init system cleans it up
-
-### 5. Checkpoint/Restore Test
-- Creates a file with unique content
-- Creates a checkpoint
-- Modifies the file
-- Restores from the checkpoint
-- Verifies the file content is restored
+### 6. Integration Tests
+- Port monitoring functionality
+- Transcript collection
+- Wrapper command execution
+- Checkpoint integration
 
 ## Debugging
 
-If tests fail, you can:
-1. Check the deploy output for errors
-2. Use `flyctl logs -a $FLY_APP_NAME` to see sprite logs
-3. Use `flyctl ssh console -a $FLY_APP_NAME` to inspect the machine
-4. The test keeps the deployment running by default for debugging
+If tests fail:
+1. Check Docker logs: `docker logs <container-id>`
+2. Inspect test artifacts in `test-artifacts/`
+3. Run tests with verbose output: `make test-all VERBOSE=1`
+4. Check server logs in the container
+
+## Test Artifacts
+
+Test artifacts are stored in `test-artifacts/`:
+- Server logs
+- WebSocket traffic captures
+- Performance metrics
+- Error reports
 
 ## Cleanup
 
-The test does not automatically clean up the deployment. To remove it:
-
+Docker tests automatically clean up containers and images. If manual cleanup is needed:
 ```bash
-flyctl machine destroy -a $FLY_APP_NAME --force
-```
-
-Or uncomment the cleanup code in `cleanupDeployment()` function. 
+docker stop $(docker ps -q --filter ancestor=sprite-test)
+docker rm $(docker ps -aq --filter ancestor=sprite-test)
+docker rmi sprite-test
+``` 

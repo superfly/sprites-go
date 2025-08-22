@@ -12,7 +12,6 @@ import (
 	"github.com/sprite-env/lib/api"
 
 	"github.com/superfly/sprite-env/packages/juicefs"
-	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
 // mockSupervisor implements Supervisor interface for testing
@@ -294,27 +293,6 @@ func (m *mockSystemManager) setProcessRunning(running bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.processRunning = running
-}
-
-// Transcripts management stubs satisfy the SystemManager interface.
-func (m *mockSystemManager) EnableTranscripts(ctx context.Context) error {
-	return nil
-}
-
-func (m *mockSystemManager) DisableTranscripts(ctx context.Context) error {
-	return nil
-}
-
-func (m *mockSystemManager) IsTranscriptsEnabled() bool {
-	return false
-
-}
-
-func (m *mockSystemManager) CreateTranscriptCollector(
-	env []string,
-	ty bool,
-) (terminal.TranscriptCollector, error) {
-	return nil, nil
 }
 
 func (m *mockSystemManager) Boot(ctx context.Context) error {

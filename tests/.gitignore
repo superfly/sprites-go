@@ -4,6 +4,7 @@ dist/
 
 # Test outputs
 *.test
+!Dockerfile.test
 *.out
 
 # Coverage files

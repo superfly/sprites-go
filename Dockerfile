@@ -27,6 +27,7 @@ COPY pkg/terminal/go.mod pkg/terminal/go.sum* ./pkg/terminal/
 COPY pkg/sync/go.mod pkg/sync/go.sum* ./pkg/sync/
 COPY cmd/sprite-run/go.mod cmd/sprite-run/go.sum* ./cmd/sprite-run/
 COPY packages/port-watcher/go.mod packages/port-watcher/go.sum* ./packages/port-watcher/
+COPY tests/go.mod tests/go.sum* ./tests/
 
 # Download dependencies for all modules in the workspace
 RUN go mod download -x

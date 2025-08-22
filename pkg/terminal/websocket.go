@@ -112,11 +112,18 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 		exitData[1] = byte(exitCode)
 
 		// Send exit code (guaranteed to be after all stdout/stderr)
+		// Use synchronous write to ensure it's processed before handler returns
+		done := make(chan error, 1)
 		wsStreams.writeChan <- writeRequest{
 			messageType: gorillaws.BinaryMessage,
 			data:        exitData,
+			done:        done,
 		}
+		<-done // Wait for exit code to be sent
 	}
+
+	// Send close message after exit code
+	wsStreams.WriteClose()
 
 	// Don't close the WebSocket - let the client close it
 	// Start a timeout goroutine to close the connection if client doesn't close it
@@ -193,7 +200,7 @@ func newWebSocketStreams(conn *gorillaws.Conn, tty bool, session *Session) *webS
 		conn:        conn,
 		tty:         tty,
 		session:     session,
-		writeChan:   make(chan writeRequest), // Unbuffered to ensure ordering
+		writeChan:   make(chan writeRequest, 100), // Buffered for better performance
 		closeChan:   make(chan struct{}),
 		doneChan:    make(chan struct{}),
 		readErrChan: make(chan error, 1), // Buffered to avoid blocking
@@ -205,7 +212,7 @@ func newWebSocketStreams(conn *gorillaws.Conn, tty bool, session *Session) *webS
 	return ws
 }
 
-// writeLoop handles all writes sequentially, ensuring ordering
+// writeLoop handles all writes sequentially, ensuring ordering (buffered channel doesn't affect ordering since only one goroutine reads from it)
 func (ws *webSocketStreams) writeLoop() {
 	defer close(ws.doneChan)
 

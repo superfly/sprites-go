@@ -304,8 +304,8 @@ func (s *System) StartProcess() error {
 
 		// Start port watcher for the container process
 		if err := s.startPortWatcher(pid); err != nil {
-			s.logger.Error("StartProcess: Failed to start port watcher for container process", "error", err)
-			return fmt.Errorf("failed to start port watcher for container process: %w", err)
+			s.logger.Warn("StartProcess: Failed to start port watcher for container process (continuing without port monitoring)", "error", err)
+			// Continue without port watcher - it's not critical for basic functionality
 		}
 
 	} else {
@@ -332,8 +332,8 @@ func (s *System) StartProcess() error {
 
 		// Start port watcher for the basic supervisor process
 		if err := s.startPortWatcher(pid); err != nil {
-			s.logger.Error("StartProcess: Failed to start port watcher for basic supervisor process", "error", err)
-			return fmt.Errorf("failed to start port watcher for basic supervisor process: %w", err)
+			s.logger.Warn("StartProcess: Failed to start port watcher for basic supervisor process (continuing without port monitoring)", "error", err)
+			// Continue without port watcher - it's not critical for basic functionality
 		}
 
 		// For non-container processes, close the ready channel immediately

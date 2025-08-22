@@ -24,7 +24,6 @@ func TestNewSession(t *testing.T) {
 
 func TestSessionWithOptions(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	transcript := NewMemoryTranscript()
 
 	s := NewSession(
 		WithCommand("echo", "hello", "world"),
@@ -32,7 +31,6 @@ func TestSessionWithOptions(t *testing.T) {
 		WithEnv([]string{"TEST=value"}),
 		WithDir("/tmp"),
 		WithTerminalSize(80, 24),
-		WithTranscript(transcript),
 		WithLogger(logger),
 	)
 
@@ -54,9 +52,6 @@ func TestSessionWithOptions(t *testing.T) {
 	if s.initialCols != 80 || s.initialRows != 24 {
 		t.Errorf("expected terminal size 80x24, got %dx%d", s.initialCols, s.initialRows)
 	}
-	if s.transcript != transcript {
-		t.Error("expected transcript to be set")
-	}
 	if s.logger != logger {
 		t.Error("expected logger to be set")
 	}
@@ -66,11 +61,9 @@ func TestRunWithoutTTY(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	transcript := NewMemoryTranscript()
 	s := NewSession(
 		WithCommand("echo", "hello world"),
 		WithTTY(false),
-		WithTranscript(transcript),
 	)
 
 	stdin := strings.NewReader("")
@@ -90,12 +83,6 @@ func TestRunWithoutTTY(t *testing.T) {
 	if !strings.Contains(output, "hello world") {
 		t.Errorf("expected output to contain 'hello world', got %q", output)
 	}
-
-	// Check transcript
-	stdoutData := transcript.GetStreamData("stdout")
-	if !strings.Contains(string(stdoutData), "hello world") {
-		t.Errorf("expected transcript to contain 'hello world', got %q", string(stdoutData))
-	}
 }
 
 func TestRunWithTTY(t *testing.T) {
@@ -107,12 +94,10 @@ func TestRunWithTTY(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	transcript := NewMemoryTranscript()
 	s := NewSession(
 		WithCommand("echo", "hello pty"),
 		WithTTY(true),
 		WithTerminalSize(80, 24),
-		WithTranscript(transcript),
 	)
 
 	stdin := strings.NewReader("")
@@ -132,12 +117,6 @@ func TestRunWithTTY(t *testing.T) {
 	output := stdout.String()
 	if !strings.Contains(output, "hello pty") {
 		t.Errorf("expected output to contain 'hello pty', got %q", output)
-	}
-
-	// Check transcript
-	stdoutData := transcript.GetStreamData("stdout")
-	if !strings.Contains(string(stdoutData), "hello pty") {
-		t.Errorf("expected transcript to contain 'hello pty', got %q", string(stdoutData))
 	}
 }
 
@@ -168,11 +147,9 @@ func TestRunWithStdinInput(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	transcript := NewMemoryTranscript()
 	s := NewSession(
 		WithCommand("cat"),
 		WithTTY(false),
-		WithTranscript(transcript),
 	)
 
 	input := "test input line\n"
@@ -192,17 +169,6 @@ func TestRunWithStdinInput(t *testing.T) {
 	output := stdout.String()
 	if output != input {
 		t.Errorf("expected output %q, got %q", input, output)
-	}
-
-	// Check transcript recorded both stdin and stdout
-	stdinData := transcript.GetStreamData("stdin")
-	if string(stdinData) != input {
-		t.Errorf("expected stdin transcript %q, got %q", input, string(stdinData))
-	}
-
-	stdoutData := transcript.GetStreamData("stdout")
-	if string(stdoutData) != input {
-		t.Errorf("expected stdout transcript %q, got %q", input, string(stdoutData))
 	}
 }
 

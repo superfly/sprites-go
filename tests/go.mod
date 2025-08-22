@@ -5,6 +5,7 @@ go 1.24.4
 require (
 	github.com/alecthomas/assert/v2 v2.11.0
 	github.com/creack/pty v1.1.24
+	github.com/gorilla/websocket v1.5.3
 )
 
 require (

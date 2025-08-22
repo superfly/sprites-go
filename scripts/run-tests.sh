@@ -43,6 +43,9 @@ run_test "lib tests" "go test -v -failfast ./lib/..."
 # Run server tests
 run_test "server tests" "go test -v -failfast ./server/..."
 
+# Run integration tests (Docker-based)
+run_test "integration tests" "(cd tests && go mod tidy && go test -v -failfast -timeout 10m -run TestExecIntegration)"
+
 # All tests passed if we reach here
 echo
 echo -e "${GREEN}All tests passed!${NC}" 

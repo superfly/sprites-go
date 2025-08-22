@@ -15,7 +15,6 @@ import (
 	"github.com/sprite-env/lib/api"
 
 	"github.com/superfly/sprite-env/packages/juicefs"
-	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
 // mockSystemManager implements SystemManager for testing
@@ -168,25 +167,6 @@ func (m *mockSystemManager) WaitForProcessRunning(ctx context.Context) error {
 func (m *mockSystemManager) WaitForJuiceFS(ctx context.Context) error {
 	// Mock always returns immediately as if JuiceFS is ready
 	return nil
-}
-
-func (m *mockSystemManager) EnableTranscripts(ctx context.Context) error {
-	return nil
-}
-
-func (m *mockSystemManager) DisableTranscripts(ctx context.Context) error {
-	return nil
-}
-
-func (m *mockSystemManager) IsTranscriptsEnabled() bool {
-	return false
-}
-
-func (m *mockSystemManager) CreateTranscriptCollector(
-	env []string,
-	ty bool,
-) (terminal.TranscriptCollector, error) {
-	return nil, nil
 }
 
 func (m *mockSystemManager) Boot(ctx context.Context) error {

@@ -2,7 +2,7 @@
 // +build !clientonly
 
 // Package terminal provides a reusable library for interactive and non-interactive
-// command execution with PTY support and transcript recording.
+// command execution with PTY support.
 package terminal
 
 import (
@@ -37,9 +37,6 @@ type Session struct {
 
 	// Wrapper command (e.g., exec.sh)
 	wrapperCommand []string
-
-	// Transcript recording
-	transcript TranscriptCollector
 
 	// Logging
 	logger *slog.Logger
@@ -123,13 +120,6 @@ func WithConsoleSocket(path string) Option {
 	}
 }
 
-// WithTranscript sets the transcript collector for recording session I/O.
-func WithTranscript(collector TranscriptCollector) Option {
-	return func(s *Session) {
-		s.transcript = collector
-	}
-}
-
 // WithLogger sets the logger for the session.
 func WithLogger(logger *slog.Logger) Option {
 	return func(s *Session) {
@@ -186,21 +176,15 @@ func (s *Session) Resize(cols, rows uint16) error {
 // Run executes the configured command with the given I/O streams.
 // Returns the exit code and any error that occurred during execution.
 func (s *Session) Run(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
-	transcript := s.transcript
-	if transcript == nil {
-		transcript = &NoopTranscript{}
-	}
-	defer transcript.Close()
-
 	cmd, err := s.buildCommand(ctx)
 	if err != nil {
 		return -1, fmt.Errorf("failed to build command: %w", err)
 	}
 
 	if s.tty {
-		return s.runWithTTY(ctx, cmd, stdin, stdout, transcript)
+		return s.runWithTTY(ctx, cmd, stdin, stdout)
 	}
-	return s.runWithoutTTY(ctx, cmd, stdin, stdout, stderr, transcript)
+	return s.runWithoutTTY(ctx, cmd, stdin, stdout, stderr)
 }
 
 // buildCommand creates the exec.Cmd with proper configuration.
@@ -263,16 +247,16 @@ func (s *Session) buildCommand(ctx context.Context) (*exec.Cmd, error) {
 }
 
 // runWithTTY executes the command with PTY support.
-func (s *Session) runWithTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Reader, stdout io.Writer, transcript TranscriptCollector) (int, error) {
+func (s *Session) runWithTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Reader, stdout io.Writer) (int, error) {
 	// Use console socket if specified, otherwise create a new PTY
 	if s.consoleSocket != "" {
-		return s.runWithConsoleSocket(ctx, cmd, stdin, stdout, transcript)
+		return s.runWithConsoleSocket(ctx, cmd, stdin, stdout)
 	}
-	return s.runWithNewPTY(ctx, cmd, stdin, stdout, transcript)
+	return s.runWithNewPTY(ctx, cmd, stdin, stdout)
 }
 
 // runWithNewPTY runs the command with a newly allocated PTY.
-func (s *Session) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, stdin io.Reader, stdout io.Writer, transcript TranscriptCollector) (int, error) {
+func (s *Session) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, stdin io.Reader, stdout io.Writer) (int, error) {
 	// Ensure TERM is set for PTY mode (only if not already set)
 	termSet := false
 	colorTermSet := false
@@ -357,7 +341,7 @@ func (s *Session) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, stdin io.Rea
 
 	// Start PTY I/O handling BEFORE starting the command
 	// This ensures we're ready to receive output immediately
-	ioWg := s.startPTYIO(ctx, ptmx, stdin, stdout, transcript)
+	ioWg := s.startPTYIO(ctx, ptmx, stdin, stdout)
 
 	// Now start the command
 	if err := cmd.Start(); err != nil {
@@ -427,7 +411,7 @@ func (s *Session) runWithNewPTY(ctx context.Context, cmd *exec.Cmd, stdin io.Rea
 }
 
 // runWithConsoleSocket runs the command using crun's console socket.
-func (s *Session) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd, stdin io.Reader, stdout io.Writer, transcript TranscriptCollector) (int, error) {
+func (s *Session) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd, stdin io.Reader, stdout io.Writer) (int, error) {
 	tty, err := container.NewWithPath(s.consoleSocket)
 	if err != nil {
 		if s.logger != nil {
@@ -543,13 +527,13 @@ func (s *Session) runWithConsoleSocket(ctx context.Context, cmd *exec.Cmd, stdin
 		// Continue anyway - PTY will work but might have echo issues
 	}
 
-	s.handlePTYIO(ctx, ptyFile, stdin, stdout, transcript)
+	s.handlePTYIO(ctx, ptyFile, stdin, stdout)
 	cmdErr := cmd.Wait()
 	return getExitCode(cmdErr), nil
 }
 
 // runWithoutTTY executes the command without PTY, using separate streams.
-func (s *Session) runWithoutTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Reader, stdout, stderr io.Writer, transcript TranscriptCollector) (int, error) {
+func (s *Session) runWithoutTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 	// Set up process group for non-TTY sessions
 	// This ensures child processes are killed when the parent is killed
 	if cmd.SysProcAttr == nil {
@@ -578,22 +562,19 @@ func (s *Session) runWithoutTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Rea
 	// Copy stdin to the process
 	go func() {
 		defer stdinPipe.Close()
-		teeReader := io.TeeReader(stdin, transcript.StreamWriter("stdin"))
-		io.Copy(stdinPipe, teeReader)
+		io.Copy(stdinPipe, stdin)
 	}()
 
 	// Stream stdout to destination
 	go func() {
 		defer close(stdoutDone)
-		multiWriter := io.MultiWriter(stdout, transcript.StreamWriter("stdout"))
-		io.Copy(multiWriter, stdoutReader)
+		io.Copy(stdout, stdoutReader)
 	}()
 
 	// Stream stderr to destination
 	go func() {
 		defer close(stderrDone)
-		multiWriter := io.MultiWriter(stderr, transcript.StreamWriter("stderr"))
-		io.Copy(multiWriter, stderrReader)
+		io.Copy(stderr, stderrReader)
 	}()
 
 	// Start the command
@@ -633,16 +614,12 @@ func (s *Session) runWithoutTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Rea
 // startPTYIO starts I/O goroutines for PTY handling and returns a WaitGroup.
 // The caller should wait on the WaitGroup after the process exits to ensure
 // all data has been read before closing the PTY.
-func (s *Session) startPTYIO(ctx context.Context, pty *os.File, stdin io.Reader, stdout io.Writer, transcript TranscriptCollector) *sync.WaitGroup {
-	inLog := transcript.StreamWriter("stdin")
-	outLog := transcript.StreamWriter("stdout")
-
+func (s *Session) startPTYIO(ctx context.Context, pty *os.File, stdin io.Reader, stdout io.Writer) *sync.WaitGroup {
 	var wg sync.WaitGroup
 
 	// Handle stdin -> PTY
 	go func() {
-		teeReader := io.TeeReader(stdin, inLog)
-		io.Copy(pty, teeReader)
+		io.Copy(pty, stdin)
 		// This will exit when stdin is closed or PTY write fails
 	}()
 
@@ -650,8 +627,7 @@ func (s *Session) startPTYIO(ctx context.Context, pty *os.File, stdin io.Reader,
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		multiWriter := io.MultiWriter(stdout, outLog)
-		io.Copy(multiWriter, pty)
+		io.Copy(stdout, pty)
 		// This will exit when PTY is closed (EOF)
 	}()
 
@@ -660,8 +636,8 @@ func (s *Session) startPTYIO(ctx context.Context, pty *os.File, stdin io.Reader,
 
 // handlePTYIO manages I/O between the PTY and the provided streams.
 // This is now deprecated in favor of startPTYIO but kept for console socket compatibility.
-func (s *Session) handlePTYIO(ctx context.Context, pty *os.File, stdin io.Reader, stdout io.Writer, transcript TranscriptCollector) {
-	wg := s.startPTYIO(ctx, pty, stdin, stdout, transcript)
+func (s *Session) handlePTYIO(ctx context.Context, pty *os.File, stdin io.Reader, stdout io.Writer) {
+	wg := s.startPTYIO(ctx, pty, stdin, stdout)
 	wg.Wait()
 }
 

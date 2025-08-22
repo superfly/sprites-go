@@ -150,19 +150,6 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 		})
 	}))
 
-	if h.system.IsTranscriptsEnabled() {
-		envVars := query["env"]
-
-		transcriptCollector, err := h.system.CreateTranscriptCollector(envVars, tty)
-		if err != nil {
-			h.logger.Error("Failed to create transcript collector", "error", err)
-			// Fail the request if transcript creation fails
-			http.Error(w, "Failed to create transcript collector", http.StatusInternalServerError)
-			return
-		}
-		options = append(options, terminal.WithTranscript(transcriptCollector))
-	}
-
 	var (
 		session   = terminal.NewSession(options...)
 		wsHandler = terminal.NewWebSocketHandler(session).WithOnConnected(func(sender terminal.TextMessageSender) {

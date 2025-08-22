@@ -11,4 +11,5 @@ use (
 	./pkg/terminal
 	./pkg/sync
 	./server
+	./tests
 )

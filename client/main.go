@@ -157,8 +157,7 @@ func main() {
 		commands.ListCommand(globalCtx, subArgs)
 	case "org", "orgs", "organizations", "organization", "o":
 		commands.OrgCommand(globalCtx, subArgs)
-	case "transcripts":
-		commands.TranscriptsCommand(globalCtx, subArgs)
+
 	case "proxy":
 		commands.ProxyCommand(globalCtx, subArgs)
 	case "sync":
@@ -192,9 +191,7 @@ Commands:
     info <id>                Show information about a specific checkpoint
   restore <id>               Restore from a checkpoint
   destroy                    Destroy the current sprite
-  transcripts <subcommand>   Manage transcript recording
-    enable                   Enable transcript recording for future exec calls
-    disable                  Disable transcript recording for future exec calls
+
   proxy <port1> [port2...]   Forward local ports through the remote server proxy
   sync                       Synchronize git repository to sprite environment
   api [options] <path>       Make authenticated API calls with curl
@@ -264,11 +261,7 @@ Examples:
   # Destroy current sprite
   sprite destroy
 
-  # Enable transcript recording
-  sprite transcripts enable
 
-  # Disable transcript recording
-  sprite transcripts disable
 
   # Forward local ports 8080 and 3000
   sprite proxy 8080 3000

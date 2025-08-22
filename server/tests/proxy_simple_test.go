@@ -14,7 +14,6 @@ import (
 	"github.com/sprite-env/lib/api"
 	"github.com/sprite-env/server/api/handlers"
 	"github.com/superfly/sprite-env/packages/juicefs"
-	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
 // Note: These proxy tests were designed for the old HTTP CONNECT approach.
@@ -290,18 +289,7 @@ func (m *simpleSystemManager) UnsubscribeFromReapEvents(ch <-chan int) {}
 func (m *simpleSystemManager) WasProcessReaped(pid int) (bool, time.Time) {
 	return false, time.Time{}
 }
-func (m *simpleSystemManager) EnableTranscripts(ctx context.Context) error {
-	return nil
-}
-func (m *simpleSystemManager) DisableTranscripts(ctx context.Context) error {
-	return nil
-}
-func (m *simpleSystemManager) IsTranscriptsEnabled() bool {
-	return false
-}
-func (m *simpleSystemManager) CreateTranscriptCollector(env []string, ty bool) (terminal.TranscriptCollector, error) {
-	return nil, nil
-}
+
 func (m *simpleSystemManager) Boot(ctx context.Context) error {
 	return nil
 }

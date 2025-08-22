@@ -213,8 +213,14 @@ func FetchFlyOrganizations(token string) ([]FlyOrganization, error) {
 
 // CreateSpriteToken creates a sprite token for the selected organization
 func CreateSpriteToken(flyToken string, orgSlug string) (string, error) {
-	// Use api.sprites.dev to create organization-specific sprite tokens
-	url := fmt.Sprintf("https://api.sprites.dev/v1/organizations/%s/tokens", orgSlug)
+	// Get API URL from environment or use default
+	apiURL := "https://api.sprites.dev"
+	if envURL := os.Getenv("SPRITES_API_URL"); envURL != "" {
+		apiURL = strings.TrimRight(envURL, "/")
+	}
+
+	// Use the API URL to create organization-specific sprite tokens
+	url := fmt.Sprintf("%s/v1/organizations/%s/tokens", apiURL, orgSlug)
 
 	// First attempt without invite code
 	token, statusCode, err := createSpriteTokenWithInvite(flyToken, url, "")

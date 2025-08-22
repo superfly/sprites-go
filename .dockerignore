@@ -19,8 +19,6 @@ scripts
 # Development and testing
 *_test.go
 *.test
-test/
-tests/
 spec/
 **/test-scripts/
 **/*_test.go
@@ -106,23 +104,9 @@ Dockerfile.test
 .gitlab-ci.yml
 .travis.yml
 
-<<<<<<< HEAD
 # Miscellaneous
 TODO.md
 TOKENS.md
 AGENTS.md
 dear_llm.md
 dear-llm.md
-||||||| parent of 2ab47c6 (we have cmd/ now)
-# Issue tracking
-issues/
-
-# Config examples (but keep actual configs)
-config.example.json
-=======
-# Issue tracking
-issues/
-
-# Config examples (but keep actual configs)
-config.example.json
->>>>>>> 2ab47c6 (we have cmd/ now)

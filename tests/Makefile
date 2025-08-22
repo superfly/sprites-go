@@ -38,10 +38,31 @@ test-race-condition:
 	@echo "Running race condition test..."
 	GOWORK=off go test -v -timeout $(TIMEOUT) -run TestExecRaceCondition
 
+# Docker-based integration tests
+test-docker:
+	@echo "Running Docker-based integration tests..."
+	GOWORK=off go test -v -timeout $(TIMEOUT) -run TestExecIntegration
+
+test-websocket-protocol:
+	@echo "Running WebSocket protocol tests..."
+	GOWORK=off go test -v -timeout $(TIMEOUT) -run TestExecIntegration/BasicCommand
+
+test-edge-cases:
+	@echo "Running edge case tests..."
+	GOWORK=off go test -v -timeout $(TIMEOUT) -run TestExecIntegration/ExitCodes
+
+test-performance:
+	@echo "Running performance tests..."
+	GOWORK=off go test -v -timeout $(TIMEOUT) -run TestExecIntegration/LargeOutput
+
+# All tests (Docker-based)
+test-all: test-docker
+
 # Clean up built artifacts
 clean:
 	@echo "Cleaning up..."
 	rm -rf ../dist
+	rm -rf test-artifacts
 
 # Show help
 help:
