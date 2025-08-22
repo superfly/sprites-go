@@ -142,7 +142,7 @@ func (om *OverlayManager) EnsureImage() error {
 		"-b", "4096", // 4K blocks align with page size and JuiceFS
 		"-i", "16384", // One inode per 16K for overlayfs metadata files
 		"-m", "0", // No reserved blocks (it's a dedicated overlay)
-		"-E", "lazy_itable_init=0,lazy_journal_init=0,stride=1024,stripe-width=1024", // Optimize for 4MB blocks
+		"-E", "lazy_itable_init=1,lazy_journal_init=1,stride=1024,stripe-width=1024", // Optimize for 4MB blocks
 		"-O", "extent,huge_file,flex_bg,dir_nlink,extra_isize,sparse_super2", // Enable optimizations
 		"-J", "size=128", // 128MB journal for good performance
 		om.imagePath)

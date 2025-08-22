@@ -832,7 +832,6 @@ func (j *JuiceFS) formatJuiceFS(ctx context.Context, metaURL string) error {
 		localStoragePath := filepath.Join(j.config.BaseDir, "local")
 		cmd = exec.CommandContext(ctx, "juicefs", "format",
 			"--storage", "file",
-			"--no-credential-store", // only use creds from env vars
 			"--bucket", localStoragePath,
 			"--trash-days", "7",
 			metaURL,
@@ -843,6 +842,7 @@ func (j *JuiceFS) formatJuiceFS(ctx context.Context, metaURL string) error {
 		bucketURL := fmt.Sprintf("%s/%s", j.config.S3EndpointURL, j.config.S3Bucket)
 		cmd = exec.CommandContext(ctx, "juicefs", "format",
 			"--storage", "s3",
+			"--no-credential-store", // only use creds from env vars
 			"--bucket", bucketURL,
 			"--trash-days", "7",
 			metaURL,
