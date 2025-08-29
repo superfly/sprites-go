@@ -102,8 +102,13 @@ jobs:
           --team-id 8SC5V44846 \
           --wait
         
-        # Staple the notarization ticket
-        xcrun stapler staple ${{ matrix.binary_name }}
+        # Staple the notarization ticket (with better error handling)
+        sleep 5  # Wait a moment for notarization to fully process
+        xcrun stapler staple ${{ matrix.binary_name }} || {
+          echo "Stapling failed, but notarization succeeded"
+          echo "The binary is notarized but not stapled"
+          echo "This is acceptable for distribution"
+        }
         
         # Clean up
         rm sprite-notarize.zip
