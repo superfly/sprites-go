@@ -64,6 +64,50 @@ jobs:
         GOOS: ${{ matrix.goos }}
         GOARCH: ${{ matrix.goarch }}
     
+    - name: Install macOS certificate
+      if: matrix.goos == 'darwin'
+      run: |
+        # Create keychain
+        security create-keychain -p "" build.keychain
+        security list-keychains -s build.keychain
+        security default-keychain -s build.keychain
+        security unlock-keychain -p "" build.keychain
+        security set-keychain-settings build.keychain
+        
+        # Import certificate
+        echo "${{ secrets.MACOS_CERTIFICATE_P12 }}" | base64 -d > certificate.p12
+        security import certificate.p12 -k build.keychain -P "${{ secrets.MACOS_CERTIFICATE_PASSWORD }}" -T /usr/bin/codesign
+        security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" build.keychain
+        
+        # Clean up
+        rm certificate.p12
+    
+    - name: Code sign macOS binary
+      if: matrix.goos == 'darwin'
+      working-directory: ./client
+      run: |
+        codesign --force --options runtime --sign "Developer ID Application: Fly.io, Inc (8SC5V44846)" ${{ matrix.binary_name }}
+    
+    - name: Notarize macOS binary
+      if: matrix.goos == 'darwin'
+      working-directory: ./client
+      run: |
+        # Create temporary zip for notarization
+        ditto -c -k --keepParent ${{ matrix.binary_name }} sprite-notarize.zip
+        
+        # Submit for notarization
+        xcrun notarytool submit sprite-notarize.zip \
+          --apple-id ${{ secrets.APPLE_ID }} \
+          --password ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }} \
+          --team-id 8SC5V44846 \
+          --wait
+        
+        # Staple the notarization ticket
+        xcrun stapler staple ${{ matrix.binary_name }}
+        
+        # Clean up
+        rm sprite-notarize.zip
+    
     - name: Create Windows archive
       if: matrix.goos == 'windows'
       working-directory: ./client
