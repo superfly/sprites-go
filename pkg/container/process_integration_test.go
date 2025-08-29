@@ -46,12 +46,18 @@ func TestProcessIntegration(t *testing.T) {
 
 	// Read output
 	var buf bytes.Buffer
-	go io.Copy(&buf, stdoutPipe)
+	done := make(chan bool)
+	go func() {
+		io.Copy(&buf, stdoutPipe)
+		done <- true
+	}()
 
 	// Wait for completion
 	if err := process.Wait(); err != nil {
 		t.Fatalf("Process failed: %v", err)
 	}
+
+	<-done
 
 	// Check output
 	output := strings.TrimSpace(buf.String())

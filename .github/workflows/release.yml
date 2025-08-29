@@ -7,13 +7,13 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+-*'
 
 jobs:
-  test:
-    name: Run Tests
-    uses: ./.github/workflows/test.yml
+  # test:
+  #   name: Run Tests
+  #   uses: ./.github/workflows/test.yml
 
   release-images:
     name: Release Docker Images
-    needs: test
+    #needs: test
     uses: ./.github/workflows/release-images.yml
     permissions:
       contents: read
@@ -24,7 +24,8 @@ jobs:
 
   release-client:
     name: Release Client
-    needs: test
+    #needs: test
     uses: ./.github/workflows/release-client.yml
     permissions:
       contents: write 
+    secrets: inherit

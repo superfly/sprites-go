@@ -48,6 +48,13 @@ func NewProcess(config ProcessConfig) (*Process, error) {
 		socketPath := fmt.Sprintf("%s/container-process-%d-%d.sock",
 			GetSocketDir(), os.Getpid(), time.Now().UnixNano())
 
+		if config.Logger != nil {
+			config.Logger.Info("Container support enabled, creating TTY manager",
+				"socketPath", socketPath,
+				"command", config.Command,
+				"args", config.Args)
+		}
+
 		// Create TTY manager
 		var err error
 		tty, err = NewWithPath(socketPath)
@@ -60,6 +67,11 @@ func NewProcess(config ProcessConfig) (*Process, error) {
 			config.Env = os.Environ()
 		}
 		config.Env = append(config.Env, fmt.Sprintf("CONSOLE_SOCKET=%s", socketPath))
+
+		if config.Logger != nil {
+			config.Logger.Info("Added CONSOLE_SOCKET to environment",
+				"CONSOLE_SOCKET", socketPath)
+		}
 
 		// Note: CONTAINER_WRAPPED env var is set later only for actual container processes
 
@@ -80,14 +92,18 @@ func NewProcess(config ProcessConfig) (*Process, error) {
 		return nil, fmt.Errorf("failed to create supervisor: %w", err)
 	}
 
-	// Extract container ID from command if this is a container process
+	// Extract container ID from command
 	var containerID string
 	if tty != nil {
 		containerID = extractContainerID(config.Command, config.Args)
 
-		// Add CONTAINER_WRAPPED env var only for actual container processes
-		if containerID != "" && isContainerCommand(config.Command, config.Args) {
-			config.Env = append(config.Env, "CONTAINER_WRAPPED=true")
+		// Add CONTAINER_WRAPPED env var since this is a container process
+		config.Env = append(config.Env, "CONTAINER_WRAPPED=true")
+		if config.Logger != nil {
+			config.Logger.Info("Container process configured",
+				"containerID", containerID,
+				"command", config.Command,
+				"socketPath", tty.SocketPath())
 		}
 	}
 
@@ -100,25 +116,11 @@ func NewProcess(config ProcessConfig) (*Process, error) {
 	}, nil
 }
 
-// isContainerCommand checks if a command is running a container
-func isContainerCommand(command string, args []string) bool {
-	// Check if the command looks like a container runtime
-	if strings.Contains(command, "crun") || strings.Contains(command, "runc") {
-		return true
-	}
-
-	// Check if the command is the exec.sh script
-	if strings.Contains(command, "exec.sh") || strings.Contains(command, "/exec.sh") {
-		return true
-	}
-
-	return false
-}
-
 // extractContainerID attempts to extract the container ID from command and args
 func extractContainerID(command string, args []string) string {
-	// For base-env/exec.sh, the container ID is hardcoded as "app"
-	if strings.Contains(command, "exec.sh") || strings.Contains(command, "/exec.sh") {
+	// For base-env/exec.sh and launch.sh, the container ID is hardcoded as "app"
+	if strings.Contains(command, "exec.sh") || strings.Contains(command, "/exec.sh") ||
+		strings.Contains(command, "launch.sh") || strings.Contains(command, "/launch.sh") {
 		return "app"
 	}
 
@@ -132,16 +134,21 @@ func extractContainerID(command string, args []string) string {
 		}
 	}
 
-	// Default fallback for container commands
-	if isContainerCommand(command, args) {
-		return "app"
-	}
-
-	return ""
+	// Default container ID
+	return "app"
 }
 
 // Start starts the process and returns its PID
 func (p *Process) Start() (int, error) {
+	if p.config.Logger != nil {
+		p.config.Logger.Debug("Process.Start called",
+			"command", p.config.Command,
+			"args", p.config.Args,
+
+			"hasTTY", p.tty != nil,
+			"containerID", p.containerID)
+	}
+
 	// Start the process using supervisor
 	pid, err := p.Supervisor.Start()
 	if err != nil {
@@ -151,14 +158,23 @@ func (p *Process) Start() (int, error) {
 	// Start TTY forwarding if configured and containers are enabled
 	if p.config.TTYOutput != nil && p.tty != nil {
 		go p.forwardTTY()
-	} else if p.tty != nil && p.isContainerProcess() {
-		// For container processes without TTY output, we still need to wait for the PTY
+	} else if p.tty != nil {
+		// For processes without TTY output, we still need to wait for the PTY
 		// and first byte to ensure the container is ready before signaling readiness
 		go func() {
+			if p.config.Logger != nil {
+				p.config.Logger.Debug("Starting PTY wait goroutine for container process",
+					"containerID", p.containerID,
+					"socketPath", p.tty.SocketPath())
+			}
+
 			pty, err := p.GetTTY()
 			if err != nil {
 				if p.config.Logger != nil {
-					p.config.Logger.Debug("Container PTY wait failed (non-TTY mode)", "error", err)
+					p.config.Logger.Warn("Container PTY wait failed (non-TTY mode)",
+						"error", err,
+						"containerID", p.containerID,
+						"socketPath", p.tty.SocketPath())
 				}
 				// Signal ready anyway
 				select {
@@ -171,6 +187,11 @@ func (p *Process) Start() (int, error) {
 			}
 			defer pty.Close()
 
+			if p.config.Logger != nil {
+				p.config.Logger.Debug("Got PTY from container, waiting for first byte",
+					"containerID", p.containerID)
+			}
+
 			// Wait for first byte to ensure container is running
 			// Use timeout to avoid blocking indefinitely
 			readyChan := make(chan bool, 1)
@@ -182,13 +203,16 @@ func (p *Process) Start() (int, error) {
 
 			// Wait for first byte or timeout
 			select {
-			case <-readyChan:
+			case gotByte := <-readyChan:
 				if p.config.Logger != nil {
-					p.config.Logger.Debug("Container ready check complete (non-TTY mode)")
+					p.config.Logger.Debug("Container ready check complete (non-TTY mode)",
+						"gotFirstByte", gotByte,
+						"containerID", p.containerID)
 				}
 			case <-time.After(2 * time.Second):
 				if p.config.Logger != nil {
-					p.config.Logger.Debug("Timeout waiting for first byte (non-TTY mode)")
+					p.config.Logger.Debug("Timeout waiting for first byte (non-TTY mode)",
+						"containerID", p.containerID)
 				}
 			}
 
@@ -312,7 +336,7 @@ func GetContainerPID(wrapperPID int) (int, error) {
 
 // cleanupContainer runs crun delete -f to clean up orphaned containers
 func (p *Process) cleanupContainer() {
-	if p.containerID == "" || !p.isContainerProcess() {
+	if p.containerID == "" {
 		return
 	}
 
@@ -410,23 +434,36 @@ func (p *Process) GetTTY() (*os.File, error) {
 		timeout = 5 * time.Second
 	}
 
+	if p.config.Logger != nil {
+		p.config.Logger.Debug("GetTTY: Waiting for PTY from container",
+			"timeout", timeout,
+			"socketPath", p.tty.SocketPath(),
+			"containerID", p.containerID)
+	}
+
 	pty, err := p.tty.GetWithTimeout(timeout)
 	if err != nil {
+		if p.config.Logger != nil {
+			p.config.Logger.Error("GetTTY: Failed to get PTY",
+				"error", err,
+				"timeout", timeout,
+				"socketPath", p.tty.SocketPath(),
+				"containerID", p.containerID)
+		}
 		return nil, err
 	}
 
-	// If this is a container process and we don't have the container PID yet,
+	// If we don't have the container PID yet,
 	// discover it now that the container is running and connected
-	if p.isContainerProcess() && p.containerPID == 0 {
+	if p.containerPID == 0 {
 		if p.config.Logger != nil {
-			p.config.Logger.Debug("Container process detected, attempting to find container PID",
-				"isContainer", p.isContainerProcess(),
+			p.config.Logger.Debug("Attempting to find container PID",
 				"currentContainerPID", p.containerPID)
 		}
 		p.findContainerProcess()
 	} else if p.config.Logger != nil {
 		p.config.Logger.Debug("Skipping container PID discovery",
-			"isContainer", p.isContainerProcess(),
+
 			"currentContainerPID", p.containerPID)
 	}
 
@@ -443,10 +480,21 @@ func (p *Process) TTYPath() (string, error) {
 }
 
 // WaitReady waits for the container to be ready (PTY received)
-// Returns immediately if not a container process or already ready
 func (p *Process) WaitReady(timeout time.Duration) error {
-	if p.tty == nil || !p.isContainerProcess() {
-		// Not a container process, consider it ready
+	if p.config.Logger != nil {
+		p.config.Logger.Debug("WaitReady called",
+			"timeout", timeout,
+			"hasTTY", p.tty != nil,
+			"containerID", p.containerID,
+			"command", p.config.Command,
+			"args", p.config.Args)
+	}
+
+	if p.tty == nil {
+		// No TTY manager, nothing to wait for
+		if p.config.Logger != nil {
+			p.config.Logger.Debug("WaitReady: No TTY manager, returning immediately")
+		}
 		return nil
 	}
 
@@ -463,8 +511,8 @@ func (p *Process) WaitReady(timeout time.Duration) error {
 
 // Stop gracefully stops the process and cleans up resources
 func (p *Process) Stop() error {
-	// For container processes, implement custom graceful shutdown with container cleanup
-	if p.isContainerProcess() {
+	// Implement custom graceful shutdown with container cleanup
+	if p.containerID != "" {
 		return p.stopContainerProcess()
 	}
 
@@ -519,6 +567,18 @@ func (p *Process) stopContainerProcess() error {
 		if p.tty != nil {
 			if closeErr := p.tty.Close(); closeErr != nil && err == nil {
 				err = closeErr
+			}
+		}
+		// Don't return an error if the process was terminated by our signal
+		// (which is expected behavior when we stop it)
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+					if status.Signaled() && status.Signal() == syscall.SIGTERM {
+						// Process was terminated by our SIGTERM, this is success
+						return nil
+					}
+				}
 			}
 		}
 		return err
@@ -581,23 +641,6 @@ func (p *Process) Close() error {
 		return p.tty.Close()
 	}
 	return nil
-}
-
-// isContainerProcess checks if this process appears to be running a container
-func (p *Process) isContainerProcess() bool {
-	// Use the shared container command detection logic
-	if isContainerCommand(p.config.Command, p.config.Args) {
-		return true
-	}
-
-	// Check if CONTAINER_WRAPPED environment variable is set
-	for _, env := range p.config.Env {
-		if strings.HasPrefix(env, "CONTAINER_WRAPPED=") {
-			return strings.HasSuffix(env, "=true")
-		}
-	}
-
-	return false
 }
 
 // NewProcessBuilder provides a fluent interface for building process configurations

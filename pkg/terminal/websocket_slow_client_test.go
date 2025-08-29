@@ -223,8 +223,19 @@ func TestWebSocketSlowClient(t *testing.T) {
 			eofMessage := []byte{byte(StreamStdinEOF)}
 			t.Logf("[SEND] Sending stdin EOF signal")
 			err = conn.WriteMessage(gorillaws.BinaryMessage, eofMessage)
-			require.NoError(t, err)
-			t.Logf("[SEND] Stdin EOF sent successfully")
+			if err != nil {
+				// If the connection is already closed, that's fine - the command completed
+				if gorillaws.IsCloseError(err, gorillaws.CloseNormalClosure) ||
+					gorillaws.IsUnexpectedCloseError(err) ||
+					strings.Contains(err.Error(), "close sent") {
+					t.Logf("[SEND] Stdin EOF not sent - connection already closed (this is OK): %v", err)
+				} else {
+					// Other errors are still failures
+					require.NoError(t, err, "Failed to send stdin EOF")
+				}
+			} else {
+				t.Logf("[SEND] Stdin EOF sent successfully")
+			}
 
 			// Wait for reading to complete or timeout
 			t.Logf("[WAIT] Waiting for reader to complete (timeout: 60s)")

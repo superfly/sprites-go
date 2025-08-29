@@ -173,7 +173,7 @@ func (nm *NamespaceMonitor) scanNamespace(watcher *namespaceWatcher) {
 	nm.mu.RUnlock()
 
 	if targetPID == 0 {
-		log.Printf("Port watcher: no process found in namespace %s", watcher.namespaceID)
+		// log.Printf("Port watcher: no process found in namespace %s", watcher.namespaceID)
 		return
 	}
 

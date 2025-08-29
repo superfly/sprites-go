@@ -21,7 +21,7 @@ type Tty struct {
 func New() (*Tty, error) {
 	// Generate unique socket path in tmp
 	socketPath := fmt.Sprintf("/tmp/container-tty-%d-%d.sock", os.Getpid(), time.Now().UnixNano())
-	
+
 	return NewWithPath(socketPath)
 }
 
@@ -76,11 +76,9 @@ func (t *Tty) GetWithTimeout(timeout time.Duration) (*os.File, error) {
 	case err := <-t.errChan:
 		return nil, fmt.Errorf("failed to receive PTY: %w", err)
 	case <-timer.C:
-		return nil, fmt.Errorf("timeout waiting for PTY after %v", timeout)
+		return nil, fmt.Errorf("timeout waiting for PTY after %v on socket %s", timeout, t.socketPath)
 	}
 }
-
-
 
 // Close cleans up the Tty resources
 func (t *Tty) Close() error {
@@ -94,6 +92,11 @@ func (t *Tty) Close() error {
 // listen accepts connections and receives file descriptors
 func (t *Tty) listen() {
 	defer t.listener.Close()
+
+	// Set an accept deadline so we don't block forever
+	if ul, ok := t.listener.(*net.UnixListener); ok {
+		ul.SetDeadline(time.Now().Add(10 * time.Second))
+	}
 
 	// Accept a single connection
 	conn, err := t.listener.Accept()
@@ -109,40 +112,29 @@ func (t *Tty) listen() {
 	// Get the underlying Unix connection
 	unixConn, ok := conn.(*net.UnixConn)
 	if !ok {
-		select {
-		case t.errChan <- fmt.Errorf("not a Unix connection"):
-		default:
-		}
+		t.errChan <- fmt.Errorf("not a Unix connection")
 		return
 	}
 
 	// Receive the file descriptor
 	fd, err := recvFd(unixConn)
 	if err != nil {
-		select {
-		case t.errChan <- err:
-		default:
-		}
+		t.errChan <- err
 		return
 	}
 
 	// Convert FD to File
 	ptyFile := os.NewFile(uintptr(fd), "pty")
-	
-	// Send the PTY to the channel
-	select {
-	case t.ptyChan <- ptyFile:
-	default:
-		// Channel full, close the file
-		ptyFile.Close()
-	}
+
+	// Send the PTY to the channel - block until it can be sent
+	t.ptyChan <- ptyFile
 }
 
 // recvFd receives a file descriptor over a Unix domain socket
 func recvFd(conn *net.UnixConn) (int, error) {
 	// We need to receive at least 1 byte of data along with the FD
 	buf := make([]byte, 1)
-	oob := make([]byte, 32) // Space for control messages
+	oob := make([]byte, 32)
 
 	// Get the underlying file descriptor
 	file, err := conn.File()
@@ -161,6 +153,7 @@ func recvFd(conn *net.UnixConn) (int, error) {
 	if err != nil {
 		return -1, err
 	}
+
 	if n == 0 || oobn == 0 {
 		return -1, fmt.Errorf("no data or control message received")
 	}
@@ -174,7 +167,6 @@ func recvFd(conn *net.UnixConn) (int, error) {
 	// Look for the file descriptor
 	for _, msg := range msgs {
 		if msg.Header.Level == syscall.SOL_SOCKET && msg.Header.Type == syscall.SCM_RIGHTS {
-			// Parse the file descriptor
 			fds, err := syscall.ParseUnixRights(&msg)
 			if err != nil {
 				return -1, err
