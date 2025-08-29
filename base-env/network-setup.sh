@@ -28,7 +28,6 @@ OUT_IF=eth0  # change if your uplink is different
 
 # Enable kernel forwarding settings
 setup_sysctl() {
-    mount -o remount,rw /proc/sys
     sysctl -w net.ipv4.ip_forward=1 >/dev/null
     sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null
 }

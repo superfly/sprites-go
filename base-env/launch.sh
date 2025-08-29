@@ -31,11 +31,6 @@ if ! mount | grep -q "^overlay on /mnt/newroot type overlay"; then
   exit 1
 fi
 
-mount -o remount,rw /proc/sys
-
-sysctl -w net.ipv4.ip_forward=1
-sysctl -w net.ipv6.conf.all.forwarding=1
-
 mkdir -p /tmp/sprite
 
 # Store base config in a variable
