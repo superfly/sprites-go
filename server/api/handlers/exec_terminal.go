@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"time"
 
-	portwatcher "github.com/superfly/sprite-env/packages/port-watcher"
+	portwatcher "github.com/superfly/sprite-env/pkg/port-watcher"
 	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
@@ -60,8 +60,9 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 	h.logger.Debug("HandleExec: Command path", "path", path)
 
 	var (
-		args []string
-		tty  = (query.Get("tty") == "true")
+		args  []string
+		tty   = (query.Get("tty") == "true")
+		stdin = (query.Get("stdin") != "false") // Default to true for backward compatibility
 	)
 	if len(cmdArgs) > 1 {
 		args = cmdArgs[1:]
@@ -69,6 +70,7 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 	options := []terminal.Option{
 		terminal.WithCommand(path, args...),
 		terminal.WithTTY(tty),
+		terminal.WithStdin(stdin),
 	}
 
 	// Set console socket for TTY + wrapper combination
@@ -161,6 +163,7 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 		"path", path,
 		"args", args,
 		"tty", tty,
+		"stdin", stdin,
 		"wrapperCommand", h.execWrapperCommand)
 
 	startTime := time.Now()

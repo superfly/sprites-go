@@ -11,6 +11,13 @@ NC='\033[0m' # No Color
 echo -e "${YELLOW}Running all tests...${NC}"
 echo
 
+# If arguments are provided, treat them as a custom test command
+if [ "$#" -gt 0 ]; then
+    echo -e "${YELLOW}Running custom test command:${NC} $*"
+    eval "$@"
+    exit $?
+fi
+
 # Function to run tests and fail immediately on error
 run_test() {
     local test_name=$1
@@ -26,25 +33,22 @@ run_test() {
     fi
 }
 
-# Run tests for each package in packages/
-for package_dir in packages/*/; do
+# Run tests for each package in pkg/ that has a Makefile
+for package_dir in pkg/*/; do
     if [ -d "$package_dir" ] && [ -f "$package_dir/Makefile" ]; then
         package_name=$(basename "$package_dir")
-        run_test "package/$package_name tests" "(cd $package_dir && make test)"
+        run_test "pkg/$package_name tests" "(cd $package_dir && make test)"
     fi
 done
 
-# Run client tests
+# Run tests for all packages in root module
+run_test "pkg tests" "go test -v -failfast ./pkg/..."
 run_test "client tests" "go test -v -failfast ./client/..."
-
-# Run lib tests
 run_test "lib tests" "go test -v -failfast ./lib/..."
-
-# Run server tests
 run_test "server tests" "go test -v -failfast ./server/..."
 
 # Run integration tests (Docker-based)
-run_test "integration tests" "(cd tests && go mod tidy && go test -v -failfast -timeout 10m -run TestExecIntegration)"
+run_test "integration tests" "go test -v -failfast -timeout 10m -run TestExecIntegration ./tests/..."
 
 # All tests passed if we reach here
 echo

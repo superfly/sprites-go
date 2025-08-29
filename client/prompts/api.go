@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sprite-env/client/config"
+	"github.com/superfly/sprite-env/client/config"
 )
 
 // SpriteInfo represents basic sprite information

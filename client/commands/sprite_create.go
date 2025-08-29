@@ -11,9 +11,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/sprite-env/client/config"
-	"github.com/sprite-env/client/format"
-	"github.com/sprite-env/client/prompts"
+	"github.com/superfly/sprite-env/client/config"
+	"github.com/superfly/sprite-env/client/format"
+	"github.com/superfly/sprite-env/client/prompts"
 )
 
 // SpriteCreateRequest represents the request to create a sprite

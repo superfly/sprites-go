@@ -249,7 +249,6 @@ func TestRealPTYCommand(t *testing.T) {
 		t.Skip("PTY not supported on this system")
 	}
 	defer ptmx.Close()
-	defer tty.Close()
 
 	// Create command with PTY
 	cmd := exec.Command("/bin/sh", "-c", "echo 'PTY test'; echo $TERM; echo 'Done'")
@@ -265,12 +264,11 @@ func TestRealPTYCommand(t *testing.T) {
 	cmd.SysProcAttr.Setsid = true
 	cmd.SysProcAttr.Setctty = true
 
-	// Create server with PTY
-	ts := httptest.NewServer(Handler(cmd, WithPTY(ptmx)))
+	// Create server with PTY and pass the slave so it can be closed after cmd.Start()
+	ts := httptest.NewServer(Handler(cmd, WithPTY(ptmx), WithPTYSlave(tty)))
 	defer ts.Close()
 	c := dialWS(t, ts)
 	defer c.Close()
-
 	sOut, _, _ := waitUntilExit(t, c)
 	if !sOut {
 		t.Fatalf("missing stdout from PTY command")
@@ -284,7 +282,6 @@ func TestInteractivePTYCommand(t *testing.T) {
 		t.Skip("PTY not supported on this system")
 	}
 	defer ptmx.Close()
-	defer tty.Close()
 
 	// Create interactive command with PTY
 	cmd := exec.Command("/bin/sh", "-c", "echo 'Enter your name:'; read -r name; echo 'Hello, $name!'")
@@ -300,8 +297,8 @@ func TestInteractivePTYCommand(t *testing.T) {
 	cmd.SysProcAttr.Setsid = true
 	cmd.SysProcAttr.Setctty = true
 
-	// Create server with PTY
-	ts := httptest.NewServer(Handler(cmd, WithPTY(ptmx), WithStdin()))
+	// Create server with PTY and pass the slave so it can be closed after cmd.Start()
+	ts := httptest.NewServer(Handler(cmd, WithPTY(ptmx), WithPTYSlave(tty), WithStdin()))
 	defer ts.Close()
 	c := dialWS(t, ts)
 	defer c.Close()
@@ -329,7 +326,6 @@ func TestPTYExitCodeZero(t *testing.T) {
 		t.Skip("PTY not supported on this system")
 	}
 	defer ptmx.Close()
-	defer tty.Close()
 
 	cmd := exec.Command("/bin/sh", "-c", "echo 'PTY exit test'; exit 0")
 	cmd.Stdin = tty
@@ -343,7 +339,8 @@ func TestPTYExitCodeZero(t *testing.T) {
 	cmd.SysProcAttr.Setsid = true
 	cmd.SysProcAttr.Setctty = true
 
-	ts := httptest.NewServer(Handler(cmd, WithPTY(ptmx)))
+	// Create server with PTY and pass the slave so it can be closed after cmd.Start()
+	ts := httptest.NewServer(Handler(cmd, WithPTY(ptmx), WithPTYSlave(tty)))
 	defer ts.Close()
 	c := dialWS(t, ts)
 	defer c.Close()
@@ -361,7 +358,6 @@ func TestPTYExitCodeNonZero(t *testing.T) {
 		t.Skip("PTY not supported on this system")
 	}
 	defer ptmx.Close()
-	defer tty.Close()
 
 	cmd := exec.Command("/bin/sh", "-c", "echo 'PTY exit test'; exit 42")
 	cmd.Stdin = tty
@@ -375,7 +371,8 @@ func TestPTYExitCodeNonZero(t *testing.T) {
 	cmd.SysProcAttr.Setsid = true
 	cmd.SysProcAttr.Setctty = true
 
-	ts := httptest.NewServer(Handler(cmd, WithPTY(ptmx)))
+	// Create server with PTY and pass the slave so it can be closed after cmd.Start()
+	ts := httptest.NewServer(Handler(cmd, WithPTY(ptmx), WithPTYSlave(tty)))
 	defer ts.Close()
 	c := dialWS(t, ts)
 	defer c.Close()
@@ -394,7 +391,6 @@ func TestPTYExitCodeWithStderr(t *testing.T) {
 		t.Skip("PTY not supported on this system")
 	}
 	defer ptmx.Close()
-	defer tty.Close()
 
 	cmd := exec.Command("/bin/sh", "-c", "echo 'stdout message'; echo 'stderr message' 1>&2; exit 99")
 	cmd.Stdin = tty
@@ -408,7 +404,8 @@ func TestPTYExitCodeWithStderr(t *testing.T) {
 	cmd.SysProcAttr.Setsid = true
 	cmd.SysProcAttr.Setctty = true
 
-	ts := httptest.NewServer(Handler(cmd, WithPTY(ptmx)))
+	// Create server with PTY and pass the slave so it can be closed after cmd.Start()
+	ts := httptest.NewServer(Handler(cmd, WithPTY(ptmx), WithPTYSlave(tty)))
 	defer ts.Close()
 	c := dialWS(t, ts)
 	defer c.Close()

@@ -6,9 +6,7 @@ echo "Starting sprite-env test server..."
 # Change to workspace directory
 cd /workspace
 
-# Build the server from the root directory
-echo "Building sprite-server..."
-go build -o /opt/sprite/sprite-server ./server
+# Server binary is prebuilt in the image at /opt/sprite/sprite-server
 
 # Create test config with API token
 cat > /opt/sprite/config.json << 'EOF'

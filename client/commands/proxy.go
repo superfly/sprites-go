@@ -15,7 +15,7 @@ import (
 	"sync"
 
 	gorillaws "github.com/gorilla/websocket"
-	"github.com/sprite-env/client/format"
+	"github.com/superfly/sprite-env/client/format"
 )
 
 // ProxyInitMessage represents the initial message sent to specify the target

@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sprite-env/client/config"
-	"github.com/sprite-env/client/format"
-	"github.com/sprite-env/client/prompts"
+	"github.com/superfly/sprite-env/client/config"
+	"github.com/superfly/sprite-env/client/format"
+	"github.com/superfly/sprite-env/client/prompts"
 )
 
 // GlobalContext contains global state that should be available to all commands

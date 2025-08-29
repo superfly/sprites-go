@@ -14,9 +14,9 @@ import (
 
 	"log/slog"
 
-	"github.com/sprite-env/client/config"
-	"github.com/sprite-env/client/format"
-	"github.com/sprite-env/lib/api"
+	"github.com/superfly/sprite-env/client/config"
+	"github.com/superfly/sprite-env/client/format"
+	"github.com/superfly/sprite-env/lib/api"
 )
 
 // CheckpointCommand handles the checkpoint command

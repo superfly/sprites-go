@@ -1,0 +1,112 @@
+# Universal test container for running repo tests against the live workspace
+# Usage examples (run from repo root):
+#   Build once:
+#     docker build -f Dockerfile.test -t sprite-env-tests .
+#   Run all tests (bind-mount current dir):
+#     docker run --rm -it -v "$PWD":/workspace -w /workspace sprite-env-tests ./scripts/run-tests.sh
+#   Run pkg/port-watcher tests only:
+#     docker run --rm -it -v "$PWD":/workspace -w /workspace sprite-env-tests go test -v -race ./pkg/port-watcher/...
+#   Run juicefs tests (requires FUSE; use privileged or add caps+device):
+#     docker run --rm -it --privileged -v "$PWD":/workspace -w /workspace sprite-env-tests go test -v -race -tags=integration ./pkg/juicefs/...
+
+# Stage to source JuiceFS binary from the custom superfly image
+FROM ghcr.io/superfly/juicefs:748b889 AS juicefs
+
+# Base test image with Go and common tools
+FROM ubuntu:24.04
+
+# Install build/runtime dependencies needed across tests
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    bash \
+    git \
+    make \
+    ca-certificates \
+    curl \
+    wget \
+    build-essential \
+    gcc \
+    g++ \
+    sqlite3 \
+    libsqlite3-dev \
+    e2fsprogs \
+    util-linux \
+    fuse3 \
+    libfuse3-dev \
+    iproute2 \
+    netcat-openbsd \
+    procps && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy JuiceFS binary into the image
+COPY --from=juicefs /usr/local/bin/juicefs /usr/local/bin/juicefs
+
+# Install Go toolchain (Ubuntu's golang may be outdated)
+ARG GO_VERSION=1.24.0
+ARG TARGETARCH
+RUN set -e; \
+    case ${TARGETARCH} in \
+      amd64) GO_ARCH="amd64" ;; \
+      arm64) GO_ARCH="arm64" ;; \
+      *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz -o /tmp/go.tgz && \
+    rm -rf /usr/local/go && \
+    tar -C /usr/local -xzf /tmp/go.tgz && \
+    rm -f /tmp/go.tgz
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+# Install Litestream for JuiceFS-related tests
+ARG TARGETARCH
+RUN set -e; \
+    case ${TARGETARCH} in \
+      amd64) L_ARCH="amd64" ;; \
+      arm64) L_ARCH="arm64" ;; \
+      *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    wget -q https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-${L_ARCH}.tar.gz && \
+    tar -xzf litestream-v0.3.13-linux-${L_ARCH}.tar.gz && \
+    mv litestream /usr/local/bin/ && \
+    rm -f litestream-v0.3.13-linux-${L_ARCH}.tar.gz && \
+    chmod +x /usr/local/bin/litestream
+
+# FUSE configuration expected by JuiceFS; Alpine provides fusermount3
+RUN echo "user_allow_other" >> /etc/fuse.conf && \
+    ln -sf /usr/bin/fusermount3 /bin/fusermount || true
+
+# Set up workspace
+WORKDIR /workspace
+
+# Cache Go dependencies - this layer will be cached unless go.mod/go.sum change
+# Copy go.mod and go.sum files from all modules in the project
+COPY go.mod go.sum ./
+COPY cmd/go.mod cmd/go.sum ./cmd/
+COPY sdks/test-harness/go.mod ./sdks/test-harness/
+
+# Download dependencies for all modules
+RUN go mod download && \
+    cd cmd && go mod download && \
+    cd ../sdks/test-harness && go mod download
+
+# Note: The actual source code will still be bind-mounted at runtime
+# This just ensures dependencies are cached in the image
+
+# Simple entrypoint: run the provided command (default to repo test script)
+RUN cat > /usr/local/bin/docker-entrypoint.sh <<'EOF' && chmod +x /usr/local/bin/docker-entrypoint.sh
+#!/bin/bash
+set -euo pipefail
+
+export PATH="/usr/local/go/bin:$PATH"
+
+CMD_STR="$*"
+if [ -z "$CMD_STR" ]; then
+  CMD_STR="./scripts/run-tests.sh"
+fi
+
+exec bash -lc "$CMD_STR"
+EOF
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["/bin/sh"]
+
+

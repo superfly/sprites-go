@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sprite-env/server/api/handlers"
+	"github.com/superfly/sprite-env/server/api/handlers"
 	"github.com/superfly/sprite-env/pkg/sync"
 )
 

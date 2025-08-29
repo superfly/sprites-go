@@ -5,8 +5,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/sprite-env/lib/api"
-	"github.com/superfly/sprite-env/packages/juicefs"
+	"github.com/superfly/sprite-env/lib/api"
+	"github.com/superfly/sprite-env/pkg/juicefs"
 )
 
 // SystemManager interface provides methods for managing the system (process + storage)

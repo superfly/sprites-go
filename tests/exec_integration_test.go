@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -69,6 +70,10 @@ func TestExecIntegration(t *testing.T) {
 		testInteractiveTTYBash(t, containerID, token)
 	})
 
+	// New: Ensure port watcher messages arrive over WebSocket
+	t.Run("PortNotifications", func(t *testing.T) {
+		testPortNotifications(t, containerID, token)
+	})
 }
 
 func testBasicWebSocketConnection(t *testing.T, containerID string) {
@@ -84,6 +89,11 @@ func testBasicWebSocketConnection(t *testing.T, containerID string) {
 }
 
 func setupTestContainer(t *testing.T) (string, func()) {
+	// Check if Docker is available
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("Docker not available, skipping integration test")
+	}
+
 	// Build the test image
 	buildCmd := exec.Command("docker", "build", "-f", "Dockerfile.test", "-t", "sprite-test", ".")
 	buildCmd.Dir = "."
@@ -117,12 +127,11 @@ func setupTestContainer(t *testing.T) (string, func()) {
 
 func waitForServer(t *testing.T, containerID string) {
 	// Wait for server to start (port 8080)
-	maxRetries := 30
+	maxRetries := 600
 	for i := 0; i < maxRetries; i++ {
 		time.Sleep(1 * time.Second)
 
-		// Check if port is listening
-		cmd := exec.Command("docker", "exec", containerID, "netstat", "-tlnp")
+		cmd := exec.Command("docker", "exec", containerID, "ss", "-ltn")
 		if output, err := cmd.CombinedOutput(); err == nil {
 			if strings.Contains(string(output), ":8080") {
 				t.Log("Server is ready")
@@ -893,4 +902,77 @@ func containsAny(messages []string, substr string) bool {
 		}
 	}
 	return false
+}
+
+// testPortNotifications verifies that port_opened and port_closed messages are received
+func testPortNotifications(t *testing.T, containerID, token string) {
+	// Use a shell that opens and then closes a TCP listener
+	// We choose a likely-free port to reduce flakiness
+	port := 18088
+	cmd := []string{"sh", "-c", fmt.Sprintf("nc -l 127.0.0.1 %d >/dev/null & NC_PID=$!; echo NC:$NC_PID; sleep 2; kill $NC_PID; wait $NC_PID 2>/dev/null || true; sleep 2", port)}
+	wsURL := buildWebSocketURL(cmd, "")
+
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer "+token)
+
+	conn, resp, err := gorillaws.DefaultDialer.Dial(wsURL, headers)
+	if err != nil {
+		t.Fatalf("Failed to connect: %v (resp=%+v)", err, resp)
+	}
+	defer conn.Close()
+
+	type portMsg struct {
+		Type    string `json:"type"`
+		Port    int    `json:"port"`
+		Address string `json:"address"`
+		PID     int    `json:"pid"`
+	}
+
+	opened := false
+	closed := false
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			messageType, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+
+			if messageType == gorillaws.TextMessage {
+				var m portMsg
+				// The server sends JSON text messages for port notifications
+				if err := json.Unmarshal(data, &m); err == nil {
+					if m.Type == "port_opened" && m.Port == port {
+						opened = true
+					}
+					if m.Type == "port_closed" && m.Port == port {
+						closed = true
+						return
+					}
+				}
+			}
+
+			if messageType == gorillaws.BinaryMessage && len(data) > 0 {
+				stream := data[0]
+				if stream == 3 { // exit
+					return
+				}
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("timeout waiting for port notifications")
+	}
+
+	if !opened {
+		t.Errorf("did not receive port_opened for %d", port)
+	}
+	if !closed {
+		t.Errorf("did not receive port_closed for %d", port)
+	}
 }

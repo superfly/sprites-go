@@ -11,26 +11,12 @@ RUN apt-get update \
       libsqlite3-dev
 WORKDIR /build
 
-# Copy go.work files first
-COPY go.work go.work.sum ./
+# Copy go.mod files
+COPY go.mod go.sum* ./
+COPY cmd/go.mod cmd/go.sum* ./cmd/
 
-# Copy all go.mod files from each module
-COPY server/go.mod server/go.sum* ./server/
-COPY lib/go.mod lib/go.sum* ./lib/
-COPY client/go.mod client/go.sum* ./client/
-COPY packages/container/go.mod packages/container/go.sum* ./packages/container/
-COPY packages/juicefs/go.mod packages/juicefs/go.sum* ./packages/juicefs/
-COPY packages/supervisor/go.mod packages/supervisor/go.sum* ./packages/supervisor/
-COPY packages/leaser/go.mod packages/leaser/go.sum* ./packages/leaser/
-COPY packages/api-docs/go.mod packages/api-docs/go.sum* ./packages/api-docs/
-COPY pkg/terminal/go.mod pkg/terminal/go.sum* ./pkg/terminal/
-COPY pkg/sync/go.mod pkg/sync/go.sum* ./pkg/sync/
-COPY cmd/sprite-run/go.mod cmd/sprite-run/go.sum* ./cmd/sprite-run/
-COPY packages/port-watcher/go.mod packages/port-watcher/go.sum* ./packages/port-watcher/
-COPY tests/go.mod tests/go.sum* ./tests/
-
-# Download dependencies for all modules in the workspace
-RUN go mod download -x
+# Download dependencies
+RUN go mod download -x && cd cmd && go mod download -x
 
 # Copy all source code
 COPY . .

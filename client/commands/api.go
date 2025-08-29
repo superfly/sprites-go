@@ -7,8 +7,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/sprite-env/client/config"
-	"github.com/sprite-env/client/format"
+	"github.com/superfly/sprite-env/client/config"
+	"github.com/superfly/sprite-env/client/format"
 )
 
 // ApiCommand makes authenticated API calls using curl

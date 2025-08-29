@@ -80,15 +80,7 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 		}
 	}()
 
-	// Send ready signal to indicate session is starting
-	// In TTY mode, we don't send stream-prefixed messages
-	if !h.session.tty {
-		readyData := []byte{byte(StreamReady)}
-		wsStreams.writeChan <- writeRequest{
-			messageType: gorillaws.BinaryMessage,
-			data:        readyData,
-		}
-	}
+	// No need for ready signal - session starts immediately
 
 	// Call onConnected callback if set
 	if h.onConnected != nil {
@@ -162,6 +154,9 @@ type webSocketStreams struct {
 
 	// Signal when a read error occurs (websocket disconnection)
 	readErrChan chan error
+
+	// Buffered stdin for non-TTY mode to avoid blocking on reads
+	stdinChan chan []byte
 }
 
 type writeRequest struct {
@@ -209,6 +204,12 @@ func newWebSocketStreams(conn *gorillaws.Conn, tty bool, session *Session) *webS
 	// Start the write loop
 	go ws.writeLoop()
 
+	// For non-TTY mode, start a stdin buffering loop so reads don't block
+	if !tty {
+		ws.stdinChan = make(chan []byte, 256)
+		go ws.readLoopNonTTY()
+	}
+
 	return ws
 }
 
@@ -220,6 +221,13 @@ func (ws *webSocketStreams) writeLoop() {
 		select {
 		case req := <-ws.writeChan:
 			err := ws.conn.WriteMessage(req.messageType, req.data)
+			if err != nil {
+				// Notify disconnection path so handler can cancel session
+				select {
+				case ws.readErrChan <- err:
+				default:
+				}
+			}
 			if req.done != nil {
 				req.done <- err
 			}
@@ -230,6 +238,12 @@ func (ws *webSocketStreams) writeLoop() {
 				select {
 				case req := <-ws.writeChan:
 					err := ws.conn.WriteMessage(req.messageType, req.data)
+					if err != nil {
+						select {
+						case ws.readErrChan <- err:
+						default:
+						}
+					}
 					if req.done != nil {
 						req.done <- err
 					}
@@ -243,6 +257,28 @@ func (ws *webSocketStreams) writeLoop() {
 
 // Read implements io.Reader for the WebSocket streams
 func (ws *webSocketStreams) Read(p []byte) (n int, err error) {
+	// Non-TTY: serve from buffered stdin without blocking
+	if !ws.tty {
+		if len(ws.readBuf) > 0 {
+			n = copy(p, ws.readBuf)
+			ws.readBuf = ws.readBuf[n:]
+			return n, nil
+		}
+		select {
+		case data, ok := <-ws.stdinChan:
+			if !ok || len(data) == 0 {
+				return 0, io.EOF
+			}
+			n = copy(p, data)
+			if n < len(data) {
+				ws.readBuf = data[n:]
+			}
+			return n, nil
+		default:
+			return 0, io.EOF
+		}
+	}
+
 	// Return buffered data first
 	if len(ws.readBuf) > 0 {
 		n = copy(p, ws.readBuf)
@@ -265,54 +301,41 @@ func (ws *webSocketStreams) Read(p []byte) (n int, err error) {
 	// Handle different message types
 	switch messageType {
 	case gorillaws.BinaryMessage:
-		if ws.tty {
-			// PTY mode: all binary data is stdin
-			n = copy(p, data)
-			if n < len(data) {
-				// Buffer remaining data
-				ws.readBuf = data[n:]
-			}
-			return n, nil
-		} else {
-			// Non-PTY mode: check stream ID
-			if len(data) == 0 {
-				return 0, errors.New("empty message")
-			}
-			streamID := StreamID(data[0])
-			if streamID == StreamStdin {
-				payload := data[1:]
-				n = copy(p, payload)
-				if n < len(payload) {
-					// Buffer remaining data
-					ws.readBuf = payload[n:]
-				}
-				return n, nil
-			} else if streamID == StreamStdinEOF {
-				return 0, io.EOF
-			}
-			// Ignore other streams and try again
-			return ws.Read(p)
+		// In both TTY and non-TTY mode, all binary data from client is stdin
+		// (no prefix needed from client side)
+		n = copy(p, data)
+		if n < len(data) {
+			// Buffer remaining data
+			ws.readBuf = data[n:]
 		}
+		return n, nil
 	case gorillaws.TextMessage:
-		// Handle control messages
-		if ws.tty {
-			// Parse control message
-			var controlMsg ControlMessage
-			if err := json.Unmarshal(data, &controlMsg); err == nil {
-				switch controlMsg.Type {
-				case "resize":
-					// Handle resize in PTY mode
-					if ws.session.logger != nil {
-						ws.session.logger.Debug("Received terminal resize via WebSocket",
-							"cols", controlMsg.Cols, "rows", controlMsg.Rows)
-					}
-					ws.session.Resize(controlMsg.Cols, controlMsg.Rows)
-					// Continue reading after handling resize
-					return ws.Read(p)
+		// Handle control messages (JSON)
+		var controlMsg ControlMessage
+		if err := json.Unmarshal(data, &controlMsg); err == nil {
+			switch controlMsg.Type {
+			case "resize":
+				// Handle resize
+				if ws.session.logger != nil {
+					ws.session.logger.Debug("Received terminal resize via WebSocket",
+						"cols", controlMsg.Cols, "rows", controlMsg.Rows)
 				}
+				ws.session.Resize(controlMsg.Cols, controlMsg.Rows)
+				// Continue reading after handling resize
+				return ws.Read(p)
+			case "stdin_eof":
+				// Handle EOF signal for non-TTY mode
+				if !ws.tty {
+					return 0, io.EOF
+				}
+				// Ignore in TTY mode
+				return ws.Read(p)
+			default:
+				// Ignore unknown control messages
+				return ws.Read(p)
 			}
 		}
-		// For non-PTY mode or unhandled text messages, try again
+		// Ignore unparseable text messages
 		return ws.Read(p)
 	default:
 		return 0, errors.New("unsupported message type")
@@ -444,4 +467,47 @@ func (ws *webSocketStreams) Close() error {
 		// Continue anyway to prevent hanging the entire process
 	}
 	return nil
+}
+
+// readLoopNonTTY continuously reads websocket frames and buffers stdin for non-TTY
+func (ws *webSocketStreams) readLoopNonTTY() {
+	for {
+		messageType, data, err := ws.conn.ReadMessage()
+		if err != nil {
+			select {
+			case ws.readErrChan <- err:
+			default:
+			}
+			close(ws.stdinChan)
+			return
+		}
+
+		switch messageType {
+		case gorillaws.BinaryMessage:
+			if len(data) == 0 {
+				continue
+			}
+			select {
+			case ws.stdinChan <- data:
+			default:
+				// Drop oldest when buffer full
+				select {
+				case <-ws.stdinChan:
+				default:
+				}
+				ws.stdinChan <- data
+			}
+		case gorillaws.TextMessage:
+			var controlMsg ControlMessage
+			if err := json.Unmarshal(data, &controlMsg); err == nil {
+				switch controlMsg.Type {
+				case "resize":
+					ws.session.Resize(controlMsg.Cols, controlMsg.Rows)
+				case "stdin_eof":
+					close(ws.stdinChan)
+					return
+				}
+			}
+		}
+	}
 }

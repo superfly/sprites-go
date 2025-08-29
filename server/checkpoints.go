@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/sprite-env/lib/api"
-	"github.com/superfly/sprite-env/packages/juicefs"
+	"github.com/superfly/sprite-env/lib/api"
+	"github.com/superfly/sprite-env/pkg/juicefs"
 )
 
 // Checkpoint creates a checkpoint of the current system state

@@ -4,7 +4,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/sprite-env/client/config"
+	"github.com/superfly/sprite-env/client/config"
 )
 
 // getSpritesAPIURL returns the base URL for the Sprites API

@@ -7,8 +7,8 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/sprite-env/client/commands"
-	"github.com/sprite-env/client/config"
+	"github.com/superfly/sprite-env/client/commands"
+	"github.com/superfly/sprite-env/client/config"
 )
 
 var (

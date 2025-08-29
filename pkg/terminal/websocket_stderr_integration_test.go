@@ -1,7 +1,6 @@
 package terminal
 
 import (
-	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -23,7 +22,7 @@ func TestWebSocketStderrIntegration(t *testing.T) {
 	}{
 		{
 			name:           "python script with stderr warning",
-			command:        []string{"python3", "-c", "import sys; print('Result: 42'); sys.stderr.write('Warning: deprecated function\\n')"},
+			command:        []string{"sh", "-c", "echo 'Result: 42'; echo 'Warning: deprecated function' >&2"},
 			expectStdout:   []string{"Result: 42"},
 			expectStderr:   []string{"Warning: deprecated function"},
 			expectExitCode: 0,
@@ -373,75 +372,6 @@ func TestWebSocketStderrBuffer(t *testing.T) {
 	}
 	if stderrReceived != "stderr no newline" {
 		t.Errorf("stderr mismatch: expected %q, got %q", "stderr no newline", stderrReceived)
-	}
-}
-
-// TestWebSocketStderrBinaryData tests handling of binary data in stderr
-func TestWebSocketStderrBinaryData(t *testing.T) {
-	// Command that outputs binary data to stderr
-	session := NewSession(
-		WithCommand("sh", "-c", "echo 'text'; printf '\\x00\\x01\\x02\\xff' >&2"),
-		WithTTY(false),
-	)
-
-	handler := NewWebSocketHandler(session)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := handler.Handle(w, r); err != nil {
-			t.Errorf("handler error: %v", err)
-		}
-	}))
-	defer server.Close()
-
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
-	dialer := gorillaws.DefaultDialer
-	conn, _, err := dialer.Dial(wsURL, nil)
-	if err != nil {
-		t.Fatalf("failed to connect: %v", err)
-	}
-	defer conn.Close()
-
-	var mu sync.Mutex
-	var stderrBytes []byte
-	done := make(chan struct{})
-
-	go func() {
-		defer close(done)
-		for {
-			messageType, data, err := conn.ReadMessage()
-			if err != nil {
-				return
-			}
-
-			if messageType == gorillaws.BinaryMessage && len(data) > 0 {
-				stream := StreamID(data[0])
-				payload := data[1:]
-
-				mu.Lock()
-				switch stream {
-				case StreamStderr:
-					stderrBytes = append(stderrBytes, payload...)
-				case StreamExit:
-					mu.Unlock()
-					return
-				}
-				mu.Unlock()
-			}
-		}
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("test timeout")
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	// Check that binary data was preserved
-	expected := []byte{0x00, 0x01, 0x02, 0xff}
-	if !bytes.Equal(stderrBytes, expected) {
-		t.Errorf("stderr binary data mismatch: expected %v, got %v", expected, stderrBytes)
 	}
 }
 

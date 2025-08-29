@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sprite-env/lib/api"
+	"github.com/superfly/sprite-env/lib/api"
 
-	"github.com/superfly/sprite-env/packages/juicefs"
+	"github.com/superfly/sprite-env/pkg/juicefs"
 )
 
 // mockSystemManager implements SystemManager for testing

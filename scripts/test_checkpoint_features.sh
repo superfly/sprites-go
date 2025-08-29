@@ -35,7 +35,7 @@ package main
 import (
     "fmt"
     "os"
-    "github.com/sprite-env/packages/juicefs"
+    "github.com/superfly/sprite-env/pkg/juicefs"
 )
 
 func main() {

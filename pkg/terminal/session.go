@@ -18,7 +18,7 @@ import (
 	"time"
 
 	creackpty "github.com/creack/pty"
-	"github.com/superfly/sprite-env/packages/container"
+	"github.com/superfly/sprite-env/pkg/container"
 )
 
 // Session represents a terminal session that can execute commands.
@@ -31,6 +31,7 @@ type Session struct {
 
 	// Terminal configuration
 	tty           bool
+	stdin         bool // Whether stdin should be connected
 	initialCols   uint16
 	initialRows   uint16
 	consoleSocket string
@@ -58,8 +59,9 @@ type Option func(*Session)
 // NewSession creates a new terminal session with the given options.
 func NewSession(options ...Option) *Session {
 	s := &Session{
-		path: "bash",
-		args: []string{"bash", "-l"},
+		path:  "bash",
+		args:  []string{"bash", "-l"},
+		stdin: true, // Default to stdin enabled for backward compatibility
 	}
 
 	for _, opt := range options {
@@ -81,6 +83,13 @@ func WithCommand(path string, args ...string) Option {
 func WithTTY(enabled bool) Option {
 	return func(s *Session) {
 		s.tty = enabled
+	}
+}
+
+// WithStdin enables or disables stdin connection.
+func WithStdin(enabled bool) Option {
+	return func(s *Session) {
+		s.stdin = enabled
 	}
 }
 
@@ -541,29 +550,23 @@ func (s *Session) runWithoutTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Rea
 	}
 	cmd.SysProcAttr.Setpgid = true
 
-	// Use io.Pipe to let exec manage the goroutines
 	stdoutReader, stdoutWriter := io.Pipe()
 	stderrReader, stderrWriter := io.Pipe()
+	var stdinReader *io.PipeReader
+	var stdinWriter *io.PipeWriter
 
-	// Assign writers to cmd
 	cmd.Stdout = stdoutWriter
 	cmd.Stderr = stderrWriter
-
-	// Set up stdin pipe
-	stdinPipe, err := cmd.StdinPipe()
-	if err != nil {
-		return -1, fmt.Errorf("failed to create stdin pipe: %w", err)
+	if s.stdin {
+		stdinReader, stdinWriter = io.Pipe()
+		cmd.Stdin = stdinReader
+	} else {
+		cmd.Stdin = nil
 	}
 
-	// Start I/O goroutines
+	// Start I/O goroutines for stdout/stderr
 	stdoutDone := make(chan struct{})
 	stderrDone := make(chan struct{})
-
-	// Copy stdin to the process
-	go func() {
-		defer stdinPipe.Close()
-		io.Copy(stdinPipe, stdin)
-	}()
 
 	// Stream stdout to destination
 	go func() {
@@ -576,6 +579,18 @@ func (s *Session) runWithoutTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Rea
 		defer close(stderrDone)
 		io.Copy(stderr, stderrReader)
 	}()
+
+	var stdinDone chan struct{}
+	if s.stdin {
+		stdinDone = make(chan struct{})
+		go func() {
+			defer close(stdinDone)
+			if stdinWriter != nil {
+				io.Copy(stdinWriter, stdin)
+				stdinWriter.Close()
+			}
+		}()
+	}
 
 	// Start the command
 	if err := cmd.Start(); err != nil {
@@ -600,6 +615,10 @@ func (s *Session) runWithoutTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Rea
 	// Wait for command to complete
 	cmdErr := cmd.Wait()
 
+	if stdinWriter != nil {
+		stdinWriter.Close()
+	}
+
 	// Close writers to signal EOF
 	stdoutWriter.Close()
 	stderrWriter.Close()
@@ -607,6 +626,12 @@ func (s *Session) runWithoutTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Rea
 	// Wait for readers to finish
 	<-stdoutDone
 	<-stderrDone
+	if stdinDone != nil {
+		select {
+		case <-stdinDone:
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 
 	return getExitCode(cmdErr), nil
 }
@@ -617,11 +642,13 @@ func (s *Session) runWithoutTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Rea
 func (s *Session) startPTYIO(ctx context.Context, pty *os.File, stdin io.Reader, stdout io.Writer) *sync.WaitGroup {
 	var wg sync.WaitGroup
 
-	// Handle stdin -> PTY
-	go func() {
-		io.Copy(pty, stdin)
-		// This will exit when stdin is closed or PTY write fails
-	}()
+	// Handle stdin -> PTY only if stdin is enabled
+	if s.stdin {
+		go func() {
+			io.Copy(pty, stdin)
+			// This will exit when stdin is closed or PTY write fails
+		}()
+	}
 
 	// Handle PTY -> stdout
 	wg.Add(1)

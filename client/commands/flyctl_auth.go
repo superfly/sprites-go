@@ -16,7 +16,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/sprite-env/client/prompts"
+	"github.com/superfly/sprite-env/client/prompts"
 )
 
 // FlyTokenInfo represents a token info from the current tokens endpoint

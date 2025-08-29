@@ -6,11 +6,11 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/superfly/sprite-env/packages/container"
-	"github.com/superfly/sprite-env/packages/juicefs"
-	"github.com/superfly/sprite-env/packages/leaser"
-	portwatcher "github.com/superfly/sprite-env/packages/port-watcher"
-	"github.com/superfly/sprite-env/packages/supervisor"
+	"github.com/superfly/sprite-env/pkg/container"
+	"github.com/superfly/sprite-env/pkg/juicefs"
+	"github.com/superfly/sprite-env/pkg/leaser"
+	portwatcher "github.com/superfly/sprite-env/pkg/port-watcher"
+	"github.com/superfly/sprite-env/pkg/supervisor"
 )
 
 // SystemConfig holds configuration for the System

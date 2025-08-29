@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"time"
 
 	gorillaws "github.com/gorilla/websocket"
 )
@@ -16,6 +17,7 @@ type HandlerOption func(*handlerConfig)
 type handlerConfig struct {
 	cmd      *exec.Cmd
 	ptmx     *os.File
+	tty      *os.File // PTY slave to close after cmd.Start()
 	hasStdin bool
 }
 
@@ -23,6 +25,13 @@ type handlerConfig struct {
 func WithPTY(ptmx *os.File) HandlerOption {
 	return func(c *handlerConfig) {
 		c.ptmx = ptmx
+	}
+}
+
+// WithPTYSlave configures the handler with the PTY slave to close after cmd.Start()
+func WithPTYSlave(tty *os.File) HandlerOption {
+	return func(c *handlerConfig) {
+		c.tty = tty
 	}
 }
 
@@ -69,7 +78,7 @@ func ServeConnWithOptions(ctx context.Context, conn *gorillaws.Conn, config *han
 
 	if config.ptmx != nil {
 		// PTY mode: read from PTY and send as stdout
-		return serveConnPTY(ctx, conn, config.cmd, config.ptmx, writeCh, writerDone, config.hasStdin)
+		return serveConnPTY(ctx, conn, config, writeCh, writerDone)
 	} else {
 		// Normal mode: separate stdout/stderr
 		return serveConnNormal(ctx, conn, config.cmd, writeCh, writerDone, config.hasStdin)
@@ -162,7 +171,10 @@ func serveConnNormal(ctx context.Context, conn *gorillaws.Conn, cmd *exec.Cmd, w
 }
 
 // serveConnPTY handles PTY command execution
-func serveConnPTY(ctx context.Context, conn *gorillaws.Conn, cmd *exec.Cmd, ptmx *os.File, writeCh chan []byte, writerDone chan struct{}, hasStdin bool) error {
+func serveConnPTY(ctx context.Context, conn *gorillaws.Conn, config *handlerConfig, writeCh chan []byte, writerDone chan struct{}) error {
+	cmd := config.cmd
+	ptmx := config.ptmx
+	hasStdin := config.hasStdin
 	// Handle stdin if requested
 	var stdinDone chan struct{}
 	if hasStdin {
@@ -214,23 +226,50 @@ func serveConnPTY(ctx context.Context, conn *gorillaws.Conn, cmd *exec.Cmd, ptmx
 
 	// PTY output reader - read from PTY and send as stdout
 	ptmxDone := make(chan struct{})
+	ptmxReady := make(chan struct{})
 	go func() {
 		defer close(ptmxDone)
 		stdoutW := &wsPrefixedWriter{streamID: StreamStdout, ch: writeCh}
-		_, err := io.Copy(stdoutW, ptmx)
-		if err != nil {
-			// PTY closed, which is expected when command exits
-		}
+		// Signal that we're ready to read
+		close(ptmxReady)
+		_, _ = io.Copy(stdoutW, ptmx)
 	}()
+
+	// Wait for the reader to be ready before starting the command
+	<-ptmxReady
 
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 
+	// Close the PTY slave in the parent process right after starting the command
+	// This is critical for proper PTY EOF handling - when the child process exits,
+	// the master side will see EOF only if the slave is closed in the parent
+	if config.tty != nil {
+		config.tty.Close()
+	}
+
 	// Wait for command to finish
 	_ = cmd.Wait()
+	_ = ptmx.Close()
 
-	// Send exit code frame first
+	// Wait for PTY reader to finish with a timeout
+	// In Docker, io.Copy might not return even after ptmx.Close()
+	ptmxFinished := make(chan struct{})
+	go func() {
+		<-ptmxDone
+		close(ptmxFinished)
+	}()
+
+	select {
+	case <-ptmxFinished:
+		// PTY reader finished normally
+	case <-time.After(100 * time.Millisecond):
+		// Timeout - PTY reader is stuck (common in Docker)
+		// Continue anyway to avoid hanging
+	}
+
+	// Send exit code frame
 	exitCode := -1
 	if ps := cmd.ProcessState; ps != nil {
 		exitCode = ps.ExitCode()
@@ -240,10 +279,9 @@ func serveConnPTY(ctx context.Context, conn *gorillaws.Conn, cmd *exec.Cmd, ptmx
 
 	close(writeCh)
 
-	// Wait for all data to be written
+	// Wait for all data to be written and stdin goroutine to finish
 	<-writerDone
 	<-stdinDone
-	<-ptmxDone
 
 	// Let client close the connection
 	return nil
@@ -255,6 +293,9 @@ type wsPrefixedWriter struct {
 }
 
 func (w *wsPrefixedWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
 	msg := make([]byte, 1+len(p))
 	msg[0] = byte(w.streamID)
 	copy(msg[1:], p)

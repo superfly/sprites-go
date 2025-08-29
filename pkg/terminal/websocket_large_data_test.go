@@ -15,32 +15,32 @@ import (
 // before the WebSocket connection is closed
 func TestWebSocketLargeDataBeforeClose(t *testing.T) {
 	testCases := []struct {
-		name         string
-		command      []string
-		minStdout    int
-		minStderr    int
-		description  string
+		name        string
+		command     []string
+		minStdout   int
+		minStderr   int
+		description string
 	}{
 		{
-			name:         "10MB_stdout_websocket",
-			command:      []string{"sh", "-c", "dd if=/dev/zero bs=1048576 count=10 2>/dev/null | base64"},
-			minStdout:    10 * 1024 * 1024,
-			minStderr:    0,
-			description:  "10MB stdout through WebSocket",
+			name:        "10MB_stdout_websocket",
+			command:     []string{"sh", "-c", "dd if=/dev/zero bs=1048576 count=10 2>/dev/null | base64"},
+			minStdout:   10 * 1024 * 1024,
+			minStderr:   0,
+			description: "10MB stdout through WebSocket",
 		},
 		{
-			name:         "5MB_stderr_websocket",
-			command:      []string{"sh", "-c", "dd if=/dev/zero bs=1048576 count=5 | base64 >&2"},
-			minStdout:    0,
-			minStderr:    5 * 1024 * 1024,
-			description:  "5MB stderr through WebSocket",
+			name:        "5MB_stderr_websocket",
+			command:     []string{"sh", "-c", "dd if=/dev/zero bs=1048576 count=5 | base64 >&2"},
+			minStdout:   0,
+			minStderr:   5 * 1024 * 1024,
+			description: "5MB stderr through WebSocket",
 		},
 		{
-			name:         "rapid_lines_websocket",
-			command:      []string{"sh", "-c", "for i in $(seq 1 5000); do echo \"Line $i\"; done"},
-			minStdout:    20000, // Rough estimate
-			minStderr:    0,
-			description:  "5000 lines through WebSocket",
+			name:        "rapid_lines_websocket",
+			command:     []string{"sh", "-c", "for i in $(seq 1 5000); do echo \"Line $i\"; done"},
+			minStdout:   20000, // Rough estimate
+			minStderr:   0,
+			description: "5000 lines through WebSocket",
 		},
 	}
 
@@ -49,7 +49,7 @@ func TestWebSocketLargeDataBeforeClose(t *testing.T) {
 			// Run multiple iterations to catch race conditions
 			for iter := 0; iter < 3; iter++ {
 				t.Logf("Iteration %d: %s", iter, tc.description)
-				
+
 				session := NewSession(
 					WithCommand(tc.command[0], tc.command[1:]...),
 					WithTTY(false),
@@ -132,16 +132,16 @@ func TestWebSocketLargeDataBeforeClose(t *testing.T) {
 				}
 
 				if len(stdoutData) < tc.minStdout {
-					t.Errorf("stdout too small: expected at least %d bytes, got %d", 
+					t.Errorf("stdout too small: expected at least %d bytes, got %d",
 						tc.minStdout, len(stdoutData))
 				}
 
 				if len(stderrData) < tc.minStderr {
-					t.Errorf("stderr too small: expected at least %d bytes, got %d", 
+					t.Errorf("stderr too small: expected at least %d bytes, got %d",
 						tc.minStderr, len(stderrData))
 				}
 
-				t.Logf("Received stdout=%d bytes, stderr=%d bytes", 
+				t.Logf("Received stdout=%d bytes, stderr=%d bytes",
 					len(stdoutData), len(stderrData))
 			}
 		})
@@ -246,4 +246,4 @@ func TestWebSocketCloseSequence(t *testing.T) {
 	if exitIndex > closeIndex {
 		t.Error("exit code came after close")
 	}
-} 
+}

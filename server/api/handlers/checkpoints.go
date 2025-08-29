@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sprite-env/lib/api"
+	"github.com/superfly/sprite-env/lib/api"
 )
 
 // HandleListCheckpoints handles GET /sprites/{id}/checkpoints

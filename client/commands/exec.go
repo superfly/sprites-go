@@ -17,8 +17,8 @@ import (
 
 	"encoding/json"
 
-	"github.com/sprite-env/client/config"
-	"github.com/sprite-env/client/format"
+	"github.com/superfly/sprite-env/client/config"
+	"github.com/superfly/sprite-env/client/format"
 	"github.com/superfly/sprite-env/pkg/terminal"
 	"golang.org/x/term"
 )

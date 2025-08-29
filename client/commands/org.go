@@ -8,9 +8,9 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/sprite-env/client/config"
-	"github.com/sprite-env/client/format"
-	"github.com/sprite-env/client/prompts"
+	"github.com/superfly/sprite-env/client/config"
+	"github.com/superfly/sprite-env/client/format"
+	"github.com/superfly/sprite-env/client/prompts"
 )
 
 // OrgCommand handles organization-related commands

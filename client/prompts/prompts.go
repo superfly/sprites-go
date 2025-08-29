@@ -8,8 +8,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/huh"
-	"github.com/sprite-env/client/config"
-	"github.com/sprite-env/client/format"
+	"github.com/superfly/sprite-env/client/config"
+	"github.com/superfly/sprite-env/client/format"
 )
 
 // isInteractiveTerminal checks if we're running in an interactive terminal

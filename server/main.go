@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	serverapi "github.com/sprite-env/server/api"
+	serverapi "github.com/superfly/sprite-env/server/api"
 )
 
 // version is set at build time via ldflags

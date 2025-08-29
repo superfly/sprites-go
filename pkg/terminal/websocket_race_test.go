@@ -1340,8 +1340,8 @@ func TestWebSocketUnderCPULoadAlternative(t *testing.T) {
 	}
 }
 
-// TestWebSocketReadyMessage verifies that StreamReady is always the first message
-func TestWebSocketReadyMessage(t *testing.T) {
+// TestWebSocketNoReadyMessage verifies that StreamReady is no longer sent
+func TestWebSocketNoReadyMessage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		session := NewSession(
 			WithCommand("echo", "hello"),
@@ -1369,14 +1369,18 @@ func TestWebSocketReadyMessage(t *testing.T) {
 		t.Fatalf("failed to read first message: %v", err)
 	}
 
-	// Verify it's a binary message with StreamReady
+	// Verify the first message is stdout, not StreamReady
 	if messageType != gorillaws.BinaryMessage {
 		t.Errorf("expected binary message, got type %d", messageType)
 	}
 
-	if len(data) != 1 || StreamID(data[0]) != StreamReady {
-		t.Errorf("expected first message to be StreamReady (0x05), got %#v", data)
+	// First message should be stdout with "hello\n"
+	if len(data) < 2 || StreamID(data[0]) != StreamStdout {
+		t.Errorf("expected first message to be StreamStdout (0x01) with content, got %#v", data)
+	}
+	if len(data) > 0 && StreamID(data[0]) == StreamReady {
+		t.Errorf("StreamReady message should not be sent anymore")
 	}
 
-	t.Log("✓ StreamReady message received as first message")
+	t.Log("✓ No StreamReady message sent, first message is stdout as expected")
 }

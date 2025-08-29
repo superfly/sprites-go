@@ -12,9 +12,9 @@ import (
 
 	"log/slog"
 
-	"github.com/superfly/sprite-env/packages/container"
-	portwatcher "github.com/superfly/sprite-env/packages/port-watcher"
-	"github.com/superfly/sprite-env/packages/supervisor"
+	"github.com/superfly/sprite-env/pkg/container"
+	portwatcher "github.com/superfly/sprite-env/pkg/port-watcher"
+	"github.com/superfly/sprite-env/pkg/supervisor"
 )
 
 // portTracker tracks active ports and detects changes

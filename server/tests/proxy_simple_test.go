@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sprite-env/lib/api"
-	"github.com/sprite-env/server/api/handlers"
-	"github.com/superfly/sprite-env/packages/juicefs"
+	"github.com/superfly/sprite-env/lib/api"
+	"github.com/superfly/sprite-env/server/api/handlers"
+	"github.com/superfly/sprite-env/pkg/juicefs"
 )
 
 // Note: These proxy tests were designed for the old HTTP CONNECT approach.

@@ -13,8 +13,8 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
-	"github.com/sprite-env/client/config"
-	"github.com/sprite-env/client/format"
+	"github.com/superfly/sprite-env/client/config"
+	"github.com/superfly/sprite-env/client/format"
 	"golang.org/x/term"
 )
 

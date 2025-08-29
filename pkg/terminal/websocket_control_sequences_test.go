@@ -340,13 +340,14 @@ func TestInteractivePTYWithExpect(t *testing.T) {
 	})
 
 	t.Run("ControlSequenceInPrompt", func(t *testing.T) {
-		// Test PS1 with color codes
-		console.SendLine("PS1='\\033[32m$\\033[0m '")
+		// Test PS1 with color codes - use printf to set the prompt with proper escaping
+		console.SendLine("PS1=$(printf '\\033[32m$\\033[0m ')")
 		time.Sleep(100 * time.Millisecond)
 
 		// Send another command to see the colored prompt
 		console.SendLine("echo test")
-		out, err := console.Expect(expect.String("test"))
+		// Use a more specific pattern that captures the full output including prompt
+		out, err := console.Expect(expect.RegexpPattern(`.*test.*`))
 		if err != nil {
 			t.Errorf("Failed to find test output: %v", err)
 		}
