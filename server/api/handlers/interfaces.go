@@ -37,6 +37,9 @@ type SystemManager interface {
 	ListCheckpointsByHistory(ctx context.Context, version string) ([]string, error)
 	GetCheckpoint(ctx context.Context, checkpointID string) (*juicefs.CheckpointInfo, error)
 
+	// Overlay sync for suspend
+	SyncOverlay(ctx context.Context) error
+
 	// Reaper integration
 	SubscribeToReapEvents() <-chan int
 	UnsubscribeFromReapEvents(ch <-chan int)

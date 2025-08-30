@@ -354,43 +354,38 @@ func (om *OverlayManager) Unmount(ctx context.Context) error {
 
 // PrepareForCheckpoint prepares the overlay for checkpointing by syncing and freezing
 func (om *OverlayManager) PrepareForCheckpoint(ctx context.Context) error {
-	// If overlayfs is skipped, just sync and freeze the loopback mount
-	if om.skipOverlayFS {
-		if !om.isMounted() {
-			return fmt.Errorf("loopback mount not mounted")
-		}
+	if om.isOverlayFSMounted() {
 
-		om.logger.Info("Syncing loopback mount", "path", om.mountPath)
-		if err := om.sync(ctx); err != nil {
-			return fmt.Errorf("failed to sync loopback mount: %w", err)
+		// 1) Sync the overlayfs filesystem (where actual writes occur)
+		om.logger.Info("Syncing OverlayFS filesystem", "path", om.overlayTargetPath)
+		syncCmd := exec.CommandContext(ctx, "sync", "-f", om.overlayTargetPath)
+		if output, err := syncCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to sync overlayfs: %w, output: %s", err, string(output))
 		}
-
-		om.logger.Info("Freezing ext4 filesystem", "path", om.mountPath)
-		freezeCmd := exec.CommandContext(ctx, "fsfreeze", "--freeze", om.mountPath)
-		if output, err := freezeCmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("failed to freeze ext4 filesystem: %w, output: %s", err, string(output))
-		}
-
-		return nil
 	}
 
-	// Normal path with overlayfs
-	if !om.isOverlayFSMounted() {
-		return fmt.Errorf("overlayfs not mounted")
-	}
-
-	// Sync the overlayfs filesystem (where actual writes occur)
-	om.logger.Info("Syncing OverlayFS filesystem", "path", om.overlayTargetPath)
-	syncCmd := exec.CommandContext(ctx, "sync", "-f", om.overlayTargetPath)
-	if output, err := syncCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to sync overlayfs: %w, output: %s", err, string(output))
-	}
-
-	// Freeze the underlying ext4 filesystem to prevent new writes
+	// 2) Freeze the underlying ext4 filesystem to prevent new writes
 	om.logger.Info("Freezing underlying ext4 filesystem", "path", om.mountPath)
 	freezeCmd := exec.CommandContext(ctx, "fsfreeze", "--freeze", om.mountPath)
 	if output, err := freezeCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to freeze ext4 filesystem: %w, output: %s", err, string(output))
+	}
+
+	// 3) Sync the loopback mount while frozen
+	om.logger.Info("Syncing loopback mount after freeze", "path", om.mountPath)
+	if err := om.sync(ctx); err != nil {
+		return fmt.Errorf("failed to sync loopback mount after freeze: %w", err)
+	}
+
+	f2, err := os.Open(om.imagePath)
+	if err != nil {
+		om.logger.Warn("Image open failed for fsync", "error", err, "path", om.imagePath)
+	}
+	if err == nil {
+		defer f2.Close()
+		if e := f2.Sync(); e != nil {
+			om.logger.Warn("Image fsync failed", "error", e, "path", om.imagePath)
+		}
 	}
 
 	return nil

@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/superfly/sprite-env/lib/api"
-	"github.com/superfly/sprite-env/server/api/handlers"
 	"github.com/superfly/sprite-env/pkg/juicefs"
+	"github.com/superfly/sprite-env/server/api/handlers"
 )
 
 // Note: These proxy tests were designed for the old HTTP CONNECT approach.
@@ -299,3 +299,5 @@ func (m *simpleSystemManager) Shutdown(ctx context.Context) error {
 func (m *simpleSystemManager) Wait() error {
 	return nil
 }
+
+func (m *simpleSystemManager) SyncOverlay(ctx context.Context) error { return nil }

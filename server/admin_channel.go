@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"time"
 
 	"github.com/nshafer/phx"
 	"github.com/superfly/sprite-env/server/api/handlers"
@@ -22,23 +23,37 @@ type AdminChannel struct {
 	socket  *phx.Socket
 	channel *phx.Channel
 	logger  *slog.Logger
+
+	// Message queue for when channel is not ready
+	messageQueue chan queuedMessage
+}
+
+type queuedMessage struct {
+	eventType string
+	payload   map[string]interface{}
 }
 
 // NewAdminChannel creates a new admin channel manager
 func NewAdminChannel(logger *slog.Logger) *AdminChannel {
 	channelURL := os.Getenv("SPRITE_ADMIN_CHANNEL")
-	token := os.Getenv("SPRITE_TOKEN")
+	token := os.Getenv("SPRITE_HTTP_API_TOKEN")
 
 	if channelURL == "" || token == "" {
 		// Return nil if not configured
 		return nil
 	}
 
-	return &AdminChannel{
-		url:    channelURL,
-		token:  token,
-		logger: logger,
+	ac := &AdminChannel{
+		url:          channelURL,
+		token:        token,
+		logger:       logger,
+		messageQueue: make(chan queuedMessage, 100),
 	}
+
+	// Start message queue processor
+	go ac.processMessageQueue()
+
+	return ac
 }
 
 // Start connects to the channel
@@ -67,11 +82,26 @@ func (ac *AdminChannel) Start() error {
 
 	ac.socket.OnOpen(func() {
 		ac.logger.Info("Socket connected")
-		// Rejoin channel after reconnect
-		if ac.channel != nil && !ac.channel.IsJoined() {
-			if _, err := ac.channel.Join(); err != nil {
-				ac.logger.Error("Failed to rejoin channel after reconnect", "error", err)
+		// Join (or rejoin) the admin channel
+		channelTopic := "sprite:admin"
+		if ac.channel == nil {
+			ac.channel = ac.socket.Channel(channelTopic, nil)
+		}
+		if !ac.channel.IsJoined() {
+			join, err := ac.channel.Join()
+			if err != nil {
+				ac.logger.Error("error joining channel", "error", err)
+				return
 			}
+			join.Receive("ok", func(response any) {
+				ac.logger.Info("Joined admin channel", "topic", channelTopic)
+			})
+			join.Receive("error", func(response any) {
+				ac.logger.Warn("Failed to join admin channel", "error", response)
+			})
+			join.Receive("timeout", func(response any) {
+				ac.logger.Warn("Admin channel join timeout")
+			})
 		}
 	})
 
@@ -80,26 +110,7 @@ func (ac *AdminChannel) Start() error {
 		return fmt.Errorf("failed to connect to channel: %w", err)
 	}
 
-	// Create and join the channel
-	channelTopic := "sprite:admin"
-	ac.channel = ac.socket.Channel(channelTopic, nil)
-
-	join, err := ac.channel.Join()
-	if err != nil {
-		ac.socket.Disconnect()
-		return fmt.Errorf("failed to join channel: %w", err)
-	}
-
-	// Fire and forget - we don't wait for join confirmation
-	join.Receive("ok", func(response any) {
-		ac.logger.Info("Joined admin channel", "topic", channelTopic)
-	})
-	join.Receive("error", func(response any) {
-		ac.logger.Warn("Failed to join admin channel", "error", response)
-	})
-	join.Receive("timeout", func(response any) {
-		ac.logger.Warn("Admin channel join timeout")
-	})
+	// Channel creation/join now handled in OnOpen
 
 	return nil
 }
@@ -122,6 +133,44 @@ func (ac *AdminChannel) Stop() error {
 	ac.logger.Info("Admin channel stopped")
 
 	return nil
+}
+
+// SendActivityEvent sends a simple activity event with a type and payload
+func (ac *AdminChannel) SendActivityEvent(eventType string, payload map[string]interface{}) {
+	if ac == nil {
+		ac.logger.Debug("Admin channel not available for activity event", "event", eventType)
+		return
+	}
+
+	if payload == nil {
+		payload = make(map[string]interface{})
+	}
+
+	// Queue the message - the processor will handle sending when ready
+	select {
+	case ac.messageQueue <- queuedMessage{eventType: eventType, payload: payload}:
+		ac.logger.Debug("Queued activity event", "event", eventType)
+	default:
+		ac.logger.Debug("Message queue full, dropping activity event", "event", eventType)
+	}
+}
+
+// processMessageQueue handles sending queued messages when channel is ready
+func (ac *AdminChannel) processMessageQueue() {
+	for msg := range ac.messageQueue {
+		// Wait for channel to be ready
+		for ac.channel == nil || !ac.channel.IsJoined() {
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		// Send the message
+		_, err := ac.channel.Push(msg.eventType, msg.payload)
+		if err != nil {
+			ac.logger.Debug("Failed to send queued activity event", "event", msg.eventType, "error", err)
+		} else {
+			ac.logger.Debug("Sent queued activity event", "event", msg.eventType)
+		}
+	}
 }
 
 // EnrichContext adds the admin channel to the context
@@ -188,6 +237,11 @@ func GetFromContext(ctx context.Context) *AdminChannel {
 		return val.(*AdminChannel)
 	}
 	return nil
+}
+
+// IsReady returns true if the admin channel is connected and joined
+func (ac *AdminChannel) IsReady() bool {
+	return ac != nil && ac.channel != nil && ac.channel.IsJoined()
 }
 
 // phxLogAdapter adapts slog.Logger to phx.Logger interface

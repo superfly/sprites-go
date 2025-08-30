@@ -310,3 +310,11 @@ func (s *System) Shutdown(ctx context.Context) error {
 
 	return nil
 }
+
+// SyncOverlay flushes overlay writes using JuiceFS overlay manager
+func (s *System) SyncOverlay(ctx context.Context) error {
+	if s.juicefs == nil {
+		return nil
+	}
+	return s.juicefs.SyncOverlay(ctx)
+}

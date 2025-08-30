@@ -1100,6 +1100,35 @@ func (j *JuiceFS) handleSignals() {
 	}
 }
 
+// SyncOverlay flushes overlay writes similar to restore preparation.
+func (j *JuiceFS) SyncOverlay(ctx context.Context) error {
+	if j.overlayMgr == nil {
+		return nil
+	}
+
+	if err := j.overlayMgr.PrepareForCheckpoint(ctx); err != nil {
+		j.logger.Debug("overlay sync skipped", "error", err)
+		return nil
+	}
+
+	if err := j.overlayMgr.UnfreezeAfterCheckpoint(ctx); err != nil {
+		j.logger.Warn("overlay unfreeze failed", "error", err)
+	}
+
+	storageRoot := filepath.Dir(j.config.BaseDir)
+	j.logger.Info("Syncing sprite storage root", "path", storageRoot)
+	rootSync := exec.CommandContext(ctx, "sync", "-f", storageRoot)
+	if output, err := rootSync.CombinedOutput(); err != nil {
+		if len(output) > 0 {
+			j.logger.Warn("sprite storage root sync failed", "error", err, "output", string(output))
+		} else {
+			j.logger.Warn("sprite storage root sync failed", "error", err)
+		}
+	}
+
+	return nil
+}
+
 // findAndUnmountDependentMounts finds and unmounts all mounts that depend on the JuiceFS mount
 func (j *JuiceFS) findAndUnmountDependentMounts(juicefsMountPath string) error {
 	// Read /proc/mounts to find all current mounts

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/superfly/sprite-env/server/api/handlers"
 	"github.com/superfly/sprite-env/pkg/sync"
+	"github.com/superfly/sprite-env/server/api/handlers"
 )
 
 var (
@@ -26,6 +26,7 @@ type Server struct {
 	syncServer      *sync.Server
 	authManager     *AuthManager
 	contextEnricher ContextEnricher
+	activityObs     func(start bool)
 }
 
 // NewServer creates a new API server
@@ -96,6 +97,16 @@ func NewServer(config Config, system handlers.SystemManager, logger *slog.Logger
 	}
 
 	handler := stripSpritePrefix(mux)
+	{
+		next := handler
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if s.activityObs != nil {
+				s.activityObs(true)
+				defer s.activityObs(false)
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 
 	s.server = &http.Server{
 		Addr: config.ListenAddr,
@@ -111,6 +122,11 @@ func NewServer(config Config, system handlers.SystemManager, logger *slog.Logger
 // SetAdminChannel sets the admin channel for context enrichment
 func (s *Server) SetAdminChannel(enricher ContextEnricher) {
 	s.contextEnricher = enricher
+}
+
+// SetActivityObserver sets a callback to observe request start/end
+func (s *Server) SetActivityObserver(observe func(start bool)) {
+	s.activityObs = observe
 }
 
 // setupEndpoints configures HTTP endpoints for the API
@@ -152,6 +168,9 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 
 	// Proxy endpoint - waits for process to be running
 	mux.HandleFunc("/proxy", s.authMiddleware(s.enrichContextMiddleware(s.waitForProcessMiddleware(s.handlers.HandleProxy))))
+
+	// Suspend endpoint - wait for JuiceFS to be ready, requires auth
+	mux.HandleFunc("/suspend", s.authMiddleware(s.waitForJuiceFSMiddleware(s.handlers.HandleSuspend)))
 
 	// Debug endpoints - require auth but don't wait for process or JuiceFS
 	mux.HandleFunc("/debug/create-zombie", s.authMiddleware(s.handlers.HandleDebugCreateZombie))

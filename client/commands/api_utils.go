@@ -10,6 +10,9 @@ import (
 // getSpritesAPIURL returns the base URL for the Sprites API
 // It checks SPRITES_API_URL environment variable first, then falls back to defaults
 func getSpritesAPIURL(org *config.Organization) string {
+	if apiURL := os.Getenv("SPRITE_URL"); apiURL != "" {
+		return strings.TrimRight(apiURL, "/")
+	}
 	// Check for override via environment variable
 	if apiURL := os.Getenv("SPRITES_API_URL"); apiURL != "" {
 		return strings.TrimRight(apiURL, "/")

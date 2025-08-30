@@ -182,6 +182,10 @@ func (m *mockSystemManager) WaitForJuiceFS(ctx context.Context) error {
 	return nil
 }
 
+func (m *mockSystemManager) SyncOverlay(ctx context.Context) error {
+	return nil
+}
+
 func (m *mockSystemManager) CheckpointWithStream(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) error {
 	defer close(streamCh)
 	streamCh <- api.StreamMessage{

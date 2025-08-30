@@ -163,6 +163,13 @@ func ApiCommand(ctx *GlobalContext, args []string) {
 		}
 	}
 
+	// If using SPRITE_URL/SPRITE_TOKEN (env org), behave like other commands:
+	// - ignore .sprite-derived sprite unless explicitly provided with -s
+	// - do not add /v1 or sprite prefix; use path as-is relative to SPRITE_URL
+	if org != nil && org.Name == "env" && flags.Sprite == "" {
+		spriteName = ""
+	}
+
 	// Note: sprite is optional for this command
 
 	// Get auth token
@@ -181,11 +188,13 @@ func ApiCommand(ctx *GlobalContext, args []string) {
 	}
 
 	var fullURL string
-	if spriteName != "" {
-		// If sprite is specified, use the sprite-specific path
+	if org != nil && org.Name == "env" {
+		fullURL = baseURL + path
+	} else if strings.HasPrefix(path, "/v1/") || path == "/v1" {
+		fullURL = baseURL + path
+	} else if spriteName != "" {
 		fullURL = baseURL + "/v1/sprites/" + spriteName + path
 	} else {
-		// If no sprite, use the general v1 path
 		fullURL = baseURL + "/v1" + path
 	}
 

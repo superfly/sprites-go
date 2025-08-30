@@ -190,6 +190,14 @@ func NewApplication(config Config) (*Application, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to create API server: %w", err)
 		}
+
+		// Start activity monitor and connect to API server
+		activity := NewActivityMonitor(logger, app.system, 30*time.Second)
+		activity.admin = app.adminChannel
+		apiServer.SetActivityObserver(func(start bool) {
+			activity.Observe(start)
+		})
+		activity.Start(ctx)
 		// Pass admin channel to API server for context enrichment
 		if app.adminChannel != nil {
 			apiServer.SetAdminChannel(app.adminChannel)
