@@ -81,12 +81,10 @@ WORKDIR /workspace
 # Copy go.mod and go.sum files from all modules in the project
 COPY go.mod go.sum ./
 COPY cmd/go.mod cmd/go.sum ./cmd/
-COPY sdks/test-harness/go.mod ./sdks/test-harness/
 
 # Download dependencies for all modules
 RUN go mod download && \
-    cd cmd && go mod download && \
-    cd ../sdks/test-harness && go mod download
+    cd cmd && go mod download
 
 # Note: The actual source code will still be bind-mounted at runtime
 # This just ensures dependencies are cached in the image

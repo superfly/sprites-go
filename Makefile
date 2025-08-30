@@ -1,4 +1,4 @@
-.PHONY: test test-docker test-machine build build-linux test-sdks help
+.PHONY: test test-docker test-machine build build-linux help
 
 test:
 	./scripts/run-tests.sh $(ARGS)
