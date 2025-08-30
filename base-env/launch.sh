@@ -243,6 +243,12 @@ CONFIG_JSON='{
       "type": "bind",
       "source": "/dev/fly_vol/container/resolv.conf",
       "options": ["ro", "nosuid", "noexec", "nodev", "bind"]
+    },
+    {
+      "destination": "/.sprite/bin",
+      "type": "bind",
+      "source": "/.sprite/bin",
+      "options": ["ro", "rbind"]
     }
   ],
   "linux": {

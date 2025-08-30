@@ -59,6 +59,36 @@ FROM litestream/litestream:latest AS litestream
 
 FROM ghcr.io/superfly/juicefs:748b889 as juicefs
 
+# ---- build stage for statically linked tmux ----
+FROM alpine:3.20 AS utility-builder
+
+RUN apk add --no-cache \
+      build-base \
+      musl-dev \
+      ncurses-static \
+      ncurses-dev \
+      libevent-static \
+      libevent-dev \
+      git \
+      autoconf \
+      automake \
+      pkgconfig \
+      bison
+
+WORKDIR /src
+
+# Fetch tmux source
+RUN git clone --depth 1 --branch 3.5a https://github.com/tmux/tmux.git .
+
+# Bootstrap & configure
+RUN sh autogen.sh && \
+    ./configure LDFLAGS="-static" CFLAGS="-O2" && \
+    make -j$(nproc)
+
+# Create the sprite bin directory and copy tmux
+RUN mkdir -p /.sprite/bin && \
+    cp tmux /.sprite/bin/
+
 # Final stage - based on juicedata/mount which includes juicefs
 FROM ubuntu:25.04
 
@@ -69,7 +99,7 @@ RUN apt-get update && \
     # Tools for DRBD
     drbd-utils \
     # Additional useful tools for disk management
-    parted gdisk util-linux fdisk xfsprogs fuse3 tmux curl iproute2 nftables iputils-ping vim \
+    parted gdisk util-linux fdisk xfsprogs fuse3 curl iproute2 nftables iputils-ping vim \
     # Cleanup
     && apt-get clean && \
     rm -rf /var/lib/apt/lists/*
@@ -78,6 +108,9 @@ RUN apt-get update && \
 COPY --from=crun /crun /usr/local/bin/crun
 COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
 COPY --from=juicefs /usr/local/bin/juicefs /usr/local/bin/juicefs
+
+# Copy statically linked tmux
+COPY --from=utility-builder /.sprite/bin/ /.sprite/bin/
 
 # Define environment variables for paths
 ENV SPRITE_WRITE_DIR=/dev/fly_vol \

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"net/url"
 	"os"
 	"time"
@@ -38,7 +37,12 @@ func NewAdminChannel(logger *slog.Logger) *AdminChannel {
 	channelURL := os.Getenv("SPRITE_ADMIN_CHANNEL")
 	token := os.Getenv("SPRITE_HTTP_API_TOKEN")
 
-	if channelURL == "" || token == "" {
+	// Use default URL if not specified
+	if channelURL == "" {
+		channelURL = "https://api.sprites.dev/internal/admin"
+	}
+
+	if token == "" {
 		// Return nil if not configured
 		return nil
 	}
@@ -62,18 +66,32 @@ func (ac *AdminChannel) Start() error {
 		return nil // Noop if not configured
 	}
 
-	// Parse the URL
+	// Parse the URL and add authentication parameters
 	u, err := url.Parse(ac.url)
 	if err != nil {
 		return fmt.Errorf("invalid channel URL: %w", err)
 	}
 
-	// Create socket with auth header
+	// Add authentication parameters to the URL
+	appName := os.Getenv("FLY_APP_NAME")
+	q := u.Query()
+	q.Set("authToken", ac.token)
+	q.Set("appName", appName)
+	u.RawQuery = q.Encode()
+
+	// Create socket with built-in reconnect configuration
 	ac.socket = phx.NewSocket(u)
-	ac.socket.RequestHeader = http.Header{
-		"Authorization": []string{"Bearer " + ac.token},
-	}
 	ac.socket.Logger = &phxLogAdapter{logger: ac.logger}
+
+	// Configure exponential backoff with max of 5 minutes
+	ac.socket.ReconnectAfterFunc = func(tries int) time.Duration {
+		backoff := time.Duration(1<<uint(tries)) * time.Second
+		if backoff > 5*time.Minute {
+			backoff = 5 * time.Minute
+		}
+		ac.logger.Info("Reconnect attempt", "tries", tries, "backoff", backoff)
+		return backoff
+	}
 
 	// Set up auto-reconnect on disconnect
 	ac.socket.OnClose(func() {
@@ -82,6 +100,7 @@ func (ac *AdminChannel) Start() error {
 
 	ac.socket.OnOpen(func() {
 		ac.logger.Info("Socket connected")
+
 		// Join (or rejoin) the admin channel
 		channelTopic := "sprite:admin"
 		if ac.channel == nil {
@@ -267,7 +286,8 @@ func (l *phxLogAdapter) Printf(level phx.LoggerLevel, kind string, format string
 func (l *phxLogAdapter) log(level phx.LoggerLevel, kind string, msg string) {
 	switch level {
 	case phx.LogDebug:
-		l.logger.Debug(msg, "kind", kind)
+		// Skip DEBUG level logs to reduce noise
+		return
 	case phx.LogInfo:
 		l.logger.Info(msg, "kind", kind)
 	case phx.LogWarning:
