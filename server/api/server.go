@@ -18,13 +18,14 @@ var (
 
 // Server provides the HTTP API with authentication
 type Server struct {
-	server      *http.Server
-	logger      *slog.Logger
-	config      Config
-	handlers    *handlers.Handlers
-	system      handlers.SystemManager
-	syncServer  *sync.Server
-	authManager *AuthManager
+	server          *http.Server
+	logger          *slog.Logger
+	config          Config
+	handlers        *handlers.Handlers
+	system          handlers.SystemManager
+	syncServer      *sync.Server
+	authManager     *AuthManager
+	contextEnricher ContextEnricher
 }
 
 // NewServer creates a new API server
@@ -107,12 +108,17 @@ func NewServer(config Config, system handlers.SystemManager, logger *slog.Logger
 	return s, nil
 }
 
+// SetAdminChannel sets the admin channel for context enrichment
+func (s *Server) SetAdminChannel(enricher ContextEnricher) {
+	s.contextEnricher = enricher
+}
+
 // setupEndpoints configures HTTP endpoints for the API
 func (s *Server) setupEndpoints(mux *http.ServeMux) {
 	// All other endpoints require authentication
 
 	// Exec endpoint - waits for process to be running
-	mux.HandleFunc("/exec", s.authMiddleware(s.waitForProcessMiddleware(s.handlers.HandleExec)))
+	mux.HandleFunc("/exec", s.authMiddleware(s.enrichContextMiddleware(s.waitForProcessMiddleware(s.handlers.HandleExec))))
 
 	mux.HandleFunc("/sync", s.authMiddleware(s.waitForProcessMiddleware(s.syncServer.HandleWebSocket)))
 
@@ -145,7 +151,7 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 	mux.HandleFunc("/checkpoints/", checkpointsHandler)
 
 	// Proxy endpoint - waits for process to be running
-	mux.HandleFunc("/proxy", s.authMiddleware(s.waitForProcessMiddleware(s.handlers.HandleProxy)))
+	mux.HandleFunc("/proxy", s.authMiddleware(s.enrichContextMiddleware(s.waitForProcessMiddleware(s.handlers.HandleProxy))))
 
 	// Debug endpoints - require auth but don't wait for process or JuiceFS
 	mux.HandleFunc("/debug/create-zombie", s.authMiddleware(s.handlers.HandleDebugCreateZombie))
@@ -165,6 +171,23 @@ func (s *Server) Start() error {
 func (s *Server) Stop(ctx context.Context) error {
 	s.logger.Info("Stopping API server")
 	return s.server.Shutdown(ctx)
+}
+
+// contextEnricherKey is the key for storing the enricher in context
+type contextEnricherKey struct{}
+
+// enrichContextMiddleware enriches the request context if a context enricher is configured
+func (s *Server) enrichContextMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.contextEnricher != nil {
+			// Enrich the context with admin channel data
+			ctx := s.contextEnricher.EnrichContext(r.Context())
+			// Also store the enricher itself in context for handlers to use
+			ctx = context.WithValue(ctx, contextEnricherKey{}, s.contextEnricher)
+			r = r.WithContext(ctx)
+		}
+		next(w, r)
+	}
 }
 
 // authMiddleware checks for authentication token

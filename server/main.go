@@ -97,6 +97,7 @@ type Application struct {
 	keepAliveOnError bool
 	reaper           *Reaper
 	resourceMonitor  *ResourceMonitor
+	adminChannel     *AdminChannel
 }
 
 // NewApplication creates a new application instance
@@ -129,6 +130,9 @@ func NewApplication(config Config) (*Application, error) {
 
 	// Initialize resource monitor (linux only implementation)
 	app.resourceMonitor = NewResourceMonitor(logger)
+
+	// Initialize admin channel (if configured)
+	app.adminChannel = NewAdminChannel(logger)
 
 	// Create System instance
 	systemConfig := SystemConfig{
@@ -186,6 +190,10 @@ func NewApplication(config Config) (*Application, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to create API server: %w", err)
 		}
+		// Pass admin channel to API server for context enrichment
+		if app.adminChannel != nil {
+			apiServer.SetAdminChannel(app.adminChannel)
+		}
 		app.apiServer = apiServer
 	}
 
@@ -203,6 +211,14 @@ func (app *Application) Run() error {
 
 	// Start zombie reaper
 	app.reaper.Start()
+
+	// Start admin channel if configured
+	if app.adminChannel != nil {
+		if err := app.adminChannel.Start(); err != nil {
+			app.logger.Error("Failed to start admin channel", "error", err)
+			// Non-fatal, continue without admin channel
+		}
+	}
 
 	// Boot the system
 	if err := app.system.Boot(app.ctx); err != nil {
@@ -314,6 +330,13 @@ func (app *Application) shutdown(exitCode int) error {
 			app.logger.Error("Failed to stop API server", "error", err)
 		}
 		cancel()
+	}
+
+	// Stop admin channel
+	if app.adminChannel != nil {
+		if err := app.adminChannel.Stop(); err != nil {
+			app.logger.Error("Failed to stop admin channel", "error", err)
+		}
 	}
 
 	// Shutdown system (stops process and JuiceFS)

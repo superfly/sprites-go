@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"time"
 
 	gorillaws "github.com/gorilla/websocket"
 )
@@ -19,7 +20,9 @@ type ProxyInitMessage struct {
 
 // HandleProxy handles WebSocket proxy requests
 func (h *Handlers) HandleProxy(w http.ResponseWriter, r *http.Request) {
-	h.logger.Info("Received proxy request", "method", r.Method, "url", r.URL.String(), "remote_addr", r.RemoteAddr)
+	startTime := time.Now()
+	proxyID := fmt.Sprintf("proxy-%d", time.Now().UnixNano())
+	h.logger.Info("Received proxy request", "method", r.Method, "url", r.URL.String(), "remote_addr", r.RemoteAddr, "proxy_id", proxyID)
 
 	// Only allow GET for WebSocket upgrade
 	if r.Method != http.MethodGet {
@@ -103,8 +106,8 @@ func (h *Handlers) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Connect to target
-	targetAddr := fmt.Sprintf("%s:%d", targetHost, initMsg.Port)
+	// Connect to target - use net.JoinHostPort for proper IPv6 handling
+	targetAddr := net.JoinHostPort(targetHost, fmt.Sprintf("%d", initMsg.Port))
 	h.logger.Info("Attempting to connect to target", "target", targetAddr, "original_host", initMsg.Host)
 
 	targetConn, err := net.Dial("tcp", targetAddr)
@@ -187,5 +190,29 @@ func (h *Handlers) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	wg.Wait()
-	h.logger.Debug("Proxy connection closed", "target", targetAddr)
+	endTime := time.Now()
+	duration := time.Since(startTime)
+	h.logger.Debug("Proxy connection closed", "target", targetAddr, "duration_ms", duration.Milliseconds())
+
+	// Send notification to admin channel if available
+	if enricher := h.getContextEnricher(r.Context()); enricher != nil {
+		extraData := map[string]interface{}{
+			"proxy_id":    proxyID,
+			"target_host": initMsg.Host,
+			"target_port": initMsg.Port,
+			"target_addr": targetAddr,
+		}
+		enricher.RequestEnd(r.Context(), &RequestInfo{
+			RequestID:   proxyID,
+			Method:      r.Method,
+			Path:        r.URL.Path,
+			StartTime:   startTime,
+			EndTime:     endTime,
+			DurationMS:  duration.Milliseconds(),
+			StatusCode:  200,
+			Error:       nil,
+			RequestType: "proxy",
+			ExtraData:   extraData,
+		})
+	}
 }

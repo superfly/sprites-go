@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -127,4 +128,12 @@ func (f *fileCollector) Close() error {
 		err = f.file.Close()
 	}
 	return err
+}
+
+// getContextEnricher retrieves the context enricher from the request context
+func (h *Handlers) getContextEnricher(ctx context.Context) ContextEnricher {
+	if val := ctx.Value(contextEnricherKey{}); val != nil {
+		return val.(ContextEnricher)
+	}
+	return nil
 }

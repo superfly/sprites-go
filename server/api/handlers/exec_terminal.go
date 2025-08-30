@@ -171,12 +171,40 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 	// Execute the command directly
 	err := wsHandler.Handle(w, r)
 
+	endTime := time.Now()
+	duration := time.Since(startTime)
 	h.logger.Info("Exec completed",
 		"path", path,
 		"args", args,
 		"error", err,
-		"requestDuration", time.Since(startTime).Milliseconds(),
+		"requestDuration", duration.Milliseconds(),
 	)
+
+	// Send notification to admin channel if available
+	if enricher := h.getContextEnricher(r.Context()); enricher != nil {
+		statusCode := 200
+		if err != nil {
+			statusCode = 500
+		}
+		extraData := map[string]interface{}{
+			"command": path,
+			"args":    args,
+			"tty":     tty,
+			"exec_id": execID,
+		}
+		enricher.RequestEnd(r.Context(), &RequestInfo{
+			RequestID:   execID,
+			Method:      r.Method,
+			Path:        r.URL.Path,
+			StartTime:   startTime,
+			EndTime:     endTime,
+			DurationMS:  duration.Milliseconds(),
+			StatusCode:  statusCode,
+			Error:       err,
+			RequestType: "exec",
+			ExtraData:   extraData,
+		})
+	}
 }
 
 // startPortMonitoring starts monitoring ports for a specific process
