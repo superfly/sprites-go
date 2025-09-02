@@ -193,9 +193,13 @@ func NewApplication(config Config) (*Application, error) {
 
 		// Start activity monitor and connect to API server
 		activity := NewActivityMonitor(logger, app.system, 30*time.Second)
-		activity.admin = app.adminChannel
+		activity.SetAdminChannel(app.adminChannel)
 		apiServer.SetActivityObserver(func(start bool) {
-			activity.Observe(start)
+			if start {
+				activity.ActivityStarted("http")
+			} else {
+				activity.ActivityEnded("http")
+			}
 		})
 		activity.Start(ctx)
 		// Pass admin channel to API server for context enrichment

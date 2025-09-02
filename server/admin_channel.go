@@ -25,6 +25,10 @@ type AdminChannel struct {
 
 	// Message queue for when channel is not ready
 	messageQueue chan queuedMessage
+	stopCh       chan struct{}
+	ctx          context.Context
+	cancel       context.CancelFunc
+	readyCh      chan struct{} // Signals when channel becomes ready
 }
 
 type queuedMessage struct {
@@ -44,14 +48,22 @@ func NewAdminChannel(logger *slog.Logger) *AdminChannel {
 
 	if token == "" {
 		// Return nil if not configured
+		logger.Info("Admin channel disabled (no SPRITE_HTTP_API_TOKEN)")
 		return nil
 	}
 
+	logger.Info("Admin channel configured", "base_url", channelURL)
+
+	ctx, cancel := context.WithCancel(context.Background())
 	ac := &AdminChannel{
 		url:          channelURL,
 		token:        token,
 		logger:       logger,
 		messageQueue: make(chan queuedMessage, 100),
+		stopCh:       make(chan struct{}),
+		ctx:          ctx,
+		cancel:       cancel,
+		readyCh:      make(chan struct{}),
 	}
 
 	// Start message queue processor
@@ -79,6 +91,16 @@ func (ac *AdminChannel) Start() error {
 	q.Set("appName", appName)
 	u.RawQuery = q.Encode()
 
+	// Log the configured URL and channel topic
+	channelTopic := fmt.Sprintf("sprite:%s", appName)
+	if appName == "" {
+		channelTopic = "sprite:unknown"
+	}
+	ac.logger.Info("Starting admin channel",
+		"url", u.String(),
+		"topic", channelTopic,
+		"app_name", appName)
+
 	// Create socket with built-in reconnect configuration
 	ac.socket = phx.NewSocket(u)
 	ac.socket.Logger = &phxLogAdapter{logger: ac.logger}
@@ -89,48 +111,72 @@ func (ac *AdminChannel) Start() error {
 		if backoff > 5*time.Minute {
 			backoff = 5 * time.Minute
 		}
-		ac.logger.Info("Reconnect attempt", "tries", tries, "backoff", backoff)
+		ac.logger.Debug("Reconnect attempt scheduled", "tries", tries, "backoff", backoff)
 		return backoff
 	}
 
 	// Set up auto-reconnect on disconnect
 	ac.socket.OnClose(func() {
-		ac.logger.Info("Socket disconnected, will auto-reconnect")
+		ac.logger.Debug("Socket disconnected, will auto-reconnect")
 	})
 
 	ac.socket.OnOpen(func() {
 		ac.logger.Info("Socket connected")
 
-		// Join (or rejoin) the admin channel
-		channelTopic := "sprite:admin"
+		// Join (or rejoin) the admin channel with app-specific topic
+		appName := os.Getenv("FLY_APP_NAME")
+		if appName == "" {
+			appName = "unknown"
+		}
+		channelTopic := fmt.Sprintf("sprite:%s", appName)
 		if ac.channel == nil {
 			ac.channel = ac.socket.Channel(channelTopic, nil)
 		}
 		if !ac.channel.IsJoined() {
 			join, err := ac.channel.Join()
 			if err != nil {
-				ac.logger.Error("error joining channel", "error", err)
+				ac.logger.Debug("error joining channel", "error", err)
 				return
 			}
 			join.Receive("ok", func(response any) {
 				ac.logger.Info("Joined admin channel", "topic", channelTopic)
+				// Signal that channel is ready and flush queued messages
+				select {
+				case ac.readyCh <- struct{}{}:
+				default:
+					// Channel already signaled as ready
+				}
+				// Trigger flush of any queued messages
+				ac.flushQueue()
 			})
 			join.Receive("error", func(response any) {
-				ac.logger.Warn("Failed to join admin channel", "error", response)
+				ac.logger.Debug("Failed to join admin channel", "error", response)
 			})
 			join.Receive("timeout", func(response any) {
-				ac.logger.Warn("Admin channel join timeout")
+				ac.logger.Debug("Admin channel join timeout")
 			})
+		} else {
+			// Channel was already joined, signal ready and flush
+			ac.logger.Debug("Channel already joined, flushing queue")
+			select {
+			case ac.readyCh <- struct{}{}:
+			default:
+				// Channel already signaled as ready
+			}
+			ac.flushQueue()
 		}
 	})
 
-	// Connect to the server
-	if err := ac.socket.Connect(); err != nil {
-		return fmt.Errorf("failed to connect to channel: %w", err)
-	}
+	// Start connection in background goroutine so it doesn't block
+	go func() {
+		ac.logger.Debug("Attempting to connect to admin channel", "url", ac.url)
+		if err := ac.socket.Connect(); err != nil {
+			ac.logger.Debug("Failed to connect to admin channel", "error", err)
+			// The socket will automatically retry with exponential backoff
+		}
+	}()
 
-	// Channel creation/join now handled in OnOpen
-
+	// Return immediately - connection happens in background
 	return nil
 }
 
@@ -139,6 +185,9 @@ func (ac *AdminChannel) Stop() error {
 	if ac == nil {
 		return nil
 	}
+
+	// Cancel context to stop message processor
+	ac.cancel()
 
 	// Leave channel and disconnect
 	if ac.channel != nil {
@@ -149,6 +198,9 @@ func (ac *AdminChannel) Stop() error {
 		ac.socket.Disconnect()
 	}
 
+	// Close stop channel to ensure processor exits
+	close(ac.stopCh)
+
 	ac.logger.Info("Admin channel stopped")
 
 	return nil
@@ -157,7 +209,6 @@ func (ac *AdminChannel) Stop() error {
 // SendActivityEvent sends a simple activity event with a type and payload
 func (ac *AdminChannel) SendActivityEvent(eventType string, payload map[string]interface{}) {
 	if ac == nil {
-		ac.logger.Debug("Admin channel not available for activity event", "event", eventType)
 		return
 	}
 
@@ -176,18 +227,60 @@ func (ac *AdminChannel) SendActivityEvent(eventType string, payload map[string]i
 
 // processMessageQueue handles sending queued messages when channel is ready
 func (ac *AdminChannel) processMessageQueue() {
-	for msg := range ac.messageQueue {
-		// Wait for channel to be ready
-		for ac.channel == nil || !ac.channel.IsJoined() {
-			time.Sleep(100 * time.Millisecond)
-		}
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
 
-		// Send the message
-		_, err := ac.channel.Push(msg.eventType, msg.payload)
-		if err != nil {
-			ac.logger.Debug("Failed to send queued activity event", "event", msg.eventType, "error", err)
-		} else {
-			ac.logger.Debug("Sent queued activity event", "event", msg.eventType)
+	for {
+		select {
+		case <-ac.ctx.Done():
+			return
+		case <-ac.stopCh:
+			return
+		case msg := <-ac.messageQueue:
+			// Only send if channel is ready, otherwise re-queue
+			if ac.IsReady() {
+				_, err := ac.channel.Push(msg.eventType, msg.payload)
+				if err != nil {
+					// Best effort - just drop the message if it fails
+					ac.logger.Debug("Failed to send activity event", "event", msg.eventType)
+				}
+			} else {
+				// Channel not ready, try to re-queue but don't block
+				select {
+				case ac.messageQueue <- msg:
+					// Successfully re-queued
+				default:
+					// Queue full, drop the message
+				}
+			}
+		case <-ac.readyCh:
+			// Channel became ready, flush any pending messages
+			ac.flushQueue()
+		case <-ticker.C:
+			// Periodic check to flush queue if channel is ready
+			if ac.IsReady() && len(ac.messageQueue) > 0 {
+				ac.flushQueue()
+			}
+		}
+	}
+}
+
+// flushQueue processes all queued messages when channel becomes ready
+func (ac *AdminChannel) flushQueue() {
+	if !ac.IsReady() {
+		return
+	}
+
+	// Process all currently queued messages (non-blocking)
+	count := len(ac.messageQueue)
+	for i := 0; i < count; i++ {
+		select {
+		case msg := <-ac.messageQueue:
+			// Best effort send - don't block or retry
+			_, _ = ac.channel.Push(msg.eventType, msg.payload)
+		default:
+			// Queue is empty
+			return
 		}
 	}
 }
@@ -202,15 +295,14 @@ func (ac *AdminChannel) EnrichContext(ctx context.Context) context.Context {
 
 // RequestEnd notifies the channel when a request ends
 func (ac *AdminChannel) RequestEnd(ctx context.Context, infoInterface interface{}) {
-	if ac == nil || ac.channel == nil {
-		return // Noop if not configured or not connected
+	if ac == nil || !ac.IsReady() {
+		return // Noop if not configured or not ready
 	}
 
 	// Cast to the expected type
 	info, ok := infoInterface.(*handlers.RequestInfo)
 	if !ok {
-		ac.logger.Error("RequestEnd called with wrong type", "type", fmt.Sprintf("%T", infoInterface))
-		return
+		return // Silently ignore wrong type
 	}
 
 	// Check if this context has the admin channel
@@ -242,11 +334,12 @@ func (ac *AdminChannel) RequestEnd(ctx context.Context, infoInterface interface{
 		}
 	}
 
-	// Send the message - fire and forget
-	_, err := ac.channel.Push("request_end", payload)
-	if err != nil {
-		ac.logger.Debug("Failed to send request_end", "error", err)
-		// Best effort - don't return error
+	// Queue the message instead of sending directly - non-blocking
+	select {
+	case ac.messageQueue <- queuedMessage{eventType: "request_end", payload: payload}:
+		// Successfully queued
+	default:
+		// Queue full, drop the message silently
 	}
 }
 

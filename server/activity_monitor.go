@@ -7,32 +7,42 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 )
+
+// Context key for storing activity monitor
+type activityMonitorKey struct{}
 
 type ActivityMonitor struct {
 	logger    *slog.Logger
 	system    *System
 	idleAfter time.Duration
-	eventsCh  chan bool
-	stopCh    chan struct{}
 	admin     *AdminChannel
 
-	requestCount     int
-	totalActiveTime  time.Duration
-	busyIntervalFrom time.Time
-	lastRequestEnd   time.Time
-	isSuspended      bool
+	// Activity tracking
+	activeCount  int64 // atomic counter for active activities
+	lastActivity time.Time
+	isSuspended  bool
+
+	// Internal channels
+	activityCh chan activityEvent
+	stopCh     chan struct{}
+}
+
+type activityEvent struct {
+	isStart bool
+	source  string // "http" or "exec" for debugging
 }
 
 func NewActivityMonitor(l *slog.Logger, sys *System, idleAfter time.Duration) *ActivityMonitor {
 	return &ActivityMonitor{
-		logger:    l,
-		system:    sys,
-		idleAfter: idleAfter,
-		eventsCh:  make(chan bool, 64),
-		stopCh:    make(chan struct{}),
-		admin:     nil,
+		logger:       l,
+		system:       sys,
+		idleAfter:    idleAfter,
+		activityCh:   make(chan activityEvent, 128),
+		stopCh:       make(chan struct{}),
+		lastActivity: time.Now(),
 	}
 }
 
@@ -40,54 +50,126 @@ func (m *ActivityMonitor) Start(ctx context.Context) {
 	go m.run(ctx)
 }
 
-func (m *ActivityMonitor) Observe(active bool) {
+// ActivityStarted increments the activity counter
+func (m *ActivityMonitor) ActivityStarted(source string) {
+	atomic.AddInt64(&m.activeCount, 1)
 	select {
-	case m.eventsCh <- active:
+	case m.activityCh <- activityEvent{isStart: true, source: source}:
 	default:
+		m.logger.Debug("Activity channel full, event dropped", "source", source)
 	}
 }
 
+// ActivityEnded decrements the activity counter
+func (m *ActivityMonitor) ActivityEnded(source string) {
+	atomic.AddInt64(&m.activeCount, -1)
+	select {
+	case m.activityCh <- activityEvent{isStart: false, source: source}:
+	default:
+		m.logger.Debug("Activity channel full, event dropped", "source", source)
+	}
+}
+
+// SetAdminChannel sets the admin channel for sending events
+func (m *ActivityMonitor) SetAdminChannel(admin *AdminChannel) {
+	m.admin = admin
+}
+
+// EnrichContext adds the activity monitor to the context for use by handlers
+func (m *ActivityMonitor) EnrichContext(ctx context.Context) context.Context {
+	// Add the monitor itself
+	ctx = context.WithValue(ctx, activityMonitorKey{}, m)
+
+	// Add a tracker function that handlers can use
+	trackerFunc := func(isStart bool, source string) {
+		if isStart {
+			m.ActivityStarted(source)
+		} else {
+			m.ActivityEnded(source)
+		}
+	}
+	ctx = context.WithValue(ctx, activityTrackerKey{}, trackerFunc)
+
+	return ctx
+}
+
+// activityTrackerKey matches the one used in handlers package
+type activityTrackerKey struct{}
+
 func (m *ActivityMonitor) run(ctx context.Context) {
-	active := 0
 	var idleTimer *time.Timer
+	var idleTimerCh <-chan time.Time
+
+	// Start idle timer immediately at boot if no activity
+	currentCount := atomic.LoadInt64(&m.activeCount)
+	if currentCount == 0 {
+		idleTimer = time.NewTimer(m.idleAfter)
+		idleTimerCh = idleTimer.C
+		m.logger.Info("Starting idle timer at boot", "duration", m.idleAfter)
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
+			if idleTimer != nil {
+				idleTimer.Stop()
+			}
 			return
-		case ev := <-m.eventsCh:
-			if ev {
-				// Request started
+
+		case ev := <-m.activityCh:
+			currentCount := atomic.LoadInt64(&m.activeCount)
+
+			if ev.isStart {
+				// Activity started
+				m.logger.Debug("Activity started", "source", ev.source, "active_count", currentCount)
+
+				// Handle resume if suspended
 				if m.isSuspended {
-					m.logger.Info("Resume detected by activity after suspension")
+					m.logger.Info("Resume detected", "source", ev.source)
 					if m.admin != nil {
 						m.admin.SendActivityEvent("resume", map[string]interface{}{
-							"suspended_duration_ms": time.Since(m.lastRequestEnd).Milliseconds(),
+							"suspended_duration_ms": time.Since(m.lastActivity).Milliseconds(),
+							"source":                ev.source,
 						})
 					}
 					m.isSuspended = false
 				}
 
-				active++
+				// Cancel idle timer if running
 				if idleTimer != nil {
-					idleTimer.Stop()
+					if !idleTimer.Stop() {
+						// Timer already fired, drain the channel
+						select {
+						case <-idleTimer.C:
+						default:
+						}
+					}
 					idleTimer = nil
+					idleTimerCh = nil
 				}
 			} else {
-				// Request ended
-				active--
-				m.requestCount++
-				m.lastRequestEnd = time.Now()
+				// Activity ended
+				m.logger.Debug("Activity ended", "source", ev.source, "active_count", currentCount)
+				m.lastActivity = time.Now()
 
-				if active == 0 {
-					// No active requests, start idle timer
+				// Start idle timer if no more activities
+				if currentCount == 0 && idleTimer == nil {
 					idleTimer = time.NewTimer(m.idleAfter)
-					go func() {
-						<-idleTimer.C
-						m.suspend(time.Since(m.lastRequestEnd))
-					}()
+					idleTimerCh = idleTimer.C
+					m.logger.Debug("Started idle timer", "duration", m.idleAfter)
 				}
 			}
+
+		case <-idleTimerCh:
+			// Timer expired, check if still idle
+			currentCount := atomic.LoadInt64(&m.activeCount)
+			m.logger.Debug("Idle timer expired", "active_count", currentCount)
+
+			if currentCount == 0 {
+				m.suspend(time.Since(m.lastActivity))
+			}
+			idleTimer = nil
+			idleTimerCh = nil
 		}
 	}
 }
@@ -97,14 +179,13 @@ func (m *ActivityMonitor) suspend(inactive time.Duration) {
 	if m.admin != nil {
 		m.admin.SendActivityEvent("suspend", map[string]interface{}{
 			"inactive_ms": inactive.Milliseconds(),
-			"requests":    m.requestCount,
 		})
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	m.logger.Info("ActivityMonitor: suspending", "requests", m.requestCount, "idle_s", inactive.Seconds())
+	m.logger.Info("ActivityMonitor: suspending", "idle_s", inactive.Seconds())
 
 	// Sync filesystem
 	start := time.Now()
