@@ -21,9 +21,10 @@ type ActivityMonitor struct {
 	admin     *AdminChannel
 
 	// Activity tracking
-	activeCount  int64 // atomic counter for active activities
-	lastActivity time.Time
-	isSuspended  bool
+	activeCount   int64     // atomic counter for active activities
+	lastActivity  time.Time
+	isSuspended   int32     // atomic: 0 = not suspended, 1 = suspended
+	suspendedAt   time.Time // timestamp when suspend occurred
 
 	// Internal channels
 	activityCh chan activityEvent
@@ -123,16 +124,16 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 				// Activity started
 				m.logger.Debug("Activity started", "source", ev.source, "active_count", currentCount)
 
-				// Handle resume if suspended
-				if m.isSuspended {
-					m.logger.Info("Resume detected", "source", ev.source)
+				// Handle resume if suspended - use atomic CAS to ensure only one goroutine sends resume
+				if atomic.CompareAndSwapInt32(&m.isSuspended, 1, 0) {
+					suspendedDuration := time.Since(m.suspendedAt)
+					m.logger.Info("Resume detected", "source", ev.source, "duration_ms", suspendedDuration.Milliseconds())
 					if m.admin != nil {
 						m.admin.SendActivityEvent("resume", map[string]interface{}{
-							"suspended_duration_ms": time.Since(m.lastActivity).Milliseconds(),
+							"suspended_duration_ms": suspendedDuration.Milliseconds(),
 							"source":                ev.source,
 						})
 					}
-					m.isSuspended = false
 				}
 
 				// Cancel idle timer if running
@@ -175,7 +176,10 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 }
 
 func (m *ActivityMonitor) suspend(inactive time.Duration) {
-	m.isSuspended = true
+	// Set suspended state atomically and store the timestamp
+	atomic.StoreInt32(&m.isSuspended, 1)
+	m.suspendedAt = time.Now()
+	
 	if m.admin != nil {
 		m.admin.SendActivityEvent("suspend", map[string]interface{}{
 			"inactive_ms": inactive.Milliseconds(),
