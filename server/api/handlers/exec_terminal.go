@@ -27,8 +27,8 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 		"url", r.URL.String(),
 		"headers", r.Header)
 
-	// Accept GET (for WebSocket upgrade) and POST requests
-	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+	// Only accept GET requests (for WebSocket upgrade or session listing)
+	if r.Method != http.MethodGet {
 		h.logger.Warn("HandleExec: Method not allowed", "method", r.Method)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -43,7 +43,33 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 		// Try PHP/Rails style array syntax
 		cmdArgs = query["cmd[]"]
 	}
-	if len(cmdArgs) == 0 {
+
+	// Get session parameters early to check if we're attaching to an existing session
+	sessionID := query.Get("id")
+	detachable := (query.Get("detachable") == "true")
+	controlMode := (query.Get("cc") == "true")
+
+	h.logger.Debug("HandleExec: Session parameters",
+		"sessionID", sessionID,
+		"detachable", detachable,
+		"controlMode", controlMode,
+		"hasTmuxManager", h.tmuxManager != nil)
+
+	// If no command specified and not attaching to a session, list available sessions
+	if len(cmdArgs) == 0 && sessionID == "" {
+		// Check if this is a WebSocket upgrade request
+		if r.Header.Get("Upgrade") == "websocket" {
+			h.logger.Error("HandleExec: No command specified for WebSocket")
+			http.Error(w, "No command specified", http.StatusBadRequest)
+			return
+		}
+
+		// For regular GET requests without commands, list available sessions
+		if r.Method == http.MethodGet {
+			h.handleListExecSessions(w, r)
+			return
+		}
+
 		h.logger.Error("HandleExec: No command specified")
 		http.Error(w, "No command specified", http.StatusBadRequest)
 		return
@@ -67,6 +93,33 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 	if len(cmdArgs) > 1 {
 		args = cmdArgs[1:]
 	}
+
+	// Handle tmux sessions
+	var returnedSessionID string
+	if sessionID != "" && h.tmuxManager != nil {
+		// Attach to existing session using TMUXManager
+		var tmuxCmd string
+		var tmuxArgs []string
+		tmuxCmd, tmuxArgs = h.tmuxManager.AttachSession(sessionID, controlMode)
+		path = tmuxCmd
+		args = tmuxArgs
+		h.logger.Info("Attempting to attach to tmux session",
+			"sessionID", sessionID,
+			"controlMode", controlMode,
+			"path", path,
+			"args", args)
+	} else if detachable && h.tmuxManager != nil {
+		// Create a new detachable session with auto-incrementing ID
+		var tmuxCmd string
+		var tmuxArgs []string
+		returnedSessionID, tmuxCmd, tmuxArgs = h.tmuxManager.CreateSession(path, args, controlMode)
+		path = tmuxCmd
+		args = tmuxArgs
+		h.logger.Info("Created new detachable tmux session",
+			"sessionID", returnedSessionID,
+			"controlMode", controlMode)
+	}
+
 	options := []terminal.Option{
 		terminal.WithCommand(path, args...),
 		terminal.WithTTY(tty),
@@ -114,6 +167,13 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 
 	// Create unique exec ID for tracking
 	execID := fmt.Sprintf("terminal-%d-%s", time.Now().UnixNano(), path)
+	if sessionID != "" {
+		// Use the session ID for tmux sessions
+		execID = fmt.Sprintf("terminal-tmux-%s", sessionID)
+	} else if returnedSessionID != "" {
+		// Use the generated session ID for new detachable sessions
+		execID = fmt.Sprintf("terminal-tmux-%s", returnedSessionID)
+	}
 
 	// Create a variable to hold the message sender once websocket connects
 	var messageSender terminal.TextMessageSender
@@ -157,13 +217,27 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 		wsHandler = terminal.NewWebSocketHandler(session).WithOnConnected(func(sender terminal.TextMessageSender) {
 			messageSender = sender
 			h.logger.Debug("WebSocket connected for exec terminal", "execID", execID)
+
+			// Send session ID for new detachable sessions
+			if returnedSessionID != "" {
+				sessionMsg := fmt.Sprintf("\r\n📌 Detachable session created with ID: %s\r\n", returnedSessionID)
+				sessionMsg += fmt.Sprintf("   To reconnect later, use: sprite exec -id %s\r\n\r\n", returnedSessionID)
+				if err := sender.SendTextMessage([]byte(sessionMsg)); err != nil {
+					h.logger.Error("Failed to send session ID message", "error", err)
+				}
+			}
 		})
 	)
+
+	// Note: tmux handles detachment automatically when the WebSocket disconnects.
+	// When running `tmux new-session`, the session will keep running after disconnect.
+	// When running `tmux attach`, the session continues after detachment.
 	h.logger.Info("HandleExec: Starting WebSocket command execution",
 		"path", path,
 		"args", args,
 		"tty", tty,
 		"stdin", stdin,
+		"sessionID", sessionID,
 		"wrapperCommand", h.execWrapperCommand)
 
 	startTime := time.Now()
@@ -187,10 +261,11 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 			statusCode = 500
 		}
 		extraData := map[string]interface{}{
-			"command": path,
-			"args":    args,
-			"tty":     tty,
-			"exec_id": execID,
+			"command":    path,
+			"args":       args,
+			"tty":        tty,
+			"exec_id":    execID,
+			"session_id": sessionID,
 		}
 		enricher.RequestEnd(r.Context(), &RequestInfo{
 			RequestID:   execID,
@@ -283,4 +358,45 @@ func (h *Handlers) isProcessRunning(pid int) bool {
 	// Send signal 0 to check if process exists (using syscall.Signal)
 	err = process.Signal(syscall.Signal(0))
 	return err == nil
+}
+
+// handleListExecSessions lists available tmux sessions
+func (h *Handlers) handleListExecSessions(w http.ResponseWriter, r *http.Request) {
+	// Check if tmux manager is available
+	if h.tmuxManager == nil {
+		h.logger.Warn("TMUXManager not configured")
+		w.Header().Set("Content-Type", "application/json")
+		response := map[string]interface{}{
+			"sessions": []interface{}{},
+			"count":    0,
+			"error":    "TMUXManager not configured",
+		}
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	// Get list of sessions with detailed info from tmux manager
+	sessions, err := h.tmuxManager.ListSessionsWithInfo()
+	if err != nil {
+		h.logger.Error("Failed to list tmux sessions", "error", err)
+		w.Header().Set("Content-Type", "application/json")
+		response := map[string]interface{}{
+			"sessions": []interface{}{},
+			"count":    0,
+			"error":    fmt.Sprintf("Failed to list sessions: %v", err),
+		}
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	// Return JSON response
+	w.Header().Set("Content-Type", "application/json")
+	response := map[string]interface{}{
+		"sessions": sessions,
+		"count":    len(sessions),
+	}
+
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		h.logger.Error("Failed to encode response", "error", err)
+	}
 }

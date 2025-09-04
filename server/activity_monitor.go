@@ -21,10 +21,10 @@ type ActivityMonitor struct {
 	admin     *AdminChannel
 
 	// Activity tracking
-	activeCount   int64     // atomic counter for active activities
-	lastActivity  time.Time
-	isSuspended   int32     // atomic: 0 = not suspended, 1 = suspended
-	suspendedAt   time.Time // timestamp when suspend occurred
+	activeCount  int64 // atomic counter for active activities
+	lastActivity time.Time
+	isSuspended  int32     // atomic: 0 = not suspended, 1 = suspended
+	suspendedAt  time.Time // timestamp when suspend occurred
 
 	// Internal channels
 	activityCh chan activityEvent
@@ -179,7 +179,7 @@ func (m *ActivityMonitor) suspend(inactive time.Duration) {
 	// Set suspended state atomically and store the timestamp
 	atomic.StoreInt32(&m.isSuspended, 1)
 	m.suspendedAt = time.Now()
-	
+
 	if m.admin != nil {
 		m.admin.SendActivityEvent("suspend", map[string]interface{}{
 			"inactive_ms": inactive.Milliseconds(),

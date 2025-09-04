@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/superfly/sprite-env/client/config"
 	"github.com/superfly/sprite-env/client/format"
@@ -60,7 +61,12 @@ func SyncCommand(cfg *config.Manager, args []string) {
 
 	org, spriteName, err := EnsureOrgAndSpriteWithContext(&GlobalContext{ConfigMgr: cfg}, flags.Org, flags.Sprite)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		// Check if it's a cancellation error
+		if strings.Contains(err.Error(), "cancelled") {
+			handlePromptError(err)
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
 		os.Exit(1)
 	}
 	if spriteName != "" {

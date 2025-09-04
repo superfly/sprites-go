@@ -293,7 +293,12 @@ func ProxyCommand(ctx *GlobalContext, args []string) {
 	// Ensure we have an org
 	org, spriteName, err := EnsureOrgAndSpriteWithContext(ctx, flags.Org, flags.Sprite)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		// Check if it's a cancellation error
+		if strings.Contains(err.Error(), "cancelled") {
+			handlePromptError(err)
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
 		os.Exit(1)
 	}
 

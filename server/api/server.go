@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -265,8 +266,17 @@ func (s *Server) waitForProcessMiddleware(next http.HandlerFunc) http.HandlerFun
 			s.logger.Warn("Request timeout waiting for process to be running",
 				"requestPath", r.URL.Path,
 				"waitTime", waitTime,
-				"error", err)
-			http.Error(w, "Process not ready", http.StatusServiceUnavailable)
+				"error", err,
+				"maxWaitTime", s.config.MaxWaitTime,
+				"isProcessRunning", s.system.IsProcessRunning())
+
+			// Provide more detailed error message
+			errMsg := fmt.Sprintf("Process not ready after %v (max wait: %v). Process running: %v. Error: %v",
+				waitTime.Round(time.Millisecond),
+				s.config.MaxWaitTime,
+				s.system.IsProcessRunning(),
+				err)
+			http.Error(w, errMsg, http.StatusServiceUnavailable)
 			return
 		}
 

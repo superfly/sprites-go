@@ -109,7 +109,7 @@ COPY --from=crun /crun /usr/local/bin/crun
 COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
 COPY --from=juicefs /usr/local/bin/juicefs /usr/local/bin/juicefs
 
-# Copy statically linked tmux
+# Copy statically linked tmux and config
 COPY --from=utility-builder /.sprite/bin/ /.sprite/bin/
 
 # Define environment variables for paths
@@ -125,6 +125,9 @@ WORKDIR ${SPRITE_HOME}
 
 # Copy all base-env contents into the working directory
 COPY base-env/ ./
+
+# Copy tmux config to sprite bin directory
+COPY base-env/tmux.conf /.sprite/bin/tmux.conf
 
 # Set working directory to the writable volume
 WORKDIR ${SPRITE_WRITE_DIR}

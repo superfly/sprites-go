@@ -21,9 +21,10 @@ type TextMessageSender interface {
 
 // WebSocketHandler wraps a terminal Session to provide WebSocket connectivity.
 type WebSocketHandler struct {
-	session     *Session
-	upgrader    gorillaws.Upgrader
-	onConnected func(sender TextMessageSender) // called when websocket is connected
+	session        *Session
+	upgrader       gorillaws.Upgrader
+	onConnected    func(sender TextMessageSender) // called when websocket is connected
+	onDisconnected func()                         // called when websocket is disconnected
 }
 
 // NewWebSocketHandler creates a new WebSocket handler for the given session.
@@ -44,6 +45,12 @@ func NewWebSocketHandler(session *Session) *WebSocketHandler {
 // WithOnConnected sets a callback that is called when the websocket connection is established
 func (h *WebSocketHandler) WithOnConnected(callback func(sender TextMessageSender)) *WebSocketHandler {
 	h.onConnected = callback
+	return h
+}
+
+// WithOnDisconnected sets a callback that is called when the websocket connection is closed
+func (h *WebSocketHandler) WithOnDisconnected(callback func()) *WebSocketHandler {
+	h.onDisconnected = callback
 	return h
 }
 
@@ -116,6 +123,11 @@ func (h *WebSocketHandler) Handle(w http.ResponseWriter, r *http.Request) error 
 
 	// Send close message after exit code
 	wsStreams.WriteClose()
+
+	// Call onDisconnected callback if set
+	if h.onDisconnected != nil {
+		h.onDisconnected()
+	}
 
 	// Don't close the WebSocket - let the client close it
 	// Start a timeout goroutine to close the connection if client doesn't close it

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
 // Handlers contains all HTTP handlers
@@ -23,6 +25,9 @@ type Handlers struct {
 	execWrapperCommand []string
 	proxyLocalhostIPv4 string
 	proxyLocalhostIPv6 string
+
+	// TMUX manager for detachable sessions
+	tmuxManager *terminal.TMUXManager
 }
 
 // Config holds handler configuration
@@ -42,6 +47,7 @@ func NewHandlers(logger *slog.Logger, system SystemManager, config Config) *Hand
 		execWrapperCommand: config.ExecWrapperCommand,
 		proxyLocalhostIPv4: config.ProxyLocalhostIPv4,
 		proxyLocalhostIPv6: config.ProxyLocalhostIPv6,
+		tmuxManager:        terminal.NewTMUXManager(logger),
 	}
 }
 

@@ -2,8 +2,10 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -14,8 +16,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"encoding/json"
 
 	"github.com/superfly/sprite-env/client/config"
 	"github.com/superfly/sprite-env/client/format"
@@ -278,10 +278,21 @@ func ExecCommand(ctx *GlobalContext, args []string) {
 			"sprite exec -env KEY=value,FOO=bar env",
 			"sprite exec -tty /bin/bash",
 			"sprite exec -o myorg -s mysprite npm start",
+			"sprite exec -detachable /bin/bash  # Create detachable session (auto ID: 1, 2, 3...)",
+			"sprite exec -detachable -cc /bin/bash  # Create with tmux control mode",
+			"sprite exec -id 3  # Attach to existing tmux session",
+			"sprite exec -id 3 -cc  # Attach with tmux control mode",
 		},
 		Notes: []string{
 			"When using -tty, terminal environment variables (TERM, COLORTERM, LANG, LC_ALL)",
 			"are automatically passed through from your local environment.",
+			"",
+			"Detachable sessions create tmux sessions with auto-incrementing IDs (1, 2, 3, etc).",
+			"Use -id with a numeric ID to attach to an existing tmux session.",
+			"Both -detachable and -id automatically enable TTY mode.",
+			"",
+			"The -cc flag enables tmux control mode, allowing compatible terminals to use",
+			"native tabs and windows. Requires -detachable or -id flag.",
 		},
 	}
 
@@ -290,17 +301,13 @@ func ExecCommand(ctx *GlobalContext, args []string) {
 	workingDir := cmd.FlagSet.String("dir", "", "Working directory for the command")
 	tty := cmd.FlagSet.Bool("tty", false, "Allocate a pseudo-TTY")
 	envVars := cmd.FlagSet.String("env", "", "Environment variables (KEY=value,KEY2=value2)")
+	detachable := cmd.FlagSet.Bool("detachable", false, "Create a detachable tmux session")
+	sessionID := cmd.FlagSet.String("id", "", "Attach to existing tmux session by numeric ID")
+	controlMode := cmd.FlagSet.Bool("cc", false, "Use tmux control mode (requires -detachable or -id)")
 
 	// Parse flags
 	remainingArgs, err := ParseFlags(cmd, args)
 	if err != nil {
-		os.Exit(1)
-	}
-
-	// Check for remaining args as command
-	if len(remainingArgs) == 0 {
-		fmt.Fprintf(os.Stderr, "Error: No command specified\n\n")
-		cmd.FlagSet.Usage()
 		os.Exit(1)
 	}
 
@@ -314,11 +321,143 @@ func ExecCommand(ctx *GlobalContext, args []string) {
 		spriteOverride = ctx.SpriteOverride
 	}
 
-	// Ensure we have an org and sprite
+	// Validate control mode flag
+	if *controlMode && *sessionID == "" && !*detachable {
+		fmt.Fprintf(os.Stderr, "Error: -cc flag requires either -detachable or -id flag\n")
+		os.Exit(1)
+	}
+
+	// Ensure we have an org and sprite (needed for all operations)
 	org, spriteName, err := EnsureOrgAndSpriteWithContext(ctx, orgOverride, spriteOverride)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		// Check if it's a cancellation error
+		if strings.Contains(err.Error(), "cancelled") {
+			handlePromptError(err)
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
 		os.Exit(1)
+	}
+
+	// Check for remaining args as command
+	// When using -id, we're attaching to an existing session and don't need a command
+	// When using -detachable, we need a command to run
+	// When no args and no session flags, list available sessions
+	if len(remainingArgs) == 0 {
+		if *sessionID == "" && !*detachable {
+			// No command specified and no session flags - list available sessions from server
+
+			// Build the API URL for listing sessions
+			apiURL := fmt.Sprintf("%s/exec", org.URL)
+
+			// Create HTTP request
+			httpReq, err := http.NewRequest("GET", apiURL, nil)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error creating request: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Add authentication
+			token, err := org.GetToken()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: Failed to get authentication token: %v\n", err)
+				os.Exit(1)
+			}
+			httpReq.Header.Set("Authorization", "Bearer "+token)
+
+			// Make the request
+			client := &http.Client{Timeout: 30 * time.Second}
+			resp, err := client.Do(httpReq)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error listing sessions: %v\n", err)
+				os.Exit(1)
+			}
+			defer resp.Body.Close()
+
+			// Check response status
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				fmt.Fprintf(os.Stderr, "Error: Server returned %d: %s\n", resp.StatusCode, string(body))
+				os.Exit(1)
+			}
+
+			// Parse JSON response
+			var result map[string]interface{}
+			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+				fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Display sessions
+			sessions, ok := result["sessions"].([]interface{})
+			if !ok {
+				sessions = []interface{}{}
+			}
+
+			if len(sessions) == 0 {
+				fmt.Println("No active tmux sessions found.")
+				fmt.Println("\nTo create a new detachable session:")
+				fmt.Println("  sprite exec -detachable /bin/bash")
+				fmt.Println("  sprite exec -detachable <command>")
+			} else {
+				// Display sessions in a table
+				fmt.Printf("Active tmux sessions (%d):\n\n", len(sessions))
+
+				// Print table header
+				fmt.Printf("%-6s %-20s %-30s\n", "ID", "Command", "Started")
+				fmt.Printf("%-6s %-20s %-30s\n", "──", "───────", "───────")
+
+				// Print each session
+				for _, s := range sessions {
+					if session, ok := s.(map[string]interface{}); ok {
+						id := session["id"]
+						command := session["command"]
+
+						// Parse and format the created time
+						var startedStr string
+						if created, ok := session["created"].(string); ok {
+							if t, err := time.Parse(time.RFC3339, created); err == nil {
+								// Calculate duration
+								duration := time.Since(t)
+								if duration < time.Minute {
+									startedStr = fmt.Sprintf("%d seconds ago", int(duration.Seconds()))
+								} else if duration < time.Hour {
+									startedStr = fmt.Sprintf("%d minutes ago", int(duration.Minutes()))
+								} else if duration < 24*time.Hour {
+									startedStr = fmt.Sprintf("%d hours ago", int(duration.Hours()))
+								} else {
+									startedStr = fmt.Sprintf("%d days ago", int(duration.Hours()/24))
+								}
+							} else {
+								startedStr = created
+							}
+						}
+
+						// Truncate command if too long
+						cmdStr := fmt.Sprintf("%v", command)
+						if len(cmdStr) > 20 {
+							cmdStr = cmdStr[:17] + "..."
+						}
+
+						fmt.Printf("%-6v %-20s %-30s\n", id, cmdStr, startedStr)
+					}
+				}
+
+				fmt.Println("\nTo attach to a session:")
+				fmt.Println("  sprite exec -id <session_id>")
+				fmt.Println("\nTo create a new detachable session:")
+				fmt.Println("  sprite exec -detachable <command>")
+			}
+
+			os.Exit(0)
+		}
+		// If only -id is specified, we're attaching to an existing session
+		// No command needed in this case
+	}
+
+	// Session attachments and detachable sessions require TTY
+	if *sessionID != "" || *detachable {
+		*tty = true
 	}
 
 	// Debug: Log what we got
@@ -367,7 +506,7 @@ func ExecCommand(ctx *GlobalContext, args []string) {
 	}
 
 	// Only print connection messages if debug logging is enabled
-	if ctx.IsDebugEnabled() {
+	if ctx.IsDebugEnabled() || *sessionID != "" || *detachable {
 		fmt.Println()
 		if spriteName != "" {
 			// Config-based connection with org and sprite
@@ -382,9 +521,16 @@ func ExecCommand(ctx *GlobalContext, args []string) {
 			fmt.Printf("Running: %s\n", format.Command(cmdStr))
 		} else {
 			// Environment variable based connection (no sprite tracking)
-			fmt.Println("Connecting to sprite environment...")
 			fmt.Printf("Running: %s\n", format.Command(cmdStr))
 		}
+
+		// Print session information
+		if *detachable {
+			fmt.Printf("\n📌 Creating detachable tmux session...\n")
+		} else if *sessionID != "" {
+			fmt.Printf("\n🔗 Attaching to tmux session: %s\n", format.Sprite(*sessionID))
+		}
+
 		fmt.Println()
 	}
 
@@ -392,7 +538,7 @@ func ExecCommand(ctx *GlobalContext, args []string) {
 	var exitCode int
 	if spriteName != "" {
 		// Use the new sprite proxy endpoint when we have a sprite name
-		exitCode = executeSpriteProxy(org, spriteName, remainingArgs, *workingDir, envList, *tty)
+		exitCode = executeSpriteProxy(org, spriteName, remainingArgs, *workingDir, envList, *tty, *detachable, *sessionID, *controlMode)
 	} else {
 		// Use direct WebSocket for backward compatibility with SPRITE_URL/SPRITE_TOKEN
 		token, err := org.GetTokenWithKeyringDisabled(ctx.ConfigMgr.IsKeyringDisabled())
@@ -400,14 +546,14 @@ func ExecCommand(ctx *GlobalContext, args []string) {
 			fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
 			os.Exit(1)
 		}
-		exitCode = executeDirectWebSocket(org.URL, token, remainingArgs, *workingDir, envList, *tty)
+		exitCode = executeDirectWebSocket(org.URL, token, remainingArgs, *workingDir, envList, *tty, *detachable, *sessionID, *controlMode)
 	}
 
 	os.Exit(exitCode)
 }
 
 // executeSpriteProxy executes a command through the sprite proxy endpoint
-func executeSpriteProxy(org *config.Organization, spriteName string, cmd []string, workingDir string, env []string, tty bool) int {
+func executeSpriteProxy(org *config.Organization, spriteName string, cmd []string, workingDir string, env []string, tty bool, detachable bool, sessionID string, controlMode bool) int {
 	// Build the proxy URL for exec endpoint
 	baseURL := buildSpriteProxyURL(org, spriteName, "/exec")
 
@@ -424,10 +570,10 @@ func executeSpriteProxy(org *config.Organization, spriteName string, cmd []strin
 		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
 		return 1
 	}
-	return executeWebSocket(wsURL, token, cmd, workingDir, env, tty)
+	return executeWebSocket(wsURL, token, cmd, workingDir, env, tty, detachable, sessionID, controlMode)
 }
 
-func executeDirectWebSocket(baseURL, token string, cmd []string, workingDir string, env []string, tty bool) int {
+func executeDirectWebSocket(baseURL, token string, cmd []string, workingDir string, env []string, tty bool, detachable bool, sessionID string, controlMode bool) int {
 	// Build WebSocket URL - directly to /exec endpoint
 	wsURL, err := buildExecWebSocketURL(baseURL)
 	if err != nil {
@@ -435,11 +581,11 @@ func executeDirectWebSocket(baseURL, token string, cmd []string, workingDir stri
 		return 1
 	}
 
-	return executeWebSocket(wsURL, token, cmd, workingDir, env, tty)
+	return executeWebSocket(wsURL, token, cmd, workingDir, env, tty, detachable, sessionID, controlMode)
 }
 
 // executeWebSocket is the common WebSocket execution logic
-func executeWebSocket(wsURL *url.URL, token string, cmd []string, workingDir string, env []string, tty bool) int {
+func executeWebSocket(wsURL *url.URL, token string, cmd []string, workingDir string, env []string, tty bool, detachable bool, sessionID string, controlMode bool) int {
 	// We need to build a proxy config based on the exec URL
 	// Convert the exec WebSocket URL back to HTTP for the proxy
 	proxyBaseURL := strings.Replace(wsURL.String(), "/exec", "/proxy", 1)
@@ -489,6 +635,18 @@ func executeWebSocket(wsURL *url.URL, token string, cmd []string, workingDir str
 				logger.Debug("Set initial terminal size", "cols", width, "rows", height)
 			}
 		}
+	}
+	if detachable {
+		query.Set("detachable", "true")
+		logger.Debug("Enabled detachable session")
+	}
+	if sessionID != "" {
+		query.Set("id", sessionID)
+		logger.Debug("Set session ID", "sessionID", sessionID)
+	}
+	if controlMode {
+		query.Set("cc", "true")
+		logger.Debug("Enabled tmux control mode")
 	}
 	for _, envVar := range env {
 		query.Add("env", envVar)

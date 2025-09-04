@@ -24,6 +24,10 @@ if ! mountpoint -q /sys/fs/cgroup; then
 fi
 mkdir -p /dev/fly_vol/local-storage/var/lib/docker
 
+mkdir -p /.sprite/tmp
+mount -t tmpfs -o size=64M tmpfs /.sprite/tmp
+
+
 # This is a prerun script to do the overlay + loopback inside the namespace
 # Only copy mounts.sh if /mnt/newroot isn't already an overlayfs
 if ! mount | grep -q "^overlay on /mnt/newroot type overlay"; then
@@ -249,6 +253,12 @@ CONFIG_JSON='{
       "type": "bind",
       "source": "/.sprite/bin",
       "options": ["ro", "rbind"]
+    },
+    {
+      "destination": "/.sprite/tmp",
+      "type": "bind",
+      "source": "/.sprite/tmp",
+      "options": ["rbind"]
     }
   ],
   "linux": {

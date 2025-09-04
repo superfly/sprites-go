@@ -270,6 +270,17 @@ func EnsureOrgAndSpriteWithContext(ctx *GlobalContext, orgOverride, spriteOverri
 		slog.Debug("Using sprite override", "sprite", spriteName)
 	}
 
+	// If we have an org but no sprite name, prompt for it
+	// (unless using env-based config where sprite tracking is not available)
+	if spriteName == "" && org != nil && org.Name != "env" {
+		var err error
+		spriteName, err = promptForSpriteName()
+		if err != nil {
+			return nil, "", err
+		}
+		slog.Debug("Got sprite name from prompt", "sprite", spriteName)
+	}
+
 	slog.Debug("Final result", "org", org.Name, "url", org.URL, "sprite", spriteName)
 	return org, spriteName, nil
 }
