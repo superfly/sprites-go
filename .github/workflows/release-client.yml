@@ -167,38 +167,6 @@ jobs:
         body: |
           ## Sprite Client ${{ github.ref_name }}
           
-          ### Installation
-          
-          #### macOS/Linux
-          ```bash
-          # Download the appropriate binary for your platform
-          curl -L https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/sprite-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/amd64/').tar.gz | tar xz
-          chmod +x sprite
-          sudo mv sprite /usr/local/bin/
-          ```
-          
-          #### Windows (PowerShell)
-          ```powershell
-          # For AMD64/x64
-          Invoke-WebRequest -Uri "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/sprite-windows-amd64.zip" -OutFile "sprite-windows-amd64.zip"
-          Expand-Archive -Path "sprite-windows-amd64.zip" -DestinationPath "."
-          Move-Item -Path "sprite.exe" -Destination "$env:USERPROFILE\AppData\Local\Microsoft\WindowsApps\" -Force
-          
-          # For ARM64
-          Invoke-WebRequest -Uri "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/sprite-windows-arm64.zip" -OutFile "sprite-windows-arm64.zip"
-          Expand-Archive -Path "sprite-windows-arm64.zip" -DestinationPath "."
-          Move-Item -Path "sprite.exe" -Destination "$env:USERPROFILE\AppData\Local\Microsoft\WindowsApps\" -Force
-          ```
-          
-          #### Verify checksums
-          ```bash
-          # Download checksum file
-          curl -L https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/sprite-<platform>-<arch>.tar.gz.sha256
-          # Verify
-          sha256sum -c sprite-<platform>-<arch>.tar.gz.sha256
-          ```
-          
-          ### What's Changed
           See the [full changelog](https://github.com/${{ github.repository }}/compare/.../${{ github.ref_name }})
         
         files: |

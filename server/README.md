@@ -4,24 +4,6 @@ Sprite-env is a process supervisor with component management and state machine o
 
 ## Installation
 
-### Download Pre-built Binaries
-
-Download the latest release from [GitHub Releases](https://github.com/YOUR_ORG/YOUR_REPO/releases):
-
-```bash
-# Linux AMD64
-curl -L https://github.com/YOUR_ORG/YOUR_REPO/releases/latest/download/sprite-env-linux-amd64.tar.gz | tar xz
-
-# Linux ARM64
-curl -L https://github.com/YOUR_ORG/YOUR_REPO/releases/latest/download/sprite-env-linux-arm64.tar.gz | tar xz
-
-# macOS Intel
-curl -L https://github.com/YOUR_ORG/YOUR_REPO/releases/latest/download/sprite-env-darwin-amd64.tar.gz | tar xz
-
-# macOS Apple Silicon
-curl -L https://github.com/YOUR_ORG/YOUR_REPO/releases/latest/download/sprite-env-darwin-arm64.tar.gz | tar xz
-```
-
 ### Build from Source
 
 ```bash

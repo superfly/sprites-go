@@ -72,12 +72,12 @@ func (tm *TMUXManager) CreateSession(cmd string, args []string, controlMode bool
 		"-f", "/.sprite/bin/tmux.conf",
 		"-S", "/.sprite/tmp/exec-tmux",
 	}
-	
+
 	// Add control mode if requested
 	if controlMode {
 		tmuxArgs = append(tmuxArgs, "-CC")
 	}
-	
+
 	tmuxArgs = append(tmuxArgs,
 		"new-session",
 		"-s", sessionName,
@@ -104,17 +104,17 @@ func (tm *TMUXManager) AttachSession(id string, controlMode bool) (string, []str
 		"-f", "/.sprite/bin/tmux.conf",
 		"-S", "/.sprite/tmp/exec-tmux",
 	}
-	
+
 	// Add control mode if requested
 	if controlMode {
 		tmuxArgs = append(tmuxArgs, "-CC")
 	}
-	
+
 	tmuxArgs = append(tmuxArgs,
 		"attach-session",
 		"-t", sessionName,
 	)
-	
+
 	return "/.sprite/bin/tmux", tmuxArgs
 }
 
