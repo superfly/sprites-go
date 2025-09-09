@@ -350,7 +350,18 @@ func ExecCommand(ctx *GlobalContext, args []string) {
 			// No command specified and no session flags - list available sessions from server
 
 			// Build the API URL for listing sessions
-			apiURL := fmt.Sprintf("%s/exec", org.URL)
+			var apiURL string
+			if spriteName != "" && org.Name != "env" {
+				// Use sprite proxy endpoint
+				apiURL = buildSpriteProxyURL(org, spriteName, "/exec")
+			} else {
+				// Use direct endpoint
+				apiURL = fmt.Sprintf("%s/exec", org.URL)
+			}
+
+			// Debug log the API URL
+			logger := slog.Default()
+			logger.Debug("Listing sessions API URL", "url", apiURL)
 
 			// Create HTTP request
 			httpReq, err := http.NewRequest("GET", apiURL, nil)
@@ -572,12 +583,19 @@ func executeSpriteProxy(org *config.Organization, spriteName string, cmd []strin
 	// Build the proxy URL for exec endpoint
 	baseURL := buildSpriteProxyURL(org, spriteName, "/exec")
 
+	// Debug log the base URL
+	logger := slog.Default()
+	logger.Debug("Built sprite proxy URL", "baseURL", baseURL)
+
 	// Convert to WebSocket URL
 	wsURL, err := convertToWebSocketURL(baseURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to build WebSocket URL: %v\n", err)
 		return 1
 	}
+
+	// Debug log the WebSocket URL
+	logger.Debug("Converted to WebSocket URL", "wsURL", wsURL.String())
 
 	// Use the existing WebSocket execution logic
 	token, err := org.GetToken()
@@ -705,6 +723,9 @@ func executeWebSocket(wsURL *url.URL, token string, cmd []string, workingDir str
 		return 1
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+
+	// Debug log the complete request URL
+	logger.Debug("Making WebSocket request", "method", req.Method, "url", req.URL.String(), "token", truncateToken(token))
 
 	// Create exec command
 	wsCmd := terminal.CommandContext(context.Background(), req, "placeholder")

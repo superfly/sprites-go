@@ -75,11 +75,11 @@ func DestroyCommand(ctx *GlobalContext, args []string) {
 		}
 	}
 
-	// Build the URL based on whether we're using the new API or backward compatibility
+	// Build the URL using buildSpriteProxyURL
 	var url string
-	if org.Name != "env" && strings.Contains(getSpritesAPIURL(org), "sprites.dev") {
-		// Use the new sprites API
-		url = fmt.Sprintf("%s/v1/sprites/%s", getSpritesAPIURL(org), spriteName)
+	if org.Name != "env" && spriteName != "" {
+		// Use the sprites API with empty path for DELETE
+		url = buildSpriteProxyURL(org, spriteName, "")
 	} else {
 		// Use direct endpoint for backward compatibility
 		url = fmt.Sprintf("%s/sprite/destroy", org.URL)

@@ -103,7 +103,6 @@ func ApiCommand(ctx *GlobalContext, args []string) {
 				// Unknown flag, assume it's for curl
 				remainingArgs = args[i:]
 				args = args[:i]
-				break
 			}
 
 			if needsValue && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
@@ -182,20 +181,26 @@ func ApiCommand(ctx *GlobalContext, args []string) {
 	// Build the full URL
 	baseURL := getSpritesAPIURL(org)
 
-	// Clean up the path
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-
 	var fullURL string
 	if org != nil && org.Name == "env" {
-		fullURL = baseURL + path
-	} else if strings.HasPrefix(path, "/v1/") || path == "/v1" {
+		// Direct URL mode (SPRITE_URL env var)
+		if !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
 		fullURL = baseURL + path
 	} else if spriteName != "" {
-		fullURL = baseURL + "/v1/sprites/" + spriteName + path
+		// Use buildSpriteProxyURL for sprite-specific requests
+		fullURL = buildSpriteProxyURL(org, spriteName, path)
 	} else {
-		fullURL = baseURL + "/v1" + path
+		// Non-sprite API path
+		if !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
+		if strings.HasPrefix(path, "/v1/") || path == "/v1" {
+			fullURL = baseURL + path
+		} else {
+			fullURL = baseURL + "/v1" + path
+		}
 	}
 
 	// Check if curl is installed
