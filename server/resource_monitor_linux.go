@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/superfly/sprite-env/pkg/tap"
 )
 
 // ResourceMonitor provides lightweight monitoring of CPU, memory, and IO using /proc and cgroups.
@@ -49,9 +51,9 @@ type ResourceMonitor struct {
 	heavyIOSustainIntervals int    // number of consecutive intervals to consider sustained
 }
 
-func NewResourceMonitor(logger *slog.Logger) *ResourceMonitor {
+func NewResourceMonitor(ctx context.Context) *ResourceMonitor {
 	return &ResourceMonitor{
-		logger:          logger,
+		logger:          tap.Logger(ctx),
 		interval:        5 * time.Second,
 		cpuThreshold:    0.90,
 		memThreshold:    0.90,

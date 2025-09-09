@@ -1,16 +1,21 @@
 package api
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/superfly/sprite-env/pkg/tap"
 )
 
 func TestNewServerRequiresAuth(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, logger)
 	systemManager := newMockSystemManager()
 
 	// Test that server creation fails without API token
@@ -19,7 +24,7 @@ func TestNewServerRequiresAuth(t *testing.T) {
 		APIToken:   "", // No token
 	}
 
-	_, err := NewServer(config, systemManager, logger)
+	_, err := NewServer(config, systemManager, ctx)
 	if err == nil {
 		t.Fatal("Expected error when creating server without API token, got nil")
 	}
@@ -30,7 +35,7 @@ func TestNewServerRequiresAuth(t *testing.T) {
 
 	// Test that server creation succeeds with API token
 	config.APIToken = "test-token"
-	server, err := NewServer(config, systemManager, logger)
+	server, err := NewServer(config, systemManager, ctx)
 	if err != nil {
 		t.Fatalf("Expected no error when creating server with API token, got: %v", err)
 	}
@@ -43,6 +48,8 @@ func TestNewServerRequiresAuth(t *testing.T) {
 
 func TestAuthMiddleware(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, logger)
 	systemManager := newMockSystemManager()
 
 	tests := []struct {
@@ -100,7 +107,7 @@ func TestAuthMiddleware(t *testing.T) {
 				ListenAddr: ":8080",
 				APIToken:   tt.apiToken,
 			}
-			server, _ := NewServer(config, systemManager, logger)
+			server, _ := NewServer(config, systemManager, ctx)
 
 			// Create a simple test handler
 			testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

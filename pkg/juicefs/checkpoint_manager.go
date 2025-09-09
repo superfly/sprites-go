@@ -3,7 +3,6 @@ package juicefs
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -11,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/superfly/sprite-env/pkg/tap"
 )
 
 // CheckpointManager handles all checkpoint and restore operations for JuiceFS
@@ -22,11 +23,8 @@ type CheckpointManager struct {
 }
 
 // NewCheckpointManager creates a new checkpoint manager
-func NewCheckpointManager(baseDir string, overlayMgr *OverlayManager, logger *slog.Logger) *CheckpointManager {
-	// Create a no-op logger if none provided
-	if logger == nil {
-		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
-	}
+func NewCheckpointManager(baseDir string, overlayMgr *OverlayManager, ctx context.Context) *CheckpointManager {
+	logger := tap.Logger(ctx)
 
 	return &CheckpointManager{
 		baseDir:    baseDir,

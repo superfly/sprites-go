@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/superfly/sprite-env/pkg/tap"
 )
 
 // OverlayManager manages the root overlay loopback mount
@@ -37,7 +39,8 @@ type OverlayManager struct {
 }
 
 // NewOverlay creates a new overlay manager instance
-func NewOverlay(j *JuiceFS, logger *slog.Logger) *OverlayManager {
+func NewOverlay(j *JuiceFS, ctx context.Context) *OverlayManager {
+	logger := tap.Logger(ctx)
 	mountPath := filepath.Join(j.config.BaseDir, "data")
 	return &OverlayManager{
 		juiceFS:           j,

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
@@ -8,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/superfly/sprite-env/pkg/tap"
 )
 
 // Test NewHandlers constructor
@@ -18,7 +21,9 @@ func TestNewHandlers(t *testing.T) {
 	}
 	mockSys := &mockSystemManager{}
 
-	h := NewHandlers(logger, mockSys, config)
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, logger)
+	h := NewHandlers(ctx, mockSys, config)
 
 	if h == nil {
 		t.Error("NewHandlers returned nil")
@@ -30,7 +35,9 @@ func TestHandleCheckpointMethod(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	config := Config{}
 	mockSys := newMockSystemManager()
-	h := NewHandlers(logger, mockSys, config)
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, logger)
+	h := NewHandlers(ctx, mockSys, config)
 
 	req := httptest.NewRequest(http.MethodGet, "/checkpoint", nil)
 	rr := httptest.NewRecorder()
@@ -51,7 +58,9 @@ func TestHandleCheckpointRestoreMethod(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	config := Config{}
 	mockSys := newMockSystemManager()
-	h := NewHandlers(logger, mockSys, config)
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, logger)
+	h := NewHandlers(ctx, mockSys, config)
 
 	req := httptest.NewRequest(http.MethodGet, "/checkpoints/test-cp/restore", nil)
 	rr := httptest.NewRecorder()
@@ -72,7 +81,9 @@ func TestHandleProxyMethod(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	config := Config{}
 	mockSys := &mockSystemManager{}
-	h := NewHandlers(logger, mockSys, config)
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, logger)
+	h := NewHandlers(ctx, mockSys, config)
 
 	// Test non-GET method (POST should fail)
 	req := httptest.NewRequest(http.MethodPost, "/proxy", nil)
@@ -94,7 +105,9 @@ func TestHandleProxyGetMethod(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	config := Config{}
 	mockSys := &mockSystemManager{}
-	h := NewHandlers(logger, mockSys, config)
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, logger)
+	h := NewHandlers(ctx, mockSys, config)
 
 	req := httptest.NewRequest(http.MethodGet, "/proxy", nil)
 	rr := httptest.NewRecorder()
@@ -118,7 +131,9 @@ func TestHandleDebugCreateZombieMethod(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	config := Config{}
 	mockSys := &mockSystemManager{}
-	h := NewHandlers(logger, mockSys, config)
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, logger)
+	h := NewHandlers(ctx, mockSys, config)
 
 	req := httptest.NewRequest(http.MethodGet, "/debug/create-zombie", nil)
 	rr := httptest.NewRecorder()
@@ -139,7 +154,9 @@ func TestHandleDebugCheckProcessMethod(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	config := Config{}
 	mockSys := &mockSystemManager{}
-	h := NewHandlers(logger, mockSys, config)
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, logger)
+	h := NewHandlers(ctx, mockSys, config)
 
 	req := httptest.NewRequest(http.MethodPost, "/debug/check-process", nil)
 	rr := httptest.NewRecorder()

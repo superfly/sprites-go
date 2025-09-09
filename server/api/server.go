@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/superfly/sprite-env/pkg/sync"
+	"github.com/superfly/sprite-env/pkg/tap"
+	"github.com/superfly/sprite-env/pkg/terminal"
 	"github.com/superfly/sprite-env/server/api/handlers"
 )
 
@@ -31,7 +33,8 @@ type Server struct {
 }
 
 // NewServer creates a new API server
-func NewServer(config Config, system handlers.SystemManager, logger *slog.Logger) (*Server, error) {
+func NewServer(config Config, system handlers.SystemManager, ctx context.Context) (*Server, error) {
+	logger := tap.Logger(ctx)
 	if config.APIToken == "" {
 		return nil, ErrNoAuth
 	}
@@ -46,10 +49,11 @@ func NewServer(config Config, system handlers.SystemManager, logger *slog.Logger
 		ExecWrapperCommand: config.ExecWrapperCommand,
 		ProxyLocalhostIPv4: config.ProxyLocalhostIPv4,
 		ProxyLocalhostIPv6: config.ProxyLocalhostIPv6,
+		TMUXManager:        config.TMUXManager,
 	}
 
 	// Create handlers
-	h := handlers.NewHandlers(logger, system, handlersConfig)
+	h := handlers.NewHandlers(ctx, system, handlersConfig)
 
 	// Create sync server
 	syncConfig := sync.ServerConfig{
@@ -321,4 +325,12 @@ func (s *Server) waitForJuiceFSMiddleware(next http.HandlerFunc) http.HandlerFun
 
 		next(w, r)
 	}
+}
+
+// GetTMUXManager returns the TMUX manager from the handlers
+func (s *Server) GetTMUXManager() *terminal.TMUXManager {
+	if s.handlers != nil {
+		return s.handlers.GetTMUXManager()
+	}
+	return nil
 }

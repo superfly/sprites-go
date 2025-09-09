@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/superfly/sprite-env/pkg/tap"
 	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
@@ -36,10 +37,19 @@ type Config struct {
 	ExecWrapperCommand []string
 	ProxyLocalhostIPv4 string
 	ProxyLocalhostIPv6 string
+	TMUXManager        *terminal.TMUXManager // Optional, will be created if nil
 }
 
 // NewHandlers creates a new Handlers instance
-func NewHandlers(logger *slog.Logger, system SystemManager, config Config) *Handlers {
+func NewHandlers(ctx context.Context, system SystemManager, config Config) *Handlers {
+	logger := tap.Logger(ctx)
+
+	// Use provided TMUXManager or create a new one
+	tmuxManager := config.TMUXManager
+	if tmuxManager == nil {
+		tmuxManager = terminal.NewTMUXManager(ctx)
+	}
+
 	return &Handlers{
 		logger:             logger,
 		system:             system,
@@ -47,7 +57,7 @@ func NewHandlers(logger *slog.Logger, system SystemManager, config Config) *Hand
 		execWrapperCommand: config.ExecWrapperCommand,
 		proxyLocalhostIPv4: config.ProxyLocalhostIPv4,
 		proxyLocalhostIPv6: config.ProxyLocalhostIPv6,
-		tmuxManager:        terminal.NewTMUXManager(logger),
+		tmuxManager:        tmuxManager,
 	}
 }
 
@@ -142,4 +152,9 @@ func (h *Handlers) getContextEnricher(ctx context.Context) ContextEnricher {
 		return val.(ContextEnricher)
 	}
 	return nil
+}
+
+// GetTMUXManager returns the TMUX manager instance
+func (h *Handlers) GetTMUXManager() *terminal.TMUXManager {
+	return h.tmuxManager
 }

@@ -17,6 +17,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/superfly/sprite-env/pkg/tap"
 )
 
 // JuiceFS manages the JuiceFS filesystem and Litestream replication
@@ -128,7 +130,10 @@ func New(config Config) (*JuiceFS, error) {
 
 	// Initialize the overlay manager if enabled
 	if config.OverlayEnabled {
-		j.overlayMgr = NewOverlay(j, logger)
+		// Create context with logger for overlay manager
+		ctx := context.Background()
+		ctx = tap.WithLogger(ctx, logger)
+		j.overlayMgr = NewOverlay(j, ctx)
 
 		// Apply overlay configuration
 		if config.OverlayImageSize != "" {

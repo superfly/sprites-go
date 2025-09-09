@@ -389,11 +389,43 @@ func (h *Handlers) handleListExecSessions(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Get activity info for sessions
+	activityInfo := h.tmuxManager.GetActiveSessionsInfo()
+	activityMap := make(map[string]*terminal.SessionActivityInfo)
+	for i := range activityInfo {
+		activityMap[activityInfo[i].SessionID] = &activityInfo[i]
+	}
+
+	// Merge session info with activity data
+	type SessionWithActivity struct {
+		terminal.SessionInfo
+		BytesPerSecond float64    `json:"bytes_per_second"`
+		IsActive       bool       `json:"is_active"`
+		LastActivity   *time.Time `json:"last_activity,omitempty"`
+	}
+
+	sessionsWithActivity := make([]SessionWithActivity, 0, len(sessions))
+	for _, session := range sessions {
+		s := SessionWithActivity{
+			SessionInfo:    session,
+			BytesPerSecond: 0,
+			IsActive:       false,
+		}
+
+		if activity, ok := activityMap[session.ID]; ok {
+			s.BytesPerSecond = activity.BytesPerSecond
+			s.IsActive = activity.IsActive
+			s.LastActivity = &activity.LastActivity
+		}
+
+		sessionsWithActivity = append(sessionsWithActivity, s)
+	}
+
 	// Return JSON response
 	w.Header().Set("Content-Type", "application/json")
 	response := map[string]interface{}{
-		"sessions": sessions,
-		"count":    len(sessions),
+		"sessions": sessionsWithActivity,
+		"count":    len(sessionsWithActivity),
 	}
 
 	if err := json.NewEncoder(w).Encode(response); err != nil {

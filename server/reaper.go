@@ -8,6 +8,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/superfly/sprite-env/pkg/tap"
 )
 
 // Reaper handles reaping of zombie processes when running as PID 1
@@ -24,10 +26,10 @@ type Reaper struct {
 }
 
 // NewReaper creates a new Reaper instance
-func NewReaper(logger *slog.Logger) *Reaper {
-	ctx, cancel := context.WithCancel(context.Background())
+func NewReaper(ctx context.Context) *Reaper {
+	ctx, cancel := context.WithCancel(ctx)
 	return &Reaper{
-		logger:    logger,
+		logger:    tap.Logger(ctx),
 		ctx:       ctx,
 		cancel:    cancel,
 		done:      make(chan struct{}),

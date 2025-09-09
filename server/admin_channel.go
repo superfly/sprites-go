@@ -8,7 +8,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/nshafer/phx"
+	"github.com/superfly/sprite-env/pkg/phx"
+	"github.com/superfly/sprite-env/pkg/tap"
 	"github.com/superfly/sprite-env/server/api/handlers"
 )
 
@@ -29,6 +30,11 @@ type AdminChannel struct {
 	ctx          context.Context
 	cancel       context.CancelFunc
 	readyCh      chan struct{} // Signals when channel becomes ready
+
+	// Connection attempt tracking
+	firstAttemptTime time.Time
+	hasGivenUp       bool
+	maxRetryDuration time.Duration
 }
 
 type queuedMessage struct {
@@ -37,7 +43,8 @@ type queuedMessage struct {
 }
 
 // NewAdminChannel creates a new admin channel manager
-func NewAdminChannel(logger *slog.Logger) *AdminChannel {
+func NewAdminChannel(ctx context.Context) *AdminChannel {
+	logger := tap.Logger(ctx)
 	channelURL := os.Getenv("SPRITE_ADMIN_CHANNEL")
 	token := os.Getenv("SPRITE_HTTP_API_TOKEN")
 
@@ -56,14 +63,15 @@ func NewAdminChannel(logger *slog.Logger) *AdminChannel {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ac := &AdminChannel{
-		url:          channelURL,
-		token:        token,
-		logger:       logger,
-		messageQueue: make(chan queuedMessage, 100),
-		stopCh:       make(chan struct{}),
-		ctx:          ctx,
-		cancel:       cancel,
-		readyCh:      make(chan struct{}),
+		url:              channelURL,
+		token:            token,
+		logger:           logger,
+		messageQueue:     make(chan queuedMessage, 100),
+		stopCh:           make(chan struct{}),
+		ctx:              ctx,
+		cancel:           cancel,
+		readyCh:          make(chan struct{}),
+		maxRetryDuration: 1 * time.Hour,
 	}
 
 	// Start message queue processor
@@ -77,6 +85,9 @@ func (ac *AdminChannel) Start() error {
 	if ac == nil {
 		return nil // Noop if not configured
 	}
+
+	// Record the first attempt time
+	ac.firstAttemptTime = time.Now()
 
 	// Parse the URL and add authentication parameters
 	u, err := url.Parse(ac.url)
@@ -107,20 +118,52 @@ func (ac *AdminChannel) Start() error {
 
 	// Configure exponential backoff with max of 5 minutes
 	ac.socket.ReconnectAfterFunc = func(tries int) time.Duration {
+		// Check if we've exceeded the maximum retry duration
+		elapsed := time.Since(ac.firstAttemptTime)
+		if elapsed >= ac.maxRetryDuration {
+			if !ac.hasGivenUp {
+				ac.hasGivenUp = true
+				ac.logger.Error("Giving up on admin channel connection after maximum retry duration",
+					"elapsed", elapsed,
+					"max_duration", ac.maxRetryDuration)
+			}
+			// Return a very long duration to effectively stop reconnecting
+			return 365 * 24 * time.Hour
+		}
+
 		backoff := time.Duration(1<<uint(tries)) * time.Second
 		if backoff > 5*time.Minute {
 			backoff = 5 * time.Minute
 		}
-		ac.logger.Debug("Reconnect attempt scheduled", "tries", tries, "backoff", backoff)
+
+		// Check if this backoff would exceed our time limit
+		if elapsed+backoff > ac.maxRetryDuration {
+			// Adjust backoff to not exceed the limit
+			backoff = ac.maxRetryDuration - elapsed
+			ac.logger.Debug("Adjusted final reconnect attempt", "tries", tries, "backoff", backoff, "elapsed", elapsed)
+		} else {
+			ac.logger.Debug("Reconnect attempt scheduled", "tries", tries, "backoff", backoff, "elapsed", elapsed)
+		}
+
 		return backoff
 	}
 
 	// Set up auto-reconnect on disconnect
 	ac.socket.OnClose(func() {
-		ac.logger.Debug("Socket disconnected, will auto-reconnect")
+		if !ac.hasGivenUp {
+			ac.logger.Debug("Socket disconnected, will auto-reconnect")
+		} else {
+			ac.logger.Debug("Socket disconnected, not reconnecting (given up)")
+		}
 	})
 
 	ac.socket.OnOpen(func() {
+		// Check if we've given up before attempting to join
+		if ac.hasGivenUp {
+			ac.logger.Info("Socket connected but not joining channel (given up after timeout)")
+			return
+		}
+
 		ac.logger.Info("Socket connected")
 
 		// Join (or rejoin) the admin channel with app-specific topic
@@ -129,10 +172,65 @@ func (ac *AdminChannel) Start() error {
 			appName = "unknown"
 		}
 		channelTopic := fmt.Sprintf("sprite:%s", appName)
-		if ac.channel == nil {
+
+		// Don't create or join channel if we've already given up
+		if ac.channel == nil && !ac.hasGivenUp {
 			ac.channel = ac.socket.Channel(channelTopic, nil)
+
+			// Set custom rejoin function that respects our give-up logic
+			ac.channel.RejoinAfterFunc = func(tries int) time.Duration {
+				elapsed := time.Since(ac.firstAttemptTime)
+
+				// Debug logging to understand the retry behavior
+				ac.logger.Debug("Channel rejoin backoff calculation",
+					"tries", tries,
+					"elapsed", elapsed,
+					"max_duration", ac.maxRetryDuration)
+
+				if elapsed >= ac.maxRetryDuration {
+					if !ac.hasGivenUp {
+						ac.hasGivenUp = true
+						ac.logger.Error("Giving up on admin channel rejoin after maximum retry duration",
+							"elapsed", elapsed,
+							"max_duration", ac.maxRetryDuration,
+							"topic", channelTopic)
+						// Leave the channel to clean up properly
+						if ac.channel != nil {
+							ac.channel.Leave()
+						}
+					}
+					// Return a very long duration to effectively stop rejoining
+					return 365 * 24 * time.Hour
+				}
+
+				// Aggressive exponential backoff: 1s, 10s, 100s, 1000s, etc.
+				// Grows by 10x each time
+				backoff := time.Duration(1) * time.Second
+				for i := 1; i < tries; i++ {
+					backoff *= 10
+				}
+
+				// Check if this backoff would exceed our time limit
+				if elapsed+backoff > ac.maxRetryDuration {
+					// Adjust backoff to not exceed the limit
+					backoff = ac.maxRetryDuration - elapsed
+					ac.logger.Debug("Adjusted final channel rejoin attempt",
+						"tries", tries,
+						"backoff", backoff,
+						"elapsed", elapsed)
+				} else {
+					ac.logger.Debug("Channel rejoin backoff",
+						"tries", tries,
+						"backoff", backoff,
+						"elapsed", elapsed)
+				}
+
+				return backoff
+			}
 		}
-		if !ac.channel.IsJoined() {
+
+		// Only attempt to join if we have a channel and haven't given up
+		if ac.channel != nil && !ac.channel.IsJoined() && !ac.hasGivenUp {
 			join, err := ac.channel.Join()
 			if err != nil {
 				ac.logger.Debug("error joining channel", "error", err)
@@ -150,10 +248,18 @@ func (ac *AdminChannel) Start() error {
 				ac.flushQueue()
 			})
 			join.Receive("error", func(response any) {
-				ac.logger.Debug("Failed to join admin channel", "error", response)
+				elapsed := time.Since(ac.firstAttemptTime)
+				ac.logger.Debug("Failed to join admin channel",
+					"error", response,
+					"elapsed", elapsed,
+					"max_duration", ac.maxRetryDuration,
+					"topic", channelTopic)
 			})
 			join.Receive("timeout", func(response any) {
-				ac.logger.Debug("Admin channel join timeout")
+				elapsed := time.Since(ac.firstAttemptTime)
+				ac.logger.Debug("Admin channel join timeout",
+					"elapsed", elapsed,
+					"max_duration", ac.maxRetryDuration)
 			})
 		} else {
 			// Channel was already joined, signal ready and flush
@@ -353,7 +459,7 @@ func GetFromContext(ctx context.Context) *AdminChannel {
 
 // IsReady returns true if the admin channel is connected and joined
 func (ac *AdminChannel) IsReady() bool {
-	return ac != nil && ac.channel != nil && ac.channel.IsJoined()
+	return ac != nil && ac.channel != nil && ac.channel.IsJoined() && !ac.hasGivenUp
 }
 
 // phxLogAdapter adapts slog.Logger to phx.Logger interface

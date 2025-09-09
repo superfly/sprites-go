@@ -13,6 +13,7 @@ import (
 
 	"github.com/superfly/sprite-env/lib/api"
 	"github.com/superfly/sprite-env/pkg/juicefs"
+	"github.com/superfly/sprite-env/pkg/tap"
 	"github.com/superfly/sprite-env/server/api/handlers"
 )
 
@@ -28,9 +29,11 @@ func TestProxyHandlerDirect(t *testing.T) {
 
 	// Create handlers
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, logger)
 	mockSys := &simpleSystemManager{}
 	config := handlers.Config{}
-	h := handlers.NewHandlers(logger, mockSys, config)
+	h := handlers.NewHandlers(ctx, mockSys, config)
 
 	t.Run("MethodValidation", func(t *testing.T) {
 		// Test that POST method is not allowed (should be GET for WebSocket)

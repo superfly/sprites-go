@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/superfly/sprite-env/pkg/tap"
+	"github.com/superfly/sprite-env/pkg/terminal"
 	serverapi "github.com/superfly/sprite-env/server/api"
 )
 
@@ -102,37 +104,31 @@ type Application struct {
 
 // NewApplication creates a new application instance
 func NewApplication(config Config) (*Application, error) {
-	// Set up logging
-	var handler slog.Handler
-	if config.LogJSON {
-		handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-			Level: config.LogLevel,
-		})
-	} else {
-		handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-			Level: config.LogLevel,
-		})
-	}
-	logger := slog.New(handler)
+	// Set up logging using tap logger
+	logger := tap.NewLogger(config.LogLevel, config.LogJSON, os.Stdout)
+	tap.SetDefault(logger)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	// Create context with logger
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, logger)
+	ctx, cancel := context.WithCancel(ctx)
 
 	app := &Application{
 		config:           config,
-		logger:           logger,
+		logger:           tap.Logger(ctx),
 		ctx:              ctx,
 		cancel:           cancel,
 		keepAliveOnError: config.KeepAliveOnError,
 	}
 
 	// Create Reaper instance
-	app.reaper = NewReaper(logger)
+	app.reaper = NewReaper(ctx)
 
 	// Initialize resource monitor (linux only implementation)
-	app.resourceMonitor = NewResourceMonitor(logger)
+	app.resourceMonitor = NewResourceMonitor(ctx)
 
 	// Initialize admin channel (if configured)
-	app.adminChannel = NewAdminChannel(logger)
+	app.adminChannel = NewAdminChannel(ctx)
 
 	// Create System instance
 	systemConfig := SystemConfig{
@@ -157,7 +153,7 @@ func NewApplication(config Config) (*Application, error) {
 		OverlaySkipOverlayFS:           config.OverlaySkipOverlayFS,
 	}
 
-	system, err := NewSystem(systemConfig, logger, app.reaper)
+	system, err := NewSystem(systemConfig, tap.Logger(ctx), app.reaper)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create system: %w", err)
 	}
@@ -175,6 +171,13 @@ func NewApplication(config Config) (*Application, error) {
 			syncTargetPath = "/tmp/sync"
 		}
 
+		// Create TMUXManager with cmdPrefix for running tmux commands inside container
+		tmuxManager := terminal.NewTMUXManager(ctx)
+		if config.ContainerEnabled {
+			// Set cmdPrefix to run tmux commands through crun exec
+			tmuxManager.SetCmdPrefix([]string{"crun", "exec", "app"})
+		}
+
 		apiConfig := serverapi.Config{
 			ListenAddr:         config.APIListenAddr,
 			APIToken:           config.APIToken,
@@ -184,15 +187,16 @@ func NewApplication(config Config) (*Application, error) {
 			SyncTargetPath:     syncTargetPath,
 			ProxyLocalhostIPv4: config.ProxyLocalhostIPv4,
 			ProxyLocalhostIPv6: config.ProxyLocalhostIPv6,
+			TMUXManager:        tmuxManager,
 		}
 
-		apiServer, err := serverapi.NewServer(apiConfig, app.system, logger)
+		apiServer, err := serverapi.NewServer(apiConfig, app.system, ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create API server: %w", err)
 		}
 
 		// Start activity monitor and connect to API server
-		activity := NewActivityMonitor(logger, app.system, 30*time.Second)
+		activity := NewActivityMonitor(ctx, app.system, 30*time.Second, tmuxManager)
 		activity.SetAdminChannel(app.adminChannel)
 		apiServer.SetActivityObserver(func(start bool) {
 			if start {
@@ -202,6 +206,67 @@ func NewApplication(config Config) (*Application, error) {
 			}
 		})
 		activity.Start(ctx)
+
+		// Set up prepare command for tmux monitoring
+		if tmuxManager != nil {
+			logger.Info("Setting up tmux activity monitor prepare command")
+			tmuxManager.SetPrepareCommand(func() {
+				// Start the tmux activity monitor
+				logger.Info("Prepare command executing - starting tmux activity monitor",
+					"tmuxManagerNil", tmuxManager == nil)
+
+				if tmuxManager == nil {
+					logger.Error("TMUXManager is nil in prepare command")
+					return
+				}
+
+				defer func() {
+					if r := recover(); r != nil {
+						logger.Error("Panic in tmux activity monitor startup",
+							"panic", r,
+							"stack", string(debug.Stack()))
+					}
+				}()
+
+				if err := tmuxManager.StartActivityMonitor(ctx); err != nil {
+					logger.Warn("Failed to start tmux activity monitor", "error", err)
+				} else {
+					logger.Info("Successfully started tmux activity monitor")
+				}
+			})
+
+			// Connect tmux activity events to the activity monitor
+			go func() {
+				logger.Info("Starting tmux activity event forwarder")
+				activityChan := tmuxManager.GetActivityChannel()
+				for {
+					select {
+					case <-ctx.Done():
+						logger.Debug("Tmux activity forwarder stopped due to context cancellation")
+						return
+					case tmuxActivity, ok := <-activityChan:
+						if !ok {
+							logger.Error("Tmux activity channel closed unexpectedly")
+							return
+						}
+
+						logger.Debug("Received tmux activity event",
+							"sessionID", tmuxActivity.SessionID,
+							"active", tmuxActivity.Active,
+							"type", tmuxActivity.Type)
+
+						// Forward to activity monitor
+						if tmuxActivity.Active {
+							activity.ActivityStarted("tmux")
+						} else {
+							activity.ActivityEnded("tmux")
+						}
+					}
+				}
+			}()
+		} else {
+			logger.Warn("TMUXManager is nil, cannot set up activity monitor")
+		}
 		// Pass admin channel to API server for context enrichment
 		if app.adminChannel != nil {
 			apiServer.SetAdminChannel(app.adminChannel)
@@ -406,6 +471,7 @@ func parseCommandLine() (Config, error) {
 		}
 
 		// Debug: Show what's in the config file
+		// Note: Using default logger since tap logger isn't initialized yet
 		slog.Debug("Loading config from file", "file", configFile)
 		slog.Debug("Config file contents", "contents", string(data))
 
@@ -480,6 +546,7 @@ func parseCommandLine() (Config, error) {
 		}
 
 		// Debug: Log container config values parsed from file
+		// Note: Using default logger since tap logger isn't initialized yet
 		slog.Debug("Container config from file",
 			"enabled", config.ContainerEnabled,
 			"socket_dir", config.ContainerSocketDir,

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -8,15 +9,18 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/superfly/sprite-env/pkg/tap"
 	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
 func TestHandleListExecSessions(t *testing.T) {
 	// Create a test handler with a mock tmux manager
 	logger := slog.Default()
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, logger)
 	handlers := &Handlers{
 		logger:      logger,
-		tmuxManager: terminal.NewTMUXManager(logger),
+		tmuxManager: terminal.NewTMUXManager(ctx),
 	}
 
 	// Create a test request
@@ -136,9 +140,11 @@ func TestHandleListExecSessionsNoTMUXManager(t *testing.T) {
 func TestHandleExecWebSocketUpgrade(t *testing.T) {
 	// Create a test handler
 	logger := slog.Default()
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, logger)
 	handlers := &Handlers{
 		logger:      logger,
-		tmuxManager: terminal.NewTMUXManager(logger),
+		tmuxManager: terminal.NewTMUXManager(ctx),
 	}
 
 	// Create a test request with WebSocket upgrade header
@@ -168,9 +174,11 @@ func TestHandleExecWebSocketUpgrade(t *testing.T) {
 func TestHandleExecListSessions(t *testing.T) {
 	// Create a test handler
 	logger := slog.Default()
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, logger)
 	handlers := &Handlers{
 		logger:      logger,
-		tmuxManager: terminal.NewTMUXManager(logger),
+		tmuxManager: terminal.NewTMUXManager(ctx),
 	}
 
 	// Create a test request without WebSocket upgrade header
@@ -200,9 +208,11 @@ func TestHandleExecListSessions(t *testing.T) {
 func TestHandleExecPOSTNotAllowed(t *testing.T) {
 	// Create a test handler
 	logger := slog.Default()
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, logger)
 	handlers := &Handlers{
 		logger:      logger,
-		tmuxManager: terminal.NewTMUXManager(logger),
+		tmuxManager: terminal.NewTMUXManager(ctx),
 	}
 
 	// Create a test POST request (should be rejected regardless of content)

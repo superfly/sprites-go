@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -8,12 +9,16 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/superfly/sprite-env/pkg/tap"
 )
 
 // TestDebugCreateZombie tests the debug zombie creation endpoint
 func TestDebugCreateZombie(t *testing.T) {
 	// Create test dependencies
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, logger)
 	mockSys := newMockSystemManager()
 
 	config := Config{
@@ -21,7 +26,7 @@ func TestDebugCreateZombie(t *testing.T) {
 	}
 
 	// Create server
-	server, err := NewServer(config, mockSys, logger)
+	server, err := NewServer(config, mockSys, ctx)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -71,6 +76,8 @@ func TestDebugCreateZombie(t *testing.T) {
 func TestDebugCheckProcess(t *testing.T) {
 	// Create test dependencies
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, logger)
 	mockSys := newMockSystemManager()
 
 	config := Config{
@@ -78,7 +85,7 @@ func TestDebugCheckProcess(t *testing.T) {
 	}
 
 	// Create server
-	server, err := NewServer(config, mockSys, logger)
+	server, err := NewServer(config, mockSys, ctx)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}

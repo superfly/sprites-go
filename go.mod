@@ -13,10 +13,8 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/creack/pty v1.1.24
 	github.com/gorilla/websocket v1.5.3
-	github.com/nshafer/phx v0.2.5
 	github.com/stretchr/testify v1.9.0
 	github.com/zalando/go-keyring v0.2.6
-	golang.org/x/exp v0.0.0-20231108232855-2478ac86f678
 	golang.org/x/term v0.33.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.29.8

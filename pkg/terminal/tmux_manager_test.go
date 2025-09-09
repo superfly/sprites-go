@@ -1,15 +1,19 @@
 package terminal
 
 import (
+	"context"
 	"log/slog"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/superfly/sprite-env/pkg/tap"
 )
 
 func TestTMUXManager_CreateSession(t *testing.T) {
-	logger := slog.Default()
-	tm := NewTMUXManager(logger)
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, slog.Default())
+	tm := NewTMUXManager(ctx)
 
 	// Test creating a new session
 	sessionID, cmd, args := tm.CreateSession("echo", []string{"hello"}, false)
@@ -46,8 +50,9 @@ func TestTMUXManager_CreateSession(t *testing.T) {
 }
 
 func TestTMUXManager_AttachSession(t *testing.T) {
-	logger := slog.Default()
-	tm := NewTMUXManager(logger)
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, slog.Default())
+	tm := NewTMUXManager(ctx)
 
 	// Test attaching to a session
 	cmd, args := tm.AttachSession("3", false)
@@ -73,8 +78,9 @@ func TestTMUXManager_AttachSession(t *testing.T) {
 }
 
 func TestTMUXManager_SessionExists(t *testing.T) {
-	logger := slog.Default()
-	tm := NewTMUXManager(logger)
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, slog.Default())
+	tm := NewTMUXManager(ctx)
 
 	// Test checking for a non-existent session
 	// This will likely return false since we're not actually creating tmux sessions in tests
@@ -85,8 +91,9 @@ func TestTMUXManager_SessionExists(t *testing.T) {
 }
 
 func TestTMUXManager_ListSessions(t *testing.T) {
-	logger := slog.Default()
-	tm := NewTMUXManager(logger)
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, slog.Default())
+	tm := NewTMUXManager(ctx)
 
 	// This test just verifies the function doesn't panic
 	sessions, err := tm.ListSessions()
@@ -101,8 +108,9 @@ func TestTMUXManager_ListSessions(t *testing.T) {
 }
 
 func TestTMUXManager_CreateSessionWithControlMode(t *testing.T) {
-	logger := slog.Default()
-	tm := NewTMUXManager(logger)
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, slog.Default())
+	tm := NewTMUXManager(ctx)
 
 	// Test creating a session with control mode
 	sessionID, cmd, args := tm.CreateSession("bash", []string{}, true)
@@ -130,8 +138,9 @@ func TestTMUXManager_CreateSessionWithControlMode(t *testing.T) {
 }
 
 func TestTMUXManager_AttachSessionWithControlMode(t *testing.T) {
-	logger := slog.Default()
-	tm := NewTMUXManager(logger)
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, slog.Default())
+	tm := NewTMUXManager(ctx)
 
 	// Test attaching with control mode
 	cmd, args := tm.AttachSession("5", true)

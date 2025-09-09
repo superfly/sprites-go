@@ -1,7 +1,7 @@
 .PHONY: test test-docker test-machine build build-linux help
 
 test:
-	./scripts/run-tests.sh $(ARGS)
+	bash ./scripts/run-tests-docker.sh $(ARGS)
 
 # Build and run tests inside Docker (requires Docker; uses --privileged for FUSE)
 test-docker:

@@ -35,7 +35,8 @@ RUN apt-get update && \
     libfuse3-dev \
     iproute2 \
     netcat-openbsd \
-    procps && \
+    procps \
+    tmux && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy JuiceFS binary into the image

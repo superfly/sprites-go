@@ -12,9 +12,11 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/superfly/sprite-env/client/config"
@@ -404,8 +406,8 @@ func ExecCommand(ctx *GlobalContext, args []string) {
 				fmt.Printf("Active tmux sessions (%d):\n\n", len(sessions))
 
 				// Print table header
-				fmt.Printf("%-6s %-20s %-30s\n", "ID", "Command", "Started")
-				fmt.Printf("%-6s %-20s %-30s\n", "──", "───────", "───────")
+				fmt.Printf("%-6s %-20s %-30s %-15s\n", "ID", "Command", "Started", "Activity")
+				fmt.Printf("%-6s %-20s %-30s %-15s\n", "──", "───────", "───────", "────────")
 
 				// Print each session
 				for _, s := range sessions {
@@ -435,11 +437,27 @@ func ExecCommand(ctx *GlobalContext, args []string) {
 
 						// Truncate command if too long
 						cmdStr := fmt.Sprintf("%v", command)
-						if len(cmdStr) > 20 {
-							cmdStr = cmdStr[:17] + "..."
+						if len(cmdStr) > 19 {
+							cmdStr = cmdStr[:16] + "..."
 						}
 
-						fmt.Printf("%-6v %-20s %-30s\n", id, cmdStr, startedStr)
+						// Format activity data
+						var activityStr string
+						if bytesPerSec, ok := session["bytes_per_second"].(float64); ok && bytesPerSec > 0 {
+							if bytesPerSec < 1024 {
+								activityStr = fmt.Sprintf("%.0f B/s", bytesPerSec)
+							} else if bytesPerSec < 1024*1024 {
+								activityStr = fmt.Sprintf("%.1f KB/s", bytesPerSec/1024)
+							} else {
+								activityStr = fmt.Sprintf("%.1f MB/s", bytesPerSec/(1024*1024))
+							}
+						} else if isActive, ok := session["is_active"].(bool); ok && isActive {
+							activityStr = "Active"
+						} else {
+							activityStr = "-"
+						}
+
+						fmt.Printf("%-6v %-20s %-30s %-15s\n", id, cmdStr, startedStr, activityStr)
 					}
 				}
 
@@ -525,13 +543,10 @@ func ExecCommand(ctx *GlobalContext, args []string) {
 		}
 
 		// Print session information
-		if *detachable {
-			fmt.Printf("\n📌 Creating detachable tmux session...\n")
-		} else if *sessionID != "" {
+		if *sessionID != "" {
 			fmt.Printf("\n🔗 Attaching to tmux session: %s\n", format.Sprite(*sessionID))
+			fmt.Println()
 		}
-
-		fmt.Println()
 	}
 
 	// Execute the command
@@ -595,18 +610,44 @@ func executeWebSocket(wsURL *url.URL, token string, cmd []string, workingDir str
 	if idx := strings.Index(proxyBaseURL, "?"); idx != -1 {
 		proxyBaseURL = proxyBaseURL[:idx]
 	}
-	// Capture initial terminal state for restoration at the end
+
+	// Set up terminal restoration that works in all exit scenarios
+	var terminalRestored bool
+	var terminalRestoreMutex sync.Mutex
 	var initialState *term.State
+
+	// Capture initial terminal state
 	if term.IsTerminal(int(os.Stdin.Fd())) {
 		if state, err := term.GetState(int(os.Stdin.Fd())); err == nil {
 			initialState = state
 		}
 	}
-	defer func() {
-		if initialState != nil {
+
+	// Create a robust terminal restoration function
+	restoreTerminal := func() {
+		terminalRestoreMutex.Lock()
+		defer terminalRestoreMutex.Unlock()
+
+		if !terminalRestored && initialState != nil {
 			term.Restore(int(os.Stdin.Fd()), initialState)
+			// Show cursor in case it was hidden
+			fmt.Print("\033[?25h")
+			terminalRestored = true
 		}
+	}
+
+	// Ensure terminal is restored on function exit
+	defer restoreTerminal()
+
+	// Set up signal handling to restore terminal on interrupt
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		restoreTerminal()
+		os.Exit(130) // Standard exit code for SIGINT
 	}()
+	defer signal.Stop(sigCh)
 
 	logger := slog.Default()
 	logger.Debug("Starting WebSocket exec", "url", wsURL.String(), "cmd", cmd, "workingDir", workingDir, "env", env, "tty", tty)
@@ -688,26 +729,39 @@ func executeWebSocket(wsURL *url.URL, token string, cmd []string, workingDir str
 	portMgr := newPortManager(logger, proxyConfig)
 	defer portMgr.cleanup()
 
-	// Set up text message handler for port notifications
-	wsCmd.TextMessageHandler = portMgr.handlePortNotification
+	// Set up text message handler for port notifications and session messages
+	var sessionIDReceived string
+	wsCmd.TextMessageHandler = func(data []byte) {
+		msg := string(data)
+		// Check if this is a session ID message
+		if strings.Contains(msg, "Detachable session created with ID:") {
+			// Extract session ID from message
+			lines := strings.Split(msg, "\n")
+			for _, line := range lines {
+				if strings.Contains(line, "Detachable session created with ID:") {
+					parts := strings.Split(line, ":")
+					if len(parts) >= 2 {
+						sessionIDReceived = strings.TrimSpace(parts[len(parts)-1])
+					}
+				}
+			}
+			// Don't forward session creation message to output
+			return
+		}
+
+		// Otherwise handle as port notification
+		portMgr.handlePortNotification(data)
+	}
 
 	logger.Debug("Created exec command", "tty", wsCmd.Tty)
 
 	// Set up PTY mode if needed
-	var cleanup func()
 	if tty {
-		var err error
-		cleanup, err = handlePTYMode(wsCmd)
-		if err != nil {
+		if err := handlePTYMode(wsCmd, restoreTerminal); err != nil {
 			logger.Error("Failed to set up PTY mode", "error", err)
 			fmt.Fprintf(os.Stderr, "Warning: Failed to set up PTY mode: %v\n", err)
 			// Continue anyway - PTY will work but without raw mode
 		}
-		defer func() {
-			if cleanup != nil {
-				cleanup()
-			}
-		}()
 	}
 
 	logger.Debug("Starting WebSocket command execution")
@@ -738,42 +792,34 @@ func executeWebSocket(wsURL *url.URL, token string, cmd []string, workingDir str
 		exitCode = 1
 	}
 
-	logger.Debug("WebSocket exec completed", "finalExitCode", exitCode)
-
-	// Restore terminal state before exiting
-	if initialState != nil {
-		term.Restore(int(os.Stdin.Fd()), initialState)
+	// Print session attachment message for detachable sessions
+	if detachable && sessionIDReceived != "" {
+		fmt.Printf("\nTo attach to this session run: sprite exec -id %s\n", sessionIDReceived)
 	}
+
+	logger.Debug("WebSocket exec completed", "finalExitCode", exitCode)
 
 	return exitCode
 }
 
-// handlePTYMode sets up the terminal for PTY mode and returns a cleanup function
-func handlePTYMode(wsCmd *terminal.Cmd) (cleanup func(), err error) {
+// handlePTYMode sets up the terminal for PTY mode
+func handlePTYMode(wsCmd *terminal.Cmd, restoreTerminal func()) error {
 	// Check if stdin is a terminal
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		// Not a terminal, no special handling needed
-		return func() {}, nil
+		return nil
 	}
 
-	// Save the current terminal state
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	// Set terminal to raw mode
+	_, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
-		return nil, fmt.Errorf("failed to set terminal to raw mode: %w", err)
-	}
-
-	// Set up cleanup function
-	cleanup = func() {
-		// Restore terminal state
-		term.Restore(int(os.Stdin.Fd()), oldState)
-		// Show cursor in case it was hidden
-		fmt.Print("\033[?25h")
+		return fmt.Errorf("failed to set terminal to raw mode: %w", err)
 	}
 
 	// Handle terminal resize (platform-specific)
 	handleTerminalResize(wsCmd)
 
-	return cleanup, nil
+	return nil
 }
 
 // buildExecWebSocketURL converts HTTP/HTTPS URL to WS/WSS URL for exec

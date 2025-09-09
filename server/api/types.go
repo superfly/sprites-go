@@ -2,6 +2,8 @@ package api
 
 import (
 	"time"
+
+	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
 // Config holds the API server configuration
@@ -13,6 +15,7 @@ type Config struct {
 
 	// Exec configuration
 	ExecWrapperCommand []string
+	TMUXManager        *terminal.TMUXManager // Optional, will be passed to handlers
 
 	// Sync configuration
 	SyncTargetPath string

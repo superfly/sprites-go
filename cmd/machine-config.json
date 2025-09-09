@@ -62,7 +62,9 @@
         "SPRITE_HTTP_API_TOKEN": "<sprite_token>",
         "SPRITE_PRIMARY_REGION": "iad",
         "SPRITE_S3_REGION": "auto",
-        "SPRITE_ADMIN_CHANNEL": "wss://sprites-api-staging.fly.dev/internal/admin"
+        "SPRITE_ADMIN_CHANNEL": "wss://sprites-api-staging.fly.dev/internal/admin",
+        "APP_RUNNNER_ENTRYPOINT": "",
+        "SPRITE_PREVENT_SUSPEND": ""
       },
       "secrets": [
         {

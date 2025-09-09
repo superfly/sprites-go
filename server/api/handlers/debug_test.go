@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/superfly/sprite-env/lib/api"
+	"github.com/superfly/sprite-env/pkg/tap"
 
 	"github.com/superfly/sprite-env/pkg/juicefs"
 )
@@ -190,7 +191,9 @@ func TestHandleDebugCreateZombie(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	config := Config{}
 	mockSys := newMockSystemManager()
-	h := NewHandlers(logger, mockSys, config)
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, logger)
+	h := NewHandlers(ctx, mockSys, config)
 
 	tests := []struct {
 		name           string
@@ -244,7 +247,9 @@ func TestHandleDebugCheckProcess(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	config := Config{}
 	mockSys := newMockSystemManager()
-	h := NewHandlers(logger, mockSys, config)
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, logger)
+	h := NewHandlers(ctx, mockSys, config)
 
 	tests := []struct {
 		name           string
