@@ -186,6 +186,10 @@ func (m *mockSystemManager) Wait() error {
 	return nil
 }
 
+func (m *mockSystemManager) ResolvePID(pid int) (int, error) {
+	return pid, nil // Simple passthrough for tests
+}
+
 // TestHandleDebugCreateZombie tests the debug zombie creation handler
 func TestHandleDebugCreateZombie(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))

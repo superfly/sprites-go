@@ -310,3 +310,7 @@ func (m *mockSystemManager) Shutdown(ctx context.Context) error {
 func (m *mockSystemManager) Wait() error {
 	return nil
 }
+
+func (m *mockSystemManager) ResolvePID(pid int) (int, error) {
+	return pid, nil // Simple passthrough for tests
+}

@@ -292,6 +292,9 @@ func (m *simpleSystemManager) UnsubscribeFromReapEvents(ch <-chan int) {}
 func (m *simpleSystemManager) WasProcessReaped(pid int) (bool, time.Time) {
 	return false, time.Time{}
 }
+func (m *simpleSystemManager) ResolvePID(pid int) (int, error) {
+	return pid, nil // Simple passthrough for tests
+}
 
 func (m *simpleSystemManager) Boot(ctx context.Context) error {
 	return nil

@@ -3,6 +3,7 @@ package portwatcher
 
 import (
 	"log"
+	"sync"
 	"time"
 
 	"github.com/superfly/sprite-env/pkg/container"
@@ -28,6 +29,7 @@ type portEvent struct {
 // PortWatcher monitors ports for a process and its children
 // It now uses the global namespace monitor for efficiency
 type PortWatcher struct {
+	mu       sync.Mutex
 	pids     []int // List of PIDs being monitored
 	callback PortCallback
 	monitor  *NamespaceMonitor
@@ -63,6 +65,9 @@ func New(pid int, callback PortCallback) (*PortWatcher, error) {
 
 // Start begins monitoring for new ports
 func (pw *PortWatcher) Start() error {
+	pw.mu.Lock()
+	defer pw.mu.Unlock()
+
 	// If this is an idle instance, do nothing
 	if pw.idle {
 		return nil
@@ -86,6 +91,9 @@ func (pw *PortWatcher) Start() error {
 
 // Stop stops the port watcher
 func (pw *PortWatcher) Stop() {
+	pw.mu.Lock()
+	defer pw.mu.Unlock()
+
 	// If this is an idle instance, do nothing
 	if pw.idle {
 		return
@@ -99,6 +107,9 @@ func (pw *PortWatcher) Stop() {
 
 // AddPID adds a new PID to monitor
 func (pw *PortWatcher) AddPID(pid int) error {
+	pw.mu.Lock()
+	defer pw.mu.Unlock()
+
 	// Check if PID is already being monitored
 	for _, existingPID := range pw.pids {
 		if existingPID == pid {
@@ -124,6 +135,9 @@ func (pw *PortWatcher) AddPID(pid int) error {
 
 // RemovePID removes a PID from monitoring
 func (pw *PortWatcher) RemovePID(pid int) {
+	pw.mu.Lock()
+	defer pw.mu.Unlock()
+
 	// Find and remove the PID
 	for i, existingPID := range pw.pids {
 		if existingPID == pid {
