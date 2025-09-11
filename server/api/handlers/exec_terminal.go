@@ -4,9 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strconv"
-	"syscall"
 	"time"
 
 	portwatcher "github.com/superfly/sprite-env/pkg/port-watcher"
@@ -178,38 +176,145 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 	// Create a variable to hold the message sender once websocket connects
 	var messageSender terminal.TextMessageSender
 
-	// Set up process start callback to monitor ports with websocket notifications
+	// Create a single port watcher that will be shared
+	var portWatcher *portwatcher.PortWatcher
+
+	// Track existing panes that need to be added after process starts
+	var pendingPanePIDs []int
+
+	// Track session ID for tmux pane monitoring
+	var monitoredSessionID string
+	if sessionID != "" {
+		monitoredSessionID = sessionID
+	} else if returnedSessionID != "" {
+		monitoredSessionID = returnedSessionID
+	}
+
+	// Port notification callback
+	portCallback := func(port portwatcher.Port) {
+		var msgType string
+		if port.State == "open" {
+			msgType = "port_opened"
+		} else {
+			msgType = "port_closed"
+		}
+
+		notification := PortNotificationMessage{
+			Type:    msgType,
+			Port:    port.Port,
+			Address: port.Address,
+			PID:     port.PID,
+		}
+
+		if messageSender != nil {
+			if data, err := json.Marshal(notification); err == nil {
+				if err := messageSender.SendTextMessage(data); err != nil {
+					h.logger.Error("Failed to send port notification", "execID", execID, "notification", notification, "error", err)
+				} else {
+					h.logger.Debug("Sent port notification", "execID", execID, "notification", notification)
+				}
+			} else {
+				h.logger.Error("Failed to marshal port notification", "execID", execID, "notification", notification, "error", err)
+			}
+		}
+	}
+
+	// For tmux sessions, create port watcher early and set up pane monitoring
+	if h.tmuxManager != nil && monitoredSessionID != "" {
+		// Create a dummy PID for the port watcher - will add real PIDs later
+		// Using PID 1 as a placeholder since we need a PID to create the watcher
+		watcher, err := portwatcher.New(1, portCallback)
+		if err != nil {
+			h.logger.Error("Failed to create port watcher for tmux session", "execID", execID, "sessionID", monitoredSessionID, "error", err)
+		} else {
+			if err := watcher.Start(); err != nil {
+				h.logger.Error("Failed to start port watcher for tmux session", "execID", execID, "sessionID", monitoredSessionID, "error", err)
+			} else {
+				portWatcher = watcher
+				// Immediately remove the dummy PID
+				portWatcher.RemovePID(1)
+				h.logger.Debug("Created port watcher for tmux session", "execID", execID, "sessionID", monitoredSessionID)
+
+				// Set up pane lifecycle callback
+				h.tmuxManager.SetPaneCallback(monitoredSessionID, func(sid string, panePID int, added bool) {
+					// Convert container PID to host PID using system's ResolvePID
+					hostPID, err := h.system.ResolvePID(panePID)
+					if err != nil {
+						h.logger.Warn("Failed to resolve container PID to host PID", "containerPID", panePID, "error", err)
+						hostPID = panePID // Fall back to using the PID as-is
+					} else if hostPID != panePID {
+						h.logger.Debug("Converted container PID to host PID", "containerPID", panePID, "hostPID", hostPID)
+					}
+
+					if added {
+						h.logger.Info("Adding tmux pane PID to port monitoring", "sessionID", sid, "containerPID", panePID, "hostPID", hostPID)
+						if err := portWatcher.AddPID(hostPID); err != nil {
+							h.logger.Error("Failed to add pane PID to port watcher", "sessionID", sid, "hostPID", hostPID, "error", err)
+						}
+					} else {
+						h.logger.Info("Removing tmux pane PID from port monitoring", "sessionID", sid, "containerPID", panePID, "hostPID", hostPID)
+						portWatcher.RemovePID(hostPID)
+					}
+				})
+
+				// Get existing pane PIDs and add them to port monitoring
+				existingPanes, err := h.tmuxManager.GetSessionPanePIDs(monitoredSessionID)
+				if err != nil {
+					h.logger.Error("Failed to get existing pane PIDs", "sessionID", monitoredSessionID, "error", err)
+				} else {
+					h.logger.Info("Found existing panes in tmux session", "sessionID", monitoredSessionID, "count", len(existingPanes), "containerPIDs", existingPanes)
+					// Store existing panes to be processed after we get container init PID
+					pendingPanePIDs = existingPanes
+				}
+			}
+		}
+	}
+
+	// Set up process start callback to create port watcher and monitor ports
 	options = append(options, terminal.WithOnProcessStart(func(pid int) {
 		h.logger.Debug("Process started via terminal", "execID", execID, "pid", pid)
 
-		// Start port monitoring directly here
-		go h.startPortMonitoring(execID, pid, func(port portwatcher.Port, opened bool) {
-			var msgType string
-			if opened {
-				msgType = "port_opened"
-			} else {
-				msgType = "port_closed"
+		// Create port watcher if not already created (for non-tmux sessions)
+		if portWatcher == nil {
+			watcher, err := portwatcher.New(pid, portCallback)
+			if err != nil {
+				h.logger.Error("Failed to create port watcher", "execID", execID, "pid", pid, "error", err)
+				return
 			}
 
-			notification := PortNotificationMessage{
-				Type:    msgType,
-				Port:    port.Port,
-				Address: port.Address,
-				PID:     port.PID,
+			if err := watcher.Start(); err != nil {
+				h.logger.Error("Failed to start port watcher", "execID", execID, "pid", pid, "error", err)
+				return
 			}
 
-			if messageSender != nil {
-				if data, err := json.Marshal(notification); err == nil {
-					if err := messageSender.SendTextMessage(data); err != nil {
-						h.logger.Error("Failed to send port notification", "execID", execID, "notification", notification, "error", err)
-					} else {
-						h.logger.Debug("Sent port notification", "execID", execID, "notification", notification)
+			portWatcher = watcher
+			h.logger.Debug("Port watcher created and started", "execID", execID, "pid", pid)
+		} else {
+			// For tmux sessions, add the main process PID to existing watcher
+			h.logger.Debug("Adding main process PID to existing port watcher", "execID", execID, "pid", pid)
+			if err := portWatcher.AddPID(pid); err != nil {
+				h.logger.Error("Failed to add main PID to port watcher", "execID", execID, "pid", pid, "error", err)
+			}
+
+			// Process any pending pane PIDs
+			if len(pendingPanePIDs) > 0 {
+				h.logger.Info("Processing pending pane PIDs", "count", len(pendingPanePIDs))
+				for _, panePID := range pendingPanePIDs {
+					// Convert container PID to host PID using system's ResolvePID
+					hostPID, err := h.system.ResolvePID(panePID)
+					if err != nil {
+						h.logger.Error("Failed to resolve pending pane PID", "containerPID", panePID, "error", err)
+						continue
 					}
-				} else {
-					h.logger.Error("Failed to marshal port notification", "execID", execID, "notification", notification, "error", err)
+					h.logger.Info("Adding resolved pane PID to port monitoring", "containerPID", panePID, "hostPID", hostPID)
+					if err := portWatcher.AddPID(hostPID); err != nil {
+						h.logger.Error("Failed to add pane PID to port watcher", "hostPID", hostPID, "error", err)
+					}
 				}
+				// Clear the pending list
+				pendingPanePIDs = nil
 			}
-		})
+		}
 	}))
 
 	var (
@@ -244,6 +349,16 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 
 	// Execute the command directly
 	err := wsHandler.Handle(w, r)
+
+	// Clean up port monitoring
+	if portWatcher != nil {
+		portWatcher.Stop()
+	}
+
+	// Clean up tmux pane callback
+	if monitoredSessionID != "" && h.tmuxManager != nil {
+		h.tmuxManager.RemovePaneCallback(monitoredSessionID)
+	}
 
 	endTime := time.Now()
 	duration := time.Since(startTime)
@@ -280,84 +395,6 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 			ExtraData:   extraData,
 		})
 	}
-}
-
-// startPortMonitoring starts monitoring ports for a specific process
-func (h *Handlers) startPortMonitoring(execID string, pid int, callback func(port portwatcher.Port, opened bool)) {
-	h.logger.Debug("Starting port monitoring", "execID", execID, "pid", pid)
-
-	// Track active ports to detect when they close
-	activePorts := make(map[string]portwatcher.Port) // key: "address:port:pid"
-
-	portCallback := func(port portwatcher.Port) {
-		key := fmt.Sprintf("%s:%d:%d", port.Address, port.Port, port.PID)
-		if _, exists := activePorts[key]; !exists {
-			activePorts[key] = port
-			h.logger.Info("Process started listening on port",
-				"execID", execID,
-				"port", port.Port,
-				"address", port.Address,
-				"pid", port.PID)
-			callback(port, true) // port opened
-		}
-	}
-
-	// Create and start port watcher
-	watcher, err := portwatcher.New(pid, portCallback)
-	if err != nil {
-		h.logger.Error("Failed to create port watcher", "execID", execID, "pid", pid, "error", err)
-		return
-	}
-
-	if err := watcher.Start(); err != nil {
-		h.logger.Error("Failed to start port watcher", "execID", execID, "pid", pid, "error", err)
-		return
-	}
-
-	h.logger.Debug("Port watcher started successfully", "execID", execID, "pid", pid)
-
-	// Monitor process lifecycle - stop when process exits
-	go func() {
-		defer func() {
-			h.logger.Debug("Stopping port watcher", "execID", execID, "pid", pid)
-			watcher.Stop()
-
-			// When stopping, notify that all ports are closed
-			for _, port := range activePorts {
-				h.logger.Info("Process stopped listening on port",
-					"execID", execID,
-					"port", port.Port,
-					"address", port.Address,
-					"pid", port.PID)
-				callback(port, false) // port closed
-			}
-		}()
-
-		// Monitor process by checking if it's still running
-		for {
-			// Check if process is still running
-			if !h.isProcessRunning(pid) {
-				h.logger.Debug("Process is no longer running, stopping port monitoring", "execID", execID, "pid", pid)
-				return
-			}
-
-			// Check every 5 seconds
-			time.Sleep(5 * time.Second)
-		}
-	}()
-}
-
-// isProcessRunning checks if a process with the given PID is still running
-func (h *Handlers) isProcessRunning(pid int) bool {
-	// On Unix systems, sending signal 0 checks if process exists without actually sending a signal
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-
-	// Send signal 0 to check if process exists (using syscall.Signal)
-	err = process.Signal(syscall.Signal(0))
-	return err == nil
 }
 
 // handleListExecSessions lists available tmux sessions

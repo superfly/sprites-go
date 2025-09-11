@@ -169,7 +169,7 @@ func TestPortWatcherIntegration(t *testing.T) {
 	// Create port watcher directly without container PID resolution
 	// since this is a test process, not a container
 	pw := &PortWatcher{
-		pid:      os.Getpid(),
+		pids:     []int{os.Getpid()},
 		callback: callback,
 		monitor:  GetGlobalMonitor(),
 	}

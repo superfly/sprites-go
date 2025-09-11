@@ -1,6 +1,7 @@
 package container
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -334,6 +335,53 @@ func GetContainerPID(wrapperPID int) (int, error) {
 	return children[0], nil
 }
 
+// HostPID converts a container PID to the corresponding host PID.
+// containerPID is the PID as seen inside the container.
+// containerInitPID is the host PID of the container's init process (PID 1 inside container).
+// Returns the host PID, or an error if the process cannot be found.
+func HostPID(containerPID, containerInitPID int) (int, error) {
+	// Special case: PID 1 in container maps to containerInitPID
+	if containerPID == 1 {
+		return containerInitPID, nil
+	}
+
+	// Read the container's process tree from /proc/<containerInitPID>/root/proc
+	// This gives us the view from inside the container
+	procPath := fmt.Sprintf("/proc/%d/root/proc/%d/stat", containerInitPID, containerPID)
+
+	// Check if the process exists in the container
+	if _, err := os.Stat(procPath); os.IsNotExist(err) {
+		return 0, fmt.Errorf("container PID %d not found in container with init PID %d", containerPID, containerInitPID)
+	}
+
+	// Read the status file to get the process info
+	statusPath := fmt.Sprintf("/proc/%d/root/proc/%d/status", containerInitPID, containerPID)
+	data, err := os.ReadFile(statusPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read container process status: %w", err)
+	}
+
+	// Parse the NSpid line which shows PID mappings across namespaces
+	// Format: NSpid: <PID in innermost namespace> <PID in parent namespace> ... <PID in root namespace>
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "NSpid:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				// The last field is the host PID
+				hostPIDStr := fields[len(fields)-1]
+				hostPID, err := strconv.Atoi(hostPIDStr)
+				if err != nil {
+					return 0, fmt.Errorf("failed to parse host PID: %w", err)
+				}
+				return hostPID, nil
+			}
+		}
+	}
+
+	return 0, fmt.Errorf("could not find NSpid mapping for container PID %d", containerPID)
+}
+
 // cleanupContainer runs crun delete -f to clean up orphaned containers
 func (p *Process) cleanupContainer() {
 	if p.containerID == "" {
@@ -641,6 +689,114 @@ func (p *Process) Close() error {
 		return p.tty.Close()
 	}
 	return nil
+}
+
+// ResolvePID converts a container PID to host PID by looking up processes in the container's PID namespace
+func (p *Process) ResolvePID(containerPID int) (int, error) {
+	// If we don't have a container, return the PID unchanged
+	if p.containerID == "" || p.containerPID == 0 {
+		return containerPID, nil
+	}
+
+	// Get the init PID from crun state
+	cmd := exec.Command("crun", "state", p.containerID)
+	output, err := cmd.Output()
+	if err != nil {
+		if p.config.Logger != nil {
+			p.config.Logger.Warn("Failed to get container state", "containerID", p.containerID, "error", err)
+		}
+		// Fall back to using stored container PID
+		return HostPID(containerPID, p.containerPID)
+	}
+
+	// Parse the JSON output to get the init PID
+	var state struct {
+		PID int `json:"pid"`
+	}
+	if err := json.Unmarshal(output, &state); err != nil {
+		if p.config.Logger != nil {
+			p.config.Logger.Warn("Failed to parse container state", "error", err)
+		}
+		// Fall back to using stored container PID
+		return HostPID(containerPID, p.containerPID)
+	}
+
+	if state.PID == 0 {
+		// No init PID, fall back to stored container PID
+		return HostPID(containerPID, p.containerPID)
+	}
+
+	// Special case: PID 1 in container is the init PID
+	if containerPID == 1 {
+		return state.PID, nil
+	}
+
+	// Get the PID namespace of the init process
+	nsPath := fmt.Sprintf("/proc/%d/ns/pid", state.PID)
+	nsTarget, err := os.Readlink(nsPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read init PID namespace: %w", err)
+	}
+
+	// Search all processes for ones in the same PID namespace
+	procDir, err := os.Open("/proc")
+	if err != nil {
+		return 0, fmt.Errorf("failed to open /proc: %w", err)
+	}
+	defer procDir.Close()
+
+	entries, err := procDir.Readdir(-1)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read /proc: %w", err)
+	}
+
+	for _, entry := range entries {
+		// Skip non-numeric entries
+		if !entry.IsDir() {
+			continue
+		}
+		hostPID, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+
+		// Check if this process is in the same namespace
+		pidNsPath := fmt.Sprintf("/proc/%d/ns/pid", hostPID)
+		pidNsTarget, err := os.Readlink(pidNsPath)
+		if err != nil {
+			continue
+		}
+
+		if pidNsTarget != nsTarget {
+			continue
+		}
+
+		// Read the NSpid field from status to get the container PID
+		statusPath := fmt.Sprintf("/proc/%d/status", hostPID)
+		statusData, err := os.ReadFile(statusPath)
+		if err != nil {
+			continue
+		}
+
+		lines := strings.Split(string(statusData), "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "NSpid:") {
+				fields := strings.Fields(line)
+				if len(fields) >= 3 {
+					// NSpid format: "NSpid: <PID in root ns> <PID in container ns>"
+					// The last field is the PID as seen in the innermost namespace
+					innerPIDStr := fields[len(fields)-1]
+					innerPID, err := strconv.Atoi(innerPIDStr)
+					if err == nil && innerPID == containerPID {
+						return hostPID, nil
+					}
+				}
+				break
+			}
+		}
+	}
+
+	return 0, fmt.Errorf("container PID %d not found in namespace of init PID %d", containerPID, state.PID)
 }
 
 // NewProcessBuilder provides a fluent interface for building process configurations

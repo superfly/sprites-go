@@ -25,6 +25,10 @@ import (
 	"golang.org/x/term"
 )
 
+// shouldSuppressOutput determines if output should be suppressed based on TTY mode
+// When in TTY mode, all output should go through the terminal device, not stdout/stderr
+var shouldSuppressOutput bool
+
 // PortNotificationMessage represents a port event notification from the server
 type PortNotificationMessage struct {
 	Type    string `json:"type"`    // "port_opened" or "port_closed"
@@ -216,7 +220,9 @@ func (pm *portManager) doStartProxy(port int, address string) error {
 		}
 	}()
 
-	fmt.Printf("🔗 Automatically proxying port %d → http://localhost:%d\n", port, port)
+	if !shouldSuppressOutput {
+		fmt.Printf("🔗 Automatically proxying port %d → http://localhost:%d\n", port, port)
+	}
 
 	if false /* this should be triggered by OSC */ {
 
@@ -248,7 +254,9 @@ func (pm *portManager) doStopProxy(port int) error {
 	// Remove from map
 	delete(pm.proxies, port)
 
-	fmt.Printf("🔌 Stopped proxying port %d\n", port)
+	if !shouldSuppressOutput {
+		fmt.Printf("🔌 Stopped proxying port %d\n", port)
+	}
 	return nil
 }
 
@@ -489,6 +497,9 @@ func ExecCommand(ctx *GlobalContext, args []string) {
 		*tty = true
 	}
 
+	// Set output suppression flag based on TTY mode
+	shouldSuppressOutput = *tty
+
 	// Debug: Log what we got
 	if ctx.IsDebugEnabled() {
 		fmt.Printf("DEBUG: After EnsureOrgAndSpriteWithContext:\n")
@@ -534,8 +545,9 @@ func ExecCommand(ctx *GlobalContext, args []string) {
 		cmdStr = cmdStr[:47] + "..."
 	}
 
-	// Only print connection messages if debug logging is enabled
-	if ctx.IsDebugEnabled() || *sessionID != "" || *detachable {
+	// Only print connection messages if debug logging is enabled OR for session operations
+	// But suppress them if in regular TTY mode (not session-related)
+	if (ctx.IsDebugEnabled() || *sessionID != "" || *detachable) && (!shouldSuppressOutput || *sessionID != "" || *detachable) {
 		fmt.Println()
 		if spriteName != "" {
 			// Config-based connection with org and sprite
@@ -780,7 +792,9 @@ func executeWebSocket(wsURL *url.URL, token string, cmd []string, workingDir str
 	if tty {
 		if err := handlePTYMode(wsCmd, restoreTerminal); err != nil {
 			logger.Error("Failed to set up PTY mode", "error", err)
-			fmt.Fprintf(os.Stderr, "Warning: Failed to set up PTY mode: %v\n", err)
+			if !shouldSuppressOutput {
+				fmt.Fprintf(os.Stderr, "Warning: Failed to set up PTY mode: %v\n", err)
+			}
 			// Continue anyway - PTY will work but without raw mode
 		}
 	}
@@ -790,7 +804,9 @@ func executeWebSocket(wsURL *url.URL, token string, cmd []string, workingDir str
 	// Start the command
 	if err := wsCmd.Start(); err != nil {
 		logger.Error("Failed to start WebSocket command", "error", err)
-		fmt.Fprintf(os.Stderr, "Error: Failed to start command: %v\n", err)
+		if !shouldSuppressOutput {
+			fmt.Fprintf(os.Stderr, "Error: Failed to start command: %v\n", err)
+		}
 		return 1
 	}
 
@@ -814,6 +830,7 @@ func executeWebSocket(wsURL *url.URL, token string, cmd []string, workingDir str
 	}
 
 	// Print session attachment message for detachable sessions
+	// Always show this message for detachable sessions, even in TTY mode
 	if detachable && sessionIDReceived != "" {
 		fmt.Printf("\nTo attach to this session run: sprite exec -id %s\n", sessionIDReceived)
 	}
@@ -953,13 +970,17 @@ func handleBrowserOpen(url string, ports []string) {
 	// Attempt to open the URL in the default browser
 	if err := openBrowser(url); err != nil {
 		logger.Error("Failed to open browser", "error", err, "url", url)
-		fmt.Fprintf(os.Stderr, "\nCould not open browser automatically.\n")
-		fmt.Fprintf(os.Stderr, "Please open this URL manually:\n%s\n\n", url)
+		if !shouldSuppressOutput {
+			fmt.Fprintf(os.Stderr, "\nCould not open browser automatically.\n")
+			fmt.Fprintf(os.Stderr, "Please open this URL manually:\n%s\n\n", url)
+		}
 	} else {
 		logger.Debug("Browser opened successfully", "url", url)
-		fmt.Fprintf(os.Stderr, "\nOpened browser to: %s\n", url)
-		if len(ports) > 0 {
-			fmt.Fprintf(os.Stderr, "Waiting for browser callback on ports: %s\n", strings.Join(ports, ", "))
+		if !shouldSuppressOutput {
+			fmt.Fprintf(os.Stderr, "\nOpened browser to: %s\n", url)
+			if len(ports) > 0 {
+				fmt.Fprintf(os.Stderr, "Waiting for browser callback on ports: %s\n", strings.Join(ports, ", "))
+			}
 		}
 	}
 

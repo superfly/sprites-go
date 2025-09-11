@@ -32,6 +32,16 @@ setup_sysctl() {
     sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null
 }
 
+# Configure namespace-specific sysctl settings
+setup_namespace_sysctl() {
+    # Allow routing to 127/8 on non-lo (required for DNAT -> 127.0.0.1)
+    ip netns exec $NS_NAME sysctl -w net.ipv4.conf.spr0.route_localnet=1 >/dev/null
+    ip netns exec $NS_NAME sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null
+    
+    # Avoid strict source validation drops
+    ip netns exec $NS_NAME sysctl -w net.ipv4.conf.spr0.rp_filter=2 >/dev/null
+}
+
 # Create veth pair if it doesn't exist
 create_veth_pair() {
     if ! ip link show $VETH_HOST &>/dev/null; then
@@ -210,40 +220,41 @@ cleanup() {
 setup_nat() {
     # Clean up any existing rules first
     cleanup_nftables
-    
+    # === host ns rules ===
+
     # Create NAT and filter tables
     nft add table inet sprite_nat
     nft add table inet sprite_filter
 
-    # POSTROUTING chain: Only NAT public destinations
+    # POSTROUTING chain: NAT public destinations
     nft add chain inet sprite_nat postrouting { type nat hook postrouting priority 100 \; }
 
     # Masquerade public IPv4 (not RFC1918, loopback, link-local)
     nft add rule inet sprite_nat postrouting \
-      ip saddr $IPV4_CIDR \
-      ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16 } \
-      oifname "$OUT_IF" masquerade
+    ip saddr $IPV4_CIDR \
+    ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16 } \
+    oifname "$OUT_IF" masquerade
 
     # Masquerade public IPv6 (not ULA, link-local, loopback, multicast)
     nft add rule inet sprite_nat postrouting \
-      ip6 saddr $IPV6_CIDR \
-      ip6 daddr != { fd00::/8, fe80::/10, ::1/128, ff00::/8 } \
-      oifname "$OUT_IF" masquerade
+    ip6 saddr $IPV6_CIDR \
+    ip6 daddr != { fd00::/8, fe80::/10, ::1/128, ff00::/8 } \
+    oifname "$OUT_IF" masquerade
 
     # Forward filter chain: allow only public destinations
     nft add chain inet sprite_filter forward { type filter hook forward priority 0 \; }
 
     # Allow forward only from container to public IPv4
     nft add rule inet sprite_filter forward \
-      iifname "$VETH_CONT" \
-      ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16 } \
-      accept
+    iifname "$VETH_CONT" \
+    ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16 } \
+    accept
 
     # Allow forward only from container to public IPv6
     nft add rule inet sprite_filter forward \
-      iifname "$VETH_CONT" \
-      ip6 daddr != { fd00::/8, fe80::/10, ::1/128, ff00::/8 } \
-      accept
+    iifname "$VETH_CONT" \
+    ip6 daddr != { fd00::/8, fe80::/10, ::1/128, ff00::/8 } \
+    accept
 
     # Drop everything else from container
     nft add rule inet sprite_filter forward iifname "$VETH_CONT" drop
@@ -251,44 +262,35 @@ setup_nat() {
     # Allow return traffic (established connections)
     nft add rule inet sprite_filter forward ct state established,related accept
 
+
+    # === inside sprite netns ===
+
     # IPv4 NAT - redirect bridge IP to localhost
     ip netns exec sprite nft add table ip nat
-    ip netns exec sprite nft add chain ip nat prerouting '{ type nat hook prerouting priority 0; }'
-    ip netns exec sprite nft add chain ip nat postrouting '{ type nat hook postrouting priority 100; }'
-    
-    # DNAT: Redirect TCP traffic from 10.0.0.1 to 127.0.0.1 (exclude spr0 interface)
-    ip netns exec sprite nft add rule ip nat prerouting \
-      iifname != "$VETH_CONT" \
-      ip daddr 10.0.0.1 \
-      tcp dport != 0 \
-      dnat to 127.0.0.1
-    
-    # SNAT: Make incoming connections appear to come from localhost (exclude spr0 interface)
-    # This ensures services see connections as coming from 127.0.0.1
-    ip netns exec sprite nft add rule ip nat postrouting \
-      iifname != "$VETH_CONT" \
-      ip daddr 127.0.0.1 \
-      snat to 127.0.0.1
-    
+    ip netns exec sprite nft add chain ip nat prerouting { type nat hook prerouting priority -100 \; }
+    ip netns exec sprite nft add chain ip nat output     { type nat hook output     priority -100 \; }
+    ip netns exec sprite nft add chain ip nat postrouting { type nat hook postrouting priority 100 \; }
+
+    # DNAT: host→ns traffic 10.0.0.1:any → 127.0.0.1:any
+    ip netns exec sprite nft add rule ip nat prerouting iifname "$VETH_CONT" ip daddr 10.0.0.1 tcp dport != 0 dnat to 127.0.0.1:tcp dport
+
+    # DNAT: local ns traffic 10.0.0.1:any → 127.0.0.1:any
+    ip netns exec sprite nft add rule ip nat output ip daddr 10.0.0.1 tcp dport != 0 dnat to 127.0.0.1:tcp dport
+
+
     # IPv6 NAT - redirect bridge IP to localhost
     ip netns exec sprite nft add table ip6 nat
-    ip netns exec sprite nft add chain ip6 nat prerouting '{ type nat hook prerouting priority 0; }'
-    ip netns exec sprite nft add chain ip6 nat postrouting '{ type nat hook postrouting priority 100; }'
+    ip netns exec sprite nft add chain ip6 nat prerouting { type nat hook prerouting priority -100 \; }
+    ip netns exec sprite nft add chain ip6 nat output     { type nat hook output     priority -100 \; }
+    ip netns exec sprite nft add chain ip6 nat postrouting { type nat hook postrouting priority 100 \; }
+
+    # DNAT: host→ns traffic fdf::1:any → ::1:any
+    ip netns exec sprite nft add rule ip6 nat prerouting iifname "$VETH_CONT" ip6 daddr fdf::1 tcp dport != 0 dnat to [::1]:tcp dport
+
+    # DNAT: local ns traffic fdf::1:any → ::1:any
+    ip netns exec sprite nft add rule ip6 nat output ip6 daddr fdf::1 tcp dport != 0 dnat to [::1]:tcp dport
     
-    # DNAT: Redirect TCP traffic from fdf::1 to ::1 (exclude spr0 interface)
-    ip netns exec sprite nft add rule ip6 nat prerouting \
-      iifname != "$VETH_CONT" \
-      ip6 daddr fdf::1 \
-      tcp dport != 0 \
-      dnat to [::1]
-    
-    # SNAT: Make incoming connections appear to come from localhost (exclude spr0 interface)
-    # This ensures services see connections as coming from ::1
-    ip netns exec sprite nft add rule ip6 nat postrouting \
-      iifname != "$VETH_CONT" \
-      ip6 daddr ::1 \
-      snat to [::1]
-}
+    }
 
 # Create custom resolv.conf for containers
 create_resolv_conf() {
@@ -417,6 +419,7 @@ main() {
     setup_sysctl
     create_veth_pair
     setup_namespace
+    setup_namespace_sysctl
     configure_host_interface
     configure_container_interface
     setup_nat

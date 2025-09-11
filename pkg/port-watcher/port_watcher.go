@@ -28,7 +28,7 @@ type portEvent struct {
 // PortWatcher monitors ports for a process and its children
 // It now uses the global namespace monitor for efficiency
 type PortWatcher struct {
-	pid      int
+	pids     []int // List of PIDs being monitored
 	callback PortCallback
 	monitor  *NamespaceMonitor
 	idle     bool // true if this is an idle instance that does nothing
@@ -51,7 +51,7 @@ func New(pid int, callback PortCallback) (*PortWatcher, error) {
 	}
 
 	pw := &PortWatcher{
-		pid:      containerPID,
+		pids:     []int{containerPID},
 		callback: callback,
 		monitor:  GetGlobalMonitor(),
 	}
@@ -68,12 +68,19 @@ func (pw *PortWatcher) Start() error {
 		return nil
 	}
 
-	// Subscribe to the global namespace monitor
-	if err := pw.monitor.Subscribe(pw.pid, pw.callback); err != nil {
-		// If subscription fails (e.g., PID doesn't exist), mark as idle and fail silently
-		pw.idle = true
-		return nil
+	// Subscribe all PIDs to the global namespace monitor
+	for _, pid := range pw.pids {
+		if err := pw.monitor.Subscribe(pid, pw.callback); err != nil {
+			log.Printf("Port watcher: failed to subscribe PID %d: %v\n", pid, err)
+			// Continue with other PIDs even if one fails
+		}
 	}
+
+	// If we couldn't subscribe any PIDs, mark as idle
+	if len(pw.pids) == 0 {
+		pw.idle = true
+	}
+
 	return nil
 }
 
@@ -84,6 +91,56 @@ func (pw *PortWatcher) Stop() {
 		return
 	}
 
-	// Unsubscribe from the global namespace monitor
-	pw.monitor.Unsubscribe(pw.pid)
+	// Unsubscribe all PIDs from the global namespace monitor
+	for _, pid := range pw.pids {
+		pw.monitor.Unsubscribe(pid)
+	}
+}
+
+// AddPID adds a new PID to monitor
+func (pw *PortWatcher) AddPID(pid int) error {
+	// Check if PID is already being monitored
+	for _, existingPID := range pw.pids {
+		if existingPID == pid {
+			return nil // Already monitoring this PID
+		}
+	}
+
+	log.Printf("Port watcher: adding PID %d to monitoring\n", pid)
+
+	// Subscribe the new PID
+	if err := pw.monitor.Subscribe(pid, pw.callback); err != nil {
+		return err
+	}
+
+	// Add to our list
+	pw.pids = append(pw.pids, pid)
+
+	// If we were idle, we're not anymore
+	pw.idle = false
+
+	return nil
+}
+
+// RemovePID removes a PID from monitoring
+func (pw *PortWatcher) RemovePID(pid int) {
+	// Find and remove the PID
+	for i, existingPID := range pw.pids {
+		if existingPID == pid {
+			log.Printf("Port watcher: removing PID %d from monitoring\n", pid)
+
+			// Unsubscribe from monitor
+			pw.monitor.Unsubscribe(pid)
+
+			// Remove from slice
+			pw.pids = append(pw.pids[:i], pw.pids[i+1:]...)
+
+			// If no more PIDs, mark as idle
+			if len(pw.pids) == 0 {
+				pw.idle = true
+			}
+
+			return
+		}
+	}
 }

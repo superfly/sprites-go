@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -39,6 +40,9 @@ type SessionActivityInfo struct {
 	IsActive       bool
 }
 
+// PaneLifecycleCallback is called when panes are added or removed
+type PaneLifecycleCallback func(sessionID string, panePID int, added bool)
+
 // TMUXManager manages detachable tmux sessions for exec commands
 type TMUXManager struct {
 	logger         *slog.Logger
@@ -50,6 +54,10 @@ type TMUXManager struct {
 
 	// Channel-based synchronization for monitor startup
 	monitorStartCh chan struct{}
+
+	// Pane lifecycle callbacks - map of sessionID to callback
+	paneCallbacks   map[string]PaneLifecycleCallback
+	paneCallbacksMu sync.RWMutex // Protects paneCallbacks
 }
 
 // NewTMUXManager creates a new TMUXManager
@@ -59,12 +67,16 @@ func NewTMUXManager(ctx context.Context) *TMUXManager {
 		nextID:         -1,
 		activityChan:   make(chan SessionActivity, 100),
 		monitorStartCh: make(chan struct{}, 1),
+		paneCallbacks:  make(map[string]PaneLifecycleCallback),
 	}
 	// Initialize nextID based on existing sessions
 	tm.initializeNextID()
 
 	// Start the monitor manager goroutine
 	go tm.monitorManager(ctx)
+
+	// Start the pane monitor goroutine
+	go tm.paneMonitor(ctx)
 
 	return tm
 }
@@ -319,6 +331,48 @@ func (tm *TMUXManager) ListSessionsWithInfo() ([]SessionInfo, error) {
 	return sessions, nil
 }
 
+// GetSessionPanePIDs returns all pane PIDs for a given session ID
+func (tm *TMUXManager) GetSessionPanePIDs(id string) ([]int, error) {
+	sessionName := fmt.Sprintf("sprite-exec-%s", id)
+
+	// List all panes in the session with their PIDs
+	// Format: #{pane_pid}
+	tmuxArgs := []string{
+		"-f", "/.sprite/bin/tmux.conf",
+		"-S", "/.sprite/tmp/exec-tmux",
+		"list-panes",
+		"-t", sessionName,
+		"-F", "#{pane_pid}",
+	}
+
+	var cmd *exec.Cmd
+	if len(tm.cmdPrefix) > 0 {
+		// Use prefix for server-side command
+		allArgs := append([]string{"/.sprite/bin/tmux"}, tmuxArgs...)
+		cmd = exec.Command(tm.cmdPrefix[0], append(tm.cmdPrefix[1:], allArgs...)...)
+	} else {
+		cmd = exec.Command("/.sprite/bin/tmux", tmuxArgs...)
+	}
+
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pane PIDs: %w", err)
+	}
+
+	var pids []int
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			if pid, err := strconv.Atoi(line); err == nil && pid > 0 {
+				pids = append(pids, pid)
+			}
+		}
+	}
+
+	return pids, nil
+}
+
 // getSessionCommand gets the command running in a tmux session
 func (tm *TMUXManager) getSessionCommand(sessionName string) string {
 	// Get the command from the first pane of the session
@@ -554,6 +608,110 @@ func (tm *TMUXManager) processWindowMonitorEvents(ctx context.Context) {
 				}:
 				default:
 					tm.logger.Debug("Activity channel full, dropping event")
+				}
+			}
+		}
+	}
+}
+
+// SetPaneCallback registers a callback for pane lifecycle events for a session
+func (tm *TMUXManager) SetPaneCallback(sessionID string, callback PaneLifecycleCallback) {
+	tm.paneCallbacksMu.Lock()
+	tm.paneCallbacks[sessionID] = callback
+	tm.paneCallbacksMu.Unlock()
+
+	if tm.logger != nil {
+		tm.logger.Debug("Registered pane callback", "sessionID", sessionID)
+	}
+}
+
+// RemovePaneCallback removes the callback for a session
+func (tm *TMUXManager) RemovePaneCallback(sessionID string) {
+	tm.paneCallbacksMu.Lock()
+	delete(tm.paneCallbacks, sessionID)
+	tm.paneCallbacksMu.Unlock()
+
+	if tm.logger != nil {
+		tm.logger.Debug("Removed pane callback", "sessionID", sessionID)
+	}
+}
+
+// paneMonitor monitors pane changes for sessions with registered callbacks
+func (tm *TMUXManager) paneMonitor(ctx context.Context) {
+	// Track known panes for each session
+	sessionPanes := make(map[string]map[int]bool) // sessionID -> set of pane PIDs
+
+	ticker := time.NewTicker(2 * time.Second) // Poll every 2 seconds
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Get a snapshot of callbacks to check
+			tm.paneCallbacksMu.RLock()
+			callbacksCopy := make(map[string]PaneLifecycleCallback)
+			for sid, cb := range tm.paneCallbacks {
+				callbacksCopy[sid] = cb
+			}
+			tm.paneCallbacksMu.RUnlock()
+
+			// Check each session with a callback
+			for sessionID, callback := range callbacksCopy {
+				// Get current panes for this session
+				currentPanes, err := tm.GetSessionPanePIDs(sessionID)
+				if err != nil {
+					// Session might have ended
+					if tm.logger != nil {
+						tm.logger.Debug("Failed to get panes for session", "sessionID", sessionID, "error", err)
+					}
+					// Clean up if we had tracked panes
+					if knownPanes, exists := sessionPanes[sessionID]; exists {
+						// Notify about all removed panes
+						for pid := range knownPanes {
+							callback(sessionID, pid, false)
+						}
+						delete(sessionPanes, sessionID)
+					}
+					continue
+				}
+
+				// Convert to map for easy comparison
+				currentPaneMap := make(map[int]bool)
+				for _, pid := range currentPanes {
+					currentPaneMap[pid] = true
+				}
+
+				// Get previously known panes
+				knownPanes, exists := sessionPanes[sessionID]
+				if !exists {
+					knownPanes = make(map[int]bool)
+					sessionPanes[sessionID] = knownPanes
+				}
+
+				// Check for new panes
+				for pid := range currentPaneMap {
+					if !knownPanes[pid] {
+						// New pane detected
+						if tm.logger != nil {
+							tm.logger.Info("New pane detected", "sessionID", sessionID, "pid", pid)
+						}
+						callback(sessionID, pid, true)
+						knownPanes[pid] = true
+					}
+				}
+
+				// Check for removed panes
+				for pid := range knownPanes {
+					if !currentPaneMap[pid] {
+						// Pane was removed
+						if tm.logger != nil {
+							tm.logger.Info("Pane removed", "sessionID", sessionID, "pid", pid)
+						}
+						callback(sessionID, pid, false)
+						delete(knownPanes, pid)
+					}
 				}
 			}
 		}
