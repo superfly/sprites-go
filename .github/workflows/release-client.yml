@@ -159,6 +159,33 @@ jobs:
         done
         cd ..
     
+    - name: Configure AWS CLI for S3-compatible storage
+      run: |
+        aws configure set aws_access_key_id ${{ secrets.BINARY_BUCKET_ACCESS_KEY_ID }}
+        aws configure set aws_secret_access_key ${{ secrets.BINARY_BUCKET_SECRET_ACCESS_KEY }}
+        aws configure set region auto
+    
+    - name: Upload binaries to S3
+      env:
+        AWS_ENDPOINT_URL_S3: https://t3.storage.dev
+      run: |
+        # Extract tag name
+        TAG_NAME="${{ github.ref_name }}"
+        
+        # Upload all binary archives and checksums to S3
+        cd artifacts
+        find . -name "*.tar.gz" -o -name "*.zip" -o -name "*.sha256" | while read file; do
+          # Remove leading ./ from file path
+          clean_file="${file#./}"
+          # Get just the filename from the full path
+          filename=$(basename "$clean_file")
+          
+          echo "Uploading $filename to s3://sprites-binaries/client/$TAG_NAME/"
+          aws s3 cp "$clean_file" "s3://sprites-binaries/client/$TAG_NAME/$filename" \
+            --endpoint-url "$AWS_ENDPOINT_URL_S3"
+        done
+        cd ..
+    
     - name: Create Release
       uses: softprops/action-gh-release@v1
       with:
