@@ -70,6 +70,11 @@ func truncateToken(token string) string {
 func buildSpriteProxyURL(org *config.Organization, spriteName string, path string) string {
 	baseURL := getSpritesAPIURL(org)
 
+	// For empty path, don't add any suffix
+	if path == "" {
+		return baseURL + "/v1/sprites/" + spriteName
+	}
+
 	// Clean up the path
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path

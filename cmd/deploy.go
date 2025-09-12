@@ -209,13 +209,23 @@ func main() {
 		log.Fatal("Failed to list machines: ", err)
 	}
 
-	// Look for existing sprite_compute machine
-	for _, m := range machines {
-		if m.Name == "sprite_compute" || strings.HasPrefix(m.Name, "sprites-") {
-			machineID = m.ID
-			existingMachine = m
-			log.Printf("Found existing machine: %s (name: %s)\n", machineID, m.Name)
-			break
+	// If only one machine exists, use it regardless of name
+	if len(machines) == 1 {
+		machineID = machines[0].ID
+		existingMachine = machines[0]
+		log.Printf("Found single machine in app: %s (name: %s)\n", machineID, machines[0].Name)
+	} else if len(machines) > 1 {
+		// Look for existing sprite_compute machine
+		for _, m := range machines {
+			if m.Name == "sprite_compute" || strings.HasPrefix(m.Name, "sprites-") {
+				machineID = m.ID
+				existingMachine = m
+				log.Printf("Found existing machine: %s (name: %s)\n", machineID, m.Name)
+				break
+			}
+		}
+		if existingMachine == nil {
+			log.Fatal("Multiple machines found but none match expected naming pattern (sprite_compute or sprites-*)")
 		}
 	}
 
@@ -255,10 +265,15 @@ func main() {
 				break
 			}
 		}
+
+		// If existing machine has no volume, fail
+		if volumeID == "" {
+			log.Fatal("Existing machine has no volume attached. Cannot deploy to a machine without persistent storage.")
+		}
 	}
 
-	// If no volume found (either no machine or machine has no volume), check all volumes
-	if volumeID == "" {
+	// If no machine found, check all volumes
+	if existingMachine == nil && volumeID == "" {
 		log.Println("No volume attached to machine, checking all volumes...")
 		volumes, err := flapsClient.GetVolumes(ctx)
 		if err != nil {
@@ -313,11 +328,11 @@ func main() {
 		// Use existing SPRITE_HTTP_API_TOKEN if available, otherwise check environment
 		spriteToken := existingSpriteToken
 		if spriteToken == "" {
-			spriteToken = os.Getenv("SPRITE_HTTP_TOKEN")
+			spriteToken = os.Getenv("SPRITE_HTTP_API_TOKEN")
 			if spriteToken == "" {
-				log.Fatal("SPRITE_HTTP_TOKEN not found in existing machine config or environment variable")
+				log.Fatal("SPRITE_HTTP_API_TOKEN not found in existing machine config or environment variable")
 			}
-			log.Printf("Using SPRITE_HTTP_TOKEN from environment variable\n")
+			log.Printf("Using SPRITE_HTTP_API_TOKEN from environment variable\n")
 		} else {
 			log.Printf("Using SPRITE_HTTP_API_TOKEN from existing machine config\n")
 		}
@@ -333,13 +348,14 @@ func main() {
 			log.Fatal("Failed to parse machine config: ", err)
 		}
 
-		// Merge existing environment variables with new config
+		// Only preserve specific environment variables from existing config
+		preserveEnvVars := []string{"SPRITE_HTTP_API_TOKEN", "SPRITE_PRIMARY_REGION"}
 		if existingContainerEnvVars != nil && len(existingContainerEnvVars) > 0 {
-			log.Printf("Merging %d existing container environment variables into new config\n", len(existingContainerEnvVars))
+			log.Printf("Checking %d existing container environment variables for preservation\n", len(existingContainerEnvVars))
 
 			// Ensure we have at least one container in the new config
 			if machineConfig.Containers == nil || len(machineConfig.Containers) == 0 {
-				log.Printf("Warning: No containers found in new config, cannot merge environment variables\n")
+				log.Printf("Warning: No containers found in new config, cannot preserve environment variables\n")
 			} else {
 				// Initialize the env map if it doesn't exist
 				if machineConfig.Containers != nil && len(machineConfig.Containers) > 0 {
@@ -350,20 +366,36 @@ func main() {
 					}
 				}
 
-				// Copy existing env vars that aren't already in the new config
-				for k, v := range existingContainerEnvVars {
-					found := false
-					for i := range machineConfig.Containers {
-						if _, exists := machineConfig.Containers[i].ExtraEnv[k]; exists {
-							found = true
+				// Only preserve specific env vars
+				for _, envVar := range preserveEnvVars {
+					if value, exists := existingContainerEnvVars[envVar]; exists {
+						// Check if already in new config
+						found := false
+						for i := range machineConfig.Containers {
+							if _, exists := machineConfig.Containers[i].ExtraEnv[envVar]; exists {
+								found = true
+								log.Printf("  - Keeping new value for env var: %s\n", envVar)
+								break
+							}
+						}
+						if !found {
+							machineConfig.Containers[0].ExtraEnv[envVar] = value
+							log.Printf("  - Preserving env var: %s\n", envVar)
+						}
+					}
+				}
+
+				// Log what we're dropping
+				for k := range existingContainerEnvVars {
+					preserve := false
+					for _, envVar := range preserveEnvVars {
+						if k == envVar {
+							preserve = true
 							break
 						}
 					}
-					if !found {
-						machineConfig.Containers[0].ExtraEnv[k] = v // Assuming the first container is the one to merge into
-						log.Printf("  - Preserving env var: %s\n", k)
-					} else {
-						log.Printf("  - Keeping new value for env var: %s\n", k)
+					if !preserve {
+						log.Printf("  - Dropping env var: %s\n", k)
 					}
 				}
 			}

@@ -160,11 +160,11 @@ func (p *Process) Start() (int, error) {
 	if p.config.TTYOutput != nil && p.tty != nil {
 		go p.forwardTTY()
 	} else if p.tty != nil {
-		// For processes without TTY output, we still need to wait for the PTY
-		// and first byte to ensure the container is ready before signaling readiness
+		// For processes without TTY output, immediately signal ready
+		// and handle PTY in the background
 		go func() {
 			if p.config.Logger != nil {
-				p.config.Logger.Debug("Starting PTY wait goroutine for container process",
+				p.config.Logger.Debug("Starting PTY handler for container process (no-wait mode)",
 					"containerID", p.containerID,
 					"socketPath", p.tty.SocketPath())
 			}
@@ -177,57 +177,21 @@ func (p *Process) Start() (int, error) {
 						"containerID", p.containerID,
 						"socketPath", p.tty.SocketPath())
 				}
-				// Signal ready anyway
-				select {
-				case <-p.readyCh:
-					// Already closed
-				default:
-					close(p.readyCh)
-				}
 				return
 			}
 			defer pty.Close()
 
-			if p.config.Logger != nil {
-				p.config.Logger.Debug("Got PTY from container, waiting for first byte",
-					"containerID", p.containerID)
-			}
-
-			// Wait for first byte to ensure container is running
-			// Use timeout to avoid blocking indefinitely
-			readyChan := make(chan bool, 1)
-			go func() {
-				firstByte := make([]byte, 1)
-				_, err := pty.Read(firstByte)
-				readyChan <- (err == nil || err == io.EOF)
-			}()
-
-			// Wait for first byte or timeout
-			select {
-			case gotByte := <-readyChan:
-				if p.config.Logger != nil {
-					p.config.Logger.Debug("Container ready check complete (non-TTY mode)",
-						"gotFirstByte", gotByte,
-						"containerID", p.containerID)
-				}
-			case <-time.After(2 * time.Second):
-				if p.config.Logger != nil {
-					p.config.Logger.Debug("Timeout waiting for first byte (non-TTY mode)",
-						"containerID", p.containerID)
-				}
-			}
-
-			// Signal ready
-			select {
-			case <-p.readyCh:
-				// Already closed
-			default:
-				close(p.readyCh)
-			}
-
-			// Discard remaining output since no TTYOutput is configured
+			// Discard output since no TTYOutput is configured
 			go io.Copy(io.Discard, pty)
 		}()
+
+		// Signal ready immediately
+		select {
+		case <-p.readyCh:
+			// Already closed
+		default:
+			close(p.readyCh)
+		}
 	}
 
 	return pid, nil
@@ -412,53 +376,7 @@ func (p *Process) cleanupContainer() {
 
 // forwardTTY forwards TTY output to the configured writer
 func (p *Process) forwardTTY() {
-	pty, err := p.GetTTY()
-	if err != nil {
-		// TTY forwarding failed, but don't crash the process
-		// Still signal ready since the process started
-		select {
-		case <-p.readyCh:
-			// Already closed
-		default:
-			close(p.readyCh)
-		}
-		return
-	}
-	defer pty.Close()
-
-	// Wait for first byte of output before signaling ready
-	// This ensures the container process is actually running
-	// Use a goroutine with timeout to avoid blocking indefinitely
-	readyChan := make(chan bool, 1)
-	go func() {
-		firstByte := make([]byte, 1)
-		n, err := pty.Read(firstByte)
-		if err == nil && n > 0 {
-			// Got first byte - write it to output
-			if p.config.TTYOutput != nil {
-				p.config.TTYOutput.Write(firstByte[:n])
-			}
-			readyChan <- true
-		} else {
-			readyChan <- false
-		}
-	}()
-
-	// Wait for first byte or timeout
-	select {
-	case gotByte := <-readyChan:
-		if gotByte && p.config.Logger != nil {
-			p.config.Logger.Debug("Container produced first byte of output, signaling ready")
-		} else if !gotByte && p.config.Logger != nil {
-			p.config.Logger.Debug("Failed to read first byte, but signaling ready anyway")
-		}
-	case <-time.After(2 * time.Second):
-		if p.config.Logger != nil {
-			p.config.Logger.Debug("Timeout waiting for first byte, signaling ready anyway")
-		}
-	}
-
-	// Signal ready
+	// Signal ready immediately - don't wait for first byte
 	select {
 	case <-p.readyCh:
 		// Already closed
@@ -466,7 +384,21 @@ func (p *Process) forwardTTY() {
 		close(p.readyCh)
 	}
 
-	// Forward remaining PTY output to the configured writer
+	pty, err := p.GetTTY()
+	if err != nil {
+		// TTY forwarding failed, but don't crash the process
+		if p.config.Logger != nil {
+			p.config.Logger.Warn("Failed to get PTY for forwarding", "error", err)
+		}
+		return
+	}
+	defer pty.Close()
+
+	if p.config.Logger != nil {
+		p.config.Logger.Debug("Starting PTY forwarding")
+	}
+
+	// Forward PTY output to the configured writer
 	io.Copy(p.config.TTYOutput, pty)
 }
 

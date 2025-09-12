@@ -63,8 +63,7 @@
         "SPRITE_PRIMARY_REGION": "iad",
         "SPRITE_S3_REGION": "auto",
         "SPRITE_ADMIN_CHANNEL": "wss://sprites-api-staging.fly.dev/internal/admin",
-        "APP_RUNNNER_ENTRYPOINT": "",
-        "SPRITE_PREVENT_SUSPEND": ""
+        "WAIT_FOR_BOOT": "true"
       },
       "secrets": [
         {

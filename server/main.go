@@ -660,6 +660,16 @@ func fileExists(path string) bool {
 }
 
 func main() {
+	// Wait for boot signal if configured
+	if os.Getenv("WAIT_FOR_BOOT") == "true" {
+		fmt.Println("WAIT_FOR_BOOT enabled, waiting for SIGUSR1...")
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGUSR1)
+		<-sigCh
+		signal.Stop(sigCh) // Stop receiving on this channel
+		fmt.Println("Received SIGUSR1, continuing boot...")
+	}
+
 	// Create crash log file for debugging
 	crashLogFile, err := os.OpenFile("/tmp/sprite-env-crash.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
