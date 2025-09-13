@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"log/slog"
@@ -15,6 +17,7 @@ import (
 	"github.com/superfly/sprite-env/pkg/container"
 	portwatcher "github.com/superfly/sprite-env/pkg/port-watcher"
 	"github.com/superfly/sprite-env/pkg/supervisor"
+	"github.com/superfly/sprite-env/pkg/tap"
 )
 
 // portTracker tracks active ports and detects changes
@@ -139,13 +142,25 @@ func (s *System) StartProcess() error {
 		"envCount", len(s.config.ProcessEnvironment),
 		"env", s.config.ProcessEnvironment)
 
+	// Set up output capturing for crash reporting
+	var stdoutBuffer, stderrBuffer *tap.CircularBuffer
+	processStartTime := time.Now()
+
+	if s.crashReporter != nil {
+		// Create circular buffers to capture recent output (32KB each)
+		stdoutBuffer = tap.NewCircularBuffer(32 * 1024)
+		stderrBuffer = tap.NewCircularBuffer(32 * 1024)
+	}
+
 	supervisorConfig := supervisor.Config{
-		Command:     s.config.ProcessCommand[0],
-		Args:        s.config.ProcessCommand[1:],
-		GracePeriod: s.config.ProcessGracefulShutdownTimeout,
-		Env:         append(os.Environ(), s.config.ProcessEnvironment...),
-		Dir:         workingDir,
-		Logger:      s.logger,
+		Command:      s.config.ProcessCommand[0],
+		Args:         s.config.ProcessCommand[1:],
+		GracePeriod:  s.config.ProcessGracefulShutdownTimeout,
+		Env:          append(os.Environ(), s.config.ProcessEnvironment...),
+		Dir:          workingDir,
+		Logger:       s.logger,
+		StdoutWriter: stdoutBuffer,
+		StderrWriter: stderrBuffer,
 	}
 
 	s.logger.Info("StartProcess: Creating supervisor",
@@ -216,12 +231,14 @@ func (s *System) StartProcess() error {
 
 		processConfig := container.ProcessConfig{
 			Config: supervisor.Config{
-				Command:     s.config.ProcessCommand[0],
-				Args:        s.config.ProcessCommand[1:],
-				GracePeriod: s.config.ProcessGracefulShutdownTimeout,
-				Env:         append(os.Environ(), s.config.ProcessEnvironment...),
-				Dir:         workingDir,
-				Logger:      s.logger,
+				Command:      s.config.ProcessCommand[0],
+				Args:         s.config.ProcessCommand[1:],
+				GracePeriod:  s.config.ProcessGracefulShutdownTimeout,
+				Env:          append(os.Environ(), s.config.ProcessEnvironment...),
+				Dir:          workingDir,
+				Logger:       s.logger,
+				StdoutWriter: stdoutBuffer,
+				StderrWriter: stderrBuffer,
 			},
 			TTYTimeout: s.config.ContainerTTYTimeout,
 			TTYOutput:  os.Stdout, // Forward TTY output to logs
@@ -302,7 +319,54 @@ func (s *System) StartProcess() error {
 	go func() {
 		s.logger.Info("StartProcess: Starting background process monitor")
 		err := s.supervisor.Wait()
-		s.logger.Info("StartProcess: Process monitor detected process exit", "error", err)
+		processRuntime := time.Since(processStartTime)
+		s.logger.Info("StartProcess: Process monitor detected process exit", "error", err, "runtime", processRuntime)
+
+		// Check if we need to generate a crash report
+		if err != nil && s.crashReporter != nil {
+			// Create crash report
+			report := &tap.CrashReport{
+				Command:  s.config.ProcessCommand[0],
+				Args:     s.config.ProcessCommand[1:],
+				Runtime:  processRuntime,
+				ExitCode: -1,
+			}
+
+			// Extract exit code and signal if available
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+					report.ExitCode = status.ExitStatus()
+					if status.Signaled() {
+						report.Signal = status.Signal().String()
+					}
+				}
+			}
+
+			// Set error message
+			report.Error = err.Error()
+
+			// Get recent output from circular buffers
+			if stdoutBuffer != nil {
+				report.RecentStdout = stdoutBuffer.GetContents()
+			}
+			if stderrBuffer != nil {
+				report.RecentStderr = stderrBuffer.GetContents()
+			}
+
+			// Report the crash
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			if reportErr := s.crashReporter.ReportSupervisedProcessCrash(ctx, report); reportErr != nil {
+				s.logger.Error("Failed to report process crash", "error", reportErr)
+			}
+
+			// Send notification to admin channel
+			if s.adminChannel != nil {
+				s.adminChannel.SendActivityEvent("supervised_process_crashed", report.ToMap())
+			}
+		}
+
 		s.processDoneCh <- err
 
 		s.setState("processRunning", false)
@@ -336,6 +400,11 @@ func (s *System) StopProcess() error {
 	s.setState("processRunning", false)
 	s.logger.Info("Process stopped successfully")
 	return nil
+}
+
+// GetCrashReporter returns the crash reporter instance
+func (s *System) GetCrashReporter() *tap.CrashReporter {
+	return s.crashReporter
 }
 
 // Wait waits for the supervised process to complete

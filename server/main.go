@@ -153,7 +153,7 @@ func NewApplication(config Config) (*Application, error) {
 		OverlaySkipOverlayFS:           config.OverlaySkipOverlayFS,
 	}
 
-	system, err := NewSystem(systemConfig, tap.Logger(ctx), app.reaper)
+	system, err := NewSystem(systemConfig, tap.Logger(ctx), app.reaper, app.adminChannel)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create system: %w", err)
 	}
@@ -678,16 +678,46 @@ func main() {
 		defer crashLogFile.Close()
 	}
 
+	// We'll set up enhanced panic recovery after the app is created
+	var app *Application
+
 	// Set up panic recovery
 	defer func() {
 		if r := recover(); r != nil {
 			crashMsg := fmt.Sprintf("PANIC at %s: %v\n", time.Now().Format(time.RFC3339), r)
 			fmt.Fprintf(os.Stderr, "%s", crashMsg)
+
+			stackTrace := debug.Stack()
 			if crashLogFile != nil {
 				crashLogFile.WriteString(crashMsg)
-				crashLogFile.WriteString(fmt.Sprintf("Stack trace:\n%s\n", debug.Stack()))
+				crashLogFile.WriteString(fmt.Sprintf("Stack trace:\n%s\n", stackTrace))
 				crashLogFile.Sync()
 			}
+
+			// Try to report crash if app and crash reporter are available
+			if app != nil && app.system != nil {
+				// Create crash report
+				report := &tap.CrashReport{
+					ExitCode:   1,
+					Error:      fmt.Sprintf("panic: %v", r),
+					StackTrace: string(stackTrace),
+				}
+
+				if crashReporter := app.system.GetCrashReporter(); crashReporter != nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+
+					if err := crashReporter.ReportGoPanic(ctx, report); err != nil {
+						fmt.Fprintf(os.Stderr, "Failed to report panic: %v\n", err)
+					}
+				}
+
+				// Send notification to admin channel
+				if app.adminChannel != nil {
+					app.adminChannel.SendActivityEvent("go_runtime_panic", report.ToMap())
+				}
+			}
+
 			os.Exit(1)
 		}
 	}()
@@ -717,7 +747,7 @@ func main() {
 		crashLogFile.Sync()
 	}
 
-	app, err := NewApplication(config)
+	app, err = NewApplication(config)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to create application: %v\n", err)
 		fmt.Fprintf(os.Stderr, "%s", errMsg)

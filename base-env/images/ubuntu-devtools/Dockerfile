@@ -26,7 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV LANG=en_US.UTF-8 \
     ASDF_DIR=/opt/asdf \
     ASDF_DATA_DIR=/opt/asdf \
-    PATH="/opt/asdf/bin:/opt/asdf/shims:${PATH}"
+    PATH="/opt/asdf/shims:${PATH}"
 
 RUN git clone https://github.com/asdf-vm/asdf.git --branch v0.14.0 --depth 1 "$ASDF_DIR" \
  && { \
@@ -34,7 +34,7 @@ RUN git clone https://github.com/asdf-vm/asdf.git --branch v0.14.0 --depth 1 "$A
       echo 'export ASDF_DIR=/opt/asdf'; \
       echo 'export ASDF_DATA_DIR=/opt/asdf'; \
       echo 'export ASDF_DEFAULT_TOOL_VERSIONS_FILENAME=/etc/asdf-default-tool-versions'; \
-      echo 'export PATH="$ASDF_DATA_DIR/shims:$ASDF_DIR/bin:$PATH"'; \
+      echo '# PATH is already set in ENV, no need to modify here'; \
       echo '. "$ASDF_DIR/asdf.sh"'; \
       echo '. "$ASDF_DIR/completions/asdf.bash"'; \
     } > /etc/profile.d/asdf.sh \
@@ -126,7 +126,7 @@ USER sprite
 ENV LANG=en_US.UTF-8 \
 ASDF_DIR=/opt/asdf \
 ASDF_DATA_DIR=/opt/asdf \
-PATH="/opt/asdf/bin:/opt/asdf/shims:${PATH}"
+PATH="/opt/asdf/shims:${PATH}"
 
 # --- user env ---
 ENV LANG=en_US.UTF-8 \

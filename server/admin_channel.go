@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
-	"time"
 
 	"github.com/superfly/sprite-env/pkg/phx"
 	"github.com/superfly/sprite-env/pkg/tap"
@@ -23,23 +22,6 @@ type AdminChannel struct {
 	socket  *phx.Socket
 	channel *phx.Channel
 	logger  *slog.Logger
-
-	// Message queue for when channel is not ready
-	messageQueue chan queuedMessage
-	stopCh       chan struct{}
-	ctx          context.Context
-	cancel       context.CancelFunc
-	readyCh      chan struct{} // Signals when channel becomes ready
-
-	// Connection attempt tracking
-	firstAttemptTime time.Time
-	hasGivenUp       bool
-	maxRetryDuration time.Duration
-}
-
-type queuedMessage struct {
-	eventType string
-	payload   map[string]interface{}
 }
 
 // NewAdminChannel creates a new admin channel manager
@@ -61,21 +43,11 @@ func NewAdminChannel(ctx context.Context) *AdminChannel {
 
 	logger.Info("Admin channel configured", "base_url", channelURL)
 
-	ctx, cancel := context.WithCancel(context.Background())
 	ac := &AdminChannel{
-		url:              channelURL,
-		token:            token,
-		logger:           logger,
-		messageQueue:     make(chan queuedMessage, 100),
-		stopCh:           make(chan struct{}),
-		ctx:              ctx,
-		cancel:           cancel,
-		readyCh:          make(chan struct{}),
-		maxRetryDuration: 1 * time.Hour,
+		url:    channelURL,
+		token:  token,
+		logger: logger,
 	}
-
-	// Start message queue processor
-	go ac.processMessageQueue()
 
 	return ac
 }
@@ -85,9 +57,6 @@ func (ac *AdminChannel) Start() error {
 	if ac == nil {
 		return nil // Noop if not configured
 	}
-
-	// Record the first attempt time
-	ac.firstAttemptTime = time.Now()
 
 	// Parse the URL and add authentication parameters
 	u, err := url.Parse(ac.url)
@@ -112,177 +81,44 @@ func (ac *AdminChannel) Start() error {
 		"topic", channelTopic,
 		"app_name", appName)
 
-	// Create socket with built-in reconnect configuration
+	// Create socket with default reconnect configuration
 	ac.socket = phx.NewSocket(u)
 	ac.socket.Logger = &phxLogAdapter{logger: ac.logger}
 
-	// Configure exponential backoff with max of 5 minutes
-	ac.socket.ReconnectAfterFunc = func(tries int) time.Duration {
-		// Check if we've exceeded the maximum retry duration
-		elapsed := time.Since(ac.firstAttemptTime)
-		if elapsed >= ac.maxRetryDuration {
-			if !ac.hasGivenUp {
-				ac.hasGivenUp = true
-				ac.logger.Error("Giving up on admin channel connection after maximum retry duration",
-					"elapsed", elapsed,
-					"max_duration", ac.maxRetryDuration)
-			}
-			// Return a very long duration to effectively stop reconnecting
-			return 365 * 24 * time.Hour
-		}
-
-		backoff := time.Duration(1<<uint(tries)) * time.Second
-		if backoff > 5*time.Minute {
-			backoff = 5 * time.Minute
-		}
-
-		// Check if this backoff would exceed our time limit
-		if elapsed+backoff > ac.maxRetryDuration {
-			// Adjust backoff to not exceed the limit
-			backoff = ac.maxRetryDuration - elapsed
-			ac.logger.Debug("Adjusted final reconnect attempt", "tries", tries, "backoff", backoff, "elapsed", elapsed)
-		} else {
-			ac.logger.Debug("Reconnect attempt scheduled", "tries", tries, "backoff", backoff, "elapsed", elapsed)
-		}
-
-		return backoff
+	// Start connection (non-blocking, starts background goroutines)
+	if err := ac.socket.Connect(); err != nil {
+		return fmt.Errorf("failed to start connection: %w", err)
 	}
 
-	// Set up auto-reconnect on disconnect
-	ac.socket.OnClose(func() {
-		if !ac.hasGivenUp {
-			ac.logger.Debug("Socket disconnected, will auto-reconnect")
+	// Create and join channel immediately - no need to wait for socket connection
+	ac.channel = ac.socket.Channel(channelTopic, nil)
+
+	// Set up ping/pong handler
+	ac.channel.On("ping", func(payload any) {
+		// Simply echo back the payload as pong
+		ac.channel.Push("pong", payload)
+	})
+
+	// Handle sprite_assigned notifications
+	ac.channel.On("sprite_assigned", func(payload any) {
+		if data, ok := payload.(map[string]interface{}); ok {
+			ac.logger.Info("Sprite assigned",
+				"org_id", data["org_id"],
+				"sprite_name", data["sprite_name"],
+				"sprite_id", data["sprite_id"],
+				"app_name", data["app_name"])
 		} else {
-			ac.logger.Debug("Socket disconnected, not reconnecting (given up)")
+			ac.logger.Info("Sprite assigned", "payload", payload)
 		}
 	})
 
-	ac.socket.OnOpen(func() {
-		// Check if we've given up before attempting to join
-		if ac.hasGivenUp {
-			ac.logger.Info("Socket connected but not joining channel (given up after timeout)")
-			return
-		}
+	// Join the channel - it will wait for socket connection if needed
+	_, err = ac.channel.Join()
+	if err != nil {
+		return fmt.Errorf("failed to join channel: %w", err)
+	}
 
-		ac.logger.Info("Socket connected")
-
-		// Join (or rejoin) the admin channel with app-specific topic
-		appName := os.Getenv("FLY_APP_NAME")
-		if appName == "" {
-			appName = "unknown"
-		}
-		channelTopic := fmt.Sprintf("sprite:%s", appName)
-
-		// Don't create or join channel if we've already given up
-		if ac.channel == nil && !ac.hasGivenUp {
-			ac.channel = ac.socket.Channel(channelTopic, nil)
-
-			// Set custom rejoin function that respects our give-up logic
-			ac.channel.RejoinAfterFunc = func(tries int) time.Duration {
-				elapsed := time.Since(ac.firstAttemptTime)
-
-				// Debug logging to understand the retry behavior
-				ac.logger.Debug("Channel rejoin backoff calculation",
-					"tries", tries,
-					"elapsed", elapsed,
-					"max_duration", ac.maxRetryDuration)
-
-				if elapsed >= ac.maxRetryDuration {
-					if !ac.hasGivenUp {
-						ac.hasGivenUp = true
-						ac.logger.Error("Giving up on admin channel rejoin after maximum retry duration",
-							"elapsed", elapsed,
-							"max_duration", ac.maxRetryDuration,
-							"topic", channelTopic)
-						// Leave the channel to clean up properly
-						if ac.channel != nil {
-							ac.channel.Leave()
-						}
-					}
-					// Return a very long duration to effectively stop rejoining
-					return 365 * 24 * time.Hour
-				}
-
-				// Aggressive exponential backoff: 1s, 10s, 100s, 1000s, etc.
-				// Grows by 10x each time
-				backoff := time.Duration(1) * time.Second
-				for i := 1; i < tries; i++ {
-					backoff *= 10
-				}
-
-				// Check if this backoff would exceed our time limit
-				if elapsed+backoff > ac.maxRetryDuration {
-					// Adjust backoff to not exceed the limit
-					backoff = ac.maxRetryDuration - elapsed
-					ac.logger.Debug("Adjusted final channel rejoin attempt",
-						"tries", tries,
-						"backoff", backoff,
-						"elapsed", elapsed)
-				} else {
-					ac.logger.Debug("Channel rejoin backoff",
-						"tries", tries,
-						"backoff", backoff,
-						"elapsed", elapsed)
-				}
-
-				return backoff
-			}
-		}
-
-		// Only attempt to join if we have a channel and haven't given up
-		if ac.channel != nil && !ac.channel.IsJoined() && !ac.hasGivenUp {
-			join, err := ac.channel.Join()
-			if err != nil {
-				ac.logger.Debug("error joining channel", "error", err)
-				return
-			}
-			join.Receive("ok", func(response any) {
-				ac.logger.Info("Joined admin channel", "topic", channelTopic)
-				// Signal that channel is ready and flush queued messages
-				select {
-				case ac.readyCh <- struct{}{}:
-				default:
-					// Channel already signaled as ready
-				}
-				// Trigger flush of any queued messages
-				ac.flushQueue()
-			})
-			join.Receive("error", func(response any) {
-				elapsed := time.Since(ac.firstAttemptTime)
-				ac.logger.Debug("Failed to join admin channel",
-					"error", response,
-					"elapsed", elapsed,
-					"max_duration", ac.maxRetryDuration,
-					"topic", channelTopic)
-			})
-			join.Receive("timeout", func(response any) {
-				elapsed := time.Since(ac.firstAttemptTime)
-				ac.logger.Debug("Admin channel join timeout",
-					"elapsed", elapsed,
-					"max_duration", ac.maxRetryDuration)
-			})
-		} else {
-			// Channel was already joined, signal ready and flush
-			ac.logger.Debug("Channel already joined, flushing queue")
-			select {
-			case ac.readyCh <- struct{}{}:
-			default:
-				// Channel already signaled as ready
-			}
-			ac.flushQueue()
-		}
-	})
-
-	// Start connection in background goroutine so it doesn't block
-	go func() {
-		ac.logger.Debug("Attempting to connect to admin channel", "url", ac.url)
-		if err := ac.socket.Connect(); err != nil {
-			ac.logger.Debug("Failed to connect to admin channel", "error", err)
-			// The socket will automatically retry with exponential backoff
-		}
-	}()
-
-	// Return immediately - connection happens in background
+	// Return immediately - connection and join happen asynchronously
 	return nil
 }
 
@@ -291,9 +127,6 @@ func (ac *AdminChannel) Stop() error {
 	if ac == nil {
 		return nil
 	}
-
-	// Cancel context to stop message processor
-	ac.cancel()
 
 	// Leave channel and disconnect
 	if ac.channel != nil {
@@ -304,17 +137,12 @@ func (ac *AdminChannel) Stop() error {
 		ac.socket.Disconnect()
 	}
 
-	// Close stop channel to ensure processor exits
-	close(ac.stopCh)
-
-	ac.logger.Info("Admin channel stopped")
-
 	return nil
 }
 
 // SendActivityEvent sends a simple activity event with a type and payload
 func (ac *AdminChannel) SendActivityEvent(eventType string, payload map[string]interface{}) {
-	if ac == nil {
+	if ac == nil || ac.channel == nil {
 		return
 	}
 
@@ -322,73 +150,8 @@ func (ac *AdminChannel) SendActivityEvent(eventType string, payload map[string]i
 		payload = make(map[string]interface{})
 	}
 
-	// Queue the message - the processor will handle sending when ready
-	select {
-	case ac.messageQueue <- queuedMessage{eventType: eventType, payload: payload}:
-		ac.logger.Debug("Queued activity event", "event", eventType)
-	default:
-		ac.logger.Debug("Message queue full, dropping activity event", "event", eventType)
-	}
-}
-
-// processMessageQueue handles sending queued messages when channel is ready
-func (ac *AdminChannel) processMessageQueue() {
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ac.ctx.Done():
-			return
-		case <-ac.stopCh:
-			return
-		case msg := <-ac.messageQueue:
-			// Only send if channel is ready, otherwise re-queue
-			if ac.IsReady() {
-				_, err := ac.channel.Push(msg.eventType, msg.payload)
-				if err != nil {
-					// Best effort - just drop the message if it fails
-					ac.logger.Debug("Failed to send activity event", "event", msg.eventType)
-				}
-			} else {
-				// Channel not ready, try to re-queue but don't block
-				select {
-				case ac.messageQueue <- msg:
-					// Successfully re-queued
-				default:
-					// Queue full, drop the message
-				}
-			}
-		case <-ac.readyCh:
-			// Channel became ready, flush any pending messages
-			ac.flushQueue()
-		case <-ticker.C:
-			// Periodic check to flush queue if channel is ready
-			if ac.IsReady() && len(ac.messageQueue) > 0 {
-				ac.flushQueue()
-			}
-		}
-	}
-}
-
-// flushQueue processes all queued messages when channel becomes ready
-func (ac *AdminChannel) flushQueue() {
-	if !ac.IsReady() {
-		return
-	}
-
-	// Process all currently queued messages (non-blocking)
-	count := len(ac.messageQueue)
-	for i := 0; i < count; i++ {
-		select {
-		case msg := <-ac.messageQueue:
-			// Best effort send - don't block or retry
-			_, _ = ac.channel.Push(msg.eventType, msg.payload)
-		default:
-			// Queue is empty
-			return
-		}
-	}
+	// Send directly - Phoenix library handles queueing
+	ac.channel.Push(eventType, payload)
 }
 
 // EnrichContext adds the admin channel to the context
@@ -401,8 +164,8 @@ func (ac *AdminChannel) EnrichContext(ctx context.Context) context.Context {
 
 // RequestEnd notifies the channel when a request ends
 func (ac *AdminChannel) RequestEnd(ctx context.Context, infoInterface interface{}) {
-	if ac == nil || !ac.IsReady() {
-		return // Noop if not configured or not ready
+	if ac == nil || ac.channel == nil {
+		return // Noop if not configured or channel not created
 	}
 
 	// Cast to the expected type
@@ -440,13 +203,8 @@ func (ac *AdminChannel) RequestEnd(ctx context.Context, infoInterface interface{
 		}
 	}
 
-	// Queue the message instead of sending directly - non-blocking
-	select {
-	case ac.messageQueue <- queuedMessage{eventType: "request_end", payload: payload}:
-		// Successfully queued
-	default:
-		// Queue full, drop the message silently
-	}
+	// Send directly - Phoenix library handles queueing
+	ac.channel.Push("request_end", payload)
 }
 
 // GetFromContext retrieves the admin channel from context
@@ -455,11 +213,6 @@ func GetFromContext(ctx context.Context) *AdminChannel {
 		return val.(*AdminChannel)
 	}
 	return nil
-}
-
-// IsReady returns true if the admin channel is connected and joined
-func (ac *AdminChannel) IsReady() bool {
-	return ac != nil && ac.channel != nil && ac.channel.IsJoined() && !ac.hasGivenUp
 }
 
 // phxLogAdapter adapts slog.Logger to phx.Logger interface

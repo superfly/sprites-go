@@ -104,7 +104,7 @@ func createTestSystem(t *testing.T, logWriter *testLogger) *System {
 	}
 
 	// Create real system
-	sys, err := NewSystem(config, logger, nil)
+	sys, err := NewSystem(config, logger, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to create test system: %v", err)
 	}

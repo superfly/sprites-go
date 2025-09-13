@@ -10,6 +10,7 @@ import (
 	"github.com/superfly/sprite-env/pkg/juicefs"
 	"github.com/superfly/sprite-env/pkg/leaser"
 	"github.com/superfly/sprite-env/pkg/supervisor"
+	"github.com/superfly/sprite-env/pkg/tap"
 )
 
 // SystemConfig holds configuration for the System
@@ -74,6 +75,8 @@ type System struct {
 	containerProcess   *container.Process // Optional container-wrapped process
 	reaper             *Reaper
 	execProcessTracker interface{} // Will be *execProcessTracker, avoiding import issues
+	crashReporter      *tap.CrashReporter
+	adminChannel       *AdminChannel
 
 	// Channels for monitoring
 	processDoneCh chan error
@@ -89,11 +92,12 @@ type System struct {
 }
 
 // NewSystem creates a new System instance
-func NewSystem(config SystemConfig, logger *slog.Logger, reaper *Reaper) (*System, error) {
+func NewSystem(config SystemConfig, logger *slog.Logger, reaper *Reaper, adminChannel *AdminChannel) (*System, error) {
 	s := &System{
 		config:         config,
 		logger:         logger,
 		reaper:         reaper,
+		adminChannel:   adminChannel,
 		processDoneCh:  make(chan error, 1),
 		processReadyCh: make(chan struct{}),
 		juicefsReadyCh: make(chan struct{}),
@@ -104,6 +108,30 @@ func NewSystem(config SystemConfig, logger *slog.Logger, reaper *Reaper) (*Syste
 
 	// Start state manager goroutine
 	go s.runStateManager()
+
+	// Initialize crash reporter
+	s3Config := (*tap.S3Config)(nil)
+	if config.S3AccessKey != "" && config.S3SecretAccessKey != "" && config.S3EndpointURL != "" && config.S3Bucket != "" {
+		s3Config = &tap.S3Config{
+			AccessKey:   config.S3AccessKey,
+			SecretKey:   config.S3SecretAccessKey,
+			EndpointURL: config.S3EndpointURL,
+			Bucket:      config.S3Bucket,
+		}
+	}
+
+	localDir := "/tmp/sprite-env"
+	if config.JuiceFSBaseDir != "" {
+		localDir = config.JuiceFSBaseDir
+	}
+
+	crashReporter, err := tap.NewCrashReporter(logger, localDir, s3Config)
+	if err != nil {
+		logger.Error("Failed to initialize crash reporter", "error", err)
+		// Non-fatal, continue without crash reporting
+	} else {
+		s.crashReporter = crashReporter
+	}
 
 	// Configure container package with system settings
 	logger.Info("Configuring container package",
@@ -240,6 +268,15 @@ func (s *System) Boot(ctx context.Context) error {
 		s.logger.Debug("Starting JuiceFS...")
 		if err := s.juicefs.Start(ctx); err != nil {
 			s.logger.Error("JuiceFS start failed", "error", err)
+
+			// Send notification to admin channel
+			if s.adminChannel != nil {
+				s.adminChannel.SendActivityEvent("juicefs_start_failed", map[string]interface{}{
+					"error":     err.Error(),
+					"timestamp": time.Now().Unix(),
+				})
+			}
+
 			return fmt.Errorf("failed to start JuiceFS: %w", err)
 		}
 		s.logger.Debug("JuiceFS started successfully")

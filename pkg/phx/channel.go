@@ -299,14 +299,38 @@ func (c *Channel) rejoin() {
 		return
 	}
 
-	push := c.getJoinPush()
-	if push == nil {
-		c.socket.Logger.Println(LogWarning, "channel", "rejoin called before joinPush created!")
-		return
-	}
+	// Create a new Push for each rejoin attempt to avoid timeout issues
+	joinPush := NewPush(c, string(JoinEvent), c.params, c.PushTimeout)
+	c.setJoinPush(joinPush)
 
+	// Set up the same callbacks as in Join()
+	joinPush.Receive("ok", func(response any) {
+		c.socket.Logger.Printf(LogInfo, "channel", "joined channel '%v' joinRef:%v", c.topic, c.JoinRef())
+		c.setState(ChannelJoined)
+		c.trigger(string(JoinEvent), 0, response)
+		c.rejoinTimer.Reset()
+	})
+	joinPush.Receive("error", func(response any) {
+		c.socket.Logger.Printf(LogError, "channel", "error joining channel '%v': %v", c.topic, response)
+		c.setState(ChannelErrored)
+		joinPush.reset()
+		c.rejoinTimer.Run()
+	})
+	joinPush.Receive("timeout", func(response any) {
+		c.socket.Logger.Printf(LogError, "channel", "timeout joining channel '%v'", c.topic)
+		joinPush.reset()
+
+		// Fire-and-forget a leave push
+		leavePush := NewPush(c, string(LeaveEvent), c.params, c.PushTimeout)
+		_ = leavePush.Send()
+
+		c.setState(ChannelErrored)
+		c.rejoinTimer.Run()
+	})
+
+	c.setState(ChannelJoining)
 	c.socket.Logger.Println(LogInfo, "channel", "attempting to rejoin channel")
-	err := push.Send()
+	err := joinPush.Send()
 	if err != nil {
 		c.socket.Logger.Println(LogError, "channel", "error on rejoin push", err)
 	}

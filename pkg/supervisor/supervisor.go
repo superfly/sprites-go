@@ -34,12 +34,14 @@ type Supervisor struct {
 
 // Config holds configuration for the supervisor
 type Config struct {
-	Command     string
-	Args        []string
-	GracePeriod time.Duration
-	Env         []string
-	Dir         string
-	Logger      *slog.Logger // Optional logger
+	Command      string
+	Args         []string
+	GracePeriod  time.Duration
+	Env          []string
+	Dir          string
+	Logger       *slog.Logger // Optional logger
+	StdoutWriter io.Writer    // Optional additional stdout writer
+	StderrWriter io.Writer    // Optional additional stderr writer
 }
 
 // New creates a new supervisor instance
@@ -78,9 +80,18 @@ func New(config Config) (*Supervisor, error) {
 	stdoutMultiPipe := NewMultiPipe(4096) // 4KB buffer per reader
 	stderrMultiPipe := NewMultiPipe(4096) // 4KB buffer per reader
 
-	// Set up process output to go to both os.Stdout/os.Stderr and multipipes
-	cmd.Stdout = io.MultiWriter(os.Stdout, stdoutMultiPipe)
-	cmd.Stderr = io.MultiWriter(os.Stderr, stderrMultiPipe)
+	// Set up process output to go to os.Stdout/os.Stderr, multipipes, and optional writers
+	stdoutWriters := []io.Writer{os.Stdout, stdoutMultiPipe}
+	if config.StdoutWriter != nil {
+		stdoutWriters = append(stdoutWriters, config.StdoutWriter)
+	}
+	cmd.Stdout = io.MultiWriter(stdoutWriters...)
+
+	stderrWriters := []io.Writer{os.Stderr, stderrMultiPipe}
+	if config.StderrWriter != nil {
+		stderrWriters = append(stderrWriters, config.StderrWriter)
+	}
+	cmd.Stderr = io.MultiWriter(stderrWriters...)
 
 	return &Supervisor{
 		cmd:             cmd,
