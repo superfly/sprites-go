@@ -12,9 +12,12 @@ import (
 
 // Config represents the sprite configuration
 type Config struct {
-	CurrentOrg     string                   `json:"current_org,omitempty"`
-	Orgs           map[string]*Organization `json:"orgs"`
-	DisableKeyring bool                     `json:"disable_keyring,omitempty"`
+	CurrentOrg       string                   `json:"current_org,omitempty"`
+	Orgs             map[string]*Organization `json:"orgs"`
+	DisableKeyring   bool                     `json:"disable_keyring,omitempty"`
+	LastVersionCheck string                   `json:"last_version_check,omitempty"`
+	LatestVersion    string                   `json:"latest_version,omitempty"`
+	CurrentVersion   string                   `json:"current_version,omitempty"`
 }
 
 // Organization represents an organization configuration
@@ -492,4 +495,34 @@ func (m *Manager) IsKeyringDisabled() bool {
 func (m *Manager) SetKeyringDisabled(disabled bool) error {
 	m.config.DisableKeyring = disabled
 	return m.Save()
+}
+
+// GetLastVersionCheck returns the last version check time
+func (m *Manager) GetLastVersionCheck() string {
+	return m.config.LastVersionCheck
+}
+
+// SetLastVersionCheck sets the last version check time
+func (m *Manager) SetLastVersionCheck(timestamp string) {
+	m.config.LastVersionCheck = timestamp
+}
+
+// GetLatestVersion returns the latest version
+func (m *Manager) GetLatestVersion() string {
+	return m.config.LatestVersion
+}
+
+// SetLatestVersion sets the latest version
+func (m *Manager) SetLatestVersion(version string) {
+	m.config.LatestVersion = version
+}
+
+// GetCurrentVersion returns the current version
+func (m *Manager) GetCurrentVersion() string {
+	return m.config.CurrentVersion
+}
+
+// SetCurrentVersion sets the current version
+func (m *Manager) SetCurrentVersion(version string) {
+	m.config.CurrentVersion = version
 }

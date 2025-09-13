@@ -20,6 +20,7 @@ type GlobalContext struct {
 	Logger         *slog.Logger
 	OrgOverride    string // Organization override from global flags
 	SpriteOverride string // Sprite override from global flags
+	Version        string // Embedded version from build
 }
 
 // IsDebugEnabled returns true if debug logging is enabled

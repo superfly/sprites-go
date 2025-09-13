@@ -51,7 +51,7 @@ jobs:
     - name: Build Windows binary
       if: matrix.goos == 'windows'
       working-directory: ./client
-      run: go build -tags clientonly -ldflags="-s -w -X main.Version=${{ github.ref_name }}" -o ${{ matrix.binary_name }}
+      run: go build -tags clientonly -ldflags="-s -w -X 'main.Version=${{ github.ref_name }}'" -o ${{ matrix.binary_name }}
       env:
         GOOS: ${{ matrix.goos }}
         GOARCH: ${{ matrix.goarch }}
@@ -59,7 +59,7 @@ jobs:
     - name: Build Unix binary
       if: matrix.goos != 'windows'
       working-directory: ./client
-      run: go build -ldflags="-s -w -X main.Version=${{ github.ref_name }}" -o ${{ matrix.binary_name }}
+      run: go build -ldflags="-s -w -X 'main.Version=${{ github.ref_name }}'" -o ${{ matrix.binary_name }}
       env:
         GOOS: ${{ matrix.goos }}
         GOARCH: ${{ matrix.goarch }}
@@ -165,6 +165,26 @@ jobs:
         aws configure set aws_secret_access_key ${{ secrets.BINARY_BUCKET_SECRET_ACCESS_KEY }}
         aws configure set region auto
     
+    - name: Create channel version file
+      run: |
+        # Extract tag name
+        TAG_NAME="${{ github.ref_name }}"
+        
+        # Determine channel from tag name
+        if [[ "$TAG_NAME" =~ -([a-zA-Z]+) ]]; then
+          # Extract the channel from the tag (e.g., rc from v0.0.1-rc1, dev from v0.0.1-dev1)
+          CHANNEL="${BASH_REMATCH[1]}"
+        else
+          # No suffix means release channel
+          CHANNEL="release"
+        fi
+        
+        # Create the channel version file
+        mkdir -p channel-files
+        echo "$TAG_NAME" > "channel-files/${CHANNEL}.txt"
+        
+        echo "Created ${CHANNEL}.txt with version $TAG_NAME"
+    
     - name: Upload binaries to S3
       env:
         AWS_ENDPOINT_URL_S3: https://t3.storage.dev
@@ -182,6 +202,15 @@ jobs:
           
           echo "Uploading $filename to s3://sprites-binaries/client/$TAG_NAME/"
           aws s3 cp "$clean_file" "s3://sprites-binaries/client/$TAG_NAME/$filename" \
+            --endpoint-url "$AWS_ENDPOINT_URL_S3"
+        done
+        cd ..
+        
+        # Upload channel version file
+        cd channel-files
+        for file in *.txt; do
+          echo "Uploading $file to s3://sprites-binaries/client/"
+          aws s3 cp "$file" "s3://sprites-binaries/client/$file" \
             --endpoint-url "$AWS_ENDPOINT_URL_S3"
         done
         cd ..

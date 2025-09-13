@@ -275,7 +275,7 @@ func (pm *portManager) handleProxyConnection(ctx context.Context, localConn net.
 }
 
 // ExecCommand handles the exec command
-func ExecCommand(ctx *GlobalContext, args []string) {
+func ExecCommand(ctx *GlobalContext, args []string) int {
 	// Create command structure
 	cmd := &Command{
 		Name:        "exec",
@@ -318,7 +318,7 @@ func ExecCommand(ctx *GlobalContext, args []string) {
 	// Parse flags
 	remainingArgs, err := ParseFlags(cmd, args)
 	if err != nil {
-		os.Exit(1)
+		return 1
 	}
 
 	// Use global context overrides if available
@@ -334,7 +334,7 @@ func ExecCommand(ctx *GlobalContext, args []string) {
 	// Validate control mode flag
 	if *controlMode && *sessionID == "" && !*detachable {
 		fmt.Fprintf(os.Stderr, "Error: -cc flag requires either -detachable or -id flag\n")
-		os.Exit(1)
+		return 1
 	}
 
 	// Ensure we have an org and sprite (needed for all operations)
@@ -346,7 +346,7 @@ func ExecCommand(ctx *GlobalContext, args []string) {
 		} else {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		}
-		os.Exit(1)
+		return 1
 	}
 
 	// Check for remaining args as command
@@ -375,14 +375,14 @@ func ExecCommand(ctx *GlobalContext, args []string) {
 			httpReq, err := http.NewRequest("GET", apiURL, nil)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error creating request: %v\n", err)
-				os.Exit(1)
+				return 1
 			}
 
 			// Add authentication
 			token, err := org.GetToken()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: Failed to get authentication token: %v\n", err)
-				os.Exit(1)
+				return 1
 			}
 			httpReq.Header.Set("Authorization", "Bearer "+token)
 
@@ -391,7 +391,7 @@ func ExecCommand(ctx *GlobalContext, args []string) {
 			resp, err := client.Do(httpReq)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error listing sessions: %v\n", err)
-				os.Exit(1)
+				return 1
 			}
 			defer resp.Body.Close()
 
@@ -399,14 +399,14 @@ func ExecCommand(ctx *GlobalContext, args []string) {
 			if resp.StatusCode != http.StatusOK {
 				body, _ := io.ReadAll(resp.Body)
 				fmt.Fprintf(os.Stderr, "Error: Server returned %d: %s\n", resp.StatusCode, string(body))
-				os.Exit(1)
+				return 1
 			}
 
 			// Parse JSON response
 			var result map[string]interface{}
 			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 				fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
-				os.Exit(1)
+				return 1
 			}
 
 			// Display sessions
@@ -486,7 +486,7 @@ func ExecCommand(ctx *GlobalContext, args []string) {
 				fmt.Println("  sprite exec -detachable <command>")
 			}
 
-			os.Exit(0)
+			return 0
 		}
 		// If only -id is specified, we're attaching to an existing session
 		// No command needed in this case
@@ -582,12 +582,12 @@ func ExecCommand(ctx *GlobalContext, args []string) {
 		token, err := org.GetTokenWithKeyringDisabled(ctx.ConfigMgr.IsKeyringDisabled())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		exitCode = executeDirectWebSocket(org.URL, token, remainingArgs, *workingDir, envList, *tty, *detachable, *sessionID, *controlMode)
 	}
 
-	os.Exit(exitCode)
+	return exitCode
 }
 
 // executeSpriteProxy executes a command through the sprite proxy endpoint
@@ -672,10 +672,12 @@ func executeWebSocket(wsURL *url.URL, token string, cmd []string, workingDir str
 	// Set up signal handling to restore terminal on interrupt
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	// Note: This goroutine is just for emergency terminal restoration
+	// The actual SIGINT exit code (130) should be handled by checking if
+	// the context was cancelled due to interrupt
 	go func() {
 		<-sigCh
 		restoreTerminal()
-		os.Exit(130) // Standard exit code for SIGINT
 	}()
 	defer signal.Stop(sigCh)
 

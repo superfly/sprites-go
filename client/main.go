@@ -12,6 +12,8 @@ import (
 )
 
 var (
+	// Version is set by ldflags during build
+	Version      = "0.0.1-dev"
 	clientLogger *slog.Logger
 )
 
@@ -101,17 +103,27 @@ func main() {
 	}
 	setupLogger(debugFile)
 
-	// Check if we need help or have no command
-	if globalHelp || len(args) == 0 {
-		printUsage()
-		os.Exit(0)
-	}
-
-	// Initialize config manager
+	// Initialize config manager early so we can do version check
 	cfg, err := config.NewManager()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to initialize config: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Start async version check (non-blocking)
+	updateChan := CheckForUpdatesAsync(cfg, Version, os.Args[0])
+	defer PrintUpdateMessage(updateChan)
+
+	// Check for version flag or command
+	if len(args) > 0 && (args[0] == "--version" || args[0] == "-v" || args[0] == "version") {
+		fmt.Printf("sprite version %s\n", Version)
+		return // Return instead of os.Exit to allow deferred functions to run
+	}
+
+	// Check if we need help or have no command
+	if globalHelp || len(args) == 0 {
+		printUsage()
+		return // Return instead of os.Exit to allow deferred functions to run
 	}
 
 	// Create global context to pass to commands
@@ -119,12 +131,13 @@ func main() {
 		Debug:     debugFile,
 		ConfigMgr: cfg,
 		Logger:    clientLogger,
+		Version:   Version,
 	}
 
 	// Get subcommand
 	if len(args) == 0 {
 		printUsage()
-		os.Exit(0)
+		return // Return instead of os.Exit to allow deferred functions to run
 	}
 
 	subcommand := args[0]
@@ -140,7 +153,10 @@ func main() {
 
 	switch subcommand {
 	case "exec", "x":
-		commands.ExecCommand(globalCtx, subArgs)
+		exitCode := commands.ExecCommand(globalCtx, subArgs)
+		if exitCode != 0 {
+			os.Exit(exitCode)
+		}
 	case "checkpoint", "checkpoints":
 		commands.CheckpointCommand(globalCtx, subArgs)
 	case "console", "c":
@@ -166,6 +182,8 @@ func main() {
 		commands.AdminCommand(globalCtx, subArgs)
 	case "api":
 		commands.ApiCommand(globalCtx, subArgs)
+	case "upgrade":
+		commands.UpgradeCommand(globalCtx, subArgs)
 	default:
 		slog.Error("Unknown command", "command", subcommand)
 		printUsage()
@@ -195,6 +213,7 @@ Commands:
   proxy <port1> [port2...]   Forward local ports through the remote server proxy
   sync                       Synchronize git repository to sprite environment
   api [options] <path>       Make authenticated API calls with curl
+  upgrade                    Upgrade the sprite client to the latest version
 
 Organization Commands:
   org auth                   Add an API token (aliases: orgs, organizations, organization, o)
@@ -266,6 +285,16 @@ Examples:
   # Forward local ports 8080 and 3000
   sprite proxy 8080 3000
 
+  # Upgrade to the latest version
+  sprite upgrade
+
+  # Check for updates without installing
+  sprite upgrade --check
+
 Use 'sprite <command> --help' for command-specific options.
+
+Environment Variables:
+  SPRITE_VERSION_DEBUG=true    Show detailed version check information
+  UPGRADE_CHECK=true           Force version check (bypass 24-hour cache)
 `)
 }
