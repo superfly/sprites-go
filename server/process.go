@@ -100,37 +100,6 @@ func (pt *portTracker) clear() {
 	pt.activePorts = make(map[string]portwatcher.Port)
 }
 
-func (s *System) startPortWatcher(pid int) error {
-	if s.portWatcher != nil {
-		s.portWatcher.Stop()
-	}
-
-	tracker := newPortTracker(s.logger, pid)
-
-	callback := func(port portwatcher.Port) {
-		tracker.addPort(port)
-	}
-
-	// Create port watcher
-	pw, err := portwatcher.New(pid, callback)
-	if err != nil {
-		return fmt.Errorf("failed to create port watcher: %w", err)
-	}
-
-	// Start port watcher
-	if err := pw.Start(); err != nil {
-		return fmt.Errorf("failed to start port watcher: %w", err)
-	}
-
-	s.portWatcher = pw
-	s.logger.Debug("Port watcher started for process", "pid", pid)
-
-	// Store the tracker so we can use it when stopping
-	s.portTracker = tracker
-
-	return nil
-}
-
 // StartProcess starts the supervised process
 func (s *System) StartProcess() error {
 	s.logger.Info("StartProcess: Entering method")
@@ -302,12 +271,6 @@ func (s *System) StartProcess() error {
 
 		s.logger.Info("StartProcess: Container process started successfully", "pid", pid, "command", s.config.ProcessCommand)
 
-		// Start port watcher for the container process
-		if err := s.startPortWatcher(pid); err != nil {
-			s.logger.Warn("StartProcess: Failed to start port watcher for container process (continuing without port monitoring)", "error", err)
-			// Continue without port watcher - it's not critical for basic functionality
-		}
-
 	} else {
 		s.logger.Info("StartProcess: Creating basic supervisor (containers disabled)")
 
@@ -329,12 +292,6 @@ func (s *System) StartProcess() error {
 		s.setState("processRunning", true)
 
 		s.logger.Info("StartProcess: Process started successfully", "pid", pid, "command", s.config.ProcessCommand)
-
-		// Start port watcher for the basic supervisor process
-		if err := s.startPortWatcher(pid); err != nil {
-			s.logger.Warn("StartProcess: Failed to start port watcher for basic supervisor process (continuing without port monitoring)", "error", err)
-			// Continue without port watcher - it's not critical for basic functionality
-		}
 
 		// For non-container processes, close the ready channel immediately
 		close(s.processReadyCh)
@@ -363,21 +320,6 @@ func (s *System) StopProcess() error {
 	}
 
 	s.logger.Info("Stopping supervised process...")
-
-	// Stop port tracker if running (this will log stopped ports)
-	if s.portTracker != nil {
-		if tracker, ok := s.portTracker.(*portTracker); ok {
-			tracker.stop()
-		}
-		s.portTracker = nil
-	}
-
-	// Stop port watcher if running
-	if s.portWatcher != nil {
-		s.logger.Debug("Stopping port watcher...")
-		s.portWatcher.Stop()
-		s.portWatcher = nil
-	}
 
 	// Stop container process if available, otherwise stop basic supervisor
 	if s.containerProcess != nil {

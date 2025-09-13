@@ -9,7 +9,6 @@ import (
 	"github.com/superfly/sprite-env/pkg/container"
 	"github.com/superfly/sprite-env/pkg/juicefs"
 	"github.com/superfly/sprite-env/pkg/leaser"
-	portwatcher "github.com/superfly/sprite-env/pkg/port-watcher"
 	"github.com/superfly/sprite-env/pkg/supervisor"
 )
 
@@ -74,8 +73,6 @@ type System struct {
 	supervisor         *supervisor.Supervisor
 	containerProcess   *container.Process // Optional container-wrapped process
 	reaper             *Reaper
-	portWatcher        *portwatcher.PortWatcher
-	portTracker        interface{} // Will be *portTracker, but avoiding circular import
 	execProcessTracker interface{} // Will be *execProcessTracker, avoiding import issues
 
 	// Channels for monitoring
