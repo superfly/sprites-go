@@ -426,12 +426,8 @@ func (h *Handlers) handleListExecSessions(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Get activity info for sessions
-	activityInfo := h.tmuxManager.GetActiveSessionsInfo()
-	activityMap := make(map[string]*terminal.SessionActivityInfo)
-	for i := range activityInfo {
-		activityMap[activityInfo[i].SessionID] = &activityInfo[i]
-	}
+	// Get activity info for all sessions
+	activityMap := h.tmuxManager.GetAllSessionActivityInfo()
 
 	// Merge session info with activity data
 	type SessionWithActivity struct {

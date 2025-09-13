@@ -86,7 +86,6 @@ func TestWindowMonitorBasic(t *testing.T) {
 	wm := NewWindowMonitor(ctx, "test-monitor").
 		WithSocketPath(socketPath).
 		WithConfigPath("") // No config file for tests
-	wm.refreshInterval = 500 * time.Millisecond // Faster for tests
 
 	// Start the monitor with modified commands
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -116,9 +115,16 @@ func TestWindowMonitorBasic(t *testing.T) {
 
 	// Start monitoring
 	go wm.monitorLoop(ctx)
-	go wm.windowDiscoveryLoop(ctx)
 
-	// Wait for initial discovery
+	// Trigger initial discovery by emitting SessionsChangedEvent
+	select {
+	case parser.events <- SessionsChangedEvent{}:
+		t.Log("Sent SessionsChangedEvent to trigger discovery")
+	case <-time.After(100 * time.Millisecond):
+		t.Error("Failed to send SessionsChangedEvent")
+	}
+
+	// Wait for discovery to complete
 	time.Sleep(1 * time.Second)
 
 	// Verify windows were discovered and linked
@@ -190,7 +196,6 @@ func TestWindowMonitorMultipleSessions(t *testing.T) {
 	wm := NewWindowMonitor(ctx, "test-monitor").
 		WithSocketPath(socketPath).
 		WithConfigPath("") // No config file for tests
-	wm.refreshInterval = 500 * time.Millisecond // Faster for tests
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -257,7 +262,6 @@ func TestWindowMonitorNewWindowDetection(t *testing.T) {
 	wm := NewWindowMonitor(ctx, "test-monitor").
 		WithSocketPath(socketPath).
 		WithConfigPath("") // No config file for tests
-	wm.refreshInterval = 500 * time.Millisecond // Faster for tests
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -285,8 +289,11 @@ func TestWindowMonitorNewWindowDetection(t *testing.T) {
 	windowID := createWindow(t, socketPath, "sprite-exec-200", "new-window")
 	t.Logf("Created new window: %s", windowID)
 
-	// Wait for discovery
-	time.Sleep(2 * time.Second)
+	// Manually trigger window discovery since new windows in other sessions don't generate events
+	wm.discoverAndLinkWindows()
+
+	// Wait for discovery to complete
+	time.Sleep(500 * time.Millisecond)
 
 	// The window count should have increased
 	newLinkedWindows := wm.GetLinkedWindows()
@@ -315,7 +322,6 @@ func TestWindowMonitorWindowClose(t *testing.T) {
 	wm := NewWindowMonitor(ctx, "test-monitor").
 		WithSocketPath(socketPath).
 		WithConfigPath("") // No config file for tests
-	wm.refreshInterval = 500 * time.Millisecond // Faster for tests
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

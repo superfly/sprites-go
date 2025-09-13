@@ -16,18 +16,19 @@ import (
 
 // WindowMonitor monitors all tmux windows across all sessions
 type WindowMonitor struct {
-	logger          *slog.Logger
-	parser          *TmuxControlModeParser
-	monitorSession  string
-	linkedWindows   map[string]string         // windowID -> original sessionID
-	activityStats   map[string]*ActivityStats // sessionID -> stats
-	mu              sync.RWMutex
-	refreshInterval time.Duration
-	eventChan       chan WindowMonitorEvent
-	socketPath      string   // tmux socket path
-	configPath      string   // tmux config path
-	cmdPrefix       []string // Command prefix for container execution
-	tmuxBinary      string   // Path to tmux binary
+	logger         *slog.Logger
+	parser         *TmuxControlModeParser
+	monitorSession string
+	linkedWindows  map[string]string         // windowID -> original sessionID
+	activityStats  map[string]*ActivityStats // sessionID -> stats
+	mu             sync.RWMutex
+	eventChan      chan WindowMonitorEvent
+	socketPath     string        // tmux socket path
+	configPath     string        // tmux config path
+	cmdPrefix      []string      // Command prefix for container execution
+	tmuxBinary     string        // Path to tmux binary
+	closed         chan struct{} // Signal that monitor has closed
+	closeOnce      sync.Once
 }
 
 // ActivityStats tracks activity statistics for a session
@@ -52,15 +53,15 @@ type WindowMonitorEvent struct {
 func NewWindowMonitor(ctx context.Context, monitorSession string) *WindowMonitor {
 	logger := tap.Logger(ctx)
 	return &WindowMonitor{
-		logger:          logger,
-		monitorSession:  monitorSession,
-		linkedWindows:   make(map[string]string),
-		activityStats:   make(map[string]*ActivityStats),
-		refreshInterval: 2 * time.Second, // Check for new windows every 2 seconds
-		eventChan:       make(chan WindowMonitorEvent, 1000),
-		socketPath:      "/.sprite/tmp/exec-tmux",
-		configPath:      "/.sprite/bin/tmux.conf",
-		tmuxBinary:      "tmux", // Default to tmux in PATH
+		logger:         logger,
+		monitorSession: monitorSession,
+		linkedWindows:  make(map[string]string),
+		activityStats:  make(map[string]*ActivityStats),
+		eventChan:      make(chan WindowMonitorEvent, 1000),
+		socketPath:     "/.sprite/tmp/exec-tmux",
+		configPath:     "/.sprite/bin/tmux.conf",
+		tmuxBinary:     "tmux", // Default to tmux in PATH
+		closed:         make(chan struct{}),
 	}
 }
 
@@ -224,11 +225,16 @@ func (wm *WindowMonitor) Start(ctx context.Context) error {
 	// Start the monitoring goroutine
 	go wm.monitorLoop(ctx)
 
-	// Start the window discovery goroutine
-	go wm.windowDiscoveryLoop(ctx)
-
 	// Start the activity timeout checker
 	go wm.activityTimeoutChecker(ctx)
+
+	// Do initial discovery after starting the monitor
+	go func() {
+		// Small delay to ensure control mode is fully connected
+		time.Sleep(100 * time.Millisecond)
+		wm.logger.Debug("Starting initial window discovery")
+		wm.discoverAndLinkWindows()
+	}()
 
 	wm.logger.Info("Window monitor started", "session", wm.monitorSession)
 	return nil
@@ -237,8 +243,14 @@ func (wm *WindowMonitor) Start(ctx context.Context) error {
 // monitorLoop processes events from the control mode parser
 func (wm *WindowMonitor) monitorLoop(ctx context.Context) {
 	defer func() {
+		// Signal that monitor is closed
+		wm.closeOnce.Do(func() {
+			close(wm.closed)
+		})
+
 		if wm.parser != nil {
 			wm.parser.Close()
+			wm.parser = nil // Clear the parser reference
 		}
 		close(wm.eventChan)
 	}()
@@ -250,14 +262,17 @@ func (wm *WindowMonitor) monitorLoop(ctx context.Context) {
 			return
 		case event, ok := <-wm.parser.Events():
 			if !ok {
+				// Parser events channel closed - process has exited
 				// Check if there was an error from the parser
-				if err := wm.parser.Wait(); err != nil {
-					wm.logger.Error("Window monitor tmux process exited with error",
-						"error", err,
-						"session", wm.monitorSession)
-				} else {
-					wm.logger.Warn("Window monitor tmux process exited normally",
-						"session", wm.monitorSession)
+				if wm.parser != nil {
+					if err := wm.parser.Wait(); err != nil {
+						wm.logger.Error("Window monitor tmux process exited with error",
+							"error", err,
+							"session", wm.monitorSession)
+					} else {
+						wm.logger.Warn("Window monitor tmux process exited normally",
+							"session", wm.monitorSession)
+					}
 				}
 				return
 			}
@@ -274,29 +289,19 @@ func (wm *WindowMonitor) monitorLoop(ctx context.Context) {
 	}
 }
 
-// windowDiscoveryLoop periodically discovers new windows and links them
-func (wm *WindowMonitor) windowDiscoveryLoop(ctx context.Context) {
-	ticker := time.NewTicker(wm.refreshInterval)
-	defer ticker.Stop()
-
-	// Initial discovery
-	wm.logger.Debug("Starting initial window discovery")
-	wm.discoverAndLinkWindows()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			// Run periodic discovery silently unless something is found
-			wm.discoverAndLinkWindows()
-		}
-	}
-}
-
 // handleEvent processes tmux events
 func (wm *WindowMonitor) handleEvent(event TmuxEvent) {
 	switch e := event.(type) {
+	case SessionsChangedEvent:
+		// Sessions have changed (added/removed), discover new windows
+		wm.logger.Debug("Sessions changed, discovering windows")
+		go wm.discoverAndLinkWindows()
+
+	case WindowAddEvent:
+		// A new window was added to some session, check if we need to link it
+		wm.logger.Debug("Window added", "windowID", e.WindowID)
+		go wm.discoverAndLinkWindows()
+
 	case PaneOutputEvent:
 		// Look up which original session this window belongs to
 		wm.mu.RLock()
@@ -418,6 +423,19 @@ func (wm *WindowMonitor) getWindowIDFromPane(paneID string) string {
 
 // discoverAndLinkWindows finds all windows and links them to the monitor session
 func (wm *WindowMonitor) discoverAndLinkWindows() {
+	// Check if monitor is still running
+	select {
+	case <-wm.closed:
+		wm.logger.Debug("Window discovery aborted - monitor closed")
+		return
+	default:
+	}
+
+	// Check if parser is valid
+	if wm.parser == nil {
+		wm.logger.Debug("Window discovery aborted - parser is nil")
+		return
+	}
 	// List all windows in all sessions
 	args := []string{}
 	if wm.configPath != "" {
@@ -466,7 +484,9 @@ func (wm *WindowMonitor) discoverAndLinkWindows() {
 		totalWindows++
 
 		// Skip windows already in the monitor session
-		if sessionID == "$"+strings.TrimPrefix(wm.monitorSession, "$") {
+		// The monitor session won't have a name starting with "sprite-exec-"
+		// Also skip if the session name matches our monitor session name
+		if sessionName == wm.monitorSession || !strings.HasPrefix(sessionName, "sprite-exec-") {
 			continue
 		}
 
@@ -475,7 +495,7 @@ func (wm *WindowMonitor) discoverAndLinkWindows() {
 		_, isLinked := wm.linkedWindows[windowID]
 		wm.mu.RUnlock()
 
-		if !isLinked && strings.HasPrefix(sessionName, "sprite-exec-") {
+		if !isLinked {
 			wm.logger.Debug("Found sprite-exec window to link",
 				"windowID", windowID,
 				"sessionID", sessionID,
@@ -494,18 +514,24 @@ func (wm *WindowMonitor) discoverAndLinkWindows() {
 					"sessionName", sessionName)
 			}
 		}
-		// Silently skip already linked windows and non-sprite-exec windows
+		// Silently skip already linked windows
 	}
 
 	if newWindows > 0 {
 		wm.logger.Info("Discovered and linked new windows", "count", newWindows, "totalWindows", totalWindows)
 		// Refresh panes after linking new windows
-		wm.parser.ListPanes()
+		if wm.parser != nil {
+			wm.parser.ListPanes()
+		}
 	}
 }
 
 // linkWindow links a window to the monitor session
 func (wm *WindowMonitor) linkWindow(windowID, originalSessionID string) error {
+	// Check if parser is still valid
+	if wm.parser == nil {
+		return fmt.Errorf("parser is closed")
+	}
 
 	// Link the window to our monitor session
 	err := wm.parser.SendCommand(fmt.Sprintf("link-window -s %s -t %s", windowID, wm.monitorSession))
@@ -550,10 +576,15 @@ func (wm *WindowMonitor) GetLinkedWindows() map[string]string {
 
 // Close stops the window monitor
 func (wm *WindowMonitor) Close() error {
-	if wm.parser != nil {
-		return wm.parser.Close()
-	}
-	return nil
+	var err error
+	wm.closeOnce.Do(func() {
+		close(wm.closed)
+		if wm.parser != nil {
+			err = wm.parser.Close()
+			wm.parser = nil
+		}
+	})
+	return err
 }
 
 // updateActivityStats updates activity statistics for a session
@@ -629,6 +660,9 @@ func (wm *WindowMonitor) activityTimeoutChecker(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-wm.closed:
+			wm.logger.Debug("Activity timeout checker stopped - monitor closed")
 			return
 		case <-ticker.C:
 			wm.mu.Lock()

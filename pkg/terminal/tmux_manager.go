@@ -51,6 +51,8 @@ type TMUXManager struct {
 	windowMonitor  *tmux.WindowMonitor
 	prepareCommand func()
 	cmdPrefix      []string // Prefix for server-side tmux commands (e.g., ["crun", "exec", "app"])
+	socketPath     string   // Path to tmux socket
+	configPath     string   // Path to tmux config
 
 	// Channel-based synchronization for monitor startup
 	monitorStartCh chan struct{}
@@ -65,6 +67,8 @@ func NewTMUXManager(ctx context.Context) *TMUXManager {
 	tm := &TMUXManager{
 		logger:         tap.Logger(ctx),
 		nextID:         -1,
+		socketPath:     "/.sprite/tmp/exec-tmux",
+		configPath:     "/.sprite/bin/tmux.conf",
 		activityChan:   make(chan SessionActivity, 100),
 		monitorStartCh: make(chan struct{}, 1),
 		paneCallbacks:  make(map[string]PaneLifecycleCallback),
@@ -78,6 +82,18 @@ func NewTMUXManager(ctx context.Context) *TMUXManager {
 	// Start the pane monitor goroutine
 	go tm.paneMonitor(ctx)
 
+	return tm
+}
+
+// WithSocketPath sets the tmux socket path
+func (tm *TMUXManager) WithSocketPath(path string) *TMUXManager {
+	tm.socketPath = path
+	return tm
+}
+
+// WithConfigPath sets the tmux config path
+func (tm *TMUXManager) WithConfigPath(path string) *TMUXManager {
+	tm.configPath = path
 	return tm
 }
 
@@ -141,8 +157,8 @@ func (tm *TMUXManager) CreateSession(cmd string, args []string, controlMode bool
 
 	// Build tmux args: tmux -f config -S socket new-session -s sessionName cmd args...
 	tmuxArgs := []string{
-		"-f", "/.sprite/bin/tmux.conf",
-		"-S", "/.sprite/tmp/exec-tmux",
+		"-f", tm.configPath,
+		"-S", tm.socketPath,
 	}
 
 	// Add control mode if requested
@@ -168,7 +184,7 @@ func (tm *TMUXManager) AttachSession(id string, controlMode bool) (string, []str
 		tm.logger.Info("Attaching to existing tmux session",
 			"sessionID", id,
 			"sessionName", sessionName,
-			"socket", "/.sprite/tmp/exec-tmux")
+			"socket", tm.socketPath)
 	}
 
 	// Request activity monitor startup (in case first interaction is attach)
@@ -181,8 +197,8 @@ func (tm *TMUXManager) AttachSession(id string, controlMode bool) (string, []str
 
 	// Return tmux attach command - using sprite-exec-<id> naming
 	tmuxArgs := []string{
-		"-f", "/.sprite/bin/tmux.conf",
-		"-S", "/.sprite/tmp/exec-tmux",
+		"-f", tm.configPath,
+		"-S", tm.socketPath,
 	}
 
 	// Add control mode if requested
@@ -202,7 +218,7 @@ func (tm *TMUXManager) AttachSession(id string, controlMode bool) (string, []str
 func (tm *TMUXManager) SessionExists(id string) bool {
 	// Check if tmux session exists by running tmux has-session with sprite-exec-<id> naming
 	sessionName := fmt.Sprintf("sprite-exec-%s", id)
-	tmuxArgs := []string{"-f", "/.sprite/bin/tmux.conf", "-S", "/.sprite/tmp/exec-tmux", "has-session", "-t", sessionName}
+	tmuxArgs := []string{"-f", tm.configPath, "-S", tm.socketPath, "has-session", "-t", sessionName}
 
 	var cmd *exec.Cmd
 	if len(tm.cmdPrefix) > 0 {
@@ -210,7 +226,12 @@ func (tm *TMUXManager) SessionExists(id string) bool {
 		allArgs := append([]string{"/.sprite/bin/tmux"}, tmuxArgs...)
 		cmd = exec.Command(tm.cmdPrefix[0], append(tm.cmdPrefix[1:], allArgs...)...)
 	} else {
-		cmd = exec.Command("/.sprite/bin/tmux", tmuxArgs...)
+		// Use system tmux if /.sprite/bin/tmux doesn't exist (e.g., in tests)
+		tmuxBinary := "/.sprite/bin/tmux"
+		if _, err := os.Stat(tmuxBinary); os.IsNotExist(err) {
+			tmuxBinary = "tmux"
+		}
+		cmd = exec.Command(tmuxBinary, tmuxArgs...)
 	}
 	err := cmd.Run()
 
@@ -225,7 +246,7 @@ func (tm *TMUXManager) KillSession(id string) error {
 
 	// Send kill-session command to tmux with sprite-exec-<id> naming
 	sessionName := fmt.Sprintf("sprite-exec-%s", id)
-	tmuxArgs := []string{"-f", "/.sprite/bin/tmux.conf", "-S", "/.sprite/tmp/exec-tmux", "kill-session", "-t", sessionName}
+	tmuxArgs := []string{"-f", tm.configPath, "-S", tm.socketPath, "kill-session", "-t", sessionName}
 
 	var cmd *exec.Cmd
 	if len(tm.cmdPrefix) > 0 {
@@ -233,7 +254,12 @@ func (tm *TMUXManager) KillSession(id string) error {
 		allArgs := append([]string{"/.sprite/bin/tmux"}, tmuxArgs...)
 		cmd = exec.Command(tm.cmdPrefix[0], append(tm.cmdPrefix[1:], allArgs...)...)
 	} else {
-		cmd = exec.Command("/.sprite/bin/tmux", tmuxArgs...)
+		// Use system tmux if /.sprite/bin/tmux doesn't exist (e.g., in tests)
+		tmuxBinary := "/.sprite/bin/tmux"
+		if _, err := os.Stat(tmuxBinary); os.IsNotExist(err) {
+			tmuxBinary = "tmux"
+		}
+		cmd = exec.Command(tmuxBinary, tmuxArgs...)
 	}
 	return cmd.Run()
 }
@@ -241,7 +267,7 @@ func (tm *TMUXManager) KillSession(id string) error {
 // ListSessions returns a list of all tmux sessions (sprite-exec-<id> names only)
 func (tm *TMUXManager) ListSessions() ([]string, error) {
 	// List all tmux sessions
-	tmuxArgs := []string{"-f", "/.sprite/bin/tmux.conf", "-S", "/.sprite/tmp/exec-tmux", "list-sessions", "-F", "#{session_name}"}
+	tmuxArgs := []string{"-f", tm.configPath, "-S", tm.socketPath, "list-sessions", "-F", "#{session_name}"}
 
 	var cmd *exec.Cmd
 	if len(tm.cmdPrefix) > 0 {
@@ -249,7 +275,12 @@ func (tm *TMUXManager) ListSessions() ([]string, error) {
 		allArgs := append([]string{"/.sprite/bin/tmux"}, tmuxArgs...)
 		cmd = exec.Command(tm.cmdPrefix[0], append(tm.cmdPrefix[1:], allArgs...)...)
 	} else {
-		cmd = exec.Command("/.sprite/bin/tmux", tmuxArgs...)
+		// Use system tmux if /.sprite/bin/tmux doesn't exist (e.g., in tests)
+		tmuxBinary := "/.sprite/bin/tmux"
+		if _, err := os.Stat(tmuxBinary); os.IsNotExist(err) {
+			tmuxBinary = "tmux"
+		}
+		cmd = exec.Command(tmuxBinary, tmuxArgs...)
 	}
 
 	output, err := cmd.Output()
@@ -280,7 +311,7 @@ func (tm *TMUXManager) ListSessions() ([]string, error) {
 func (tm *TMUXManager) ListSessionsWithInfo() ([]SessionInfo, error) {
 	// List all tmux sessions with detailed format
 	// Format: session_name:created_time:session_windows
-	tmuxArgs := []string{"-f", "/.sprite/bin/tmux.conf", "-S", "/.sprite/tmp/exec-tmux",
+	tmuxArgs := []string{"-f", tm.configPath, "-S", tm.socketPath,
 		"list-sessions", "-F",
 		"#{session_name}|#{session_created}|#{session_windows}|#{pane_current_command}"}
 
@@ -290,7 +321,12 @@ func (tm *TMUXManager) ListSessionsWithInfo() ([]SessionInfo, error) {
 		allArgs := append([]string{"/.sprite/bin/tmux"}, tmuxArgs...)
 		cmd = exec.Command(tm.cmdPrefix[0], append(tm.cmdPrefix[1:], allArgs...)...)
 	} else {
-		cmd = exec.Command("/.sprite/bin/tmux", tmuxArgs...)
+		// Use system tmux if /.sprite/bin/tmux doesn't exist (e.g., in tests)
+		tmuxBinary := "/.sprite/bin/tmux"
+		if _, err := os.Stat(tmuxBinary); os.IsNotExist(err) {
+			tmuxBinary = "tmux"
+		}
+		cmd = exec.Command(tmuxBinary, tmuxArgs...)
 	}
 
 	output, err := cmd.Output()
@@ -338,8 +374,8 @@ func (tm *TMUXManager) GetSessionPanePIDs(id string) ([]int, error) {
 	// List all panes in the session with their PIDs
 	// Format: #{pane_pid}
 	tmuxArgs := []string{
-		"-f", "/.sprite/bin/tmux.conf",
-		"-S", "/.sprite/tmp/exec-tmux",
+		"-f", tm.configPath,
+		"-S", tm.socketPath,
 		"list-panes",
 		"-t", sessionName,
 		"-F", "#{pane_pid}",
@@ -351,7 +387,12 @@ func (tm *TMUXManager) GetSessionPanePIDs(id string) ([]int, error) {
 		allArgs := append([]string{"/.sprite/bin/tmux"}, tmuxArgs...)
 		cmd = exec.Command(tm.cmdPrefix[0], append(tm.cmdPrefix[1:], allArgs...)...)
 	} else {
-		cmd = exec.Command("/.sprite/bin/tmux", tmuxArgs...)
+		// Use system tmux if /.sprite/bin/tmux doesn't exist (e.g., in tests)
+		tmuxBinary := "/.sprite/bin/tmux"
+		if _, err := os.Stat(tmuxBinary); os.IsNotExist(err) {
+			tmuxBinary = "tmux"
+		}
+		cmd = exec.Command(tmuxBinary, tmuxArgs...)
 	}
 
 	output, err := cmd.Output()
@@ -376,7 +417,7 @@ func (tm *TMUXManager) GetSessionPanePIDs(id string) ([]int, error) {
 // getSessionCommand gets the command running in a tmux session
 func (tm *TMUXManager) getSessionCommand(sessionName string) string {
 	// Get the command from the first pane of the session
-	tmuxArgs := []string{"-f", "/.sprite/bin/tmux.conf", "-S", "/.sprite/tmp/exec-tmux",
+	tmuxArgs := []string{"-f", tm.configPath, "-S", tm.socketPath,
 		"list-panes", "-t", sessionName, "-F", "#{pane_current_command}"}
 
 	var cmd *exec.Cmd
@@ -385,7 +426,12 @@ func (tm *TMUXManager) getSessionCommand(sessionName string) string {
 		allArgs := append([]string{"/.sprite/bin/tmux"}, tmuxArgs...)
 		cmd = exec.Command(tm.cmdPrefix[0], append(tm.cmdPrefix[1:], allArgs...)...)
 	} else {
-		cmd = exec.Command("/.sprite/bin/tmux", tmuxArgs...)
+		// Use system tmux if /.sprite/bin/tmux doesn't exist (e.g., in tests)
+		tmuxBinary := "/.sprite/bin/tmux"
+		if _, err := os.Stat(tmuxBinary); os.IsNotExist(err) {
+			tmuxBinary = "tmux"
+		}
+		cmd = exec.Command(tmuxBinary, tmuxArgs...)
 	}
 
 	output, err := cmd.Output()
@@ -446,12 +492,28 @@ func (tm *TMUXManager) GetActiveSessionsInfo() []SessionActivityInfo {
 		activityStats = make(map[string]*tmux.ActivityStats)
 	}
 
+	// Get the mapping between tmux session IDs and user session IDs
+	mapping := tm.getSessionIDMapping()
+
+	// Reverse the mapping to go from user ID to tmux ID
+	reverseMapping := make(map[string]string)
+	for tmuxID, userID := range mapping {
+		reverseMapping[userID] = tmuxID
+	}
+
 	var result []SessionActivityInfo
 	now := time.Now()
 
 	for _, session := range sessions {
+		// Look up the tmux session ID for this user session ID
+		tmuxSessionID, ok := reverseMapping[session.ID]
+		if !ok {
+			// Can't map to tmux ID, skip
+			continue
+		}
+
 		// Check if we have activity stats for this session
-		stats, hasActivity := activityStats[session.ID]
+		stats, hasActivity := activityStats[tmuxSessionID]
 		if !hasActivity {
 			continue
 		}
@@ -465,7 +527,7 @@ func (tm *TMUXManager) GetActiveSessionsInfo() []SessionActivityInfo {
 		info := SessionActivityInfo{
 			SessionID:    session.ID,
 			Name:         session.Name,
-			IsActive:     true,
+			IsActive:     stats.IsActive,
 			LastActivity: stats.LastActivity,
 		}
 
@@ -479,6 +541,109 @@ func (tm *TMUXManager) GetActiveSessionsInfo() []SessionActivityInfo {
 	}
 
 	return result
+}
+
+// GetAllSessionActivityInfo returns activity information for all sessions, including inactive ones
+func (tm *TMUXManager) GetAllSessionActivityInfo() map[string]*SessionActivityInfo {
+	// Get activity stats from window monitor if available
+	var activityStats map[string]*tmux.ActivityStats
+	if tm.windowMonitor != nil {
+		activityStats = tm.windowMonitor.GetActivityStats()
+	} else {
+		activityStats = make(map[string]*tmux.ActivityStats)
+	}
+
+	// Get the mapping between tmux session IDs and user session IDs
+	mapping := tm.getSessionIDMapping()
+
+	result := make(map[string]*SessionActivityInfo)
+	now := time.Now()
+
+	for tmuxSessionID, stats := range activityStats {
+		// Map from tmux session ID (e.g., "1") to user session ID (e.g., "0")
+		userSessionID, ok := mapping[tmuxSessionID]
+		if !ok {
+			// If we can't map it, skip this session
+			tm.logger.Debug("No mapping found for tmux session ID",
+				"tmuxSessionID", tmuxSessionID)
+			continue
+		}
+
+		info := &SessionActivityInfo{
+			SessionID:    userSessionID,
+			Name:         fmt.Sprintf("sprite-exec-%s", userSessionID),
+			IsActive:     stats.IsActive,
+			LastActivity: stats.LastActivity,
+		}
+
+		// Calculate bytes per second
+		duration := now.Sub(stats.StartTime).Seconds()
+		if duration > 0 {
+			info.BytesPerSecond = float64(stats.ByteCount) / duration
+		}
+
+		result[userSessionID] = info
+	}
+
+	return result
+}
+
+// getSessionIDMapping returns a mapping from tmux session IDs to user session IDs
+// e.g., {"1": "0", "2": "1"} where "1" is the tmux session ID and "0" is the user session ID
+func (tm *TMUXManager) getSessionIDMapping() map[string]string {
+	// List all tmux sessions with their IDs
+	// Format: tmux_session_id:session_name
+	tmuxArgs := []string{"-f", tm.configPath, "-S", tm.socketPath,
+		"list-sessions", "-F", "#{session_id}:#{session_name}"}
+
+	var cmd *exec.Cmd
+	if len(tm.cmdPrefix) > 0 {
+		// Use prefix for server-side command
+		allArgs := append([]string{"/.sprite/bin/tmux"}, tmuxArgs...)
+		cmd = exec.Command(tm.cmdPrefix[0], append(tm.cmdPrefix[1:], allArgs...)...)
+	} else {
+		// Use system tmux if /.sprite/bin/tmux doesn't exist (e.g., in tests)
+		tmuxBinary := "/.sprite/bin/tmux"
+		if _, err := os.Stat(tmuxBinary); os.IsNotExist(err) {
+			tmuxBinary = "tmux"
+		}
+		cmd = exec.Command(tmuxBinary, tmuxArgs...)
+	}
+
+	output, err := cmd.Output()
+	if err != nil {
+		// Log the error for debugging
+		if tm.logger != nil {
+			tm.logger.Debug("Failed to get session ID mapping",
+				"error", err,
+				"cmd", cmd.String())
+		}
+		// If tmux server is not running, return empty mapping
+		return make(map[string]string)
+	}
+
+	mapping := make(map[string]string)
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		parts := strings.Split(line, ":")
+		if len(parts) >= 2 {
+			tmuxSessionID := strings.TrimPrefix(parts[0], "$") // Remove $ prefix
+			sessionName := parts[1]
+
+			// Extract user session ID from sprite-exec-X name
+			if strings.HasPrefix(sessionName, "sprite-exec-") {
+				userSessionID := strings.TrimPrefix(sessionName, "sprite-exec-")
+				mapping[tmuxSessionID] = userSessionID
+			}
+		}
+	}
+
+	return mapping
 }
 
 // StartActivityMonitor starts monitoring tmux sessions for activity
@@ -517,12 +682,12 @@ func (tm *TMUXManager) StartActivityMonitor(ctx context.Context) error {
 	// Create window monitor
 	tm.logger.Debug("Creating new window monitor",
 		"monitorSession", "sprite-monitor",
-		"socketPath", "/.sprite/tmp/exec-tmux",
-		"configPath", "/.sprite/bin/tmux.conf",
+		"socketPath", tm.socketPath,
+		"configPath", tm.configPath,
 		"cmdPrefix", tm.cmdPrefix)
 	tm.windowMonitor = tmux.NewWindowMonitor(ctx, "sprite-monitor").
-		WithSocketPath("/.sprite/tmp/exec-tmux").
-		WithConfigPath("/.sprite/bin/tmux.conf").
+		WithSocketPath(tm.socketPath).
+		WithConfigPath(tm.configPath).
 		WithCmdPrefix(tm.cmdPrefix)
 
 	// Start the window monitor
