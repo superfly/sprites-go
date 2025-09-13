@@ -409,84 +409,62 @@ func ExecCommand(ctx *GlobalContext, args []string) int {
 				return 1
 			}
 
-			// Display sessions
+			// Parse sessions from result
 			sessions, ok := result["sessions"].([]interface{})
 			if !ok {
 				sessions = []interface{}{}
 			}
 
-			if len(sessions) == 0 {
-				fmt.Println("No active tmux sessions found.")
-				fmt.Println("\nTo create a new detachable session:")
-				fmt.Println("  sprite exec -detachable /bin/bash")
-				fmt.Println("  sprite exec -detachable <command>")
-			} else {
-				// Display sessions in a table
-				fmt.Printf("Active tmux sessions (%d):\n\n", len(sessions))
-
-				// Print table header
-				fmt.Printf("%-6s %-20s %-30s %-15s\n", "ID", "Command", "Started", "Activity")
-				fmt.Printf("%-6s %-20s %-30s %-15s\n", "──", "───────", "───────", "────────")
-
-				// Print each session
-				for _, s := range sessions {
-					if session, ok := s.(map[string]interface{}); ok {
-						id := session["id"]
-						command := session["command"]
-
-						// Parse and format the created time
-						var startedStr string
-						if created, ok := session["created"].(string); ok {
-							if t, err := time.Parse(time.RFC3339, created); err == nil {
-								// Calculate duration
-								duration := time.Since(t)
-								if duration < time.Minute {
-									startedStr = fmt.Sprintf("%d seconds ago", int(duration.Seconds()))
-								} else if duration < time.Hour {
-									startedStr = fmt.Sprintf("%d minutes ago", int(duration.Minutes()))
-								} else if duration < 24*time.Hour {
-									startedStr = fmt.Sprintf("%d hours ago", int(duration.Hours()))
-								} else {
-									startedStr = fmt.Sprintf("%d days ago", int(duration.Hours()/24))
-								}
-							} else {
-								startedStr = created
-							}
-						}
-
-						// Truncate command if too long
-						cmdStr := fmt.Sprintf("%v", command)
-						if len(cmdStr) > 19 {
-							cmdStr = cmdStr[:16] + "..."
-						}
-
-						// Format activity data
-						var activityStr string
-						if bytesPerSec, ok := session["bytes_per_second"].(float64); ok && bytesPerSec > 0 {
-							if bytesPerSec < 1024 {
-								activityStr = fmt.Sprintf("%.0f B/s", bytesPerSec)
-							} else if bytesPerSec < 1024*1024 {
-								activityStr = fmt.Sprintf("%.1f KB/s", bytesPerSec/1024)
-							} else {
-								activityStr = fmt.Sprintf("%.1f MB/s", bytesPerSec/(1024*1024))
-							}
-						} else if isActive, ok := session["is_active"].(bool); ok && isActive {
-							activityStr = "Active"
-						} else {
-							activityStr = "-"
-						}
-
-						fmt.Printf("%-6v %-20s %-30s %-15s\n", id, cmdStr, startedStr, activityStr)
+			// Convert to SessionItem structs
+			sessionItems := make([]SessionItem, 0, len(sessions))
+			for _, s := range sessions {
+				if session, ok := s.(map[string]interface{}); ok {
+					item := SessionItem{
+						ID:      fmt.Sprintf("%v", session["id"]),
+						Command: fmt.Sprintf("%v", session["command"]),
 					}
-				}
 
-				fmt.Println("\nTo attach to a session:")
-				fmt.Println("  sprite exec -id <session_id>")
-				fmt.Println("\nTo create a new detachable session:")
-				fmt.Println("  sprite exec -detachable <command>")
+					// Parse created time
+					if created, ok := session["created"].(string); ok {
+						if t, err := time.Parse(time.RFC3339, created); err == nil {
+							item.Created = t
+						}
+					}
+
+					// Parse activity data
+					if bytesPerSec, ok := session["bytes_per_second"].(float64); ok {
+						item.BytesPerSecond = bytesPerSec
+					}
+					if isActive, ok := session["is_active"].(bool); ok {
+						item.IsActive = isActive
+					}
+					if lastActivity, ok := session["last_activity"].(string); ok {
+						if t, err := time.Parse(time.RFC3339, lastActivity); err == nil {
+							item.LastActivity = &t
+						}
+					}
+
+					sessionItems = append(sessionItems, item)
+				}
 			}
 
-			return 0
+			// Check if we're in an interactive terminal
+			isInteractive := term.IsTerminal(int(os.Stdout.Fd()))
+
+			if isInteractive {
+				// Run the interactive session selector
+				selectedID, err := runSessionSelector(sessionItems, org, spriteName, spriteOverride, flags, ctx)
+				if err != nil {
+					// User cancelled or no sessions
+					return 0
+				}
+
+				// Execute the selected session
+				return executeSelectedSession(selectedID, org, spriteName, spriteOverride, flags, ctx)
+			} else {
+				// Non-interactive mode - just list the sessions
+				return listSessionsNonInteractive(sessionItems, org, spriteName)
+			}
 		}
 		// If only -id is specified, we're attaching to an existing session
 		// No command needed in this case
