@@ -1106,18 +1106,24 @@ func (j *JuiceFS) handleSignals() {
 }
 
 // SyncOverlay flushes overlay writes similar to restore preparation.
-func (j *JuiceFS) SyncOverlay(ctx context.Context) error {
+// Returns a function that must be called to unfreeze the filesystem.
+func (j *JuiceFS) SyncOverlay(ctx context.Context) (func() error, error) {
 	if j.overlayMgr == nil {
-		return nil
+		return func() error { return nil }, nil
 	}
 
 	if err := j.overlayMgr.PrepareForCheckpoint(ctx); err != nil {
 		j.logger.Debug("overlay sync skipped", "error", err)
-		return nil
+		return func() error { return nil }, nil
 	}
 
-	if err := j.overlayMgr.UnfreezeAfterCheckpoint(ctx); err != nil {
-		j.logger.Warn("overlay unfreeze failed", "error", err)
+	// Create unfreeze function to be called later
+	unfreezeFunc := func() error {
+		if err := j.overlayMgr.UnfreezeAfterCheckpoint(ctx); err != nil {
+			j.logger.Warn("overlay unfreeze failed", "error", err)
+			return err
+		}
+		return nil
 	}
 
 	storageRoot := filepath.Dir(j.config.BaseDir)
@@ -1131,7 +1137,7 @@ func (j *JuiceFS) SyncOverlay(ctx context.Context) error {
 		}
 	}
 
-	return nil
+	return unfreezeFunc, nil
 }
 
 // findAndUnmountDependentMounts finds and unmounts all mounts that depend on the JuiceFS mount

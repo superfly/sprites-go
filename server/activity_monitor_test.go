@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -132,7 +131,7 @@ func TestActivityMonitor_ActivityPreventsSuspension(t *testing.T) {
 	sys := createTestSystem(t, logWriter)
 
 	// Create activity monitor with short idle time
-	monitor := NewActivityMonitor(ctx, sys, 2*time.Second, nil)
+	monitor := NewActivityMonitor(ctx, sys, 2*time.Second)
 
 	// Prevent actual suspension API call
 	os.Setenv("SPRITE_PREVENT_SUSPEND", "true")
@@ -191,7 +190,7 @@ func TestActivityMonitor_IdleTimerTriggersSuspension(t *testing.T) {
 	ctx = tap.WithLogger(ctx, logger)
 
 	sys := createTestSystem(t, logWriter)
-	monitor := NewActivityMonitor(ctx, sys, 1*time.Second, nil)
+	monitor := NewActivityMonitor(ctx, sys, 1*time.Second)
 
 	os.Setenv("SPRITE_PREVENT_SUSPEND", "true")
 	defer os.Unsetenv("SPRITE_PREVENT_SUSPEND")
@@ -254,7 +253,7 @@ func TestActivityMonitor_ActiveTmuxSessionsPreventSuspension(t *testing.T) {
 	// Create test system
 	logWriter := &testLogger{}
 	sys := createTestSystem(t, logWriter)
-	monitor := NewActivityMonitor(ctx, sys, 1*time.Second, tmuxManager)
+	monitor := NewActivityMonitor(ctx, sys, 1*time.Second)
 
 	os.Setenv("SPRITE_PREVENT_SUSPEND", "true")
 	defer os.Unsetenv("SPRITE_PREVENT_SUSPEND")
@@ -286,7 +285,7 @@ func TestActivityMonitor_ConcurrentActivities(t *testing.T) {
 	ctx = tap.WithLogger(ctx, logger)
 
 	sys := createTestSystem(t, logWriter)
-	monitor := NewActivityMonitor(ctx, sys, 1*time.Second, nil)
+	monitor := NewActivityMonitor(ctx, sys, 1*time.Second)
 
 	os.Setenv("SPRITE_PREVENT_SUSPEND", "true")
 	defer os.Unsetenv("SPRITE_PREVENT_SUSPEND")
@@ -353,7 +352,7 @@ func TestActivityMonitor_PreventSuspendEnvVar(t *testing.T) {
 		subCtx := context.Background()
 		subCtx = tap.WithLogger(subCtx, subLogger)
 		sys := createTestSystem(t, logWriter)
-		monitor := NewActivityMonitor(subCtx, sys, 500*time.Millisecond, nil)
+		monitor := NewActivityMonitor(subCtx, sys, 500*time.Millisecond)
 
 		os.Setenv("SPRITE_PREVENT_SUSPEND", "true")
 		defer os.Unsetenv("SPRITE_PREVENT_SUSPEND")
@@ -381,7 +380,7 @@ func TestActivityMonitor_PreventSuspendEnvVar(t *testing.T) {
 		subCtx := context.Background()
 		subCtx = tap.WithLogger(subCtx, subLogger)
 		sys := createTestSystem(t, logWriter)
-		monitor := NewActivityMonitor(subCtx, sys, 500*time.Millisecond, nil)
+		monitor := NewActivityMonitor(subCtx, sys, 500*time.Millisecond)
 
 		os.Setenv("SPRITE_PREVENT_SUSPEND", "false")
 		defer os.Unsetenv("SPRITE_PREVENT_SUSPEND")
@@ -412,7 +411,7 @@ func TestActivityMonitor_ResumeDetection(t *testing.T) {
 	ctx = tap.WithLogger(ctx, logger)
 
 	sys := createTestSystem(t, logWriter)
-	monitor := NewActivityMonitor(ctx, sys, 500*time.Millisecond, nil)
+	monitor := NewActivityMonitor(ctx, sys, 500*time.Millisecond)
 
 	os.Setenv("SPRITE_PREVENT_SUSPEND", "true")
 	defer os.Unsetenv("SPRITE_PREVENT_SUSPEND")
@@ -424,19 +423,14 @@ func TestActivityMonitor_ResumeDetection(t *testing.T) {
 	// Wait for first suspension
 	time.Sleep(1 * time.Second)
 
-	// Verify suspended state
-	if atomic.LoadInt32(&monitor.isSuspended) != 1 {
-		t.Error("Monitor should be in suspended state")
+	// Verify suspension happened
+	if getSuspendCount() == 0 {
+		t.Error("Monitor should have triggered suspension")
 	}
 
-	// Simulate resume by starting activity
-	monitor.ActivityStarted("resume-test")
-
-	// Check that suspended state is cleared
-	time.Sleep(100 * time.Millisecond)
-	if atomic.LoadInt32(&monitor.isSuspended) != 0 {
-		t.Error("Monitor should not be in suspended state after activity")
-	}
+	// Note: We no longer track suspended state internally since we rely on
+	// resume detection via API time divergence. The resume will be detected
+	// when the API returns a time that diverges from local time.
 
 	monitor.ActivityEnded("resume-test")
 }
@@ -453,7 +447,7 @@ func TestActivityMonitor_RapidActivityToggle(t *testing.T) {
 	ctx = tap.WithLogger(ctx, logger)
 
 	sys := createTestSystem(t, logWriter)
-	monitor := NewActivityMonitor(ctx, sys, 1*time.Second, nil)
+	monitor := NewActivityMonitor(ctx, sys, 1*time.Second)
 
 	os.Setenv("SPRITE_PREVENT_SUSPEND", "true")
 	defer os.Unsetenv("SPRITE_PREVENT_SUSPEND")
@@ -496,7 +490,7 @@ func TestActivityMonitor_ActivityDuringSuspension(t *testing.T) {
 	ctx = tap.WithLogger(ctx, logger)
 
 	sys := createTestSystem(t, logWriter)
-	monitor := NewActivityMonitor(ctx, sys, 500*time.Millisecond, nil)
+	monitor := NewActivityMonitor(ctx, sys, 500*time.Millisecond)
 
 	os.Setenv("SPRITE_PREVENT_SUSPEND", "true")
 	defer os.Unsetenv("SPRITE_PREVENT_SUSPEND")
@@ -515,11 +509,9 @@ func TestActivityMonitor_ActivityDuringSuspension(t *testing.T) {
 	// Start activity while suspended
 	monitor.ActivityStarted("during-suspend")
 
-	// Should handle resume
+	// Activity during suspension is handled normally now
+	// Resume detection happens separately via API time divergence
 	time.Sleep(100 * time.Millisecond)
-	if atomic.LoadInt32(&monitor.isSuspended) != 0 {
-		t.Error("Should have resumed from suspended state")
-	}
 
 	monitor.ActivityEnded("during-suspend")
 }
@@ -536,7 +528,7 @@ func TestActivityMonitor_ChannelFull(t *testing.T) {
 	ctx = tap.WithLogger(ctx, logger)
 
 	sys := createTestSystem(t, logWriter)
-	monitor := NewActivityMonitor(ctx, sys, 10*time.Second, nil) // Long timeout
+	monitor := NewActivityMonitor(ctx, sys, 10*time.Second) // Long timeout
 
 	// Don't start the monitor to let channel fill up
 
@@ -570,7 +562,7 @@ func TestActivityMonitor_RealTmuxIntegration(t *testing.T) {
 	// Create mock system
 	logWriter := &testLogger{}
 	sys := createTestSystem(t, logWriter)
-	monitor := NewActivityMonitor(ctx, sys, 2*time.Second, tmuxManager)
+	monitor := NewActivityMonitor(ctx, sys, 2*time.Second)
 
 	os.Setenv("SPRITE_PREVENT_SUSPEND", "true")
 	defer os.Unsetenv("SPRITE_PREVENT_SUSPEND")

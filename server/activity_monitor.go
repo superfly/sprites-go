@@ -11,23 +11,20 @@ import (
 	"time"
 
 	"github.com/superfly/sprite-env/pkg/tap"
-	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
 // Context key for storing activity monitor
 type activityMonitorKey struct{}
 
 type ActivityMonitor struct {
-	logger      *slog.Logger
-	system      *System
-	idleAfter   time.Duration
-	admin       *AdminChannel
-	tmuxManager *terminal.TMUXManager
+	logger    *slog.Logger
+	system    *System
+	idleAfter time.Duration
+	admin     *AdminChannel
 
 	// Activity tracking
 	activeCount  int64 // atomic counter for active activities
 	lastActivity time.Time
-	isSuspended  int32     // atomic: 0 = not suspended, 1 = suspended
 	suspendedAt  time.Time // timestamp when suspend occurred
 
 	// Internal channels
@@ -40,12 +37,11 @@ type activityEvent struct {
 	source  string // "http" or "exec" for debugging
 }
 
-func NewActivityMonitor(ctx context.Context, sys *System, idleAfter time.Duration, tmuxManager *terminal.TMUXManager) *ActivityMonitor {
+func NewActivityMonitor(ctx context.Context, sys *System, idleAfter time.Duration) *ActivityMonitor {
 	return &ActivityMonitor{
 		logger:       tap.Logger(ctx),
 		system:       sys,
 		idleAfter:    idleAfter,
-		tmuxManager:  tmuxManager,
 		activityCh:   make(chan activityEvent, 128),
 		stopCh:       make(chan struct{}),
 		lastActivity: time.Now(),
@@ -102,6 +98,86 @@ func (m *ActivityMonitor) EnrichContext(ctx context.Context) context.Context {
 // activityTrackerKey matches the one used in handlers package
 type activityTrackerKey struct{}
 
+// makeFlapsRequest is a helper function to make requests to the Flaps API
+func (m *ActivityMonitor) makeFlapsRequest(ctx context.Context, method, path string) (*http.Response, error) {
+	d := &net.Dialer{Timeout: 2 * time.Second}
+	tr := &http.Transport{
+		DialContext: func(c context.Context, network, addr string) (net.Conn, error) {
+			return d.DialContext(c, "unix", "/.fly/api")
+		},
+	}
+	client := &http.Client{Transport: tr, Timeout: 5 * time.Second}
+
+	app := os.Getenv("FLY_APP_NAME")
+	mid := os.Getenv("FLY_MACHINE_ID")
+	url := fmt.Sprintf("http://flaps/v1/apps/%s%s", app, fmt.Sprintf(path, mid))
+
+	req, err := http.NewRequestWithContext(ctx, method, url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return client.Do(req)
+}
+
+// checkApiTime checks for time divergence between local and API server time
+// Returns true if resume is detected, false otherwise
+func (m *ActivityMonitor) checkApiTime(loopCount int) bool {
+	// Get current system time before API call
+	apiCheckTime := time.Now()
+
+	// Make metadata request
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	resp, err := m.makeFlapsRequest(ctx, http.MethodGet, "/machines/%s/metadata")
+	cancel()
+
+	if err != nil {
+		m.logger.Debug("Failed to get metadata", "error", err, "loop", loopCount)
+		return false
+	}
+
+	if resp == nil {
+		return false
+	}
+
+	// Parse Date header
+	dateStr := resp.Header.Get("Date")
+	resp.Body.Close()
+
+	if dateStr == "" {
+		m.logger.Debug("No Date header in metadata response", "loop", loopCount)
+		return false
+	}
+
+	serverTime, err := http.ParseTime(dateStr)
+	if err != nil {
+		m.logger.Debug("Failed to parse Date header", "error", err, "date", dateStr, "loop", loopCount)
+		return false
+	}
+
+	// Compare server time with local time
+	timeDiff := serverTime.Sub(apiCheckTime).Abs()
+	timeDiffMs := timeDiff.Milliseconds()
+
+	m.logger.Debug("API time check",
+		"loop", loopCount,
+		"local_time", apiCheckTime.Format(time.RFC3339),
+		"server_time", serverTime.Format(time.RFC3339),
+		"time_diff_ms", timeDiffMs)
+
+	// If server and local time diverge by more than 2 seconds, resume detected
+	if timeDiff > 2*time.Second {
+		m.logger.Info("Resume detected via API time divergence",
+			"loops", loopCount,
+			"local_time", apiCheckTime.Format(time.RFC3339),
+			"server_time", serverTime.Format(time.RFC3339),
+			"divergence_ms", timeDiffMs)
+		return true
+	}
+
+	return false
+}
+
 func (m *ActivityMonitor) run(ctx context.Context) {
 	var idleTimer *time.Timer
 	var idleTimerCh <-chan time.Time
@@ -128,18 +204,6 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 			if ev.isStart {
 				// Activity started
 				m.logger.Debug("Activity started", "source", ev.source, "active_count", currentCount)
-
-				// Handle resume if suspended - use atomic CAS to ensure only one goroutine sends resume
-				if atomic.CompareAndSwapInt32(&m.isSuspended, 1, 0) {
-					suspendedDuration := time.Since(m.suspendedAt)
-					m.logger.Info("Resume detected", "source", ev.source, "duration_ms", suspendedDuration.Milliseconds())
-					if m.admin != nil {
-						m.admin.SendActivityEvent("resume", map[string]interface{}{
-							"suspended_duration_ms": suspendedDuration.Milliseconds(),
-							"source":                ev.source,
-						})
-					}
-				}
 
 				// Cancel idle timer if running
 				if idleTimer != nil {
@@ -172,39 +236,10 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 			m.logger.Debug("Idle timer expired", "active_count", currentCount)
 
 			if currentCount == 0 {
-				// Check if there are active tmux sessions
-				if m.tmuxManager != nil && m.tmuxManager.HasActiveSessions() {
-					// Get session information
-					sessions := m.tmuxManager.GetActiveSessionsInfo()
-
-					// Calculate total data rate
-					var totalBytesPerSecond float64
-					for _, session := range sessions {
-						totalBytesPerSecond += session.BytesPerSecond
-					}
-
-					m.logger.Info("Tmux activity preventing suspend",
-						"active_sessions", len(sessions),
-						"total_bytes_per_second", fmt.Sprintf("%.2f", totalBytesPerSecond))
-
-					// Log details of each active session
-					for _, session := range sessions {
-						activityAge := time.Since(session.LastActivity)
-						m.logger.Info("  Active tmux session",
-							"id", session.SessionID,
-							"name", session.Name,
-							"idle_seconds", int(activityAge.Seconds()),
-							"bytes_per_second", fmt.Sprintf("%.2f", session.BytesPerSecond))
-					}
-
-					// Reset the timer for another 30 seconds
-					idleTimer = time.NewTimer(30 * time.Second)
-					idleTimerCh = idleTimer.C
-				} else {
-					m.suspend(time.Since(m.lastActivity))
-					idleTimer = nil
-					idleTimerCh = nil
-				}
+				// No active activities, suspend
+				m.suspend(time.Since(m.lastActivity))
+				idleTimer = nil
+				idleTimerCh = nil
 			} else {
 				idleTimer = nil
 				idleTimerCh = nil
@@ -217,8 +252,7 @@ func (m *ActivityMonitor) suspend(inactive time.Duration) {
 	// Check if suspend should be prevented
 	preventSuspend := os.Getenv("SPRITE_PREVENT_SUSPEND") == "true"
 
-	// Set suspended state atomically and store the timestamp
-	atomic.StoreInt32(&m.isSuspended, 1)
+	// Store the timestamp when suspension started
 	m.suspendedAt = time.Now()
 
 	if m.admin != nil {
@@ -236,39 +270,144 @@ func (m *ActivityMonitor) suspend(inactive time.Duration) {
 		m.logger.Info("ActivityMonitor: suspending", "idle_s", inactive.Seconds())
 	}
 
-	// Sync filesystem
+	// Sync filesystem and get unfreeze function
 	start := time.Now()
-	if err := m.system.SyncOverlay(ctx); err != nil {
+	unfreezeFunc, err := m.system.SyncOverlay(ctx)
+	if err != nil {
 		m.logger.Debug("overlay sync error", "error", err)
 	}
 	m.logger.Info("Suspending, fs sync completed", "duration_s", time.Since(start).Seconds())
 
-	// Skip the actual suspend API call if prevented
+	// Defer unfreeze to run after suspend/resume detection
+	defer func() {
+		if err := unfreezeFunc(); err != nil {
+			m.logger.Error("Failed to unfreeze filesystem after resume", "error", err)
+		} else {
+			m.logger.Info("Filesystem unfrozen after resume")
+		}
+	}()
+
+	// Skip the actual suspend API call and wait loop if prevented
 	if preventSuspend {
 		m.logger.Info("Suspend prevented by SPRITE_PREVENT_SUSPEND=true, continuing to run")
 		return
 	}
 
+	// Capture system wall time BEFORE the suspend API call
+	initialSystemTime := time.Now()
+	m.logger.Info("Starting suspend process", "initial_time", initialSystemTime.Format(time.RFC3339Nano))
+
 	// Call flaps suspend API
-	app := os.Getenv("FLY_APP_NAME")
-	mid := os.Getenv("FLY_MACHINE_ID")
-	url := fmt.Sprintf("http://flaps/v1/apps/%s/machines/%s/suspend", app, mid)
+	m.logger.Info("Calling Fly suspend API")
 
-	d := &net.Dialer{}
-	tr := &http.Transport{
-		DialContext: func(c context.Context, network, addr string) (net.Conn, error) {
-			return d.DialContext(c, "unix", "/.fly/api")
-		},
-	}
-	client := &http.Client{Transport: tr}
+	apiStart := time.Now()
+	resp, err := m.makeFlapsRequest(ctx, http.MethodPost, "/machines/%s/suspend")
+	apiDuration := time.Since(apiStart)
 
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
-	resp, err := client.Do(req)
 	if err != nil {
-		m.logger.Debug("flaps suspend call error", "error", err)
-		return
+		m.logger.Error("Failed to call suspend API", "error", err, "duration", apiDuration)
+	} else if resp != nil {
+		m.logger.Info("Suspend API response",
+			"status", resp.StatusCode,
+			"duration", apiDuration,
+			"status_text", resp.Status)
+		if resp.Body != nil {
+			resp.Body.Close()
+		}
 	}
-	if resp != nil && resp.Body != nil {
-		resp.Body.Close()
+
+	// Start loop after suspend API call for resume detection
+	const sleepInterval = 500 * time.Millisecond
+	const maxLoopCount = 30
+	loopCount := 0
+	var actualElapsedHistory []int64 // Track actual elapsed time per loop
+
+	for {
+		loopCount++
+		time.Sleep(sleepInterval)
+
+		// Check for time divergence
+		currentSystemTime := time.Now()
+
+		// Note: time.Sub() uses monotonic time which doesn't include suspended time
+		// So actualElapsed will only show time the process was actually running
+		actualElapsed := currentSystemTime.Sub(initialSystemTime)
+
+		// Track actual elapsed time (monotonic)
+		actualElapsedHistory = append(actualElapsedHistory, actualElapsed.Milliseconds())
+
+		// Additional debug: calculate wall clock difference in seconds
+		wallClockDiff := currentSystemTime.Unix() - initialSystemTime.Unix()
+
+		// Calculate expected loops based on wall clock time (not monotonic time)
+		// This properly accounts for time spent suspended
+		wallClockElapsed := time.Duration(wallClockDiff) * time.Second
+		expectedLoops := int(wallClockElapsed / sleepInterval)
+		loopDivergence := expectedLoops - loopCount
+
+		// Only log debug on loops 2, 22, 42, etc
+		if loopCount == 2 || (loopCount > 2 && (loopCount-2)%20 == 0) {
+			m.logger.Debug("Resume detection loop",
+				"loop", loopCount,
+				"initial_time", initialSystemTime.Format(time.RFC3339Nano),
+				"current_time", currentSystemTime.Format(time.RFC3339Nano),
+				"actual_elapsed_ms", actualElapsed.Milliseconds(),
+				"wall_clock_diff_s", wallClockDiff,
+				"expected_loops", expectedLoops,
+				"loop_divergence", loopDivergence,
+				"elapsed_history", actualElapsedHistory)
+		}
+
+		// If we have fewer loops than expected, resume detected
+		if loopDivergence >= 1 {
+			m.logger.Info("Resume detected via loop divergence",
+				"loops", loopCount,
+				"initial_time", initialSystemTime.Format(time.RFC3339Nano),
+				"current_time", currentSystemTime.Format(time.RFC3339Nano),
+				"actual_elapsed_ms", actualElapsed.Milliseconds(),
+				"wall_clock_diff_s", wallClockDiff,
+				"expected_loops", expectedLoops,
+				"loop_divergence", loopDivergence,
+				"elapsed_history", actualElapsedHistory)
+
+			// Send resume event to admin channel
+			// Use wall clock time to get actual suspended duration
+			suspendedDurationSec := currentSystemTime.Unix() - m.suspendedAt.Unix()
+			if m.admin != nil {
+				m.admin.SendActivityEvent("resume", map[string]interface{}{
+					"suspended_duration_s": suspendedDurationSec,
+					"source":               "wall_time",
+				})
+			}
+			break
+		}
+
+		// On every other iteration, check API time
+		// Commented out for now
+		// if loopCount%2 == 0 {
+		// 	if m.checkApiTime(loopCount) {
+		// 		// Send resume event to admin channel
+		// 		suspendedDuration := time.Since(m.suspendedAt)
+		// 		if m.admin != nil {
+		// 			m.admin.SendActivityEvent("resume", map[string]interface{}{
+		// 				"suspended_duration_ms": suspendedDuration.Milliseconds(),
+		// 				"source":                "fly_api_time",
+		// 			})
+		// 		}
+		// 		break
+		// 	}
+		// }
+
+		// Safety timeout
+		if loopCount >= maxLoopCount {
+			m.logger.Warn("Resume detection timeout reached",
+				"loops", loopCount,
+				"monotonic_elapsed", actualElapsed,
+				"wall_clock_diff_s", wallClockDiff,
+				"elapsed_history", actualElapsedHistory)
+			break
+		}
 	}
+
+	m.logger.Info("Resume detection complete")
 }

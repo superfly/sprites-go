@@ -12,6 +12,11 @@ type channelBinding struct {
 	callback func(payload any)
 }
 
+type pendingPush struct {
+	push     *Push
+	resultCh chan error
+}
+
 // A Channel is a unique connection to the given Topic on the server. You can have many Channels connected over one
 // Socket, each handling messages independently.
 type Channel struct {
@@ -32,6 +37,8 @@ type Channel struct {
 	bindings        map[Ref]*channelBinding
 	rejoinTimer     *callbackTimer
 	socketCallbacks []Ref
+	pendingPushes   chan *pendingPush
+	pushDone        chan struct{}
 }
 
 // NewChannel creates a new Channel attached to the Socket. If there is already a Channel for the given topic, that
@@ -52,9 +59,14 @@ func NewChannel(topic string, params map[string]string, socket *Socket) *Channel
 		refGenerator:    newAtomicRef(),
 		bindings:        make(map[Ref]*channelBinding),
 		socketCallbacks: make([]Ref, 0, 2),
+		pendingPushes:   make(chan *pendingPush, 100), // Buffer up to 100 pending pushes
+		pushDone:        make(chan struct{}),
 	}
 
 	c.rejoinTimer = newCallbackTimer(c.rejoin, c.RejoinAfterFunc)
+
+	// Start goroutine to process pending pushes
+	go c.processPendingPushes()
 
 	c.OnClose(func(payload any) {
 		c.socket.Logger.Printf(LogInfo, "channel", "Channel '%v' closed. joinRef: %v", c.topic, c.JoinRef())
@@ -200,6 +212,10 @@ func (c *Channel) Remove() error {
 	for _, ref := range c.socketCallbacks {
 		c.socket.Off(ref)
 	}
+
+	// Stop the pending push processor
+	close(c.pushDone)
+
 	return nil
 }
 
@@ -214,6 +230,22 @@ func (c *Channel) Push(event string, payload any) (*Push, error) {
 	}
 
 	push := NewPush(c, event, payload, c.PushTimeout)
+
+	// If not joined, queue the push
+	if !c.IsJoined() {
+		resultCh := make(chan error, 1)
+		select {
+		case c.pendingPushes <- &pendingPush{push: push, resultCh: resultCh}:
+			// Wait for result from processPendingPushes goroutine
+			err := <-resultCh
+			return push, err
+		default:
+			// Queue is full
+			return nil, fmt.Errorf("pending push queue is full")
+		}
+	}
+
+	// Channel is joined, send immediately
 	err := push.Send()
 	return push, err
 }
@@ -460,4 +492,42 @@ func (c *Channel) IsRemoved() bool {
 	defer c.mu.RUnlock()
 
 	return c.state == ChannelRemoved
+}
+
+// processPendingPushes runs in a goroutine and sends queued pushes when the channel is joined
+func (c *Channel) processPendingPushes() {
+	for {
+		select {
+		case <-c.pushDone:
+			// Channel is being removed, drain any pending pushes with errors
+			for {
+				select {
+				case pending := <-c.pendingPushes:
+					pending.resultCh <- fmt.Errorf("channel removed")
+				default:
+					return
+				}
+			}
+		case pending := <-c.pendingPushes:
+			// Wait until joined or removed
+			for !c.IsJoined() && !c.IsRemoved() {
+				select {
+				case <-c.pushDone:
+					pending.resultCh <- fmt.Errorf("channel removed")
+					return
+				case <-time.After(50 * time.Millisecond):
+					// Check state periodically
+				}
+			}
+
+			if c.IsRemoved() {
+				pending.resultCh <- fmt.Errorf("channel removed")
+				continue
+			}
+
+			// Send the push
+			err := pending.push.Send()
+			pending.resultCh <- err
+		}
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
@@ -196,7 +197,7 @@ func NewApplication(config Config) (*Application, error) {
 		}
 
 		// Start activity monitor and connect to API server
-		activity := NewActivityMonitor(ctx, app.system, 30*time.Second, tmuxManager)
+		activity := NewActivityMonitor(ctx, app.system, 30*time.Second)
 		activity.SetAdminChannel(app.adminChannel)
 		apiServer.SetActivityObserver(func(start bool) {
 			if start {
@@ -297,17 +298,7 @@ func (app *Application) Run() error {
 		}
 	}
 
-	// Boot the system
-	if err := app.system.Boot(app.ctx); err != nil {
-		return fmt.Errorf("failed to boot system: %w", err)
-	}
-
-	// Start resource monitor
-	if app.resourceMonitor != nil {
-		app.resourceMonitor.Start(app.ctx)
-	}
-
-	// Start API server if configured
+	// Start API server if configured - moved before system boot to start listening early
 	if app.apiServer != nil {
 		go func() {
 			if err := app.apiServer.Start(); err != nil {
@@ -316,6 +307,26 @@ func (app *Application) Run() error {
 				app.cancel()
 			}
 		}()
+	}
+
+	// Wait for boot signal if configured - moved after HTTP server starts
+	if os.Getenv("WAIT_FOR_BOOT") == "true" {
+		app.logger.Info("WAIT_FOR_BOOT enabled, HTTP server is listening, waiting for SIGUSR1...")
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGUSR1)
+		<-sigCh
+		signal.Stop(sigCh) // Stop receiving on this channel
+		app.logger.Info("Received SIGUSR1, continuing boot...")
+	}
+
+	// Boot the system
+	if err := app.system.Boot(app.ctx); err != nil {
+		return fmt.Errorf("failed to boot system: %w", err)
+	}
+
+	// Start resource monitor
+	if app.resourceMonitor != nil {
+		app.resourceMonitor.Start(app.ctx)
 	}
 
 	// Set up signal handling
@@ -339,8 +350,16 @@ func (app *Application) Run() error {
 
 		case err := <-processDoneCh:
 			// Process exited
+			exitCode := 0
 			if err != nil {
 				app.logger.Error("Process exited with error", "error", err)
+				// Extract exit code from error if available
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+						exitCode = status.ExitStatus()
+						app.logger.Info("Process exit code", "exitCode", exitCode)
+					}
+				}
 			} else {
 				app.logger.Info("Process exited normally")
 			}
@@ -358,8 +377,8 @@ func (app *Application) Run() error {
 						}()
 					}
 				} else {
-					app.logger.Info("Process exited, stopping application...")
-					return app.shutdown(0)
+					app.logger.Info("Process exited, stopping application...", "exitCode", exitCode)
+					return app.shutdown(exitCode)
 				}
 			} else {
 				// If restoring, only restart monitoring if a process is running
@@ -660,16 +679,6 @@ func fileExists(path string) bool {
 }
 
 func main() {
-	// Wait for boot signal if configured
-	if os.Getenv("WAIT_FOR_BOOT") == "true" {
-		fmt.Println("WAIT_FOR_BOOT enabled, waiting for SIGUSR1...")
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGUSR1)
-		<-sigCh
-		signal.Stop(sigCh) // Stop receiving on this channel
-		fmt.Println("Received SIGUSR1, continuing boot...")
-	}
-
 	// Create crash log file for debugging
 	crashLogFile, err := os.OpenFile("/tmp/sprite-env-crash.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {

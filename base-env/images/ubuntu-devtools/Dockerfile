@@ -7,7 +7,7 @@ ARG USER UID
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential sudo \
+        build-essential clang sudo \
         curl git ca-certificates gnupg dirmngr \
         autoconf automake libtool pkg-config xz-utils \
         libssl-dev zlib1g-dev libreadline-dev libsqlite3-dev \
@@ -25,21 +25,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # --- global asdf ---
 ENV LANG=en_US.UTF-8 \
     ASDF_DIR=/opt/asdf \
-    ASDF_DATA_DIR=/opt/asdf \
-    PATH="/opt/asdf/bin:/opt/asdf/shims:${PATH}"
+    ASDF_DATA_DIR=/opt/asdf
+RUN env
 
 RUN git clone https://github.com/asdf-vm/asdf.git --branch v0.14.0 --depth 1 "$ASDF_DIR" \
  && { \
       echo '# /etc/profile.d/asdf.sh'; \
       echo 'export ASDF_DIR=/opt/asdf'; \
       echo 'export ASDF_DATA_DIR=/opt/asdf'; \
-      echo 'export ASDF_DEFAULT_TOOL_VERSIONS_FILENAME=/etc/asdf-default-tool-versions'; \
-      echo 'export PATH="$ASDF_DATA_DIR/shims:$ASDF_DIR/bin:$PATH"'; \
+      echo 'export ASDF_DEFAULT_TOOL_VERSIONS_FILENAME=/opt/asdf/default-tool-versions'; \
+      #echo 'export PATH="$ASDF_DATA_DIR/shims:$ASDF_DIR/bin:$PATH"'; \
       echo '. "$ASDF_DIR/asdf.sh"'; \
       echo '. "$ASDF_DIR/completions/asdf.bash"'; \
     } > /etc/profile.d/asdf.sh \
  && echo ". /etc/profile.d/asdf.sh" >> /etc/bash.bashrc \
  && echo ". /etc/profile.d/sprite.sh" >> /etc/bash.bashrc
+
+ RUN printenv && cat  /etc/profile.d/asdf.sh
 
  ## ^^^ those are annoying but they'll reliably set env vars
 
@@ -57,16 +59,23 @@ RUN useradd -ms /bin/bash -u $UID $USER \
 # (built separately)
 ############################
 FROM base AS languages-split
+ENV PATH="/opt/asdf/bin:/opt/asdf/shims:${PATH}"
+RUN printenv
 
 # Install each language in separate layers for better errors
+COPY languages/nodejs.sh /tmp/
+RUN chmod +x /tmp/nodejs.sh && /tmp/nodejs.sh && rm /tmp/nodejs.sh
+
+# install some agents
+RUN npm install -g @anthropic-ai/claude-code && \
+    npm install -g @google/gemini-cli
+
+
 COPY languages/erlang.sh /tmp/
 RUN chmod +x /tmp/erlang.sh && /tmp/erlang.sh && rm /tmp/erlang.sh
 
 COPY languages/elixir.sh /tmp/
 RUN chmod +x /tmp/elixir.sh && /tmp/elixir.sh && rm /tmp/elixir.sh
-
-COPY languages/nodejs.sh /tmp/
-RUN chmod +x /tmp/nodejs.sh && /tmp/nodejs.sh && rm /tmp/nodejs.sh
 
 COPY languages/golang.sh /tmp/
 RUN chmod +x /tmp/golang.sh && /tmp/golang.sh && rm /tmp/golang.sh
@@ -89,9 +98,7 @@ RUN chmod +x /tmp/java.sh && /tmp/java.sh && rm /tmp/java.sh
 COPY languages/python.sh /tmp/
 RUN chmod +x /tmp/python.sh && /tmp/python.sh && rm /tmp/python.sh
 
-# install some agents
-RUN npm install -g @anthropic-ai/claude-code && \
-    npm install -g @google/gemini-cli
+COPY /root/.tool-versions /opt/asdf/default-tool-versions
     
 
 ############################
@@ -101,9 +108,6 @@ FROM scratch AS languages
 ARG UID
 
 COPY --chown=$UID:$UID --from=languages-split /opt/asdf /opt/asdf
-
-# make these tool versions the default
-COPY --from=languages-split /root/.tool-versions /etc/asdf-default-tool-versions
 
 
 ####################################################

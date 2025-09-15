@@ -38,7 +38,8 @@ type SystemManager interface {
 	GetCheckpoint(ctx context.Context, checkpointID string) (*juicefs.CheckpointInfo, error)
 
 	// Overlay sync for suspend
-	SyncOverlay(ctx context.Context) error
+	// Returns a function that must be called to unfreeze the filesystem
+	SyncOverlay(ctx context.Context) (func() error, error)
 
 	// Reaper integration
 	SubscribeToReapEvents() <-chan int

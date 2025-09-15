@@ -306,4 +306,6 @@ func (m *simpleSystemManager) Wait() error {
 	return nil
 }
 
-func (m *simpleSystemManager) SyncOverlay(ctx context.Context) error { return nil }
+func (m *simpleSystemManager) SyncOverlay(ctx context.Context) (func() error, error) {
+	return func() error { return nil }, nil
+}

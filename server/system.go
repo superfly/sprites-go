@@ -346,9 +346,10 @@ func (s *System) Shutdown(ctx context.Context) error {
 }
 
 // SyncOverlay flushes overlay writes using JuiceFS overlay manager
-func (s *System) SyncOverlay(ctx context.Context) error {
+// Returns a function that must be called to unfreeze the filesystem.
+func (s *System) SyncOverlay(ctx context.Context) (func() error, error) {
 	if s.juicefs == nil {
-		return nil
+		return func() error { return nil }, nil
 	}
 	return s.juicefs.SyncOverlay(ctx)
 }

@@ -19,9 +19,17 @@ func (h *Handlers) HandleSuspend(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	start := time.Now()
-	if err := h.system.SyncOverlay(ctx); err != nil {
+	unfreezeFunc, err := h.system.SyncOverlay(ctx)
+	if err != nil {
 		h.logger.Debug("overlay sync error", "error", err)
 	}
+	// Defer unfreeze - this handler doesn't wait for resume, so unfreeze immediately
+	defer func() {
+		if err := unfreezeFunc(); err != nil {
+			h.logger.Error("Failed to unfreeze filesystem", "error", err)
+		}
+	}()
+
 	h.logger.Info(
 		fmt.Sprintf(
 			"Suspending, fs sync took %.2fs",

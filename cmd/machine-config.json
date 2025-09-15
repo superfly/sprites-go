@@ -48,7 +48,7 @@
   "image": "<image_ref>",
   "restart": {
     "policy": "on-failure",
-    "max_retries": 3
+    "max_retries": 10
   },
   "stop_config": {
     "timeout": "5m0s",

@@ -113,6 +113,38 @@ func NewServer(config Config, system handlers.SystemManager, ctx context.Context
 		})
 	}
 
+	// Add global JuiceFS wait middleware
+	{
+		next := handler
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Wait for JuiceFS to be ready before processing any request
+			ctx, cancel := context.WithTimeout(r.Context(), s.config.MaxWaitTime)
+			defer cancel()
+
+			startTime := time.Now()
+			err := s.system.WaitForJuiceFS(ctx)
+			waitTime := time.Since(startTime)
+
+			if err != nil {
+				s.logger.Warn("Request timeout waiting for JuiceFS to be ready",
+					"requestPath", r.URL.Path,
+					"waitTime", waitTime,
+					"error", err)
+				http.Error(w, "Storage not ready", http.StatusServiceUnavailable)
+				return
+			}
+
+			// Log if we waited more than 5ms
+			if waitTime > 5*time.Millisecond {
+				s.logger.Info("JuiceFS became ready, processing request",
+					"requestPath", r.URL.Path,
+					"waitTime", waitTime)
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+
 	s.server = &http.Server{
 		Addr: config.ListenAddr,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -150,7 +150,7 @@ func (ac *AdminChannel) SendActivityEvent(eventType string, payload map[string]i
 		payload = make(map[string]interface{})
 	}
 
-	// Send directly - Phoenix library handles queueing
+	// Send directly - Phoenix library handles queueing when not joined
 	ac.channel.Push(eventType, payload)
 }
 

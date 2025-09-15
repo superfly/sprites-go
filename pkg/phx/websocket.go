@@ -3,12 +3,13 @@ package phx
 import (
 	"errors"
 	"fmt"
-	"github.com/gorilla/websocket"
 	"net/http"
 	"net/url"
 	"path"
 	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // Websocket is a Transport that connects to the server via Websockets. It is based on
@@ -294,10 +295,14 @@ func (w *Websocket) connectionWriter() {
 		case <-w.done:
 			return
 		case data := <-w.send:
-			// If there is a message to send, but we're not connected, then wait until we are.
-			if !w.connIsReady() {
-				time.Sleep(busyWait)
-				continue
+			// Block until we're connected or shutting down
+			for !w.connIsReady() {
+				select {
+				case <-w.done:
+					return
+				default:
+					time.Sleep(busyWait)
+				}
 			}
 
 			// Send the message
