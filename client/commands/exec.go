@@ -644,6 +644,15 @@ func executeWebSocket(wsURL *url.URL, token string, cmd []string, workingDir str
 		}
 	}
 
+	// Set up error message printing (before terminal restoration defer)
+	var startErr error
+	defer func() {
+		if startErr != nil {
+			slog.Default().Error("Failed to start WebSocket command", "error", startErr)
+			fmt.Fprintf(os.Stderr, "Error: %v\n", startErr)
+		}
+	}()
+
 	// Ensure terminal is restored on function exit
 	defer restoreTerminal()
 
@@ -783,10 +792,7 @@ func executeWebSocket(wsURL *url.URL, token string, cmd []string, workingDir str
 
 	// Start the command
 	if err := wsCmd.Start(); err != nil {
-		logger.Error("Failed to start WebSocket command", "error", err)
-		if !shouldSuppressOutput {
-			fmt.Fprintf(os.Stderr, "Error: Failed to start command: %v\n", err)
-		}
+		startErr = err
 		return 1
 	}
 
