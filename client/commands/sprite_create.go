@@ -179,7 +179,7 @@ func CreateSprite(cfg *config.Manager, org *config.Organization, spriteName stri
 		"request_body", string(jsonData))
 
 	// Make the request
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: 120 * time.Second}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		slog.Debug("Sprite create request failed", "error", err)
