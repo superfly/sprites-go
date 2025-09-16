@@ -22,90 +22,74 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean
 # we are keeping indexes for future apts
 
-# --- global asdf ---
+# --- setup environment ---
 ENV LANG=en_US.UTF-8 \
-    ASDF_DIR=/opt/asdf \
-    ASDF_DATA_DIR=/opt/asdf
-RUN env
-
-RUN git clone https://github.com/asdf-vm/asdf.git --branch v0.14.0 --depth 1 "$ASDF_DIR" \
- && { \
-      echo '# /etc/profile.d/asdf.sh'; \
-      echo 'export ASDF_DIR=/opt/asdf'; \
-      echo 'export ASDF_DATA_DIR=/opt/asdf'; \
-      echo 'export ASDF_DEFAULT_TOOL_VERSIONS_FILENAME=/opt/asdf/default-tool-versions'; \
-      #echo 'export PATH="$ASDF_DATA_DIR/shims:$ASDF_DIR/bin:$PATH"'; \
-      echo '. "$ASDF_DIR/asdf.sh"'; \
-      echo '. "$ASDF_DIR/completions/asdf.bash"'; \
-    } > /etc/profile.d/asdf.sh \
- && echo ". /etc/profile.d/asdf.sh" >> /etc/bash.bashrc \
- && echo ". /etc/profile.d/sprite.sh" >> /etc/bash.bashrc
+    PATH="/.sprite/bin:${PATH}"
+# Setup bash profile
+RUN echo ". /.sprite/etc/profile.d/sprite.sh" >> /etc/bash.bashrc
 
 
 # Copy the sudoers file and user skeleton, then fix ownership
 RUN useradd -ms /bin/bash -u $UID $USER \
 && echo "$USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$USER \
 && chmod 0440 /etc/sudoers.d/$USER \
-&& usermod -aG sudo,users $USER \
-&& chown -R $USER:$USER /opt/asdf
-
+&& usermod -aG sudo,users $USER
 
 ############################
-# asdf Languages (one per layer)
+# Languages (one per layer)
 # (built separately)
 ############################
 FROM base AS languages-split
-ENV PATH="/opt/asdf/bin:/opt/asdf/shims:${PATH}"
-RUN printenv
+
+ARG USER UID
 
 # Install each language in separate layers for better errors
 COPY languages/nodejs.sh /tmp/
-RUN chmod +x /tmp/nodejs.sh && /tmp/nodejs.sh && rm /tmp/nodejs.sh
+RUN chmod +x /tmp/nodejs.sh && /tmp/nodejs.sh /.sprite && rm /tmp/nodejs.sh
 
 # install some agents
-RUN npm install -g @anthropic-ai/claude-code && \
-    npm install -g @google/gemini-cli
+RUN /.sprite/bin/npm install -g @anthropic-ai/claude-code && \
+    /.sprite/bin/npm install -g @google/gemini-cli
 
 
 COPY languages/erlang.sh /tmp/
-RUN chmod +x /tmp/erlang.sh && /tmp/erlang.sh && rm /tmp/erlang.sh
+RUN chmod +x /tmp/erlang.sh && /tmp/erlang.sh /.sprite && rm /tmp/erlang.sh
 
 COPY languages/elixir.sh /tmp/
-RUN chmod +x /tmp/elixir.sh && /tmp/elixir.sh && rm /tmp/elixir.sh
+RUN chmod +x /tmp/elixir.sh && /tmp/elixir.sh /.sprite && rm /tmp/elixir.sh
 
 COPY languages/golang.sh /tmp/
-RUN chmod +x /tmp/golang.sh && /tmp/golang.sh && rm /tmp/golang.sh
+RUN chmod +x /tmp/golang.sh && /tmp/golang.sh /.sprite && rm /tmp/golang.sh
 
 COPY languages/ruby.sh /tmp/
-RUN chmod +x /tmp/ruby.sh && /tmp/ruby.sh && rm /tmp/ruby.sh
+RUN chmod +x /tmp/ruby.sh && /tmp/ruby.sh /.sprite && rm /tmp/ruby.sh
 
 COPY languages/rust.sh /tmp/
-RUN chmod +x /tmp/rust.sh && /tmp/rust.sh && rm /tmp/rust.sh
+RUN chmod +x /tmp/rust.sh && /tmp/rust.sh /.sprite && rm /tmp/rust.sh
 
 COPY languages/bun.sh /tmp/
-RUN chmod +x /tmp/bun.sh && /tmp/bun.sh && rm /tmp/bun.sh
+RUN chmod +x /tmp/bun.sh && /tmp/bun.sh /.sprite && rm /tmp/bun.sh
 
 COPY languages/deno.sh /tmp/
-RUN chmod +x /tmp/deno.sh && /tmp/deno.sh && rm /tmp/deno.sh
+RUN chmod +x /tmp/deno.sh && /tmp/deno.sh /.sprite && rm /tmp/deno.sh
 
 COPY languages/java.sh /tmp/
-RUN chmod +x /tmp/java.sh && /tmp/java.sh && rm /tmp/java.sh
+RUN chmod +x /tmp/java.sh && /tmp/java.sh /.sprite && rm /tmp/java.sh
 
 COPY languages/python.sh /tmp/
-RUN chmod +x /tmp/python.sh && /tmp/python.sh && rm /tmp/python.sh
+RUN chmod +x /tmp/python.sh && /tmp/python.sh /.sprite && rm /tmp/python.sh
 
-RUN ls -la /root/
-
-COPY /root/.tool-versions /opt/asdf/default-tool-versions
-    
+USER $USER
 
 ############################
-# asdf Languages ONLY
+# Languages ONLY
 ############################
 FROM scratch AS languages
 ARG UID
 
-COPY --chown=$UID:$UID --from=languages-split /opt/asdf /opt/asdf
+COPY --chown=$UID:$UID --from=languages-split /.sprite/languages /.sprite/languages
+COPY --chown=$UID:$UID --from=languages-split /.sprite/bin /.sprite/bin
+COPY --chown=$UID:$UID --from=languages-split /.sprite/etc/profile.d /.sprite/etc/profile.d
 
 
 ####################################################
@@ -116,23 +100,22 @@ COPY --chown=$UID:$UID --from=languages-split /opt/asdf /opt/asdf
 FROM base
 ARG USER UID
 
-# Create sprite scripts directory
-RUN mkdir -p /.sprite
+# Create sprite scripts directory and languages directory
+RUN mkdir -p /.sprite/languages /.sprite/bin /.sprite/etc/profile.d
 
 # Copy our stuff
 COPY root/ /
 
+# Make language dependency installer executable
+RUN chmod +x /.sprite/bin/install-language-deps
+
 USER sprite
 
-# --- global asdf ---
-ENV LANG=en_US.UTF-8 \
-ASDF_DIR=/opt/asdf \
-ASDF_DATA_DIR=/opt/asdf \
-PATH="/opt/asdf/bin:/opt/asdf/shims:${PATH}"
+# --- global environment ---
+ENV LANG=en_US.UTF-8
 
 # --- user env ---
-ENV LANG=en_US.UTF-8 \
-    BROWSER="/usr/local/bin/sprite-browser" \
+ENV BROWSER="/usr/local/bin/sprite-browser" \
     HOME="/home/sprite"
 
 WORKDIR /home/sprite

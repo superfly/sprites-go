@@ -78,6 +78,28 @@ func updateMachineImageOnly(config *fly.MachineConfig, newImageRef string) {
 	}
 }
 
+// updateVolumeImages updates the image references for system-base and languages-image volumes
+func updateVolumeImages(config *fly.MachineConfig, ubuntuImageRef, languagesImageRef string) {
+	if config.Volumes == nil {
+		return
+	}
+
+	for i := range config.Volumes {
+		switch config.Volumes[i].Name {
+		case "system-base":
+			if ubuntuImageRef != "" {
+				config.Volumes[i].Image = ubuntuImageRef
+				log.Printf("Updated system-base volume to use image: %s\n", ubuntuImageRef)
+			}
+		case "languages-image":
+			if languagesImageRef != "" {
+				config.Volumes[i].Image = languagesImageRef
+				log.Printf("Updated languages-image volume to use image: %s\n", languagesImageRef)
+			}
+		}
+	}
+}
+
 // updateMachine updates a machine config via direct API call
 func updateMachine(appName, machineID, token string, config *fly.MachineConfig) error {
 	url := fmt.Sprintf("https://api.machines.dev/v1/apps/%s/machines/%s", appName, machineID)
@@ -147,9 +169,11 @@ func main() {
 	var appName string
 	var skipBuild bool
 	var replaceConfig bool
+	var updateBase bool
 	flag.StringVar(&appName, "a", "", "Fly app name")
 	flag.BoolVar(&skipBuild, "skip-build", false, "Skip docker build step and just push the image")
 	flag.BoolVar(&replaceConfig, "replace-config", false, "Replace entire machine config instead of just updating the image")
+	flag.BoolVar(&updateBase, "update-base", false, "Build and push base Ubuntu and languages images")
 	flag.Parse()
 
 	// Check for app name from flag or env var
@@ -190,6 +214,49 @@ func main() {
 		}
 	} else {
 		log.Println("Skipping docker image build.")
+	}
+
+	// Build and push base images if requested
+	var ubuntuImageRef, languagesImageRef string
+	if updateBase {
+		log.Println("Building base Ubuntu image...")
+		ubuntuLabel := fmt.Sprintf("%s-ubuntu", label)
+		ubuntuImageRef = fmt.Sprintf("registry.fly.io/%s:%s", appName, ubuntuLabel)
+
+		// Build and push ubuntu base image
+		ubuntuBuildCmd := exec.Command("fly", "deploy",
+			"-a", appName,
+			"--build-only",
+			"--push",
+			"--image-label", ubuntuLabel,
+			"--dockerfile", "base-env/images/ubuntu-devtools/Dockerfile")
+		ubuntuBuildCmd.Dir = "../"
+		ubuntuBuildCmd.Stdout = os.Stdout
+		ubuntuBuildCmd.Stderr = os.Stderr
+		if err := ubuntuBuildCmd.Run(); err != nil {
+			log.Fatal("Failed to build Ubuntu base image: ", err)
+		}
+		log.Printf("Built Ubuntu base image: %s\n", ubuntuImageRef)
+
+		log.Println("Building languages image...")
+		languagesLabel := fmt.Sprintf("%s-languages", label)
+		languagesImageRef = fmt.Sprintf("registry.fly.io/%s:%s", appName, languagesLabel)
+
+		// Build and push languages stage
+		languagesBuildCmd := exec.Command("fly", "deploy",
+			"-a", appName,
+			"--build-only",
+			"--push",
+			"--image-label", languagesLabel,
+			"--dockerfile", "base-env/images/ubuntu-devtools/Dockerfile",
+			"--build-target", "languages")
+		languagesBuildCmd.Dir = "../"
+		languagesBuildCmd.Stdout = os.Stdout
+		languagesBuildCmd.Stderr = os.Stderr
+		if err := languagesBuildCmd.Run(); err != nil {
+			log.Fatal("Failed to build languages image: ", err)
+		}
+		log.Printf("Built languages image: %s\n", languagesImageRef)
 	}
 
 	// Create flaps client for machine management
@@ -348,6 +415,11 @@ func main() {
 			log.Fatal("Failed to parse machine config: ", err)
 		}
 
+		// Update volume images if base images were built
+		if updateBase {
+			updateVolumeImages(&machineConfig, ubuntuImageRef, languagesImageRef)
+		}
+
 		// Only preserve specific environment variables from existing config
 		preserveEnvVars := []string{"SPRITE_HTTP_API_TOKEN", "SPRITE_PRIMARY_REGION"}
 		if existingContainerEnvVars != nil && len(existingContainerEnvVars) > 0 {
@@ -455,6 +527,11 @@ func main() {
 
 			// Update only the image references
 			updateMachineImageOnly(currentConfig, imageRef)
+
+			// Update volume images if base images were built
+			if updateBase {
+				updateVolumeImages(currentConfig, ubuntuImageRef, languagesImageRef)
+			}
 
 			// Save the updated config to tmp file
 			tmpDir := "tmp"
