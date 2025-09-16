@@ -41,17 +41,13 @@ RUN git clone https://github.com/asdf-vm/asdf.git --branch v0.14.0 --depth 1 "$A
  && echo ". /etc/profile.d/asdf.sh" >> /etc/bash.bashrc \
  && echo ". /etc/profile.d/sprite.sh" >> /etc/bash.bashrc
 
- RUN printenv && cat  /etc/profile.d/asdf.sh
-
- ## ^^^ those are annoying but they'll reliably set env vars
 
 # Copy the sudoers file and user skeleton, then fix ownership
-
 RUN useradd -ms /bin/bash -u $UID $USER \
- && echo "$USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$USER \
- && chmod 0440 /etc/sudoers.d/$USER \
- && usermod -aG sudo,users $USER \
- && chown -R $USER:$USER /opt/asdf
+&& echo "$USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$USER \
+&& chmod 0440 /etc/sudoers.d/$USER \
+&& usermod -aG sudo,users $USER \
+&& chown -R $USER:$USER /opt/asdf
 
 
 ############################
@@ -97,6 +93,8 @@ RUN chmod +x /tmp/java.sh && /tmp/java.sh && rm /tmp/java.sh
 
 COPY languages/python.sh /tmp/
 RUN chmod +x /tmp/python.sh && /tmp/python.sh && rm /tmp/python.sh
+
+RUN ls -la /root/
 
 COPY /root/.tool-versions /opt/asdf/default-tool-versions
     
