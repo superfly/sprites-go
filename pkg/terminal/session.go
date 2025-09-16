@@ -257,10 +257,7 @@ func (s *Session) buildCommand(ctx context.Context) (*exec.Cmd, error) {
 
 // runWithTTY executes the command with PTY support.
 func (s *Session) runWithTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Reader, stdout io.Writer) (int, error) {
-	// Use console socket if specified, otherwise create a new PTY
-	if s.consoleSocket != "" {
-		return s.runWithConsoleSocket(ctx, cmd, stdin, stdout)
-	}
+	// Always create a new PTY (console socket support removed)
 	return s.runWithNewPTY(ctx, cmd, stdin, stdout)
 }
 

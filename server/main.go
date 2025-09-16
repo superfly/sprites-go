@@ -41,11 +41,6 @@ type Config struct {
 	ProcessEnvironment             []string
 	ProcessGracefulShutdownTimeout time.Duration
 
-	// Container configuration
-	ContainerEnabled    bool
-	ContainerSocketDir  string
-	ContainerTTYTimeout time.Duration
-
 	// JuiceFS
 	JuiceFSBaseDir    string
 	JuiceFSLocalMode  bool
@@ -137,9 +132,6 @@ func NewApplication(config Config) (*Application, error) {
 		ProcessWorkingDir:              config.ProcessWorkingDir,
 		ProcessEnvironment:             config.ProcessEnvironment,
 		ProcessGracefulShutdownTimeout: config.ProcessGracefulShutdownTimeout,
-		ContainerEnabled:               config.ContainerEnabled,
-		ContainerSocketDir:             config.ContainerSocketDir,
-		ContainerTTYTimeout:            config.ContainerTTYTimeout,
 		JuiceFSBaseDir:                 config.JuiceFSBaseDir,
 		JuiceFSLocalMode:               config.JuiceFSLocalMode,
 		S3AccessKey:                    config.S3AccessKey,
@@ -172,12 +164,8 @@ func NewApplication(config Config) (*Application, error) {
 			syncTargetPath = "/tmp/sync"
 		}
 
-		// Create TMUXManager with cmdPrefix for running tmux commands inside container
+		// Create TMUXManager for terminal management
 		tmuxManager := terminal.NewTMUXManager(ctx)
-		if config.ContainerEnabled {
-			// Set cmdPrefix to run tmux commands through crun exec
-			tmuxManager.SetCmdPrefix([]string{"crun", "exec", "app"})
-		}
 
 		apiConfig := serverapi.Config{
 			ListenAddr:         config.APIListenAddr,
@@ -503,11 +491,6 @@ func parseCommandLine() (Config, error) {
 			ProcessEnv         []string `json:"process_environment"`
 			ExecWrapperCommand []string `json:"exec_wrapper_command"`
 
-			// Container configuration
-			ContainerEnabled    bool   `json:"container_enabled"`
-			ContainerSocketDir  string `json:"container_socket_dir"`
-			ContainerTTYTimeout string `json:"container_tty_timeout"`
-
 			// JuiceFS configuration
 			JuiceFSEnabled    bool   `json:"juicefs_enabled"`
 			JuiceFSBaseDir    string `json:"juicefs_base_dir"`
@@ -554,22 +537,6 @@ func parseCommandLine() (Config, error) {
 		config.ProcessWorkingDir = fileConfig.ProcessDir
 		config.ProcessEnvironment = fileConfig.ProcessEnv
 		config.ExecWrapperCommand = fileConfig.ExecWrapperCommand
-
-		// Container configuration
-		config.ContainerEnabled = fileConfig.ContainerEnabled
-		config.ContainerSocketDir = fileConfig.ContainerSocketDir
-		if fileConfig.ContainerTTYTimeout != "" {
-			if timeout, err := time.ParseDuration(fileConfig.ContainerTTYTimeout); err == nil {
-				config.ContainerTTYTimeout = timeout
-			}
-		}
-
-		// Debug: Log container config values parsed from file
-		// Note: Using default logger since tap logger isn't initialized yet
-		slog.Debug("Container config from file",
-			"enabled", config.ContainerEnabled,
-			"socket_dir", config.ContainerSocketDir,
-			"tty_timeout", config.ContainerTTYTimeout)
 
 		config.JuiceFSBaseDir = fileConfig.JuiceFSBaseDir
 		config.JuiceFSLocalMode = fileConfig.JuiceFSLocalMode

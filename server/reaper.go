@@ -202,15 +202,8 @@ func (s *System) WasProcessReaped(pid int) (bool, time.Time) {
 	return s.reaper.WasProcessReaped(pid)
 }
 
-// ResolvePID converts a container PID to host PID
-// If running with a container, it resolves container PIDs to host PIDs
-// If not running with a container, it returns the PID unchanged (identity function)
+// ResolvePID returns the PID unchanged (no container translation needed)
 func (s *System) ResolvePID(pid int) (int, error) {
-	// If we have a container process, use its ResolvePID method
-	if s.containerProcess != nil {
-		return s.containerProcess.ResolvePID(pid)
-	}
-
 	// No container, return PID unchanged (identity function)
 	return pid, nil
 }

@@ -45,7 +45,7 @@ CONFIG_JSON='{
       "uid": 0,
       "gid": 0
     },
-    "terminal": true,
+    "terminal": false,
     "args": [],
     "cwd": "/",
     "env": [
