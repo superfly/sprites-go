@@ -190,6 +190,9 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 		monitoredSessionID = returnedSessionID
 	}
 
+	// Pane lifecycle callback function (will be set up after port watcher is created)
+	var paneLifecycleCallback func(string, int, bool)
+
 	// Port notification callback
 	portCallback := func(port portwatcher.Port) {
 		var msgType string
@@ -219,54 +222,35 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// For tmux sessions, create port watcher early and set up pane monitoring
+	// For tmux sessions, prepare pane monitoring (but don't create port watcher yet)
 	if h.tmuxManager != nil && monitoredSessionID != "" {
-		// Create a dummy PID for the port watcher - will add real PIDs later
-		// Using PID 1 as a placeholder since we need a PID to create the watcher
-		watcher, err := portwatcher.New(1, portCallback)
-		if err != nil {
-			h.logger.Error("Failed to create port watcher for tmux session", "execID", execID, "sessionID", monitoredSessionID, "error", err)
-		} else {
-			if err := watcher.Start(); err != nil {
-				h.logger.Error("Failed to start port watcher for tmux session", "execID", execID, "sessionID", monitoredSessionID, "error", err)
-			} else {
-				portWatcher = watcher
-				// Immediately remove the dummy PID
-				portWatcher.RemovePID(1)
-				h.logger.Debug("Created port watcher for tmux session", "execID", execID, "sessionID", monitoredSessionID)
-
-				// Set up pane lifecycle callback
-				h.tmuxManager.SetPaneCallback(monitoredSessionID, func(sid string, panePID int, added bool) {
-					// Convert container PID to host PID using system's ResolvePID
-					hostPID, err := h.system.ResolvePID(panePID)
-					if err != nil {
-						h.logger.Warn("Failed to resolve container PID to host PID", "containerPID", panePID, "error", err)
-						hostPID = panePID // Fall back to using the PID as-is
-					} else if hostPID != panePID {
-						h.logger.Debug("Converted container PID to host PID", "containerPID", panePID, "hostPID", hostPID)
-					}
-
-					if added {
-						h.logger.Info("Adding tmux pane PID to port monitoring", "sessionID", sid, "containerPID", panePID, "hostPID", hostPID)
-						if err := portWatcher.AddPID(hostPID); err != nil {
-							h.logger.Error("Failed to add pane PID to port watcher", "sessionID", sid, "hostPID", hostPID, "error", err)
-						}
-					} else {
-						h.logger.Info("Removing tmux pane PID from port monitoring", "sessionID", sid, "containerPID", panePID, "hostPID", hostPID)
-						portWatcher.RemovePID(hostPID)
-					}
-				})
-
-				// Get existing pane PIDs and add them to port monitoring
-				existingPanes, err := h.tmuxManager.GetSessionPanePIDs(monitoredSessionID)
-				if err != nil {
-					h.logger.Error("Failed to get existing pane PIDs", "sessionID", monitoredSessionID, "error", err)
-				} else {
-					h.logger.Info("Found existing panes in tmux session", "sessionID", monitoredSessionID, "count", len(existingPanes), "containerPIDs", existingPanes)
-					// Store existing panes to be processed after we get container init PID
-					pendingPanePIDs = existingPanes
-				}
+		// Define the pane lifecycle callback
+		paneLifecycleCallback = func(sid string, panePID int, added bool) {
+			// Only process if port watcher exists
+			if portWatcher == nil {
+				h.logger.Warn("Pane lifecycle callback triggered but port watcher not yet created", "sessionID", sid, "panePID", panePID)
+				return
 			}
+
+			if added {
+				h.logger.Info("Adding tmux pane PID to port monitoring", "sessionID", sid, "pid", panePID)
+				if err := portWatcher.AddPID(panePID); err != nil {
+					h.logger.Error("Failed to add pane PID to port watcher", "sessionID", sid, "pid", panePID, "error", err)
+				}
+			} else {
+				h.logger.Info("Removing tmux pane PID from port monitoring", "sessionID", sid, "pid", panePID)
+				portWatcher.RemovePID(panePID)
+			}
+		}
+
+		// Get existing pane PIDs and store them for later processing
+		existingPanes, err := h.tmuxManager.GetSessionPanePIDs(monitoredSessionID)
+		if err != nil {
+			h.logger.Error("Failed to get existing pane PIDs", "sessionID", monitoredSessionID, "error", err)
+		} else {
+			h.logger.Info("Found existing panes in tmux session", "sessionID", monitoredSessionID, "count", len(existingPanes), "pids", existingPanes)
+			// Store existing panes to be processed after port watcher is created
+			pendingPanePIDs = existingPanes
 		}
 	}
 
@@ -274,13 +258,15 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 	options = append(options, terminal.WithOnProcessStart(func(pid int) {
 		h.logger.Debug("Process started via terminal", "execID", execID, "pid", pid)
 
-		// Create port watcher if not already created (for non-tmux sessions)
+		// Create port watcher if not already created
 		if portWatcher == nil {
-			watcher, err := portwatcher.New(pid, portCallback)
+			watcher, err := portwatcher.New(pid, "sprite", portCallback)
 			if err != nil {
 				h.logger.Error("Failed to create port watcher", "execID", execID, "pid", pid, "error", err)
 				return
 			}
+
+			// No need to get container init PID anymore - we use named namespace "sprite"
 
 			if err := watcher.Start(); err != nil {
 				h.logger.Error("Failed to start port watcher", "execID", execID, "pid", pid, "error", err)
@@ -289,31 +275,36 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 
 			portWatcher = watcher
 			h.logger.Debug("Port watcher created and started", "execID", execID, "pid", pid)
-		} else {
-			// For tmux sessions, add the main process PID to existing watcher
-			h.logger.Debug("Adding main process PID to existing port watcher", "execID", execID, "pid", pid)
-			if err := portWatcher.AddPID(pid); err != nil {
-				h.logger.Error("Failed to add main PID to port watcher", "execID", execID, "pid", pid, "error", err)
-			}
 
-			// Process any pending pane PIDs
-			if len(pendingPanePIDs) > 0 {
-				h.logger.Info("Processing pending pane PIDs", "count", len(pendingPanePIDs))
-				for _, panePID := range pendingPanePIDs {
-					// Convert container PID to host PID using system's ResolvePID
-					hostPID, err := h.system.ResolvePID(panePID)
-					if err != nil {
-						h.logger.Error("Failed to resolve pending pane PID", "containerPID", panePID, "error", err)
-						continue
-					}
-					h.logger.Info("Adding resolved pane PID to port monitoring", "containerPID", panePID, "hostPID", hostPID)
-					if err := portWatcher.AddPID(hostPID); err != nil {
-						h.logger.Error("Failed to add pane PID to port watcher", "hostPID", hostPID, "error", err)
-					}
+			// For tmux sessions, set up pane lifecycle callback and add main PID
+			if h.tmuxManager != nil && monitoredSessionID != "" {
+				// Set up the pane lifecycle callback now that port watcher exists
+				if paneLifecycleCallback != nil {
+					h.tmuxManager.SetPaneCallback(monitoredSessionID, paneLifecycleCallback)
+					h.logger.Debug("Set up tmux pane lifecycle callback", "sessionID", monitoredSessionID)
 				}
-				// Clear the pending list
-				pendingPanePIDs = nil
+
+				// Add the main process PID for tmux sessions
+				if err := portWatcher.AddPID(pid); err != nil {
+					h.logger.Error("Failed to add main process PID to port watcher", "execID", execID, "pid", pid, "error", err)
+				}
 			}
+		} else {
+			// This should not happen with the refactored logic
+			h.logger.Error("Port watcher already exists when it shouldn't", "execID", execID)
+		}
+
+		// Process any pending pane PIDs for tmux sessions
+		if h.tmuxManager != nil && monitoredSessionID != "" && len(pendingPanePIDs) > 0 {
+			h.logger.Info("Processing pending pane PIDs", "count", len(pendingPanePIDs))
+			for _, panePID := range pendingPanePIDs {
+				h.logger.Info("Adding pending pane PID to port monitoring", "pid", panePID)
+				if err := portWatcher.AddPID(panePID); err != nil {
+					h.logger.Error("Failed to add pending pane PID to port watcher", "pid", panePID, "error", err)
+				}
+			}
+			// Clear the pending list
+			pendingPanePIDs = nil
 		}
 	}))
 
@@ -322,15 +313,6 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 		wsHandler = terminal.NewWebSocketHandler(session).WithOnConnected(func(sender terminal.TextMessageSender) {
 			messageSender = sender
 			h.logger.Debug("WebSocket connected for exec terminal", "execID", execID)
-
-			// Send session ID for new detachable sessions
-			if returnedSessionID != "" {
-				sessionMsg := fmt.Sprintf("\r\n📌 Detachable session created with ID: %s\r\n", returnedSessionID)
-				sessionMsg += fmt.Sprintf("   To reconnect later, use: sprite exec -id %s\r\n\r\n", returnedSessionID)
-				if err := sender.SendTextMessage([]byte(sessionMsg)); err != nil {
-					h.logger.Error("Failed to send session ID message", "error", err)
-				}
-			}
 		})
 	)
 

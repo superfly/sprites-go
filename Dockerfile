@@ -48,10 +48,10 @@ RUN apk add --no-cache curl
 # Map Docker's TARGETARCH to crun's naming convention
 RUN case ${TARGETARCH} in \
         amd64) CRUN_ARCH="amd64" ;; \
-        arm64) CRUN_ARCH="aarch64" ;; \
+        arm64) CRUN_ARCH="arm64" ;; \
         *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
     esac && \
-    curl -L https://github.com/containers/crun/releases/download/1.21/crun-1.21-linux-${CRUN_ARCH}-disable-systemd -o /crun && \
+    curl -fL https://github.com/containers/crun/releases/download/1.24/crun-1.24-linux-${CRUN_ARCH} -o /crun && \
     chmod +x /crun
 
 # ---- build stage for statically linked tmux ----

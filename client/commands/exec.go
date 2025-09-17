@@ -751,27 +751,9 @@ func executeWebSocket(wsURL *url.URL, token string, cmd []string, workingDir str
 	portMgr := newPortManager(logger, proxyConfig)
 	defer portMgr.cleanup()
 
-	// Set up text message handler for port notifications and session messages
-	var sessionIDReceived string
+	// Set up text message handler for port notifications
 	wsCmd.TextMessageHandler = func(data []byte) {
-		msg := string(data)
-		// Check if this is a session ID message
-		if strings.Contains(msg, "Detachable session created with ID:") {
-			// Extract session ID from message
-			lines := strings.Split(msg, "\n")
-			for _, line := range lines {
-				if strings.Contains(line, "Detachable session created with ID:") {
-					parts := strings.Split(line, ":")
-					if len(parts) >= 2 {
-						sessionIDReceived = strings.TrimSpace(parts[len(parts)-1])
-					}
-				}
-			}
-			// Don't forward session creation message to output
-			return
-		}
-
-		// Otherwise handle as port notification
+		// Handle as port notification
 		portMgr.handlePortNotification(data)
 	}
 
@@ -813,12 +795,6 @@ func executeWebSocket(wsURL *url.URL, token string, cmd []string, workingDir str
 		logger.Warn("No proper exit code received, defaulting to 1")
 		// If we didn't get a proper exit code, default to 1
 		exitCode = 1
-	}
-
-	// Print session attachment message for detachable sessions
-	// Always show this message for detachable sessions, even in TTY mode
-	if detachable && sessionIDReceived != "" {
-		fmt.Printf("\nTo attach to this session run: sprite exec -id %s\n", sessionIDReceived)
 	}
 
 	logger.Debug("WebSocket exec completed", "finalExitCode", exitCode)

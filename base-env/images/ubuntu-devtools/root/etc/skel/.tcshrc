@@ -1,0 +1,23 @@
+# Default tcsh configuration for sprite
+
+# Set a simple prompt
+set prompt = "%n@%m:%~%# "
+
+# History settings
+set history = 1000
+set savehist = 1000
+
+# Enable command completion
+set autolist
+
+# Enable color for ls
+setenv CLICOLOR 1
+alias ls 'ls --color=auto'
+alias ll 'ls -la'
+alias l 'ls -l'
+
+# Source sprite environment if available
+if ( -r /.sprite/etc/profile.d/sprite.sh ) then
+    # Note: tcsh can't directly source bash scripts
+    # This would need to be adapted for tcsh
+endif

@@ -538,7 +538,15 @@ mkdir -p "${SPRITE_WRITE_DIR}/tmp"
 echo "$CONFIG_JSON" > "${SPRITE_WRITE_DIR}/tmp/config.json"
 
 if [ -n "${CONSOLE_SOCKET:-}" ]; then
-    exec crun --debug run --console-socket="${CONSOLE_SOCKET}" -f "${SPRITE_WRITE_DIR}/tmp/config.json" app
+    if [ -n "${CRUN_PID_FILE:-}" ]; then
+        exec crun --debug run --pid-file="${CRUN_PID_FILE}" --console-socket="${CONSOLE_SOCKET}" -f "${SPRITE_WRITE_DIR}/tmp/config.json" app
+    else
+        exec crun --debug run --console-socket="${CONSOLE_SOCKET}" -f "${SPRITE_WRITE_DIR}/tmp/config.json" app
+    fi
 else
-    exec crun --debug run -f "${SPRITE_WRITE_DIR}/tmp/config.json" app
+    if [ -n "${CRUN_PID_FILE:-}" ]; then
+        exec crun --debug run --pid-file="${CRUN_PID_FILE}" -f "${SPRITE_WRITE_DIR}/tmp/config.json" app
+    else
+        exec crun --debug run -f "${SPRITE_WRITE_DIR}/tmp/config.json" app
+    fi
 fi

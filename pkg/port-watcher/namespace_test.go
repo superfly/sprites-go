@@ -4,9 +4,11 @@
 package portwatcher
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -56,7 +58,7 @@ func TestMultipleNamespaces(t *testing.T) {
 		pid := cmd.Process.Pid
 
 		// Subscribe to each process
-		if err := nm.Subscribe(pid, func(p Port) {
+		if err := nm.SubscribeInNamespace(pid, "sprite", func(p Port) {
 			mu.Lock()
 			detectedPorts[pid] = append(detectedPorts[pid], p)
 			mu.Unlock()
@@ -100,7 +102,7 @@ func TestNamespaceIsolation(t *testing.T) {
 
 	// Subscribe to process 2 only
 	detectedPorts := make(chan Port, 10)
-	if err := nm.Subscribe(pid2, func(port Port) {
+	if err := nm.SubscribeInNamespace(pid2, "sprite", func(port Port) {
 		select {
 		case detectedPorts <- port:
 		default:
@@ -124,7 +126,29 @@ func TestNamespaceIsolation(t *testing.T) {
 
 // TestHostNetworkNamespace tests monitoring in the host network namespace
 func TestHostNetworkNamespace(t *testing.T) {
-	// This test doesn't require root since we're in the host namespace
+	// This test uses the namespace monitor which requires nsenter and ss -ltnp to work
+	// Skip on non-Linux systems
+	if _, err := os.Stat("/proc/self/ns/net"); err != nil {
+		t.Skip("Skipping test on non-Linux system")
+	}
+
+	// Check if we can run nsenter and ss exactly as the namespace monitor will
+	// Test with both current PID and PID 1 (common init PID)
+	for _, pid := range []int{os.Getpid(), 1} {
+		cmd := exec.Command("nsenter", "--net=/proc/"+fmt.Sprintf("%d", pid)+"/ns/net", "ss", "-ltnp")
+		output, err := cmd.CombinedOutput()
+		if err == nil {
+			// Command succeeded, check if it shows process information
+			if strings.Contains(string(output), "users:") || strings.Contains(string(output), "pid=") {
+				// Good, we can get process information
+				goto skipCheckPassed
+			}
+		}
+	}
+	// If we get here, neither PID worked - skip the test
+	t.Skip("Skipping test - nsenter/ss not working in this environment (missing privileges or capabilities)")
+
+skipCheckPassed:
 
 	// Get the namespace monitor
 	nm := GetGlobalMonitor()
@@ -142,7 +166,7 @@ func TestHostNetworkNamespace(t *testing.T) {
 
 	// Subscribe to our own process
 	portChan := make(chan Port, 10)
-	if err := nm.Subscribe(os.Getpid(), func(port Port) {
+	if err := nm.SubscribeInNamespace(os.Getpid(), "sprite", func(port Port) {
 		select {
 		case portChan <- port:
 		case <-time.After(1 * time.Second):
@@ -186,7 +210,7 @@ func TestNonExistentPID(t *testing.T) {
 
 	// Subscribe to non-existent PID - this should not error
 	portChan := make(chan Port, 10)
-	if err := nm.Subscribe(nonExistentPID, func(p Port) {
+	if err := nm.SubscribeInNamespace(nonExistentPID, "sprite", func(p Port) {
 		select {
 		case portChan <- p:
 		default:

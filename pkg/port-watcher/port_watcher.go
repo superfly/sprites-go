@@ -2,11 +2,9 @@
 package portwatcher
 
 import (
+	"fmt"
 	"log"
 	"sync"
-	"time"
-
-	"github.com/superfly/sprite-env/pkg/container"
 )
 
 // Port represents a listening port
@@ -20,45 +18,31 @@ type Port struct {
 // PortCallback is called when a port state changes
 type PortCallback func(port Port)
 
-// portEvent is used internally for channel communication
-type portEvent struct {
-	portKey string
-	port    Port
-}
-
 // PortWatcher monitors ports for a process and its children
 // It now uses the global namespace monitor for efficiency
 type PortWatcher struct {
-	mu       sync.Mutex
-	pids     []int // List of PIDs being monitored
-	callback PortCallback
-	monitor  *NamespaceMonitor
-	idle     bool // true if this is an idle instance that does nothing
+	mu        sync.Mutex
+	pids      []int  // List of PIDs being monitored
+	namespace string // Network namespace name (required, e.g., "sprite")
+	callback  PortCallback
+	monitor   *NamespaceMonitor
+	idle      bool // true if this is an idle instance that does nothing
 }
 
 // New creates a new PortWatcher for the given PID
-func New(pid int, callback PortCallback) (*PortWatcher, error) {
-	// Wait a bit for the container process to spawn
-	time.Sleep(50 * time.Millisecond)
-
-	// Try to find the actual container process PID
-	wrapperPID := pid
-	containerPID := wrapperPID // Default to wrapper PID if we can't find child
-
-	if childPID, err := container.GetContainerPID(wrapperPID); err == nil {
-		containerPID = childPID
-		log.Printf("Port watcher: found container child process - wrapperPID: %d, containerPID: %d\n", wrapperPID, containerPID)
-	} else {
-		log.Printf("Port watcher: could not find container child process, using wrapper PID - wrapperPID: %d, error: %v\n", wrapperPID, err)
+func New(pid int, namespace string, callback PortCallback) (*PortWatcher, error) {
+	if namespace == "" {
+		return nil, fmt.Errorf("namespace name is required")
 	}
 
 	pw := &PortWatcher{
-		pids:     []int{containerPID},
-		callback: callback,
-		monitor:  GetGlobalMonitor(),
+		pids:      []int{pid},
+		namespace: namespace,
+		callback:  callback,
+		monitor:   GetGlobalMonitor(),
 	}
 
-	log.Printf("Port watcher: creating watcher for PID %d\n", containerPID)
+	log.Printf("Port watcher: creating watcher for PID %d in namespace %s\n", pid, namespace)
 
 	return pw, nil
 }
@@ -75,7 +59,7 @@ func (pw *PortWatcher) Start() error {
 
 	// Subscribe all PIDs to the global namespace monitor
 	for _, pid := range pw.pids {
-		if err := pw.monitor.Subscribe(pid, pw.callback); err != nil {
+		if err := pw.monitor.SubscribeInNamespace(pid, pw.namespace, pw.callback); err != nil {
 			log.Printf("Port watcher: failed to subscribe PID %d: %v\n", pid, err)
 			// Continue with other PIDs even if one fails
 		}
@@ -120,7 +104,7 @@ func (pw *PortWatcher) AddPID(pid int) error {
 	log.Printf("Port watcher: adding PID %d to monitoring\n", pid)
 
 	// Subscribe the new PID
-	if err := pw.monitor.Subscribe(pid, pw.callback); err != nil {
+	if err := pw.monitor.SubscribeInNamespace(pid, pw.namespace, pw.callback); err != nil {
 		return err
 	}
 

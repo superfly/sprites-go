@@ -24,25 +24,22 @@ type NamespaceMonitor struct {
 	ctx          context.Context
 	cancel       context.CancelFunc
 	pollInterval time.Duration
+	tickerCancel context.CancelFunc // Separate cancel for ticker goroutine
 }
 
 // namespaceWatcher monitors a specific network namespace
 type namespaceWatcher struct {
-	namespaceID  string
+	namespaceID  string          // Same as namespace name for named namespaces
+	namespace    string          // Network namespace name (e.g., "sprite")
 	currentPorts map[string]int  // key: "addr:port" value: PID
 	loggedAddrs  map[string]bool // key: "addr:port" for unrecognized addresses
 }
 
 // subscription represents a subscription to port events for a PID tree
 type subscription struct {
-	rootPID  int
-	callback PortCallback
-}
-
-// portDetection represents a detected port in a namespace
-type portDetection struct {
-	port        Port
-	namespaceID string
+	rootPID   int
+	namespace string // Network namespace name (e.g., "sprite")
+	callback  PortCallback
 }
 
 var (
@@ -61,56 +58,52 @@ func GetGlobalMonitor() *NamespaceMonitor {
 			cancel:       cancel,
 			pollInterval: 1 * time.Second,
 		}
-		go globalMonitor.run()
+		// Don't start the ticker automatically - wait for subscriptions
 	})
 	return globalMonitor
 }
 
-// Subscribe subscribes to port events for a PID and its children
-func (nm *NamespaceMonitor) Subscribe(pid int, callback PortCallback) error {
+// SubscribeInNamespace subscribes to port events for a PID and its children within a specific namespace
+func (nm *NamespaceMonitor) SubscribeInNamespace(pid int, namespace string, callback PortCallback) error {
+	// Require namespace
+	if namespace == "" {
+		return fmt.Errorf("namespace name is required for monitoring")
+	}
+
+	// Lock for the data structure updates
 	nm.mu.Lock()
 	defer nm.mu.Unlock()
 
-	// Find the namespace for this PID
-	namespaceID, err := getNetworkNamespace(pid)
-	if err != nil {
-		// For non-existent PIDs, we should handle this gracefully
-		// Create a dummy subscription that won't be scanned
-		log.Printf("Port watcher: PID %d does not exist, creating idle subscription: %v", pid, err)
-
-		// Add the subscription but mark it as inactive
-		sub := &subscription{
-			rootPID:  pid,
-			callback: callback,
-		}
-		nm.subscribers[pid] = append(nm.subscribers[pid], sub)
-
-		return nil
-	}
-
-	log.Printf("Port watcher: PID %d is in namespace %s", pid, namespaceID)
-
 	// Find or create the namespace watcher
-	if _, exists := nm.monitors[namespaceID]; !exists {
+	if _, exists := nm.monitors[namespace]; !exists {
 		// Create a new namespace watcher
-		watcher := &namespaceWatcher{
-			namespaceID:  namespaceID,
+		nm.monitors[namespace] = &namespaceWatcher{
+			namespaceID:  namespace,
+			namespace:    namespace,
 			currentPorts: make(map[string]int),
 			loggedAddrs:  make(map[string]bool),
 		}
-		nm.monitors[namespaceID] = watcher
-
-		log.Printf("Port watcher: started monitoring namespace %s", namespaceID)
+		log.Printf("Port watcher: started monitoring namespace %s", namespace)
 	}
 
 	// Add the subscription
 	sub := &subscription{
-		rootPID:  pid,
-		callback: callback,
+		rootPID:   pid,
+		namespace: namespace,
+		callback:  callback,
 	}
 	nm.subscribers[pid] = append(nm.subscribers[pid], sub)
 
-	log.Printf("Port watcher: subscribed to PID %d in namespace %s", pid, namespaceID)
+	log.Printf("Port watcher: subscribed to PID %d in namespace %s (will monitor this PID and its children)", pid, namespace)
+
+	// Start ticker if this is the first subscription
+	if nm.tickerCancel == nil {
+		tickerCtx, tickerCancel := context.WithCancel(context.Background())
+		nm.tickerCancel = tickerCancel
+		go nm.run(tickerCtx)
+		log.Printf("Port watcher: started ticker for namespace monitoring")
+	}
+
 	return nil
 }
 
@@ -121,7 +114,15 @@ func (nm *NamespaceMonitor) Unsubscribe(pid int) {
 
 	delete(nm.subscribers, pid)
 
-	// TODO: Clean up namespace watchers with no subscribers
+	// Stop ticker if no more subscribers
+	if len(nm.subscribers) == 0 && nm.tickerCancel != nil {
+		nm.tickerCancel()
+		nm.tickerCancel = nil
+		log.Printf("Port watcher: stopped ticker - no more subscribers")
+
+		// Clean up all namespace watchers
+		nm.monitors = make(map[string]*namespaceWatcher)
+	}
 }
 
 // Stop stops the global monitor
@@ -130,16 +131,28 @@ func (nm *NamespaceMonitor) Stop() {
 }
 
 // run is the main loop for the namespace monitor
-func (nm *NamespaceMonitor) run() {
+func (nm *NamespaceMonitor) run(ctx context.Context) {
 	ticker := time.NewTicker(nm.pollInterval)
 	defer ticker.Stop()
 
+	lastTick := time.Now()
+	suspendThreshold := nm.pollInterval * 5 // Warn if gap is > 5x the normal interval
+
 	for {
 		select {
-		case <-nm.ctx.Done():
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			now := time.Now()
+			elapsed := now.Sub(lastTick)
+
+			// Check for suspiciously large gaps
+			if elapsed > suspendThreshold {
+				log.Printf("Port watcher: detected large gap between ticks (%v), likely VM suspend/resume", elapsed)
+			}
+
 			nm.scanAllNamespaces()
+			lastTick = now
 		}
 	}
 }
@@ -160,28 +173,16 @@ func (nm *NamespaceMonitor) scanAllNamespaces() {
 
 // scanNamespace scans for new ports in a namespace
 func (nm *NamespaceMonitor) scanNamespace(watcher *namespaceWatcher) {
-	// Find a process in this namespace to get the namespace inode
-	var targetPID int
-	nm.mu.RLock()
-	for pid := range nm.subscribers {
-		pidNamespace, err := getNetworkNamespace(pid)
-		if err == nil && pidNamespace == watcher.namespaceID {
-			targetPID = pid
-			break
-		}
-	}
-	nm.mu.RUnlock()
-
-	if targetPID == 0 {
-		// log.Printf("Port watcher: no process found in namespace %s", watcher.namespaceID)
+	// Use the named network namespace
+	if watcher.namespace == "" {
+		log.Printf("Port watcher: no namespace name set for namespace %s", watcher.namespaceID)
 		return
 	}
 
-	// Use the namespace inode to run ss in our own namespace
-	cmd := exec.Command("nsenter", "--net=/proc/"+strconv.Itoa(targetPID)+"/ns/net", "ss", "-ltnp")
+	cmd := exec.Command("nsenter", "--net=/var/run/netns/"+watcher.namespace, "ss", "-ltnp")
 	output, err := cmd.Output()
 	if err != nil {
-		log.Printf("Port watcher: ss failed for namespace %s: %v", watcher.namespaceID, err)
+		log.Printf("Port watcher: ss failed for namespace %s (name: %s): %v", watcher.namespaceID, watcher.namespace, err)
 		return
 	}
 
@@ -201,20 +202,13 @@ func (nm *NamespaceMonitor) scanNamespace(watcher *namespaceWatcher) {
 				addr := strings.Join(parts[:len(parts)-1], ":")
 
 				pid := watcher.currentPorts[portKey]
-				// Check if anyone cares about this closed port
-				inMonitoredTree := false
-				nm.mu.RLock()
-				for rootPID := range nm.subscribers {
-					if isPIDInTree(pid, rootPID) {
-						inMonitoredTree = true
-						break
-					}
-				}
-				nm.mu.RUnlock()
 
-				// Always log port closures for debugging
-				log.Printf("Port watcher: detected closed port in namespace %s - %s (PID: %d, monitored: %v)",
-					watcher.namespaceID, portKey, pid, inMonitoredTree)
+				// Log port closure with process tree
+				log.Printf("Port watcher: port closed in namespace %s - %s (PID: %d)",
+					watcher.namespaceID, portKey, pid)
+
+				// Debug: Print the full process tree for this PID
+				nm.debugPrintProcessTree(pid)
 
 				// Notify subscribers
 				nm.notifySubscribers(Port{
@@ -336,23 +330,14 @@ func (nm *NamespaceMonitor) parseAndNotify(r io.Reader, watcher *namespaceWatche
 
 			// Check if this is a new port
 			if watcher.currentPorts[portKey] == 0 {
-				// New port opened - check if anyone cares about it
-				inMonitoredTree := false
-				nm.mu.RLock()
-				for rootPID := range nm.subscribers {
-					if isPIDInTree(pid, rootPID) {
-						inMonitoredTree = true
-						break
-					}
-				}
-				nm.mu.RUnlock()
+				// New port opened
+				log.Printf("Port watcher: new port detected in namespace %s - %s:%d (PID: %d)",
+					watcher.namespaceID, addr, port, pid)
 
-				if inMonitoredTree {
-					log.Printf("Port watcher: new port detected in namespace %s - %s:%d (PID: %d)",
-						watcher.namespaceID, addr, port, pid)
-				}
+				// Debug: Print the full process tree for this PID
+				nm.debugPrintProcessTree(pid)
 
-				// Notify subscribers (only those whose tree contains this PID)
+				// Notify subscribers
 				nm.notifySubscribers(Port{
 					Port:    port,
 					PID:     pid,
@@ -387,20 +372,35 @@ func (nm *NamespaceMonitor) parseSSOutput(output string, watcher *namespaceWatch
 		processInfo := fields[5] // Process info like users:(("claude",pid=9506,fd=29))
 
 		// Extract address and port
-		parts := strings.Split(localAddr, ":")
-		if len(parts) < 2 {
-			continue
+		// Handle IPv6 addresses with brackets like [::1]:46061
+		var addr string
+		var portStr string
+
+		if strings.HasPrefix(localAddr, "[") {
+			// IPv6 format: [addr]:port
+			closeBracket := strings.LastIndex(localAddr, "]")
+			if closeBracket == -1 || closeBracket+1 >= len(localAddr) || localAddr[closeBracket+1] != ':' {
+				log.Printf("Port watcher: malformed IPv6 address: %s", localAddr)
+				continue
+			}
+			addr = localAddr[1:closeBracket] // Remove brackets
+			portStr = localAddr[closeBracket+2:]
+		} else {
+			// IPv4 format: addr:port
+			lastColon := strings.LastIndex(localAddr, ":")
+			if lastColon == -1 {
+				log.Printf("Port watcher: no port separator in address: %s", localAddr)
+				continue
+			}
+			addr = localAddr[:lastColon]
+			portStr = localAddr[lastColon+1:]
 		}
 
-		// Get port (last part)
-		portStr := parts[len(parts)-1]
 		port, err := strconv.Atoi(portStr)
 		if err != nil {
+			log.Printf("Port watcher: invalid port number %s in address %s: %v", portStr, localAddr, err)
 			continue
 		}
-
-		// Get address (everything except last part)
-		addr := strings.Join(parts[:len(parts)-1], ":")
 
 		// Normalize addresses we care about
 		var normalizedAddr string
@@ -426,6 +426,7 @@ func (nm *NamespaceMonitor) parseSSOutput(output string, watcher *namespaceWatch
 		}
 
 		portKey := fmt.Sprintf("%s:%d", normalizedAddr, port)
+
 		if seenPorts[portKey] != 0 {
 			continue // Already seen
 		}
@@ -433,21 +434,12 @@ func (nm *NamespaceMonitor) parseSSOutput(output string, watcher *namespaceWatch
 
 		// Check if this is a new port
 		if watcher.currentPorts[portKey] == 0 {
-			// New port opened - check if anyone cares about it
-			inMonitoredTree := false
-			nm.mu.RLock()
-			for rootPID := range nm.subscribers {
-				if isPIDInTree(pid, rootPID) {
-					inMonitoredTree = true
-					break
-				}
-			}
-			nm.mu.RUnlock()
+			// New port opened
+			log.Printf("Port watcher: new port detected in namespace %s - %s:%d (PID: %d)",
+				watcher.namespaceID, normalizedAddr, port, pid)
 
-			if inMonitoredTree {
-				log.Printf("Port watcher: new port detected in namespace %s - %s:%d (PID: %d)",
-					watcher.namespaceID, normalizedAddr, port, pid)
-			}
+			// Debug: Print the full process tree for this PID
+			nm.debugPrintProcessTree(pid)
 
 			// Notify subscribers
 			nm.notifySubscribers(Port{
@@ -485,7 +477,7 @@ func (nm *NamespaceMonitor) extractPIDFromProcessInfo(processInfo string) int {
 	return pid
 }
 
-// notifySubscribers notifies all relevant subscribers about a new port
+// notifySubscribers notifies all relevant subscribers about a port change
 func (nm *NamespaceMonitor) notifySubscribers(port Port) {
 	nm.mu.RLock()
 	defer nm.mu.RUnlock()
@@ -606,14 +598,53 @@ func findPIDForSocket(inode string) int {
 	return 0
 }
 
+// debugPrintProcessTree prints the full process tree for a PID
+func (nm *NamespaceMonitor) debugPrintProcessTree(pid int) {
+	log.Printf("Port watcher: Process tree for PID %d:", pid)
+
+	// Build the tree
+	currentPID := pid
+	tree := []string{}
+
+	for currentPID != 0 && currentPID != 1 {
+		// Get process name
+		cmdPath := fmt.Sprintf("/proc/%d/comm", currentPID)
+		cmdBytes, _ := os.ReadFile(cmdPath)
+		cmd := strings.TrimSpace(string(cmdBytes))
+		if cmd == "" {
+			cmd = "?"
+		}
+
+		// Get parent PID
+		ppid := getParentPID(currentPID)
+
+		tree = append(tree, fmt.Sprintf("  %d (%s) -> parent: %d", currentPID, cmd, ppid))
+		currentPID = ppid
+	}
+
+	// Print tree
+	for _, line := range tree {
+		log.Print(line)
+	}
+
+	// Also print command line for the original PID
+	cmdlinePath := fmt.Sprintf("/proc/%d/cmdline", pid)
+	if cmdlineBytes, err := os.ReadFile(cmdlinePath); err == nil {
+		cmdline := strings.ReplaceAll(string(cmdlineBytes), "\x00", " ")
+		log.Printf("  Command line: %s", strings.TrimSpace(cmdline))
+	}
+}
+
 func isPIDInTree(pid int, rootPID int) bool {
 	if pid == rootPID {
 		return true
 	}
 
 	currentPID := pid
+	pidPath := []int{currentPID}
 	for currentPID != 0 && currentPID != 1 {
 		ppid := getParentPID(currentPID)
+		pidPath = append(pidPath, ppid)
 		if ppid == rootPID {
 			return true
 		}

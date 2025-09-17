@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         procps htop tree \
         zip gzip bzip2 locales iproute2 \
         libffi-dev libyaml-dev gosu xdg-utils \
-        tmux rsync \
+        tmux rsync zsh fish tcsh ksh \
     && locale-gen en_US.UTF-8 \
     && apt-get clean
 # we are keeping indexes for future apts
@@ -25,17 +25,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # --- setup environment ---
 ENV LANG=en_US.UTF-8 \
     PATH="/.sprite/bin:${PATH}"
-# Source sprite scripts in /etc/profile for login shells
-RUN echo '' >> /etc/profile && \
-    echo '# Source sprite environment' >> /etc/profile && \
-    echo '[ -r /.sprite/etc/profile.d/sprite.sh ] && . /.sprite/etc/profile.d/sprite.sh' >> /etc/profile
-
-
-# Copy the sudoers file and user skeleton, then fix ownership
-RUN useradd -ms /bin/bash -u $UID $USER \
-&& echo "$USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$USER \
-&& chmod 0440 /etc/sudoers.d/$USER \
-&& usermod -aG sudo,users $USER
 
 ############################
 # Languages (one per layer)
@@ -80,7 +69,6 @@ RUN chmod +x /tmp/python.sh && /tmp/python.sh /.sprite && rm /tmp/python.sh
 COPY languages/agents.sh /tmp/
 RUN chmod +x /tmp/agents.sh && /tmp/agents.sh /.sprite && rm /tmp/agents.sh
 
-USER $USER
 
 ############################
 # Languages ONLY
@@ -106,8 +94,23 @@ RUN mkdir -p /.sprite/languages /.sprite/bin /.sprite/etc/profile.d
 # Copy our stuff
 COPY root/ /
 
+# Set proper permissions on shell configurations
+# The shell config files are copied from root/etc/skel/* during COPY root/ /
+RUN chmod 644 /etc/skel/.* 2>/dev/null || true
+
 # Make language dependency installer executable
 RUN chmod +x /.sprite/bin/install-language-deps
+
+# Source sprite scripts in /etc/profile for login shells
+RUN echo '' >> /etc/profile && \
+    echo '# Source sprite environment' >> /etc/profile && \
+    echo '[ -r /.sprite/etc/profile.d/sprite.sh ] && . /.sprite/etc/profile.d/sprite.sh' >> /etc/profile
+
+# Copy the sudoers file and user skeleton, then fix ownership
+RUN useradd -ms /bin/bash -u $UID $USER \
+&& echo "$USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$USER \
+&& chmod 0440 /etc/sudoers.d/$USER \
+&& usermod -aG sudo,users $USER
 
 USER sprite
 

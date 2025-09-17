@@ -201,9 +201,3 @@ func (s *System) WasProcessReaped(pid int) (bool, time.Time) {
 	}
 	return s.reaper.WasProcessReaped(pid)
 }
-
-// ResolvePID returns the PID unchanged (no container translation needed)
-func (s *System) ResolvePID(pid int) (int, error) {
-	// No container, return PID unchanged (identity function)
-	return pid, nil
-}

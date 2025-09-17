@@ -37,7 +37,13 @@ jobs:
       ubuntu_tag: ${{ steps.tag.outputs.ubuntu_tag }}
       sprite_env_tag: ${{ steps.tag.outputs.sprite_env_tag }}
       is_version_tag: ${{ steps.tag.outputs.is_version_tag }}
+      previous_tag: ${{ steps.tag.outputs.previous_tag }}
     steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Fetch all history for tags
+    
     - name: Generate short SHA
       id: short-sha
       run: echo "short-sha=${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
@@ -52,18 +58,76 @@ jobs:
           echo "ubuntu_tag=25.04-${TAG}" >> $GITHUB_OUTPUT
           echo "sprite_env_tag=${TAG}" >> $GITHUB_OUTPUT
           echo "is_version_tag=true" >> $GITHUB_OUTPUT
+          
+          # Get previous tag for comparison
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [[ ! -z "$PREV_TAG" ]]; then
+            PREV_TAG="${PREV_TAG#v}"
+          fi
+          echo "previous_tag=${PREV_TAG}" >> $GITHUB_OUTPUT
         else
           SUFFIX="${{ inputs.tag_suffix || steps.short-sha.outputs.short-sha }}"
           echo "ubuntu_tag=25.04-${SUFFIX}" >> $GITHUB_OUTPUT
           echo "sprite_env_tag=${SUFFIX}" >> $GITHUB_OUTPUT
           echo "is_version_tag=false" >> $GITHUB_OUTPUT
+          echo "previous_tag=" >> $GITHUB_OUTPUT
         fi
 
-  build-base:
+  check-ubuntu-changes:
     needs: generate-tag
+    runs-on: ubuntu-latest
+    outputs:
+      has_changes: ${{ steps.check.outputs.has_changes }}
+      source_tag: ${{ steps.check.outputs.source_tag }}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Fetch all history for comparison
+    
+    - name: Check for changes in ubuntu-devtools
+      id: check
+      run: |
+        # Only check for changes if we have a previous tag
+        if [[ -z "${{ needs.generate-tag.outputs.previous_tag }}" ]]; then
+          echo "No previous tag found, will build images"
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+          echo "source_tag=" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        # Compare changes since the previous tag
+        PREV_TAG_REF="v${{ needs.generate-tag.outputs.previous_tag }}"
+        echo "Checking for changes since ${PREV_TAG_REF}..."
+        
+        # Check if the previous tag exists
+        if ! git rev-parse "${PREV_TAG_REF}" >/dev/null 2>&1; then
+          echo "Previous tag ${PREV_TAG_REF} not found, will build images"
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+          echo "source_tag=" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        # Check for changes in the ubuntu-devtools directory
+        CHANGES=$(git diff --name-only "${PREV_TAG_REF}" HEAD -- base-env/images/ubuntu-devtools/ || true)
+        
+        if [[ -z "$CHANGES" ]]; then
+          echo "No changes detected in base-env/images/ubuntu-devtools/ since ${PREV_TAG_REF}"
+          echo "has_changes=false" >> $GITHUB_OUTPUT
+          echo "source_tag=25.04-${{ needs.generate-tag.outputs.previous_tag }}" >> $GITHUB_OUTPUT
+        else
+          echo "Changes detected in base-env/images/ubuntu-devtools/:"
+          echo "$CHANGES"
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+          echo "source_tag=" >> $GITHUB_OUTPUT
+        fi
+
+  build-or-retag-base:
+    needs: [generate-tag, check-ubuntu-changes]
     permissions:
       contents: read
       packages: write
+    if: needs.check-ubuntu-changes.outputs.has_changes == 'true'
     uses: ./.github/workflows/docker-publish.yml
     with:
       context_dir: base-env/images/ubuntu-devtools
@@ -74,8 +138,37 @@ jobs:
       latest_tag: 25.04-latest
       tag_latest: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && (inputs.tag_latest == true || inputs.tag_latest == null) }}
 
-  build-languages:
-    needs: [generate-tag, build-base]
+  retag-base:
+    needs: [generate-tag, check-ubuntu-changes]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    if: needs.check-ubuntu-changes.outputs.has_changes == 'false'
+    steps:
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Retag existing image
+      run: |
+        SOURCE_TAG="${{ needs.check-ubuntu-changes.outputs.source_tag }}"
+        TARGET_TAG="${{ needs.generate-tag.outputs.ubuntu_tag }}"
+        
+        echo "Retagging ${SOURCE_TAG} as ${TARGET_TAG}..."
+        
+        # Create manifest for multi-arch retagging
+        docker buildx imagetools create \
+          -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TARGET_TAG} \
+          ${{ needs.generate-tag.outputs.is_version_tag == 'false' && (inputs.tag_latest == true || inputs.tag_latest == null) && format('-t {0}/{1}:25.04-latest', env.REGISTRY, env.IMAGE_NAME) || '' }} \
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${SOURCE_TAG}
+
+  build-or-retag-languages:
+    needs: [generate-tag, check-ubuntu-changes, build-or-retag-base, retag-base]
+    if: always() && (needs.build-or-retag-base.result == 'success' || needs.retag-base.result == 'success') && needs.check-ubuntu-changes.outputs.has_changes == 'true'
     permissions:
       contents: read
       packages: write
@@ -89,6 +182,34 @@ jobs:
       cache_tag: 25.04-languages-latest
       latest_tag: 25.04-languages-latest
       tag_latest: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && (inputs.tag_latest == true || inputs.tag_latest == null) }}
+
+  retag-languages:
+    needs: [generate-tag, check-ubuntu-changes, build-or-retag-base, retag-base]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    if: always() && (needs.build-or-retag-base.result == 'success' || needs.retag-base.result == 'success') && needs.check-ubuntu-changes.outputs.has_changes == 'false'
+    steps:
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Retag existing languages image
+      run: |
+        SOURCE_TAG="${{ needs.check-ubuntu-changes.outputs.source_tag }}-languages"
+        TARGET_TAG="${{ needs.generate-tag.outputs.ubuntu_tag }}-languages"
+        
+        echo "Retagging ${SOURCE_TAG} as ${TARGET_TAG}..."
+        
+        # Create manifest for multi-arch retagging
+        docker buildx imagetools create \
+          -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TARGET_TAG} \
+          ${{ needs.generate-tag.outputs.is_version_tag == 'false' && (inputs.tag_latest == true || inputs.tag_latest == null) && format('-t {0}/{1}:25.04-languages-latest', env.REGISTRY, env.IMAGE_NAME) || '' }} \
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${SOURCE_TAG}
 
   build-sprite-env:
     needs: generate-tag

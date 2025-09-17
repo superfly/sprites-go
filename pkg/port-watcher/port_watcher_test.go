@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync" // Added for mutex initialization
@@ -156,6 +157,24 @@ func TestPortWatcherIntegration(t *testing.T) {
 		t.Skip("Skipping test on non-Linux system")
 	}
 
+	// Check if we can run nsenter and ss exactly as the test will
+	// This mimics what scanNamespace does in namespace_monitor.go
+	for _, pid := range []int{os.Getpid(), 1} {
+		cmd := exec.Command("nsenter", "--net=/proc/"+strconv.Itoa(pid)+"/ns/net", "ss", "-ltnp")
+		output, err := cmd.CombinedOutput()
+		if err == nil {
+			// Command succeeded, check if it shows any process information
+			if strings.Contains(string(output), "users:") || strings.Contains(string(output), "pid=") {
+				// Good, we can get process information
+				goto skipCheckPassed
+			}
+		}
+	}
+	// If we get here, neither PID worked - skip the test
+	t.Skip("Skipping test - ss -ltnp not working in this environment (missing privileges or capabilities)")
+
+skipCheckPassed:
+
 	// Create a channel to receive port notifications
 	portChan := make(chan Port, 10)
 	callback := func(port Port) {
@@ -169,9 +188,10 @@ func TestPortWatcherIntegration(t *testing.T) {
 	// Create port watcher directly without container PID resolution
 	// since this is a test process, not a container
 	pw := &PortWatcher{
-		pids:     []int{os.Getpid()},
-		callback: callback,
-		monitor:  GetGlobalMonitor(),
+		pids:      []int{os.Getpid()},
+		namespace: "sprite", // Use sprite namespace for test
+		callback:  callback,
+		monitor:   GetGlobalMonitor(),
 	}
 	defer pw.Stop()
 
@@ -791,18 +811,18 @@ func TestUnmonitoredPortsNoRepeatLogs(t *testing.T) {
 	t.Logf("Second scan logs:\n%s", secondScanLogs)
 	t.Logf("Third scan logs:\n%s", thirdScanLogs)
 
-	// With the new implementation, unmonitored ports should NOT generate any logs at all
-	if len(strings.TrimSpace(firstScanLogs)) > 0 {
-		t.Errorf("First scan should not log anything for unmonitored port, but got: %s", firstScanLogs)
+	// First scan should log the new port detection
+	if !strings.Contains(firstScanLogs, "new port detected") {
+		t.Errorf("First scan should log new port detection, but got: %s", firstScanLogs)
 	}
 
-	// Second and third scans should also have NO log messages
+	// Second and third scans should NOT log anything as the port is already known
 	if len(strings.TrimSpace(secondScanLogs)) > 0 {
-		t.Errorf("Second scan should not log anything for unmonitored port, but got: %s", secondScanLogs)
+		t.Errorf("Second scan should not log anything for already-known port, but got: %s", secondScanLogs)
 	}
 
 	if len(strings.TrimSpace(thirdScanLogs)) > 0 {
-		t.Errorf("Third scan should not log anything for unmonitored port, but got: %s", thirdScanLogs)
+		t.Errorf("Third scan should not log anything for already-known port, but got: %s", thirdScanLogs)
 	}
 
 	// Verify the port is being tracked internally by checking it doesn't generate new notifications

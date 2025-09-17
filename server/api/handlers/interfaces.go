@@ -45,9 +45,6 @@ type SystemManager interface {
 	SubscribeToReapEvents() <-chan int
 	UnsubscribeFromReapEvents(ch <-chan int)
 	WasProcessReaped(pid int) (bool, time.Time)
-
-	// PID resolution for containers
-	ResolvePID(pid int) (int, error)
 }
 
 // ProcessManager interface for process operations

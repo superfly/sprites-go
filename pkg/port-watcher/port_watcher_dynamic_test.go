@@ -15,7 +15,7 @@ func TestPortWatcherDynamicPIDs(t *testing.T) {
 
 	// Create port watcher with initial PID (use current process for testing)
 	initialPID := 99999 // Non-existent PID for testing
-	pw, err := New(initialPID, callback)
+	pw, err := New(initialPID, "sprite", callback)
 	if err != nil {
 		t.Fatalf("Failed to create port watcher: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestPortWatcherDynamicPIDs(t *testing.T) {
 // TestPortWatcherConcurrentOperations tests thread safety of add/remove operations
 func TestPortWatcherConcurrentOperations(t *testing.T) {
 	callback := func(port Port) {}
-	pw, err := New(11111, callback)
+	pw, err := New(11111, "sprite", callback)
 	if err != nil {
 		t.Fatalf("Failed to create port watcher: %v", err)
 	}

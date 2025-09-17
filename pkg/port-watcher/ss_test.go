@@ -140,3 +140,61 @@ func TestExtractPIDFromProcessInfo(t *testing.T) {
 		}
 	}
 }
+
+// TestSSParsingIPv6WithBrackets tests parsing IPv6 addresses with bracket notation
+func TestSSParsingIPv6WithBrackets(t *testing.T) {
+	nm := &NamespaceMonitor{
+		subscribers:  make(map[int][]*subscription),
+		monitors:     make(map[string]*namespaceWatcher),
+		mu:           sync.RWMutex{},
+		pollInterval: 1 * time.Second,
+	}
+
+	watcher := &namespaceWatcher{
+		namespaceID:  "test-namespace",
+		namespace:    "test-namespace",
+		currentPorts: make(map[string]int),
+		loggedAddrs:  make(map[string]bool),
+	}
+
+	// Add watcher to monitors
+	nm.monitors["test-namespace"] = watcher
+
+	// Subscribe to track port events using a channel
+	eventsChan := make(chan string, 10)
+	callback := func(p Port) {
+		eventsChan <- fmt.Sprintf("%s port %s:%d (PID: %d)", p.State, p.Address, p.Port, p.PID)
+	}
+	nm.SubscribeInNamespace(336, "test-namespace", callback)
+
+	// Test ss output with IPv6 bracket notation
+	ssOutput := `State  Recv-Q Send-Q Local Address:Port  Peer Address:Port Process
+LISTEN 0      0              [::1]:46061            *:*    users:(("claude",pid=336,fd=23))
+LISTEN 0      0              [::]:80               *:*    users:(("nginx",pid=337,fd=3))`
+
+	seenPorts := nm.parseSSOutput(ssOutput, watcher)
+
+	// Should have parsed both ports
+	if len(seenPorts) != 2 {
+		t.Errorf("Expected 2 ports, got %d", len(seenPorts))
+	}
+
+	// Check specific ports
+	if pid, ok := seenPorts["::1:46061"]; !ok || pid != 336 {
+		t.Errorf("Expected ::1:46061 with PID 336, got %v", seenPorts)
+	}
+	if pid, ok := seenPorts[":::80"]; !ok || pid != 337 {
+		t.Errorf("Expected :::80 with PID 337, got %v", seenPorts)
+	}
+
+	// Should have received notification for port 46061 (PID 336 is subscribed)
+	// Use select with timeout to receive event
+	select {
+	case event := <-eventsChan:
+		if event != "open port ::1:46061 (PID: 336)" {
+			t.Errorf("Expected notification for ::1:46061, got %v", event)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Error("No event received within timeout")
+	}
+}

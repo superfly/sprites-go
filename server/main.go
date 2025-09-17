@@ -559,6 +559,23 @@ func parseCommandLine() (Config, error) {
 		config.ProxyLocalhostIPv6 = fileConfig.ProxyLocalhostIPv6
 	}
 
+	// Apply LOG_LEVEL environment variable if set
+	if logLevel := os.Getenv("LOG_LEVEL"); logLevel != "" {
+		switch strings.ToLower(logLevel) {
+		case "debug":
+			config.LogLevel = slog.LevelDebug
+		case "info":
+			config.LogLevel = slog.LevelInfo
+		case "warn", "warning":
+			config.LogLevel = slog.LevelWarn
+		case "error":
+			config.LogLevel = slog.LevelError
+		default:
+			// Invalid log level - ignore and use default
+			fmt.Fprintf(os.Stderr, "Warning: Invalid LOG_LEVEL '%s', using default\n", logLevel)
+		}
+	}
+
 	// Apply command-line overrides
 	if debug {
 		config.Debug = true

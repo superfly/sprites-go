@@ -298,6 +298,7 @@ func buildImage(appName, label, dockerfile, buildTarget, workDir string, showPro
 		"deploy",
 		"-a", appName,
 		"--build-only",
+		"--buildkit",
 		"--push",
 		"--image-label", label,
 	}

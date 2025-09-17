@@ -46,6 +46,20 @@ nvm use default
 echo "Installing common global packages..."
 npm install -g npm@latest
 
+# Get npm global bin path and append to languages.sh
+echo "Adding npm global bin path to languages.sh..."
+# npm bin -g is deprecated, use npm config get prefix instead
+NPM_PREFIX=$(npm config get prefix)
+NPM_GLOBAL_BIN="$NPM_PREFIX/bin"
+if [ -f "$ETC_DIR/languages.sh" ]; then
+    echo "" >> "$ETC_DIR/languages.sh"
+    echo "# Node.js/npm global bin directory" >> "$ETC_DIR/languages.sh"
+    echo "export PATH=\"$NPM_GLOBAL_BIN:\$PATH\"" >> "$ETC_DIR/languages.sh"
+    echo "  Added npm global bin path: $NPM_GLOBAL_BIN"
+else
+    echo "  Note: languages.sh not found, skipping npm global bin path addition"
+fi
+
 # Create symlinks in BIN_DIR for core Node.js binaries only
 echo "Creating symlinks in $BIN_DIR..."
 NODE_BIN_PATH="$(dirname $(which node))"

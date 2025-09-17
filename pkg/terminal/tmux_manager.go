@@ -1,3 +1,6 @@
+//go:build !clientonly
+// +build !clientonly
+
 package terminal
 
 import (
@@ -12,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/superfly/sprite-env/pkg/container"
 	"github.com/superfly/sprite-env/pkg/tap"
 	"github.com/superfly/sprite-env/pkg/tmux"
 )
@@ -405,8 +409,18 @@ func (tm *TMUXManager) GetSessionPanePIDs(id string) ([]int, error) {
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line != "" {
-			if pid, err := strconv.Atoi(line); err == nil && pid > 0 {
-				pids = append(pids, pid)
+			if containerPID, err := strconv.Atoi(line); err == nil && containerPID > 0 {
+				// Convert container namespace PID to host PID
+				hostPID, err := container.ResolvePID(containerPID)
+				if err != nil {
+					if tm.logger != nil {
+						tm.logger.Warn("Failed to resolve container PID to host PID",
+							"containerPID", containerPID, "error", err)
+					}
+					// Skip PIDs we can't resolve
+					continue
+				}
+				pids = append(pids, hostPID)
 			}
 		}
 	}
