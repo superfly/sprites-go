@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -91,19 +92,22 @@ func runUpgrade(globalCtx *GlobalContext, checkOnly, force bool, targetVersion s
 		return fmt.Errorf("failed to resolve executable path: %w", err)
 	}
 
-	// Check if we should do a version check
-	if !force && !shouldCheckVersion(cfg) && !checkOnly {
-		fmt.Println("Version check performed recently. Use --force to check again.")
-		return nil
-	}
+	// Skip the version check time limit for explicit upgrade commands
+	// Only apply the time limit for automatic version checks (not implemented here)
 
 	fmt.Println("Checking for updates...")
+	slog.Debug("Starting upgrade check",
+		"checkOnly", checkOnly,
+		"force", force,
+		"targetVersion", targetVersion,
+		"currentExe", currentExe)
 
 	// Find the latest version or the target version
 	var selectedVersion *semver.Version
 	var selectedVersionStr string
 	if targetVersion != "" {
 		// Find specific version - need to list all versions
+		slog.Debug("Listing bucket versions for specific version", "targetVersion", targetVersion)
 		versions, err := listBucketVersions(bucketURL, clientPrefix)
 		if err != nil {
 			return fmt.Errorf("failed to list versions: %w", err)
@@ -130,10 +134,12 @@ func runUpgrade(globalCtx *GlobalContext, checkOnly, force bool, targetVersion s
 			currentVersion = globalCtx.Version
 		}
 
+		slog.Debug("Getting latest version for channel", "currentVersion", currentVersion)
 		latestVersionStr, err := GetLatestVersionForChannel(currentVersion)
 		if err != nil {
 			return fmt.Errorf("failed to get latest version: %w", err)
 		}
+		slog.Debug("Latest version found", "version", latestVersionStr)
 
 		selectedVersionStr = latestVersionStr
 	}
@@ -200,8 +206,12 @@ func runUpgrade(globalCtx *GlobalContext, checkOnly, force bool, targetVersion s
 	} else {
 		binaryName = fmt.Sprintf("sprite-%s.tar.gz", platform)
 	}
-	downloadURL := fmt.Sprintf("%s%sv%s/%s", bucketURL, clientPrefix, selectedVersionStr, binaryName)
+	downloadURL := fmt.Sprintf("%s%s%s/%s", bucketURL, clientPrefix, selectedVersionStr, binaryName)
 
+	slog.Debug("Download URL constructed",
+		"url", downloadURL,
+		"platform", platform,
+		"binaryName", binaryName)
 	fmt.Printf("Downloading %s...\n", binaryName)
 
 	// Create temporary directory
@@ -213,9 +223,11 @@ func runUpgrade(globalCtx *GlobalContext, checkOnly, force bool, targetVersion s
 
 	// Download the binary
 	tempFile := filepath.Join(tempDir, binaryName)
+	slog.Debug("Downloading file", "url", downloadURL, "destination", tempFile)
 	if err := downloadFile(downloadURL, tempFile); err != nil {
 		return fmt.Errorf("failed to download: %w", err)
 	}
+	slog.Debug("Download completed successfully")
 
 	// Extract the binary
 	extractedBinary := filepath.Join(tempDir, "sprite")
@@ -248,9 +260,11 @@ func runUpgrade(globalCtx *GlobalContext, checkOnly, force bool, targetVersion s
 
 	// Replace the current binary
 	fmt.Println("Installing new version...")
+	slog.Debug("Replacing executable", "current", currentExe, "new", extractedBinary)
 	if err := replaceExecutable(currentExe, extractedBinary); err != nil {
 		return fmt.Errorf("failed to replace executable: %w", err)
 	}
+	slog.Debug("Executable replaced successfully")
 
 	// Update current version in config
 	cfg.SetCurrentVersion(selectedVersionStr)
@@ -283,7 +297,7 @@ type VersionCheckResult struct {
 	ChannelVersions map[string]string
 }
 
-// GetLatestVersionForChannel gets the latest version by checking channel version files
+// GetLatestVersionForChannel gets the latest version by checking release, rc, and current channel version files
 func GetLatestVersionForChannel(currentVersion string) (string, error) {
 	result, err := GetLatestVersionForChannelDetailed(currentVersion)
 	if err != nil {
@@ -293,29 +307,49 @@ func GetLatestVersionForChannel(currentVersion string) (string, error) {
 }
 
 // GetLatestVersionForChannelDetailed gets the latest version with detailed information
+// It always checks release, rc, and the current channel (if different)
 func GetLatestVersionForChannelDetailed(currentVersion string) (*VersionCheckResult, error) {
 	// Determine current channel
 	currentChannel := ExtractChannel(currentVersion)
+	slog.Debug("Extracting channel from version", "currentVersion", currentVersion, "channel", currentChannel)
 
 	result := &VersionCheckResult{
 		CurrentChannel:  currentChannel,
 		ChannelVersions: make(map[string]string),
 	}
 
-	// Fetch versions from both current channel and release channel
+	// Fetch versions from release, rc, and current channel
 	var versions []string
 
 	// Always check release channel
+	slog.Debug("Fetching release channel version")
 	if releaseVersion, err := fetchVersionFromChannel("release"); err == nil && releaseVersion != "" {
+		slog.Debug("Found release version", "version", releaseVersion)
 		versions = append(versions, releaseVersion)
 		result.ChannelVersions["release"] = releaseVersion
+	} else if err != nil {
+		slog.Debug("Failed to fetch release version", "error", err)
 	}
 
-	// Check current channel if it's not release
-	if currentChannel != "release" {
+	// Always check rc channel
+	slog.Debug("Fetching rc channel version")
+	if rcVersion, err := fetchVersionFromChannel("rc"); err == nil && rcVersion != "" {
+		slog.Debug("Found rc version", "version", rcVersion)
+		versions = append(versions, rcVersion)
+		result.ChannelVersions["rc"] = rcVersion
+	} else if err != nil {
+		slog.Debug("Failed to fetch rc version", "error", err)
+	}
+
+	// Check current channel if it's not release or rc
+	if currentChannel != "release" && currentChannel != "rc" {
+		slog.Debug("Fetching channel-specific version", "channel", currentChannel)
 		if channelVersion, err := fetchVersionFromChannel(currentChannel); err == nil && channelVersion != "" {
+			slog.Debug("Found channel version", "channel", currentChannel, "version", channelVersion)
 			versions = append(versions, channelVersion)
 			result.ChannelVersions[currentChannel] = channelVersion
+		} else if err != nil {
+			slog.Debug("Failed to fetch channel version", "channel", currentChannel, "error", err)
 		}
 	}
 
@@ -370,6 +404,7 @@ func ExtractChannel(version string) string {
 // fetchVersionFromChannel retrieves the version from a channel's .txt file
 func fetchVersionFromChannel(channel string) (string, error) {
 	url := fmt.Sprintf("https://sprites-binaries.t3.storage.dev/client/%s.txt", channel)
+	slog.Debug("Fetching version from channel file", "channel", channel, "url", url)
 
 	client := &http.Client{
 		Timeout: 5 * time.Second,
@@ -377,11 +412,14 @@ func fetchVersionFromChannel(channel string) (string, error) {
 
 	resp, err := client.Get(url)
 	if err != nil {
+		slog.Debug("Failed to fetch channel file", "error", err)
 		return "", err
 	}
 	defer resp.Body.Close()
 
+	slog.Debug("Channel file response", "status", resp.StatusCode)
 	if resp.StatusCode == http.StatusNotFound {
+		slog.Debug("Channel file not found")
 		return "", nil // Channel file doesn't exist yet
 	}
 
@@ -396,11 +434,13 @@ func fetchVersionFromChannel(channel string) (string, error) {
 
 	// Trim whitespace but keep the version as-is (could have 'v' prefix)
 	version := strings.TrimSpace(string(body))
+	slog.Debug("Channel version retrieved", "channel", channel, "version", version)
 
 	return version, nil
 }
 
 func listBucketVersions(bucketURL string, prefix string) (map[string]*semver.Version, error) {
+	slog.Debug("Listing bucket versions", "url", bucketURL, "prefix", prefix)
 	// Try to list the bucket contents
 	resp, err := http.Get(bucketURL)
 	if err != nil {
@@ -408,6 +448,7 @@ func listBucketVersions(bucketURL string, prefix string) (map[string]*semver.Ver
 	}
 	defer resp.Body.Close()
 
+	slog.Debug("Bucket list response", "status", resp.StatusCode)
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("failed to list bucket: HTTP %d", resp.StatusCode)
 	}
@@ -513,12 +554,15 @@ func getPlatform() string {
 }
 
 func downloadFile(url, dest string) error {
+	slog.Debug("Starting file download", "url", url, "destination", dest)
 	resp, err := http.Get(url)
 	if err != nil {
+		slog.Debug("Download request failed", "error", err)
 		return err
 	}
 	defer resp.Body.Close()
 
+	slog.Debug("Download response", "status", resp.StatusCode)
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download failed: HTTP %d", resp.StatusCode)
 	}
@@ -529,8 +573,13 @@ func downloadFile(url, dest string) error {
 	}
 	defer out.Close()
 
-	_, err = io.Copy(out, resp.Body)
-	return err
+	n, err := io.Copy(out, resp.Body)
+	if err != nil {
+		slog.Debug("Failed to write download", "error", err)
+		return err
+	}
+	slog.Debug("Download completed", "bytes", n)
+	return nil
 }
 
 func extractTarGz(tarGzPath, destDir string) error {

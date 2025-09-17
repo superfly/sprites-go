@@ -7,7 +7,7 @@ ARG USER UID
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential clang sudo \
+        build-essential clang sudo inotify-tools \
         curl git ca-certificates gnupg dirmngr \
         autoconf automake libtool pkg-config xz-utils \
         libssl-dev zlib1g-dev libreadline-dev libsqlite3-dev \
@@ -102,7 +102,6 @@ ARG USER UID
 
 # Create sprite scripts directory and languages directory
 RUN mkdir -p /.sprite/languages /.sprite/bin /.sprite/etc/profile.d
-COPY --from=utility-builder /.sprite/bin/ /.sprite/bin/
 
 # Copy our stuff
 COPY root/ /

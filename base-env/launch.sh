@@ -35,8 +35,6 @@ if ! mount | grep -q "^overlay on /mnt/newroot type overlay"; then
   exit 1
 fi
 
-mkdir -p /tmp/sprite
-
 # Store base config in a variable
 CONFIG_JSON='{
   "ociVersion": "1.0.2",
@@ -222,9 +220,9 @@ CONFIG_JSON='{
     },
     {
         "destination": "/tmp",
-        "type": "bind",
-        "source": "/tmp/sprite",
-        "options": ["rbind", "nosuid", "nodev"]
+        "type": "tmpfs",
+        "source": "tmpfs",
+        "options": ["nosuid", "nodev", "mode=1777", "size=512M"]
     },
     {
         "destination": "/var/lib/docker",

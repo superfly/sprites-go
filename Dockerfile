@@ -54,9 +54,6 @@ RUN case ${TARGETARCH} in \
     curl -L https://github.com/containers/crun/releases/download/1.21/crun-1.21-linux-${CRUN_ARCH}-disable-systemd -o /crun && \
     chmod +x /crun
 
-
-
-
 # ---- build stage for statically linked tmux ----
 FROM alpine:3.20 AS utility-builder
 
@@ -86,6 +83,19 @@ RUN sh autogen.sh && \
 # Create the sprite bin directory and copy tmux
 RUN mkdir -p /system/.sprite/bin && \
     cp tmux /system/.sprite/bin/
+
+
+# Create /system/etc/hosts with localhost and sprite entries
+RUN mkdir -p /system/etc && \
+    cat > /system/etc/hosts <<EOF
+# IPv4
+127.0.0.1   localhost
+127.0.0.1   sprite
+
+# IPv6
+::1         localhost
+::1         sprite
+EOF
 
 # Download and install gh CLI with appropriate architecture
 RUN ARCH=$(uname -m) && \
@@ -125,6 +135,7 @@ COPY --from=crun /crun /usr/local/bin/crun
 COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
 COPY --from=juicefs /usr/local/bin/juicefs /usr/local/bin/juicefs
 COPY --from=utility-builder /system/.sprite /system/.sprite
+COPY --from=utility-builder /system/etc /system/etc
 
 # Define environment variables for paths
 ENV SPRITE_WRITE_DIR=/dev/fly_vol \
