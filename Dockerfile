@@ -54,6 +54,52 @@ RUN case ${TARGETARCH} in \
     curl -L https://github.com/containers/crun/releases/download/1.21/crun-1.21-linux-${CRUN_ARCH}-disable-systemd -o /crun && \
     chmod +x /crun
 
+
+
+
+# ---- build stage for statically linked tmux ----
+FROM alpine:3.20 AS utility-builder
+
+RUN apk add --no-cache \
+        build-base \
+        musl-dev \
+        ncurses-static \
+        ncurses-dev \
+        libevent-static \
+        libevent-dev \
+        git \
+        autoconf \
+        automake \
+        pkgconfig \
+        bison
+
+WORKDIR /src
+
+# Fetch tmux source
+RUN git clone --depth 1 --branch 3.5a https://github.com/tmux/tmux.git .
+
+# Bootstrap & configure
+RUN sh autogen.sh && \
+    ./configure LDFLAGS="-static" CFLAGS="-O2" && \
+    make -j$(nproc)
+
+# Create the sprite bin directory and copy tmux
+RUN mkdir -p /system/.sprite/bin && \
+    cp tmux /system/.sprite/bin/
+
+# Download and install gh CLI with appropriate architecture
+RUN ARCH=$(uname -m) && \
+    case ${ARCH} in \
+        x86_64) GH_ARCH="amd64" ;; \
+        aarch64) GH_ARCH="arm64" ;; \
+        *) echo "Unsupported architecture: ${ARCH}" && exit 1 ;; \
+    esac && \
+    wget -O gh.tar.gz "https://github.com/cli/cli/releases/download/v2.79.0/gh_2.79.0_linux_${GH_ARCH}.tar.gz" && \
+    tar -xzf gh.tar.gz && \
+    cp gh_2.79.0_linux_${GH_ARCH}/bin/gh /system/.sprite/bin/ && \
+    chmod +x /system/.sprite/bin/gh && \
+    rm -rf gh.tar.gz gh_2.79.0_linux_${GH_ARCH}
+
 # Get litestream binary
 FROM litestream/litestream:latest AS litestream
 
@@ -78,6 +124,7 @@ RUN apt-get update && \
 COPY --from=crun /crun /usr/local/bin/crun
 COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
 COPY --from=juicefs /usr/local/bin/juicefs /usr/local/bin/juicefs
+COPY --from=utility-builder /system/.sprite /system/.sprite
 
 # Define environment variables for paths
 ENV SPRITE_WRITE_DIR=/dev/fly_vol \

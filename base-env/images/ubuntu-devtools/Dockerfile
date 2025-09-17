@@ -92,38 +92,6 @@ COPY --chown=$UID:$UID --from=languages-split /.sprite/languages /.sprite/langua
 COPY --chown=$UID:$UID --from=languages-split /.sprite/bin /.sprite/bin
 COPY --chown=$UID:$UID --from=languages-split /.sprite/etc/profile.d /.sprite/etc/profile.d
 
-
-
-# ---- build stage for statically linked tmux ----
-FROM alpine:3.20 AS utility-builder
-
-RUN apk add --no-cache \
-        build-base \
-        musl-dev \
-        ncurses-static \
-        ncurses-dev \
-        libevent-static \
-        libevent-dev \
-        git \
-        autoconf \
-        automake \
-        pkgconfig \
-        bison
-
-WORKDIR /src
-
-# Fetch tmux source
-RUN git clone --depth 1 --branch 3.5a https://github.com/tmux/tmux.git .
-
-# Bootstrap & configure
-RUN sh autogen.sh && \
-    ./configure LDFLAGS="-static" CFLAGS="-O2" && \
-    make -j$(nproc)
-
-# Create the sprite bin directory and copy tmux
-RUN mkdir -p /.sprite/bin && \
-    cp tmux /.sprite/bin/
-
 ####################################################
 # STAGE 1 – final runtime
 # does not include languages
