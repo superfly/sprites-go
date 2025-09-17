@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -12,12 +13,136 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/superfly/fly-go"
 	"github.com/superfly/fly-go/flaps"
 	"github.com/superfly/fly-go/tokens"
 )
+
+// Global mutex for coordinating console output
+var outputMutex sync.Mutex
+
+// buildOutputWriter manages the output of build processes
+// It shows only the last N lines during progress and collapses on success
+type buildOutputWriter struct {
+	label        string
+	lines        []string
+	maxLines     int
+	allOutput    bytes.Buffer
+	mu           sync.Mutex
+	lastUpdate   time.Time
+	startTime    time.Time
+	isError      bool
+	done         bool
+	showProgress bool
+}
+
+func newBuildOutputWriter(label string, showProgress bool) *buildOutputWriter {
+	return &buildOutputWriter{
+		label:        label,
+		lines:        make([]string, 0, 10),
+		maxLines:     10,
+		startTime:    time.Now(),
+		lastUpdate:   time.Now(),
+		showProgress: showProgress,
+	}
+}
+
+func (w *buildOutputWriter) Write(p []byte) (n int, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// Store all output for error cases
+	w.allOutput.Write(p)
+
+	// Process new lines
+	scanner := bufio.NewScanner(bytes.NewReader(p))
+	for scanner.Scan() {
+		line := scanner.Text()
+		w.lines = append(w.lines, line)
+		if len(w.lines) > w.maxLines {
+			w.lines = w.lines[len(w.lines)-w.maxLines:]
+		}
+	}
+
+	// Update display if showing progress and enough time has passed
+	if w.showProgress && time.Since(w.lastUpdate) > 500*time.Millisecond && !w.done {
+		outputMutex.Lock()
+		w.display()
+		outputMutex.Unlock()
+		w.lastUpdate = time.Now()
+	}
+
+	return len(p), nil
+}
+
+func (w *buildOutputWriter) display() {
+	// Clear previous lines (move cursor up and clear)
+	fmt.Printf("\033[%dA\033[J", w.maxLines+2)
+
+	// Show header
+	elapsed := time.Since(w.startTime).Round(time.Second)
+	fmt.Printf("[%s] Building %s... (%s)\n", time.Now().Format("15:04:05"), w.label, elapsed)
+	fmt.Println(strings.Repeat("-", 80))
+
+	// Show last N lines
+	for _, line := range w.lines {
+		// Truncate long lines
+		if len(line) > 100 {
+			line = line[:97] + "..."
+		}
+		fmt.Printf(" %s\n", line)
+	}
+
+	// Pad if we have fewer lines
+	for i := len(w.lines); i < w.maxLines; i++ {
+		fmt.Println()
+	}
+}
+
+func (w *buildOutputWriter) setupProgressDisplay() {
+	if !w.showProgress {
+		return
+	}
+
+	outputMutex.Lock()
+	defer outputMutex.Unlock()
+
+	// Reserve space for progress display
+	for i := 0; i < w.maxLines+2; i++ {
+		fmt.Println()
+	}
+	w.display()
+}
+
+func (w *buildOutputWriter) finish(err error) {
+	w.mu.Lock()
+	w.done = true
+	w.isError = err != nil
+	elapsed := time.Since(w.startTime).Round(time.Second)
+	w.mu.Unlock()
+
+	outputMutex.Lock()
+	defer outputMutex.Unlock()
+
+	if w.showProgress {
+		// Clear the progress display
+		fmt.Printf("\033[%dA\033[J", w.maxLines+2)
+	}
+
+	if err != nil {
+		// On error, show all output
+		fmt.Printf("[%s] ❌ Failed building %s after %s\n", time.Now().Format("15:04:05"), w.label, elapsed)
+		fmt.Println(strings.Repeat("=", 80))
+		fmt.Print(w.allOutput.String())
+		fmt.Println(strings.Repeat("=", 80))
+	} else {
+		// On success, show single line
+		fmt.Printf("[%s] ✓ Successfully built %s in %s\n", time.Now().Format("15:04:05"), w.label, elapsed)
+	}
+}
 
 // apiRequest makes a request to the Fly.io API
 func apiRequest(method, url string, token string, body interface{}) (*http.Response, error) {
@@ -165,15 +290,58 @@ func waitForMachineStarted(ctx context.Context, client *flaps.Client, machineID 
 	}
 }
 
+// buildImage builds and pushes a Docker image
+func buildImage(appName, label, dockerfile, buildTarget, workDir string, showProgress bool) error {
+	imageRef := fmt.Sprintf("registry.fly.io/%s:%s", appName, label)
+
+	args := []string{
+		"deploy",
+		"-a", appName,
+		"--build-only",
+		"--push",
+		"--image-label", label,
+	}
+
+	if dockerfile != "" {
+		args = append(args, "--dockerfile", dockerfile)
+	}
+
+	if buildTarget != "" {
+		args = append(args, "--build-target", buildTarget)
+	}
+
+	// Create output writer for this build
+	outputWriter := newBuildOutputWriter(imageRef, showProgress)
+
+	buildCmd := exec.Command("fly", args...)
+	buildCmd.Dir = workDir
+	buildCmd.Stdout = outputWriter
+	buildCmd.Stderr = outputWriter
+
+	// Setup progress display if enabled
+	outputWriter.setupProgressDisplay()
+
+	err := buildCmd.Run()
+	outputWriter.finish(err)
+
+	if err != nil {
+		return fmt.Errorf("failed to build image %s: %w", label, err)
+	}
+
+	return nil
+}
+
 func main() {
 	var appName string
 	var skipBuild bool
 	var replaceConfig bool
 	var updateBase bool
+	var updateLanguages bool
 	flag.StringVar(&appName, "a", "", "Fly app name")
 	flag.BoolVar(&skipBuild, "skip-build", false, "Skip docker build step and just push the image")
 	flag.BoolVar(&replaceConfig, "replace-config", false, "Replace entire machine config instead of just updating the image")
-	flag.BoolVar(&updateBase, "update-base", false, "Build and push base Ubuntu and languages images")
+	flag.BoolVar(&updateBase, "update-base", false, "Build and push base Ubuntu image")
+	flag.BoolVar(&updateLanguages, "update-languages", false, "Build and push languages image")
 	flag.Parse()
 
 	// Check for app name from flag or env var
@@ -198,65 +366,106 @@ func main() {
 
 	ctx := context.Background()
 
-	// Build and push Docker image
+	// Build and push Docker images
 	label := fmt.Sprintf("%d", time.Now().Unix())
 	imageRef := fmt.Sprintf("registry.fly.io/%s:%s", appName, label)
 
-	if !skipBuild {
-		log.Println("Building Docker image...")
-		// Use buildx for better cross-platform support
-		buildCmd := exec.Command("fly", "deploy", "-a", appName, "--build-only", "--push", "--image-label", label)
-		buildCmd.Dir = "../"
-		buildCmd.Stdout = os.Stdout
-		buildCmd.Stderr = os.Stderr
-		if err := buildCmd.Run(); err != nil {
-			log.Fatal("Failed to build Docker image: ", err)
-		}
-	} else {
-		log.Println("Skipping docker image build.")
-	}
-
-	// Build and push base images if requested
+	// Prepare image refs for base images
 	var ubuntuImageRef, languagesImageRef string
 	if updateBase {
-		log.Println("Building base Ubuntu image...")
-		ubuntuLabel := fmt.Sprintf("%s-ubuntu", label)
-		ubuntuImageRef = fmt.Sprintf("registry.fly.io/%s:%s", appName, ubuntuLabel)
+		ubuntuImageRef = fmt.Sprintf("registry.fly.io/%s:%s-ubuntu", appName, label)
+	}
+	if updateLanguages {
+		languagesImageRef = fmt.Sprintf("registry.fly.io/%s:%s-languages", appName, label)
+	}
 
-		// Build and push ubuntu base image
-		ubuntuBuildCmd := exec.Command("fly", "deploy",
-			"-a", appName,
-			"--build-only",
-			"--push",
-			"--image-label", ubuntuLabel,
-			"--dockerfile", "base-env/images/ubuntu-devtools/Dockerfile")
-		ubuntuBuildCmd.Dir = "../"
-		ubuntuBuildCmd.Stdout = os.Stdout
-		ubuntuBuildCmd.Stderr = os.Stderr
-		if err := ubuntuBuildCmd.Run(); err != nil {
-			log.Fatal("Failed to build Ubuntu base image: ", err)
+	// Build all images in parallel
+	if !skipBuild || updateBase || updateLanguages {
+		var wg sync.WaitGroup
+		errChan := make(chan error, 3) // Buffer for up to 3 errors
+
+		// Count how many builds we're doing
+		buildCount := 0
+		if !skipBuild {
+			buildCount++
 		}
-		log.Printf("Built Ubuntu base image: %s\n", ubuntuImageRef)
-
-		log.Println("Building languages image...")
-		languagesLabel := fmt.Sprintf("%s-languages", label)
-		languagesImageRef = fmt.Sprintf("registry.fly.io/%s:%s", appName, languagesLabel)
-
-		// Build and push languages stage
-		languagesBuildCmd := exec.Command("fly", "deploy",
-			"-a", appName,
-			"--build-only",
-			"--push",
-			"--image-label", languagesLabel,
-			"--dockerfile", "base-env/images/ubuntu-devtools/Dockerfile",
-			"--build-target", "languages")
-		languagesBuildCmd.Dir = "../"
-		languagesBuildCmd.Stdout = os.Stdout
-		languagesBuildCmd.Stderr = os.Stderr
-		if err := languagesBuildCmd.Run(); err != nil {
-			log.Fatal("Failed to build languages image: ", err)
+		if updateBase {
+			buildCount++
 		}
-		log.Printf("Built languages image: %s\n", languagesImageRef)
+		if updateLanguages {
+			buildCount++
+		}
+
+		// For single builds, show progress; for multiple builds, don't show progress to avoid conflicts
+		showProgress := buildCount == 1
+
+		if buildCount > 1 {
+			log.Printf("Starting %d parallel builds...\n", buildCount)
+		}
+
+		// Build main image if not skipping
+		if !skipBuild {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if !showProgress {
+					log.Println("  • Building main Docker image...")
+				}
+				if err := buildImage(appName, label, "", "", "../", showProgress); err != nil {
+					errChan <- fmt.Errorf("main image: %w", err)
+				}
+			}()
+		} else if buildCount == 0 {
+			log.Println("Skipping main docker image build.")
+		}
+
+		// Build Ubuntu base image if requested
+		if updateBase {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if !showProgress {
+					log.Println("  • Building Ubuntu base image...")
+				}
+				ubuntuLabel := fmt.Sprintf("%s-ubuntu", label)
+				if err := buildImage(appName, ubuntuLabel, "Dockerfile", "", "../base-env/images/ubuntu-devtools", showProgress); err != nil {
+					errChan <- fmt.Errorf("ubuntu base image: %w", err)
+				}
+			}()
+		}
+
+		// Build languages image if requested
+		if updateLanguages {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if !showProgress {
+					log.Println("  • Building languages image...")
+				}
+				languagesLabel := fmt.Sprintf("%s-languages", label)
+				if err := buildImage(appName, languagesLabel, "Dockerfile", "languages", "../base-env/images/ubuntu-devtools", showProgress); err != nil {
+					errChan <- fmt.Errorf("languages image: %w", err)
+				}
+			}()
+		}
+
+		// Wait for all builds to complete
+		wg.Wait()
+		close(errChan)
+
+		// Check for errors
+		var errors []string
+		for err := range errChan {
+			errors = append(errors, err.Error())
+		}
+
+		if len(errors) > 0 {
+			log.Fatal("Failed to build images:\n  - ", strings.Join(errors, "\n  - "))
+		}
+
+		if buildCount > 1 {
+			log.Println("\nAll images built successfully!")
+		}
 	}
 
 	// Create flaps client for machine management
@@ -416,7 +625,7 @@ func main() {
 		}
 
 		// Update volume images if base images were built
-		if updateBase {
+		if updateBase || updateLanguages {
 			updateVolumeImages(&machineConfig, ubuntuImageRef, languagesImageRef)
 		}
 
@@ -529,7 +738,7 @@ func main() {
 			updateMachineImageOnly(currentConfig, imageRef)
 
 			// Update volume images if base images were built
-			if updateBase {
+			if updateBase || updateLanguages {
 				updateVolumeImages(currentConfig, ubuntuImageRef, languagesImageRef)
 			}
 

@@ -59,7 +59,7 @@ func NewWindowMonitor(ctx context.Context, monitorSession string) *WindowMonitor
 		activityStats:  make(map[string]*ActivityStats),
 		eventChan:      make(chan WindowMonitorEvent, 1000),
 		socketPath:     "/.sprite/tmp/exec-tmux",
-		configPath:     "/.sprite/bin/tmux.conf",
+		configPath:     "/.sprite/etc/tmux.conf",
 		tmuxBinary:     "tmux", // Default to tmux in PATH
 		closed:         make(chan struct{}),
 	}

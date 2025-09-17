@@ -27,7 +27,7 @@ client/client
 server/api/handlers/static
 
 # Local sprite configuration
-.sprite
+/.sprite
 cmd/tmp/
 CLAUDE.md
 .tmux-ui

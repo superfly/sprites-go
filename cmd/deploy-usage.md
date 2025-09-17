@@ -18,20 +18,38 @@ go run deploy.go -a your-app-name --replace-config
 
 ## Update Base Images
 
-The `--update-base` flag builds and pushes the base Ubuntu and languages images that are mounted as volumes in the container:
+The deploy command provides separate flags for updating base images that are mounted as volumes:
 
+### Update Ubuntu Base Image Only
 ```bash
-# Build and deploy main app + base images
 go run deploy.go -a your-app-name --update-base
 ```
+This builds and pushes the Ubuntu base image as `registry.fly.io/your-app:TIMESTAMP-ubuntu`
 
-This will:
-1. Build and push the main application image as `registry.fly.io/your-app:TIMESTAMP`
-2. Build and push the Ubuntu base image as `registry.fly.io/your-app:TIMESTAMP-ubuntu`
-3. Build and push the languages image as `registry.fly.io/your-app:TIMESTAMP-languages`
-4. Update the machine config to use these images in the volumes:
-   - `system-base` volume → uses the `-ubuntu` image
-   - `languages-image` volume → uses the `-languages` image
+### Update Languages Image Only
+```bash
+go run deploy.go -a your-app-name --update-languages
+```
+This builds and pushes the languages image as `registry.fly.io/your-app:TIMESTAMP-languages`
+
+### Update Both Base Images
+```bash
+go run deploy.go -a your-app-name --update-base --update-languages
+```
+
+### What These Flags Do
+When using these flags (individually or together):
+1. Build and push the requested images:
+   - `--update-base`: Ubuntu base image from `base-env/images/ubuntu-devtools/Dockerfile`
+   - `--update-languages`: Languages stage from the same Dockerfile
+2. Update the machine config to use these images in the volumes:
+   - `system-base` volume → uses the `-ubuntu` image (if `--update-base`)
+   - `languages-image` volume → uses the `-languages` image (if `--update-languages`)
+3. The main application image is built unless `--skip-build` is used
+
+**Performance Note**: All requested images are built in parallel to minimize deployment time.
+
+Note: The base image builds run from the `base-env/images/ubuntu-devtools/` directory to ensure the Docker context is correct for COPY operations.
 
 ## Environment Variables
 
@@ -42,14 +60,23 @@ This will:
 ## Example Workflow
 
 ```bash
-# First deployment with base images
+# First deployment with all images
 export FLY_APP_NAME=my-sprite-app
 export SPRITE_HTTP_API_TOKEN=my-secret-token
-go run deploy.go --update-base
+go run deploy.go --update-base --update-languages
 
-# Subsequent deployments (only update main app)
+# Update only the main application
 go run deploy.go
 
-# Update only base images without changing config
+# Update only the Ubuntu base image
 go run deploy.go --update-base --skip-build
+
+# Update only the languages image
+go run deploy.go --update-languages --skip-build
+
+# Update both base images but not the main app
+go run deploy.go --update-base --update-languages --skip-build
+
+# Update everything
+go run deploy.go --update-base --update-languages
 ```

@@ -68,7 +68,7 @@ func NewTMUXManager(ctx context.Context) *TMUXManager {
 		logger:         tap.Logger(ctx),
 		nextID:         -1,
 		socketPath:     "/.sprite/tmp/exec-tmux",
-		configPath:     "/.sprite/bin/tmux.conf",
+		configPath:     "/.sprite/etc/tmux.conf",
 		activityChan:   make(chan SessionActivity, 100),
 		monitorStartCh: make(chan struct{}, 1),
 		paneCallbacks:  make(map[string]PaneLifecycleCallback),

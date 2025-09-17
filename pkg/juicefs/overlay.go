@@ -26,11 +26,12 @@ import (
 // And is mounted at:
 // ${JUICEFS_BASE}/root-upper
 type OverlayManager struct {
-	juiceFS   *JuiceFS
-	imagePath string
-	mountPath string
-	imageSize string
-	logger    *slog.Logger
+	juiceFS    *JuiceFS
+	imagePath  string
+	mountPath  string
+	imageSize  string
+	logger     *slog.Logger
+	loopDevice string // Loop device path (e.g., /dev/loop0)
 
 	// Overlayfs configuration
 	lowerPaths        []string // Lower directories (e.g., ["/mnt/base1", "/mnt/base2", "/mnt/system-base"])
@@ -201,17 +202,41 @@ func (om *OverlayManager) Mount(ctx context.Context) error {
 	om.logger.Info("Mounting root overlay", "mountPath", om.mountPath)
 	om.logger.Debug("Source image", "path", om.imagePath)
 
-	// Create a context with timeout for the mount command
+	// Create a context with timeout for the mount commands
 	mountCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(mountCtx, "mount", "-o", "loop", om.imagePath, om.mountPath)
+	// First, create a loop device with direct-io and discard options
+	cmd := exec.CommandContext(mountCtx, "losetup", "--show", "--direct-io=on", "--discard=on", "-f", om.imagePath)
+	loopOutput, err := cmd.Output()
+	if err != nil {
+		om.logger.Error("Failed to create loop device", "error", err)
+		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
+			om.logger.Debug("losetup stderr", "stderr", string(exitErr.Stderr))
+		}
+		return fmt.Errorf("failed to create loop device: %w", err)
+	}
+
+	// Store the loop device path (remove trailing newline)
+	om.loopDevice = strings.TrimSpace(string(loopOutput))
+	om.logger.Debug("Created loop device", "device", om.loopDevice)
+
+	// Now mount the loop device with discard option
+	cmd = exec.CommandContext(mountCtx, "mount", "-o", "discard", om.loopDevice, om.mountPath)
 	output, err := cmd.CombinedOutput()
 
 	// Check if it was a timeout
 	if mountCtx.Err() == context.DeadlineExceeded {
 		om.logger.Error("Mount command timed out after 10 seconds, likely due to I/O error")
 		err = fmt.Errorf("mount timeout")
+		// Clean up the loop device if mount failed
+		if om.loopDevice != "" {
+			detachCmd := exec.Command("losetup", "-d", om.loopDevice)
+			if detachErr := detachCmd.Run(); detachErr != nil {
+				om.logger.Warn("Failed to detach loop device after timeout", "device", om.loopDevice, "error", detachErr)
+			}
+			om.loopDevice = ""
+		}
 	}
 
 	// Check for I/O errors which indicate a corrupted image
@@ -221,6 +246,15 @@ func (om *OverlayManager) Mount(ctx context.Context) error {
 		om.logger.Error("Mount failed with I/O error, attempting recovery...", "error", err)
 		if len(output) > 0 {
 			om.logger.Debug("Mount output", "output", string(output))
+		}
+
+		// Clean up the loop device if it was created
+		if om.loopDevice != "" {
+			detachCmd := exec.Command("losetup", "-d", om.loopDevice)
+			if detachErr := detachCmd.Run(); detachErr != nil {
+				om.logger.Warn("Failed to detach loop device during recovery", "device", om.loopDevice, "error", detachErr)
+			}
+			om.loopDevice = ""
 		}
 
 		// Delete the corrupted image
@@ -240,11 +274,30 @@ func (om *OverlayManager) Mount(ctx context.Context) error {
 		mountCtx2, cancel2 := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel2()
 
-		cmd = exec.CommandContext(mountCtx2, "mount", "-o", "loop", om.imagePath, om.mountPath)
+		// Create a new loop device
+		cmd = exec.CommandContext(mountCtx2, "losetup", "--show", "--direct-io=on", "--discard=on", "-f", om.imagePath)
+		loopOutput, err = cmd.Output()
+		if err != nil {
+			om.logger.Error("Failed to create loop device on retry", "error", err)
+			return fmt.Errorf("failed to create loop device on retry: %w", err)
+		}
+		om.loopDevice = strings.TrimSpace(string(loopOutput))
+		om.logger.Debug("Created loop device on retry", "device", om.loopDevice)
+
+		// Mount the new loop device
+		cmd = exec.CommandContext(mountCtx2, "mount", "-o", "discard", om.loopDevice, om.mountPath)
 		output, err = cmd.CombinedOutput()
 	}
 
 	if err != nil {
+		// Clean up the loop device if mount failed
+		if om.loopDevice != "" {
+			detachCmd := exec.Command("losetup", "-d", om.loopDevice)
+			if detachErr := detachCmd.Run(); detachErr != nil {
+				om.logger.Warn("Failed to detach loop device after mount failure", "device", om.loopDevice, "error", detachErr)
+			}
+			om.loopDevice = ""
+		}
 		return fmt.Errorf("failed to mount overlay: %w, output: %s", err, string(output))
 	}
 
@@ -349,6 +402,19 @@ func (om *OverlayManager) Unmount(ctx context.Context) error {
 		if output2, err2 := cmd.CombinedOutput(); err2 != nil {
 			return fmt.Errorf("failed to unmount overlay: %w, outputs: %s, %s", err2, string(output), string(output2))
 		}
+	}
+
+	// Detach the loop device if it exists
+	if om.loopDevice != "" {
+		om.logger.Debug("Detaching loop device", "device", om.loopDevice)
+		cmd = exec.CommandContext(ctx, "losetup", "-d", om.loopDevice)
+		if err := cmd.Run(); err != nil {
+			om.logger.Warn("Failed to detach loop device", "device", om.loopDevice, "error", err)
+			// Don't fail the unmount operation if we can't detach the loop device
+		} else {
+			om.logger.Info("Loop device detached successfully", "device", om.loopDevice)
+		}
+		om.loopDevice = ""
 	}
 
 	om.logger.Info("Root overlay unmounted successfully")

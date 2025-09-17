@@ -31,12 +31,12 @@ func TestTMUXManager_CreateSession(t *testing.T) {
 	}
 
 	// Check that args contain config, socket and new-session command
-	// Expected: [-f /.sprite/bin/tmux.conf -S /.sprite/tmp/exec-tmux new-session -s sprite-exec-<id> cmd args...]
+	// Expected: [-f /.sprite/etc/tmux.conf -S /.sprite/tmp/exec-tmux new-session -s sprite-exec-<id> cmd args...]
 	if len(args) < 7 {
 		t.Errorf("Expected at least 7 args, got %d: %v", len(args), args)
 	}
-	if args[0] != "-f" || args[1] != "/.sprite/bin/tmux.conf" {
-		t.Errorf("Expected -f /.sprite/bin/tmux.conf, got %s %s", args[0], args[1])
+	if args[0] != "-f" || args[1] != "/.sprite/etc/tmux.conf" {
+		t.Errorf("Expected -f /.sprite/etc/tmux.conf, got %s %s", args[0], args[1])
 	}
 	if args[2] != "-S" || args[3] != "/.sprite/tmp/exec-tmux" {
 		t.Errorf("Expected -S /.sprite/tmp/exec-tmux, got %s %s", args[2], args[3])
@@ -62,12 +62,12 @@ func TestTMUXManager_AttachSession(t *testing.T) {
 	}
 
 	// Check that args contain config, socket and attach-session command
-	// Expected: [-f /.sprite/bin/tmux.conf -S /.sprite/tmp/exec-tmux attach-session -t sprite-exec-3]
+	// Expected: [-f /.sprite/etc/tmux.conf -S /.sprite/tmp/exec-tmux attach-session -t sprite-exec-3]
 	if len(args) != 7 {
 		t.Errorf("Expected 7 args, got %d: %v", len(args), args)
 	}
-	if args[0] != "-f" || args[1] != "/.sprite/bin/tmux.conf" {
-		t.Errorf("Expected -f /.sprite/bin/tmux.conf, got %s %s", args[0], args[1])
+	if args[0] != "-f" || args[1] != "/.sprite/etc/tmux.conf" {
+		t.Errorf("Expected -f /.sprite/etc/tmux.conf, got %s %s", args[0], args[1])
 	}
 	if args[2] != "-S" || args[3] != "/.sprite/tmp/exec-tmux" {
 		t.Errorf("Expected -S /.sprite/tmp/exec-tmux, got %s %s", args[2], args[3])

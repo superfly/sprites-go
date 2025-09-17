@@ -46,7 +46,7 @@ nvm use default
 echo "Installing common global packages..."
 npm install -g npm@latest
 
-# Create symlinks in BIN_DIR
+# Create symlinks in BIN_DIR for core Node.js binaries only
 echo "Creating symlinks in $BIN_DIR..."
 NODE_BIN_PATH="$(dirname $(which node))"
 for binary in "$NODE_BIN_PATH"/{node,npm,npx,corepack}; do

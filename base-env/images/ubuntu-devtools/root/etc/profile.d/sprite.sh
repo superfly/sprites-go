@@ -1,1 +1,0 @@
-export BROWSER="/usr/local/bin/sprite-browser"

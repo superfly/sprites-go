@@ -25,8 +25,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # --- setup environment ---
 ENV LANG=en_US.UTF-8 \
     PATH="/.sprite/bin:${PATH}"
-# Setup bash profile
-RUN echo ". /.sprite/etc/profile.d/sprite.sh" >> /etc/bash.bashrc
+# Source sprite scripts in /etc/profile for login shells
+RUN echo '' >> /etc/profile && \
+    echo '# Source sprite environment' >> /etc/profile && \
+    echo '[ -r /.sprite/etc/profile.d/sprite.sh ] && . /.sprite/etc/profile.d/sprite.sh' >> /etc/profile
 
 
 # Copy the sudoers file and user skeleton, then fix ownership
@@ -46,11 +48,6 @@ ARG USER UID
 # Install each language in separate layers for better errors
 COPY languages/nodejs.sh /tmp/
 RUN chmod +x /tmp/nodejs.sh && /tmp/nodejs.sh /.sprite && rm /tmp/nodejs.sh
-
-# install some agents
-RUN /.sprite/bin/npm install -g @anthropic-ai/claude-code && \
-    /.sprite/bin/npm install -g @google/gemini-cli
-
 
 COPY languages/erlang.sh /tmp/
 RUN chmod +x /tmp/erlang.sh && /tmp/erlang.sh /.sprite && rm /tmp/erlang.sh
@@ -79,6 +76,10 @@ RUN chmod +x /tmp/java.sh && /tmp/java.sh /.sprite && rm /tmp/java.sh
 COPY languages/python.sh /tmp/
 RUN chmod +x /tmp/python.sh && /tmp/python.sh /.sprite && rm /tmp/python.sh
 
+# Install agents (depends on Node.js being installed)
+COPY languages/agents.sh /tmp/
+RUN chmod +x /tmp/agents.sh && /tmp/agents.sh /.sprite && rm /tmp/agents.sh
+
 USER $USER
 
 ############################
@@ -92,6 +93,37 @@ COPY --chown=$UID:$UID --from=languages-split /.sprite/bin /.sprite/bin
 COPY --chown=$UID:$UID --from=languages-split /.sprite/etc/profile.d /.sprite/etc/profile.d
 
 
+
+# ---- build stage for statically linked tmux ----
+FROM alpine:3.20 AS utility-builder
+
+RUN apk add --no-cache \
+        build-base \
+        musl-dev \
+        ncurses-static \
+        ncurses-dev \
+        libevent-static \
+        libevent-dev \
+        git \
+        autoconf \
+        automake \
+        pkgconfig \
+        bison
+
+WORKDIR /src
+
+# Fetch tmux source
+RUN git clone --depth 1 --branch 3.5a https://github.com/tmux/tmux.git .
+
+# Bootstrap & configure
+RUN sh autogen.sh && \
+    ./configure LDFLAGS="-static" CFLAGS="-O2" && \
+    make -j$(nproc)
+
+# Create the sprite bin directory and copy tmux
+RUN mkdir -p /.sprite/bin && \
+    cp tmux /.sprite/bin/
+
 ####################################################
 # STAGE 1 – final runtime
 # does not include languages
@@ -102,6 +134,7 @@ ARG USER UID
 
 # Create sprite scripts directory and languages directory
 RUN mkdir -p /.sprite/languages /.sprite/bin /.sprite/etc/profile.d
+COPY --from=utility-builder /.sprite/bin/ /.sprite/bin/
 
 # Copy our stuff
 COPY root/ /

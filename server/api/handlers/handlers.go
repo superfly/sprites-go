@@ -48,6 +48,10 @@ func NewHandlers(ctx context.Context, system SystemManager, config Config) *Hand
 	tmuxManager := config.TMUXManager
 	if tmuxManager == nil {
 		tmuxManager = terminal.NewTMUXManager(ctx)
+		// Set the command prefix for executing tmux in the container
+		if len(config.ExecWrapperCommand) > 0 {
+			tmuxManager.SetCmdPrefix(config.ExecWrapperCommand)
+		}
 	}
 
 	return &Handlers{

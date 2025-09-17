@@ -249,12 +249,6 @@ CONFIG_JSON='{
       "options": ["ro", "nosuid", "noexec", "nodev", "bind"]
     },
     {
-      "destination": "/.sprite/bin",
-      "type": "bind",
-      "source": "/.sprite/bin",
-      "options": ["ro", "rbind"]
-    },
-    {
       "destination": "/.sprite/tmp",
       "type": "bind",
       "source": "/.sprite/tmp",

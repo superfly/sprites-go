@@ -166,6 +166,10 @@ func NewApplication(config Config) (*Application, error) {
 
 		// Create TMUXManager for terminal management
 		tmuxManager := terminal.NewTMUXManager(ctx)
+		// Set the command prefix for executing tmux in the container
+		if len(config.ExecWrapperCommand) > 0 {
+			tmuxManager.SetCmdPrefix(config.ExecWrapperCommand)
+		}
 
 		apiConfig := serverapi.Config{
 			ListenAddr:         config.APIListenAddr,
