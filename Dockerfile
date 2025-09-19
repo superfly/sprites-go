@@ -159,6 +159,6 @@ EXPOSE 7778
 
 # Use spritectl as entrypoint with config file
 # /usr/local/bin/spritectl -config /home/sprite/config.json -listen 0.0.0.0:7778
-ENTRYPOINT ["/usr/local/bin/spritectl", "-config", "/home/sprite/config.json", "-listen", "0.0.0.0:7778", "-debug"] 
+ENTRYPOINT ["/usr/local/bin/spritectl", "-config", "/home/sprite/config.json", "-listen", "0.0.0.0:7778"] 
 
 # juicefs mount --no-usage-report -o writeback_cache -o fsname=SpriteFS --writeback --upload-delay=1m --cache-dir=/dev/fly_vol/  --no-syslog --cache-size=8192 --buffer-size=819  sqlite3://dev/fly_vol/juicefs/metadata.db /data
