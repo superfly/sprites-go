@@ -50,40 +50,41 @@ func PromptForConfirmationOrExit(title, description string) bool {
 // EnsureOrg ensures we have a valid organization for API calls.
 // It returns the organization.
 func EnsureOrg(cfg *config.Manager, orgOverride string) (*config.Organization, error) {
-	// First check if we have environment variables set
+	// Check for environment variables that might provide a default URL
 	envURL := os.Getenv("SPRITE_URL")
+	if envURL == "" {
+		envURL = os.Getenv("SPRITES_API_URL")
+	}
 	envToken := os.Getenv("SPRITE_TOKEN")
 
 	var org *config.Organization
 
-	// If env vars are set, use them (backward compatibility)
-	if envURL != "" && envToken != "" {
-		// This is using environment-based config, not org-based
-		// Create a temporary org structure
-		org = &config.Organization{
-			Name:  "env",
-			URL:   envURL,
-			Token: envToken,
-		}
-		return org, nil
-	}
-
 	// Check if we have command-line overrides
 	if orgOverride != "" {
-		// Find the organization by name
-		orgs := cfg.GetOrgs()
-		for _, o := range orgs {
-			if o.Name == orgOverride {
-				org = o
-				// Set as current for this session
-				if err := cfg.SetCurrentOrg(o.Name); err != nil {
-					return nil, fmt.Errorf("failed to set current org: %w", err)
+		// Try to find the organization with alias support
+		foundOrg, _, err := cfg.FindOrgWithAlias(orgOverride)
+		if err != nil {
+			// Check if it's an unknown alias error
+			if strings.Contains(err.Error(), "unknown alias:") {
+				// Parse the org specification to get the alias
+				_, alias, _ := cfg.ParseOrgWithAlias(orgOverride)
+
+				// Get all available URLs
+				urls := cfg.GetAllURLs()
+				if len(urls) > 0 {
+					// In non-interactive contexts, we can't prompt, so return error
+					return nil, fmt.Errorf("unknown alias '%s'. Available URLs: %v", alias, urls)
+				} else {
+					return nil, fmt.Errorf("no URLs configured to associate with alias '%s'", alias)
 				}
-				break
 			}
+			return nil, err
 		}
-		if org == nil {
-			return nil, fmt.Errorf("organization '%s' not found", orgOverride)
+
+		org = foundOrg
+		// Set as current for this session
+		if err := cfg.SetCurrentOrg(org.Name); err != nil {
+			return nil, fmt.Errorf("failed to set current org: %w", err)
 		}
 		return org, nil
 	}
@@ -106,12 +107,46 @@ func EnsureOrg(cfg *config.Manager, orgOverride string) (*config.Organization, e
 		// If no current org, try to get the first available one
 		orgs := cfg.GetOrgs()
 		if len(orgs) == 0 {
+			// If we have an environment URL, use it as a default
+			if envURL != "" {
+				// Create a temporary org structure
+				org = &config.Organization{
+					Name:  "default",
+					URL:   envURL,
+					Token: envToken, // Will be empty if not set
+				}
+				// This org is not saved to config, just used for this session
+				return org, nil
+			}
 			return nil, fmt.Errorf("no organizations configured. Please run 'sprite org auth' first")
 		}
-		// Get the first org from the map
+
+		// Check if all orgs are from the same URL (single API endpoint)
+		urls := make(map[string]bool)
 		for _, o := range orgs {
-			org = o
-			break
+			urls[o.URL] = true
+		}
+
+		if len(urls) == 1 {
+			// All orgs are from the same URL, use any of them
+			for _, o := range orgs {
+				org = o
+				break
+			}
+		} else if envURL != "" {
+			// Multiple URLs configured, but we have an environment URL
+			// Create a temporary org for the environment URL
+			org = &config.Organization{
+				Name:  "default",
+				URL:   envURL,
+				Token: envToken, // Will be empty if not set
+			}
+		} else {
+			// Multiple URLs and no environment URL, use the first org
+			for _, o := range orgs {
+				org = o
+				break
+			}
 		}
 	}
 
@@ -147,51 +182,64 @@ func EnsureOrgAndSpriteWithContext(ctx *GlobalContext, orgOverride, spriteOverri
 	var org *config.Organization
 	var spriteName string
 
-	// Only use environment variables if no org or sprite override is specified
-	// This allows users to override environment variables with explicit flags
+	// Check for environment variables that might provide a default URL
 	envURL := os.Getenv("SPRITE_URL")
-	envToken := os.Getenv("SPRITE_TOKEN")
-	slog.Debug("Environment variables check", "SPRITE_URL", envURL != "", "SPRITE_TOKEN", envToken != "")
-
-	// If we have a sprite override but no org override, we should NOT use env vars
-	// Instead, we should use configured organizations
-	if spriteOverride != "" && orgOverride == "" && envURL != "" && envToken != "" {
-		slog.Debug("Sprite override specified with env vars present - ignoring env vars to use configured orgs")
-		// Don't use env vars, continue to org selection below
-	} else if envURL != "" && envToken != "" && orgOverride == "" && spriteOverride == "" {
-		// Only use env vars for backward compatibility when no overrides are specified
-		slog.Debug("Using environment variables for organization (no overrides specified)")
-		// This is using environment-based config, not org-based
-		// Create a temporary org structure
-		org = &config.Organization{
-			Name:  "env",
-			URL:   envURL,
-			Token: envToken,
-		}
-		// Without sprite override, maintain backward compatibility (no sprite tracking)
-		slog.Debug("Returning env-based org without sprite", "org", "env")
-		return org, "", nil
+	if envURL == "" {
+		envURL = os.Getenv("SPRITES_API_URL")
 	}
+	envToken := os.Getenv("SPRITE_TOKEN")
+	slog.Debug("Environment variables check", "envURL", envURL != "", "SPRITE_TOKEN", envToken != "")
 
 	// Check if we have command-line overrides
 	if orgOverride != "" {
 		slog.Debug("Checking for org override", "orgOverride", orgOverride)
-		// Find the organization by name
-		orgs := ctx.ConfigMgr.GetOrgs()
-		for _, o := range orgs {
-			if o.Name == orgOverride {
-				org = o
-				// Set as current for this session
-				if err := ctx.ConfigMgr.SetCurrentOrg(o.Name); err != nil {
-					return nil, "", fmt.Errorf("failed to set current org: %w", err)
+
+		// Try to find the organization with alias support
+		foundOrg, foundURL, err := ctx.ConfigMgr.FindOrgWithAlias(orgOverride)
+		if err != nil {
+			// Check if it's an unknown alias error
+			if strings.Contains(err.Error(), "unknown alias:") {
+				// Parse the org specification to get the alias
+				_, alias, _ := ctx.ConfigMgr.ParseOrgWithAlias(orgOverride)
+
+				// Get all available URLs
+				urls := ctx.ConfigMgr.GetAllURLs()
+				if len(urls) > 0 {
+					// Prompt user to select a URL for this alias
+					selectedURL, promptErr := prompts.SelectURLForAlias(alias, urls)
+					if promptErr != nil {
+						return nil, "", fmt.Errorf("failed to select URL for alias: %w", promptErr)
+					}
+
+					// Save the alias
+					if saveErr := ctx.ConfigMgr.SetURLAlias(alias, selectedURL); saveErr != nil {
+						return nil, "", fmt.Errorf("failed to save alias: %w", saveErr)
+					}
+
+					fmt.Printf("%s Saved alias '%s' for URL %s\n",
+						format.Success("✓"),
+						format.Bold(alias),
+						format.URL(selectedURL))
+
+					// Try again with the newly saved alias
+					foundOrg, foundURL, err = ctx.ConfigMgr.FindOrgWithAlias(orgOverride)
+					if err != nil {
+						return nil, "", err
+					}
+				} else {
+					return nil, "", fmt.Errorf("no URLs configured to associate with alias '%s'", alias)
 				}
-				slog.Debug("Found organization from override", "org", o.Name, "url", o.URL)
-				break
+			} else {
+				return nil, "", err
 			}
 		}
-		if org == nil {
-			return nil, "", fmt.Errorf("organization '%s' not found", orgOverride)
+
+		org = foundOrg
+		// Set as current for this session
+		if err := ctx.ConfigMgr.SetCurrentOrg(org.Name); err != nil {
+			return nil, "", fmt.Errorf("failed to set current org: %w", err)
 		}
+		slog.Debug("Found organization from override", "org", org.Name, "url", foundURL)
 	}
 
 	// If no org override, check .sprite file or use current config
@@ -220,6 +268,16 @@ func EnsureOrgAndSpriteWithContext(ctx *GlobalContext, orgOverride, spriteOverri
 			}
 
 			if org != nil {
+				// If environment URL is set, create a temporary org with the env URL
+				if envURL != "" {
+					slog.Debug("Found org from .sprite file but using environment URL", "org", org.Name, "configURL", org.URL, "envURL", envURL)
+					org = &config.Organization{
+						Name:  org.Name, // Keep the org name from .sprite file
+						URL:   envURL,   // Use the environment URL
+						Token: envToken, // Use environment token if available
+					}
+				}
+
 				// Print where we loaded the sprite from
 				if spritePath != "" && spriteName != "" {
 					fmt.Printf("Using %s %s (from %s)\n",
@@ -233,9 +291,11 @@ func EnsureOrgAndSpriteWithContext(ctx *GlobalContext, orgOverride, spriteOverri
 					fmt.Printf("Using organization '%s' and sprite '%s' from .sprite file\n",
 						format.Org(org.Name), format.Sprite(spriteName))
 				}
-				// Set as current in the config
-				if err := ctx.ConfigMgr.SetCurrentOrg(org.Name); err != nil {
-					return nil, "", fmt.Errorf("failed to set current org: %w", err)
+				// Set as current in the config (unless using env URL)
+				if envURL == "" {
+					if err := ctx.ConfigMgr.SetCurrentOrg(org.Name); err != nil {
+						return nil, "", fmt.Errorf("failed to set current org: %w", err)
+					}
 				}
 				// Don't check sprite existence - let API endpoints handle it
 			}
@@ -252,16 +312,62 @@ func EnsureOrgAndSpriteWithContext(ctx *GlobalContext, orgOverride, spriteOverri
 			// If no current org, try to get the first available one
 			orgs := ctx.ConfigMgr.GetOrgs()
 			if len(orgs) == 0 {
-				return nil, "", fmt.Errorf("no organizations configured. Please run 'sprite org auth' first")
-			}
-			// Get the first org from the map
-			for _, o := range orgs {
-				org = o
-				slog.Debug("Using first available org", "org", o.Name, "url", o.URL)
-				break
+				// If we have an environment URL, use it as a default
+				if envURL != "" {
+					slog.Debug("No orgs configured, but have environment URL", "url", envURL)
+					// Create a temporary org structure
+					org = &config.Organization{
+						Name:  "default",
+						URL:   envURL,
+						Token: envToken, // Will be empty if not set
+					}
+					// This org is not saved to config, just used for this session
+				} else {
+					return nil, "", fmt.Errorf("no organizations configured. Please run 'sprite org auth' first")
+				}
+			} else {
+				// Check if all orgs are from the same URL (single API endpoint)
+				urls := make(map[string]bool)
+				for _, o := range orgs {
+					urls[o.URL] = true
+				}
+
+				if len(urls) == 1 {
+					// All orgs are from the same URL, use any of them
+					for _, o := range orgs {
+						org = o
+						slog.Debug("Using org from single API endpoint", "org", o.Name, "url", o.URL)
+						break
+					}
+				} else if envURL != "" {
+					// Multiple URLs configured, but we have an environment URL
+					// Create a temporary org for the environment URL
+					slog.Debug("Multiple URLs configured, using environment URL", "url", envURL)
+					org = &config.Organization{
+						Name:  "default",
+						URL:   envURL,
+						Token: envToken, // Will be empty if not set
+					}
+				} else {
+					// Multiple URLs and no environment URL, use the first org
+					for _, o := range orgs {
+						org = o
+						slog.Debug("Using first available org", "org", o.Name, "url", o.URL)
+						break
+					}
+				}
 			}
 		} else {
 			slog.Debug("Using current org", "org", org.Name, "url", org.URL)
+			// If environment URL is set, override the org's URL
+			if envURL != "" {
+				slog.Debug("Overriding current org URL with environment URL", "org", org.Name, "configURL", org.URL, "envURL", envURL)
+				org = &config.Organization{
+					Name:  org.Name, // Keep the org name
+					URL:   envURL,   // Use the environment URL
+					Token: envToken, // Use environment token if available
+				}
+			}
 		}
 	}
 
@@ -272,8 +378,7 @@ func EnsureOrgAndSpriteWithContext(ctx *GlobalContext, orgOverride, spriteOverri
 	}
 
 	// If we have an org but no sprite name, prompt for it
-	// (unless using env-based config where sprite tracking is not available)
-	if spriteName == "" && org != nil && org.Name != "env" {
+	if spriteName == "" && org != nil {
 		var err error
 		spriteName, err = promptForSpriteName()
 		if err != nil {

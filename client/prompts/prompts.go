@@ -304,3 +304,42 @@ type FlyOrganization struct {
 	Type   string
 	Status string
 }
+
+// SelectURLForAlias prompts the user to select a URL for an unknown alias
+func SelectURLForAlias(alias string, urls []string) (string, error) {
+	if len(urls) == 0 {
+		return "", fmt.Errorf("no URLs configured")
+	}
+
+	// Create options for URLs
+	var options []huh.Option[string]
+	for _, url := range urls {
+		options = append(options, huh.NewOption(url, url))
+	}
+
+	var selectedURL string
+
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewNote().
+				Title(fmt.Sprintf("🔍 Unknown alias: %s", format.Bold(alias))).
+				Description("This alias hasn't been used before. Which API URL should it point to?"),
+
+			huh.NewSelect[string]().
+				Key("url").
+				Title("Select API URL").
+				Description("Choose the API URL to associate with this alias.").
+				Options(options...).
+				Value(&selectedURL),
+		),
+	)
+
+	// Configure form with accessibility and theming
+	form = configureForm(form)
+
+	if err := form.Run(); err != nil {
+		return "", fmt.Errorf("URL selection cancelled: %w", err)
+	}
+
+	return selectedURL, nil
+}

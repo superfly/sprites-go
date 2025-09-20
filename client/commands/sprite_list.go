@@ -9,12 +9,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
 	"github.com/superfly/sprite-env/client/config"
 	"github.com/superfly/sprite-env/client/format"
+	"github.com/superfly/sprite-env/client/prompts"
 	"golang.org/x/term"
 )
 
@@ -38,7 +40,7 @@ func ListCommand(ctx *GlobalContext, args []string) {
 	}
 
 	// Set up flags
-	flags := NewSpriteFlags(cmd.FlagSet)
+	_ = NewSpriteFlags(cmd.FlagSet) // Register flags but we use ctx.OrgOverride instead
 	var prefix string
 	cmd.FlagSet.StringVar(&prefix, "prefix", "", "Filter sprites by name prefix")
 
@@ -57,20 +59,52 @@ func ListCommand(ctx *GlobalContext, args []string) {
 
 	// Get the organization (use override if provided)
 	var org *config.Organization
-	if flags.Org != "" {
-		// Find the organization by name
-		found := false
-		for _, o := range orgs {
-			if o.Name == flags.Org {
-				org = o
-				found = true
-				break
+	orgOverride := ctx.OrgOverride // Use the global context's org override
+	slog.Debug("Getting organization", "ctx.OrgOverride", ctx.OrgOverride)
+	if orgOverride != "" {
+		slog.Debug("Using org override with alias support", "orgSpec", orgOverride)
+		// Try to find the organization with alias support
+		foundOrg, _, err := ctx.ConfigMgr.FindOrgWithAlias(orgOverride)
+		if err != nil {
+			// Check if it's an unknown alias error
+			if strings.Contains(err.Error(), "unknown alias:") {
+				// Parse the org specification to get the alias
+				_, alias, _ := ctx.ConfigMgr.ParseOrgWithAlias(orgOverride)
+
+				// Get all configured URLs
+				urls := ctx.ConfigMgr.GetAllURLs()
+				if len(urls) == 0 {
+					fmt.Fprintf(os.Stderr, "Error: No URLs configured\n")
+					os.Exit(1)
+				}
+
+				// Prompt user to select URL for this alias
+				selectedURL, err := prompts.SelectURLForAlias(alias, urls)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+
+				// Save the alias
+				if err := ctx.ConfigMgr.SetURLAlias(alias, selectedURL); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: Failed to save alias: %v\n", err)
+					os.Exit(1)
+				}
+				fmt.Printf("✓ Saved alias '%s' for URL %s\n", alias, format.URL(selectedURL))
+
+				// Try again with the saved alias
+				foundOrg, _, err = ctx.ConfigMgr.FindOrgWithAlias(orgOverride)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
 			}
 		}
-		if !found {
-			fmt.Fprintf(os.Stderr, "Error: Organization '%s' not found\n", flags.Org)
-			os.Exit(1)
-		}
+		org = foundOrg
+		slog.Debug("Found organization with alias", "org", org.Name, "url", org.URL)
 	} else {
 		// Use current org or first available
 		org = ctx.ConfigMgr.GetCurrentOrg()

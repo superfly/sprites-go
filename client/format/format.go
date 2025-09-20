@@ -10,8 +10,8 @@ import (
 
 // ANSI color codes - using theme-adaptive colors
 const (
-	Reset = "\033[0m"
-	Bold  = "\033[1m"
+	Reset    = "\033[0m"
+	BoldCode = "\033[1m" // Renamed to avoid conflict with Bold function
 
 	// Basic colors that adapt to terminal themes
 	Red     = "\033[91m" // Bright red - adapts better to dark/light themes
@@ -122,13 +122,23 @@ func ContextCommand(org, cmd, sprite string) string {
 }
 
 // Bold makes text bold
+func Bold(s string) string {
+	return colorize(s, BoldCode)
+}
+
+// BoldText is deprecated, use Bold instead
 func BoldText(s string) string {
-	return colorize(s, Bold)
+	return Bold(s)
 }
 
 // Question formats question prompts with blue
 func Question(msg string) string {
 	return colorize(msg, Blue)
+}
+
+// URL formats a URL with magenta
+func URL(url string) string {
+	return colorize(url, Magenta)
 }
 
 // Subtle formats subtle text with dimmed appearance (theme-adaptive)

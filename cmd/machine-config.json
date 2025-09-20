@@ -4,10 +4,7 @@
     "cpu_kind": "shared",
     "cpus": 8,
     "memory_mb": 4096,
-    "kernel_args": [
-      "cgroup_no_v1=all",
-      "systemd.unified_cgroup_hierarchy=1"
-    ]
+    "kernel_args": []
   },
   "metadata": {
     "sprite_config_version": "aa0774c40aaf0224bc69df451997c5f80fe64e590608d696a6d3693158bac768"
@@ -62,7 +59,8 @@
         "SPRITE_HTTP_API_TOKEN": "<sprite_token>",
         "SPRITE_PRIMARY_REGION": "iad",
         "SPRITE_S3_REGION": "auto",
-        "LOG_LEVEL": "debug"
+        "LOG_LEVEL": "debug",
+        "SPRITE_PREVENT_SUSPEND": "true"
       },
       "secrets": [
         {

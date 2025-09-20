@@ -71,7 +71,7 @@ func OrgCommand(ctx *GlobalContext, args []string) {
 
 	switch subcommand {
 	case "auth":
-		orgAuthCommand(ctx.ConfigMgr, subArgs)
+		orgAuthCommand(ctx, subArgs)
 	case "list", "ls":
 		orgListCommand(ctx.ConfigMgr, subArgs)
 	case "logout":
@@ -85,17 +85,22 @@ func OrgCommand(ctx *GlobalContext, args []string) {
 	}
 }
 
-func orgAuthCommand(cfg *config.Manager, args []string) {
+func orgAuthCommand(ctx *GlobalContext, args []string) {
 	// Create command structure
 	cmd := &Command{
 		Name:        "org auth",
-		Usage:       "org auth",
+		Usage:       "org auth [-o <api>:<org>]",
 		Description: "Add an API token",
 		FlagSet:     flag.NewFlagSet("org auth", flag.ContinueOnError),
+		Examples: []string{
+			"sprite org auth",
+			"sprite org auth -o prod:my-org",
+			"sprite org auth -o staging:test-org",
+		},
 	}
 
 	// Set up flags
-	_ = NewGlobalFlags(cmd.FlagSet)
+	flags := NewSpriteFlags(cmd.FlagSet)
 
 	// Parse flags
 	remainingArgs, err := ParseFlags(cmd, args)
@@ -109,24 +114,45 @@ func orgAuthCommand(cfg *config.Manager, args []string) {
 		os.Exit(1)
 	}
 
+	// Parse org override if provided
+	var orgOverride string
+	var aliasOverride string
+	// First check the global context for org override
+	orgSpec := ctx.OrgOverride
+	if orgSpec == "" && flags.Org != "" {
+		// If not in global context, check local flags (shouldn't happen but just in case)
+		orgSpec = flags.Org
+	}
+
+	if orgSpec != "" {
+		orgName, alias, hasAlias := ctx.ConfigMgr.ParseOrgWithAlias(orgSpec)
+		if hasAlias {
+			orgOverride = orgName
+			aliasOverride = alias
+		} else {
+			// Just an org name, no alias
+			orgOverride = orgSpec
+		}
+	}
+
 	// Try Fly authentication
-	org, err := AuthenticateWithFly(cfg)
+	org, err := AuthenticateWithFly(ctx.ConfigMgr, orgOverride, aliasOverride)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Set as current org
-	if err := cfg.SetCurrentOrg(org.Name); err != nil {
+	if err := ctx.ConfigMgr.SetCurrentOrg(org.Name); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to set current organization: %v\n", err)
 		os.Exit(1)
 	}
 }
 
 // AuthenticateWithFly handles the Fly.io authentication flow
-func AuthenticateWithFly(cfg *config.Manager) (*config.Organization, error) {
+func AuthenticateWithFly(cfg *config.Manager, orgOverride string, aliasOverride string) (*config.Organization, error) {
 	fmt.Println("🚀 Checking for Fly.io authentication...")
-	slog.Debug("Starting Fly.io authentication flow")
+	slog.Debug("Starting Fly.io authentication flow", "orgOverride", orgOverride, "aliasOverride", aliasOverride)
 
 	// Get Fly token
 	flyToken, source, err := GetFlyToken()
@@ -179,14 +205,49 @@ func AuthenticateWithFly(cfg *config.Manager) (*config.Organization, error) {
 		}
 	}
 
-	// Let user select organization
-	selectedOrg, err := prompts.PromptForFlyOrganization(promptOrgs)
-	if err != nil {
-		slog.Debug("Organization selection cancelled", "error", err)
-		return nil, err
+	// Check if org was specified via command line
+	var selectedOrg *prompts.FlyOrganization
+	if orgOverride != "" {
+		// When using alias syntax (e.g., alpha:kurt), the org part might not be a real Fly org
+		// In this case, just use the first available org or let user pick one specific org
+		if aliasOverride != "" {
+			// Using alias:org syntax - just pick the first org or the one that matches if it exists
+			for i, org := range promptOrgs {
+				if org.Slug == orgOverride {
+					selectedOrg = &promptOrgs[i]
+					break
+				}
+			}
+			// If no exact match found with alias syntax, use the first org
+			if selectedOrg == nil && len(promptOrgs) > 0 {
+				selectedOrg = &promptOrgs[0]
+				slog.Debug("Using first available organization with alias", "slug", selectedOrg.Slug, "alias", aliasOverride)
+			}
+		} else {
+			// Just -o <org> without alias - find the exact org
+			for i, org := range promptOrgs {
+				if org.Slug == orgOverride {
+					selectedOrg = &promptOrgs[i]
+					break
+				}
+			}
+			if selectedOrg == nil {
+				return nil, fmt.Errorf("organization '%s' not found in your Fly.io account", orgOverride)
+			}
+		}
+		slog.Debug("Using specified organization", "slug", selectedOrg.Slug, "name", selectedOrg.Name)
+		fmt.Printf("Using organization: %s\n", format.Org(selectedOrg.Slug))
+	} else {
+		// Let user select organization
+		var err error
+		selectedOrg, err = prompts.PromptForFlyOrganization(promptOrgs)
+		if err != nil {
+			slog.Debug("Organization selection cancelled", "error", err)
+			return nil, err
+		}
+		slog.Debug("Organization selected", "slug", selectedOrg.Slug, "name", selectedOrg.Name)
 	}
 
-	slog.Debug("Organization selected", "slug", selectedOrg.Slug, "name", selectedOrg.Name)
 	fmt.Printf("\nCreating Sprite token for organization %s...", format.Org(selectedOrg.Slug))
 
 	// Create sprite token
@@ -205,6 +266,36 @@ func AuthenticateWithFly(cfg *config.Manager) (*config.Organization, error) {
 		slog.Debug("Using custom API URL from environment", "url", apiURL)
 	}
 
+	// Handle alias if provided
+	if aliasOverride != "" {
+		// Check if we need to prompt for URL selection
+		url, exists := cfg.GetURLForAlias(aliasOverride)
+		if !exists {
+			// Get all configured URLs
+			urls := cfg.GetAllURLs()
+			if len(urls) == 0 {
+				// No URLs configured yet, use the default
+				url = apiURL
+			} else {
+				// Prompt user to select URL for this alias
+				selectedURL, err := prompts.SelectURLForAlias(aliasOverride, urls)
+				if err != nil {
+					return nil, fmt.Errorf("failed to select URL for alias: %w", err)
+				}
+				url = selectedURL
+			}
+			// Save the alias
+			if err := cfg.SetURLAlias(aliasOverride, url); err != nil {
+				return nil, fmt.Errorf("failed to save alias: %w", err)
+			}
+			fmt.Printf("✓ Saved alias '%s' for URL %s\n", aliasOverride, format.URL(url))
+		}
+		apiURL = url
+	}
+
+	// Print the API URL being used
+	fmt.Printf("Using API URL: %s\n", format.URL(apiURL))
+
 	// Add the organization with the Fly org name (uses keyring by default)
 	slog.Debug("Saving organization", "name", selectedOrg.Slug, "url", apiURL)
 	if err := cfg.AddOrg(selectedOrg.Slug, spriteToken, apiURL); err != nil {
@@ -213,6 +304,9 @@ func AuthenticateWithFly(cfg *config.Manager) (*config.Organization, error) {
 	}
 
 	fmt.Println(format.Success("✓ Authenticated with Fly.io organization: " + format.Org(selectedOrg.Slug)))
+	if aliasOverride != "" {
+		fmt.Printf("✓ Organization available as: %s:%s\n", aliasOverride, selectedOrg.Slug)
+	}
 	fmt.Println(format.Success("✓ Ready to work with Sprites!") + "\n")
 
 	// Return the newly added org

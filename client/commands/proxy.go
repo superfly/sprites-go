@@ -324,12 +324,10 @@ func ProxyCommand(ctx *GlobalContext, args []string) {
 
 	// Print connection info
 	fmt.Println()
-	if spriteName != "" && org.Name != "env" {
+	if spriteName != "" {
 		fmt.Printf("Proxying through %s sprite %s...\n",
 			format.Org(format.GetOrgDisplayName(org.Name, org.URL)),
 			format.Sprite(spriteName))
-	} else if org.Name == "env" {
-		fmt.Println("Proxying through sprite environment...")
 	} else {
 		fmt.Printf("Proxying through %s...\n",
 			format.Org(format.GetOrgDisplayName(org.Name, org.URL)))

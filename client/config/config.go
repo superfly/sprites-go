@@ -6,80 +6,73 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
+	v1 "github.com/superfly/sprite-env/client/config/v1"
 	"github.com/zalando/go-keyring"
 )
-
-// Config represents the sprite configuration
-type Config struct {
-	CurrentOrg       string                   `json:"current_org,omitempty"`
-	Orgs             map[string]*Organization `json:"orgs"`
-	DisableKeyring   bool                     `json:"disable_keyring,omitempty"`
-	LastVersionCheck string                   `json:"last_version_check,omitempty"`
-	LatestVersion    string                   `json:"latest_version,omitempty"`
-	CurrentVersion   string                   `json:"current_version,omitempty"`
-}
-
-// Organization represents an organization configuration
-type Organization struct {
-	Name       string `json:"name"`
-	Token      string `json:"token,omitempty"` // Only used when keyring is disabled
-	URL        string `json:"url"`
-	UseKeyring bool   `json:"use_keyring,omitempty"` // Tracks whether keyring is being used for this org
-}
-
-// Manager handles configuration operations
-type Manager struct {
-	configPath string
-	config     *Config
-}
 
 const (
 	KeyringService = "sprites-cli"
 )
 
-// CredentialType represents different types of credentials that can be stored
-type CredentialType string
-
-const (
-	CredentialTypeToken  CredentialType = "token"
-	CredentialTypeAPIKey CredentialType = "api-key"
-	CredentialTypeCert   CredentialType = "certificate"
-	CredentialTypeSSHKey CredentialType = "ssh-key"
-)
-
-// buildKeyringKey creates a consistent keyring key format
-func buildKeyringKey(orgName string, credType CredentialType) string {
-	if credType == CredentialTypeToken {
-		// For backward compatibility, tokens use just the org name
-		return orgName
-	}
-	return fmt.Sprintf("%s:%s", orgName, string(credType))
+// Manager manages sprite configuration
+type Manager struct {
+	configPath string
+	config     *v1.Config
 }
 
-// NewManager creates a new configuration manager
+// buildKeychainKeyV1 creates the new keychain key format for v1
+func buildKeychainKeyV1(url, org, sprite string) string {
+	// Clean the URL to make it a valid keychain key
+	cleanURL := strings.ReplaceAll(url, "://", "-")
+	cleanURL = strings.ReplaceAll(cleanURL, ":", "-")
+	cleanURL = strings.ReplaceAll(cleanURL, "/", "-")
+	cleanURL = strings.TrimSuffix(cleanURL, "-")
+
+	// For org-level keys (when sprite is empty), use a two-part format
+	if sprite == "" {
+		return fmt.Sprintf("%s:%s", cleanURL, org)
+	}
+	return fmt.Sprintf("%s:%s:%s", cleanURL, org, sprite)
+}
+
+// NewManager creates a new configuration manager that uses sprites.json (creating it from config.json if needed)
+// Note: This manager reads and writes to sprites.json. The config.json file is preserved for backward compatibility
+// with old clients, but is not updated by this manager.
 func NewManager() (*Manager, error) {
 	configDir, err := getConfigDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get config directory: %w", err)
 	}
 
-	configPath := filepath.Join(configDir, "config.json")
+	// Perform migration if needed (creates sprites.json from config.json if it doesn't exist)
+	if err := performMigrationIfNeeded(configDir); err != nil {
+		return nil, fmt.Errorf("migration failed: %w", err)
+	}
+
+	configPath := filepath.Join(configDir, "sprites.json")
 
 	m := &Manager{
 		configPath: configPath,
-		config:     &Config{Orgs: make(map[string]*Organization)},
+		config: &v1.Config{
+			Version:    CurrentConfigVersion,
+			URLs:       make(map[string]*v1.URLConfig),
+			URLAliases: make(map[string]string),
+		},
 	}
 
-	// Load existing config if it exists
-	err = m.Load()
-	if err != nil {
-		if os.IsNotExist(err) {
-			// File doesn't exist yet - this is OK for first-time use
-			return m, nil
+	// Load config if it exists
+	if data, err := os.ReadFile(configPath); err == nil {
+		if err := json.Unmarshal(data, &m.config); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal sprites.json: %w", err)
 		}
-		// Any other error is fatal - don't continue with empty config
-		return nil, fmt.Errorf("failed to load config from %s: %w", configPath, err)
+		// Ensure URLAliases is initialized for older configs
+		if m.config.URLAliases == nil {
+			m.config.URLAliases = make(map[string]string)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("failed to read sprites.json: %w", err)
 	}
 
 	return m, nil
@@ -105,8 +98,8 @@ func getConfigDir() (string, error) {
 
 	configDir := filepath.Join(homeDir, ".sprites")
 
-	// Create directory if it doesn't exist
-	if err := os.MkdirAll(configDir, 0755); err != nil {
+	// Ensure directory exists
+	if err := os.MkdirAll(configDir, 0700); err != nil {
 		return "", fmt.Errorf("failed to create config directory: %w", err)
 	}
 
@@ -117,11 +110,34 @@ func getConfigDir() (string, error) {
 func (m *Manager) Load() error {
 	data, err := os.ReadFile(m.configPath)
 	if err != nil {
-		return err
+		if os.IsNotExist(err) {
+			// No config file yet, use defaults
+			return nil
+		}
+		return fmt.Errorf("failed to read config file: %w", err)
 	}
 
-	if err := json.Unmarshal(data, &m.config); err != nil {
-		return err
+	// Check if we need to migrate
+	migratedData, err := MigrateConfig(data)
+	if err != nil {
+		return fmt.Errorf("failed to migrate config: %w", err)
+	}
+
+	// Unmarshal the (possibly migrated) config
+	if err := json.Unmarshal(migratedData, &m.config); err != nil {
+		return fmt.Errorf("failed to unmarshal config: %w", err)
+	}
+
+	// Ensure URLAliases is initialized for older configs
+	if m.config.URLAliases == nil {
+		m.config.URLAliases = make(map[string]string)
+	}
+
+	// Save if we migrated
+	if string(migratedData) != string(data) {
+		if err := m.Save(); err != nil {
+			return fmt.Errorf("failed to save migrated config: %w", err)
+		}
 	}
 
 	return nil
@@ -129,6 +145,13 @@ func (m *Manager) Load() error {
 
 // Save writes the configuration to disk
 func (m *Manager) Save() error {
+	// Ensure config directory exists
+	dir := filepath.Dir(m.configPath)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
+
+	// Marshal config
 	data, err := json.MarshalIndent(m.config, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
@@ -137,353 +160,234 @@ func (m *Manager) Save() error {
 	return os.WriteFile(m.configPath, data, 0600)
 }
 
-// GetCurrentOrg returns the current organization
-func (m *Manager) GetCurrentOrg() *Organization {
-	if m.config.CurrentOrg == "" {
-		return nil
+// GetCurrentOrgConfig returns the current organization configuration
+func (m *Manager) GetCurrentOrgConfig() (*v1.OrgConfig, error) {
+	if m.config.CurrentSelection == nil {
+		return nil, fmt.Errorf("no current organization selected")
 	}
-	return m.config.Orgs[m.config.CurrentOrg]
+
+	urlConfig, exists := m.config.URLs[m.config.CurrentSelection.URL]
+	if !exists {
+		return nil, fmt.Errorf("URL %s not found in config", m.config.CurrentSelection.URL)
+	}
+
+	orgConfig, exists := urlConfig.Orgs[m.config.CurrentSelection.Org]
+	if !exists {
+		return nil, fmt.Errorf("org %s not found under URL %s", m.config.CurrentSelection.Org, m.config.CurrentSelection.URL)
+	}
+
+	return orgConfig, nil
 }
 
-// GetCurrentOrgToken returns the token for the current organization using keyring-aware retrieval
+// GetCurrentOrgToken returns the token for the current organization
 func (m *Manager) GetCurrentOrgToken() (string, error) {
-	org := m.GetCurrentOrg()
-	if org == nil {
-		return "", fmt.Errorf("no current organization")
+	orgConfig, err := m.GetCurrentOrgConfig()
+	if err != nil {
+		return "", err
 	}
-	return org.GetTokenWithKeyringDisabled(m.config.DisableKeyring)
+
+	return m.getOrgToken(orgConfig)
 }
 
-// SetCurrentOrg sets the current organization
-func (m *Manager) SetCurrentOrg(orgName string) error {
-	if _, exists := m.config.Orgs[orgName]; !exists {
-		return fmt.Errorf("organization %s not found", orgName)
-	}
-	m.config.CurrentOrg = orgName
-	return m.Save()
-}
-
-// AddOrg adds a new organization or updates an existing one
-func (m *Manager) AddOrg(name, token, url string) error {
-	// Validate inputs
-	if name == "" {
-		return fmt.Errorf("organization name cannot be empty")
-	}
-	if token == "" {
-		return fmt.Errorf("organization token cannot be empty")
-	}
-	if url == "" {
-		return fmt.Errorf("organization URL cannot be empty")
-	}
-
-	if m.config.Orgs == nil {
-		m.config.Orgs = make(map[string]*Organization)
-	}
-
-	// First, check if we already have an organization with this token
-	var existingOrgByToken *Organization
-	var existingOrgNameByToken string
-	for orgName, org := range m.config.Orgs {
-		existingToken, err := org.GetTokenWithKeyringDisabled(m.config.DisableKeyring)
-		if err == nil && existingToken == token {
-			existingOrgByToken = org
-			existingOrgNameByToken = orgName
-			break
-		}
-	}
-
-	if existingOrgByToken != nil {
-		// Update existing organization found by token
-		// If the name changed, we need to move the org to the new key
-		if existingOrgNameByToken != name {
-			// Remove old entry
-			delete(m.config.Orgs, existingOrgNameByToken)
-			// Update current org reference if it was pointing to the old name
-			if m.config.CurrentOrg == existingOrgNameByToken {
-				m.config.CurrentOrg = name
-			}
-		}
-
-		// Update the organization details
-		existingOrgByToken.Name = name
-		existingOrgByToken.SetTokenWithKeyringDisabled(token, m.config.DisableKeyring)
-		existingOrgByToken.URL = url
-
-		// Store under the correct name
-		m.config.Orgs[name] = existingOrgByToken
-	} else if existingOrg, exists := m.config.Orgs[name]; exists {
-		// Check by name as fallback - update existing organization
-		existingOrg.SetTokenWithKeyringDisabled(token, m.config.DisableKeyring)
-		existingOrg.URL = url
-	} else {
-		// Create new organization
-		org := &Organization{
-			Name: name,
-			URL:  url,
-		}
-
-		org.SetTokenWithKeyringDisabled(token, m.config.DisableKeyring)
-		m.config.Orgs[name] = org
-
-		// Set as current if it's the first org
-		if len(m.config.Orgs) == 1 {
-			m.config.CurrentOrg = name
-		}
-	}
-
-	return m.Save()
-}
-
-// RemoveOrg removes an organization
-func (m *Manager) RemoveOrg(name string) error {
-	delete(m.config.Orgs, name)
-
-	// Clear current org if it was removed
-	if m.config.CurrentOrg == name {
-		m.config.CurrentOrg = ""
-	}
-
-	return m.Save()
-}
-
-// GetOrgs returns all organizations
-func (m *Manager) GetOrgs() map[string]*Organization {
-	return m.config.Orgs
-}
-
-// GetToken retrieves the token for this organization, checking keyring first, then config file
-func (o *Organization) GetToken() (string, error) {
-	return o.GetTokenWithKeyringDisabled(false)
-}
-
-// GetTokenWithKeyringDisabled retrieves the token with optional keyring bypass
-func (o *Organization) GetTokenWithKeyringDisabled(disableKeyring bool) (string, error) {
-	if !disableKeyring {
+// getOrgToken retrieves the token for an org, checking keyring first
+func (m *Manager) getOrgToken(org *v1.OrgConfig) (string, error) {
+	if !m.config.DisableKeyring && org.UseKeyring {
 		// Try keyring first
-		token, err := keyring.Get(KeyringService, o.Name)
-		if err == nil {
-			// Check if token is empty even if keyring returned no error
-			if token == "" {
-				return "", fmt.Errorf("empty token found in keyring for organization %s", o.Name)
-			}
-			o.UseKeyring = true // Update flag to reflect we're using keyring
+		token, err := keyring.Get(KeyringService, org.KeychainKey)
+		if err == nil && token != "" {
 			return token, nil
 		}
 	}
 
 	// Fallback to file-stored token
-	if o.Token != "" {
-		o.UseKeyring = false // Update flag to reflect we're using file storage
-		return o.Token, nil
+	if org.Token != "" {
+		return org.Token, nil
 	}
 
-	return "", fmt.Errorf("no token found for organization %s", o.Name)
+	return "", fmt.Errorf("no token found for org %s", org.Name)
 }
 
-// SetToken stores the token for this organization, preferring keyring with fallback to config file
-func (o *Organization) SetToken(token string) error {
-	return o.SetTokenWithKeyringDisabled(token, false)
-}
-
-// SetTokenWithKeyringDisabled stores the token with optional keyring bypass
-func (o *Organization) SetTokenWithKeyringDisabled(token string, disableKeyring bool) error {
-	// Validate token is not empty
+// setOrgToken stores the token for an org
+func (m *Manager) setOrgToken(org *v1.OrgConfig, token string) error {
 	if token == "" {
-		return fmt.Errorf("cannot store empty token for organization %s", o.Name)
+		return fmt.Errorf("cannot store empty token for organization %s", org.Name)
 	}
 
-	if !disableKeyring {
+	if !m.config.DisableKeyring {
 		// Try to store in keyring first
-		err := keyring.Set(KeyringService, o.Name, token)
+		err := keyring.Set(KeyringService, org.KeychainKey, token)
 		if err == nil {
 			// Successfully stored in keyring
-			o.Token = ""        // Clear file-stored token since we're using keyring
-			o.UseKeyring = true // Mark that we're using keyring for this org
+			org.Token = "" // Clear file-stored token
+			org.UseKeyring = true
 			return nil
 		}
 	}
 
 	// Keyring disabled or failed, use file storage
-	o.Token = token
-	o.UseKeyring = false // Mark that we're using file storage for this org
+	org.Token = token
+	org.UseKeyring = false
 	return nil
 }
 
-// DeleteToken removes the token for this organization from both keyring and config file
-func (o *Organization) DeleteToken() error {
-	var errors []error
-
-	// Try to delete from keyring (ignore errors if not found)
-	if err := keyring.Delete(KeyringService, o.Name); err != nil {
-		// Only add to errors if it's not a "not found" type error
-		// go-keyring doesn't have a standard "not found" error, so we'll be permissive
-		errors = append(errors, fmt.Errorf("keyring delete error: %w", err))
+// AddSprite adds a new sprite or updates an existing one
+func (m *Manager) AddSprite(url, orgName, spriteName, token string) error {
+	// Validate inputs
+	if url == "" {
+		return fmt.Errorf("URL cannot be empty")
+	}
+	if orgName == "" {
+		return fmt.Errorf("organization name cannot be empty")
+	}
+	if spriteName == "" {
+		return fmt.Errorf("sprite name cannot be empty")
 	}
 
-	// Clear file-stored token
-	o.Token = ""
-
-	if len(errors) > 0 {
-		return fmt.Errorf("token deletion had issues: %v", errors)
-	}
-
-	return nil
-}
-
-// Enhanced keyring methods for flexible credential management
-
-// FindOrgByToken searches for an organization that has the specified token
-func (m *Manager) FindOrgByToken(token string) (*Organization, string, error) {
-	for orgName, org := range m.config.Orgs {
-		existingToken, err := org.GetToken()
-		if err == nil && existingToken == token {
-			return org, orgName, nil
-		}
-	}
-	return nil, "", fmt.Errorf("no organization found with the specified token")
-}
-
-// GetCredential retrieves a credential of the specified type for the organization
-func (o *Organization) GetCredential(credType CredentialType) (string, error) {
-	if credType == CredentialTypeToken {
-		return o.GetToken()
-	}
-
-	key := buildKeyringKey(o.Name, credType)
-
-	// Try keyring first
-	credential, err := keyring.Get(KeyringService, key)
-	if err == nil {
-		return credential, nil
-	}
-
-	return "", fmt.Errorf("no %s found for organization %s", credType, o.Name)
-}
-
-// SetCredential stores a credential of the specified type for the organization
-func (o *Organization) SetCredential(credType CredentialType, credential string) error {
-	if credType == CredentialTypeToken {
-		return o.SetToken(credential)
-	}
-
-	key := buildKeyringKey(o.Name, credType)
-
-	// Try to store in keyring
-	err := keyring.Set(KeyringService, key, credential)
-	if err != nil {
-		return fmt.Errorf("failed to store %s for organization %s: %w", credType, o.Name, err)
-	}
-
-	return nil
-}
-
-// DeleteCredential removes a credential of the specified type for the organization
-func (o *Organization) DeleteCredential(credType CredentialType) error {
-	if credType == CredentialTypeToken {
-		return o.DeleteToken()
-	}
-
-	key := buildKeyringKey(o.Name, credType)
-
-	err := keyring.Delete(KeyringService, key)
-	if err != nil {
-		return fmt.Errorf("failed to delete %s for organization %s: %w", credType, o.Name, err)
-	}
-
-	return nil
-}
-
-// ListCredentialTypes returns all credential types stored for this organization
-func (o *Organization) ListCredentialTypes() []CredentialType {
-	var types []CredentialType
-
-	// Always check for token first
-	if _, err := o.GetToken(); err == nil {
-		types = append(types, CredentialTypeToken)
-	}
-
-	// Check other credential types
-	for _, credType := range []CredentialType{CredentialTypeAPIKey, CredentialTypeCert, CredentialTypeSSHKey} {
-		if _, err := o.GetCredential(credType); err == nil {
-			types = append(types, credType)
+	// Ensure URL config exists
+	if _, exists := m.config.URLs[url]; !exists {
+		m.config.URLs[url] = &v1.URLConfig{
+			URL:  url,
+			Orgs: make(map[string]*v1.OrgConfig),
 		}
 	}
 
-	return types
-}
+	// Ensure org config exists
+	urlConfig := m.config.URLs[url]
+	orgConfig, orgExists := urlConfig.Orgs[orgName]
+	if !orgExists {
+		// New org - create keychain key
+		orgConfig = &v1.OrgConfig{
+			Name:        orgName,
+			KeychainKey: buildKeychainKeyV1(url, orgName, ""),
+			Sprites:     make(map[string]*v1.SpriteConfig),
+		}
+		urlConfig.Orgs[orgName] = orgConfig
+	}
 
-// GetAllCredentials returns a map of all credentials for this organization
-func (o *Organization) GetAllCredentials() map[CredentialType]string {
-	credentials := make(map[CredentialType]string)
-
-	for _, credType := range o.ListCredentialTypes() {
-		if cred, err := o.GetCredential(credType); err == nil {
-			credentials[credType] = cred
+	// Create or update sprite
+	sprite, spriteExists := orgConfig.Sprites[spriteName]
+	if !spriteExists {
+		sprite = &v1.SpriteConfig{
+			Name: spriteName,
 		}
 	}
 
-	return credentials
-}
+	// Set the token at the org level
+	if err := m.setOrgToken(orgConfig, token); err != nil {
+		return err
+	}
 
-// SearchOrgsByURL finds all organizations with the specified URL
-func (m *Manager) SearchOrgsByURL(url string) []*Organization {
-	var orgs []*Organization
-	for _, org := range m.config.Orgs {
-		if org.URL == url {
-			orgs = append(orgs, org)
+	orgConfig.Sprites[spriteName] = sprite
+
+	// Set as current if it's the first org
+	if m.config.CurrentSelection == nil {
+		m.config.CurrentSelection = &v1.CurrentSelection{
+			URL: url,
+			Org: orgName,
 		}
 	}
-	return orgs
-}
 
-// SearchOrgsByCredential finds organizations that have a specific credential value
-func (m *Manager) SearchOrgsByCredential(credType CredentialType, credential string) []*Organization {
-	var orgs []*Organization
-	for _, org := range m.config.Orgs {
-		if existingCred, err := org.GetCredential(credType); err == nil && existingCred == credential {
-			orgs = append(orgs, org)
-		}
-	}
-	return orgs
-}
-
-// AddOrgWithoutSetting adds an organization but doesn't set it as current (used for discovery)
-func (m *Manager) AddOrgWithoutSetting(name, token, url string) error {
-	if m.config.Orgs == nil {
-		m.config.Orgs = make(map[string]*Organization)
-	}
-
-	// Create new organization
-	org := &Organization{
-		Name: name,
-		URL:  url,
-	}
-
-	org.SetTokenWithKeyringDisabled(token, m.config.DisableKeyring)
-	m.config.Orgs[name] = org
-
-	// Don't auto-set as current - let user choose through interactive selector
 	return m.Save()
 }
 
-// AddOrgMetadataOnly adds an organization to config without touching any existing token in keyring
-func (m *Manager) AddOrgMetadataOnly(name, url string) error {
-	if m.config.Orgs == nil {
-		m.config.Orgs = make(map[string]*Organization)
+// RemoveSprite removes a sprite
+func (m *Manager) RemoveSprite(url, orgName, spriteName string) error {
+	urlConfig, exists := m.config.URLs[url]
+	if !exists {
+		return fmt.Errorf("URL %s not found", url)
 	}
 
-	// Create new organization
-	org := &Organization{
-		Name:       name,
-		URL:        url,
-		UseKeyring: true, // Assume keyring usage since we're not storing token
+	orgConfig, exists := urlConfig.Orgs[orgName]
+	if !exists {
+		return fmt.Errorf("org %s not found under URL %s", orgName, url)
 	}
 
-	// Don't call SetToken - leave existing keyring entry untouched
-	m.config.Orgs[name] = org
+	if _, exists := orgConfig.Sprites[spriteName]; !exists {
+		return fmt.Errorf("sprite %s not found under org %s", spriteName, orgName)
+	}
 
-	// Don't auto-set as current - let user choose through interactive selector
+	// Remove the sprite
+	delete(orgConfig.Sprites, spriteName)
+
+	// If org has no more sprites, remove it and clean up token
+	if len(orgConfig.Sprites) == 0 {
+		// Delete token from keyring if it was stored there
+		if orgConfig.UseKeyring {
+			_ = keyring.Delete(KeyringService, orgConfig.KeychainKey)
+		}
+		delete(urlConfig.Orgs, orgName)
+	}
+
+	// If URL has no more orgs, remove it
+	if len(urlConfig.Orgs) == 0 {
+		delete(m.config.URLs, url)
+	}
+
+	// Clear current selection if we removed the last sprite from the current org
+	if m.config.CurrentSelection != nil &&
+		m.config.CurrentSelection.URL == url &&
+		m.config.CurrentSelection.Org == orgName &&
+		len(orgConfig.Sprites) == 0 {
+		m.config.CurrentSelection = nil
+	}
+
 	return m.Save()
+}
+
+// GetAllSprites returns all sprites organized by URL and org
+func (m *Manager) GetAllSprites() map[string]*v1.URLConfig {
+	return m.config.URLs
+}
+
+// FindSprite finds a sprite by name, handling conflicts
+func (m *Manager) FindSprite(spriteName string) (*v1.SpriteConfig, string, string, string, error) {
+	var foundSprites []struct {
+		sprite *v1.SpriteConfig
+		url    string
+		org    string
+	}
+
+	// Search all URLs and orgs
+	for url, urlConfig := range m.config.URLs {
+		for orgName, orgConfig := range urlConfig.Orgs {
+			if sprite, exists := orgConfig.Sprites[spriteName]; exists {
+				foundSprites = append(foundSprites, struct {
+					sprite *v1.SpriteConfig
+					url    string
+					org    string
+				}{
+					sprite: sprite,
+					url:    url,
+					org:    orgName,
+				})
+			}
+		}
+	}
+
+	if len(foundSprites) == 0 {
+		return nil, "", "", "", fmt.Errorf("sprite %s not found", spriteName)
+	}
+
+	if len(foundSprites) == 1 {
+		return foundSprites[0].sprite, foundSprites[0].url, foundSprites[0].org, spriteName, nil
+	}
+
+	// Multiple sprites found - handle conflict
+	fmt.Printf("Warning: Multiple sprites named '%s' found. ", spriteName)
+
+	// If we have a current selection, prefer sprites from the same URL
+	if m.config.CurrentSelection != nil {
+		for _, found := range foundSprites {
+			if found.url == m.config.CurrentSelection.URL {
+				fmt.Printf("Using the one from URL %s\n", found.url)
+				return found.sprite, found.url, found.org, spriteName, nil
+			}
+		}
+	}
+
+	// Default to first one
+	fmt.Printf("Using the one from URL %s\n", foundSprites[0].url)
+	return foundSprites[0].sprite, foundSprites[0].url, foundSprites[0].org, spriteName, nil
 }
 
 // IsKeyringDisabled returns whether keyring usage is disabled
@@ -525,4 +429,57 @@ func (m *Manager) GetCurrentVersion() string {
 // SetCurrentVersion sets the current version
 func (m *Manager) SetCurrentVersion(version string) {
 	m.config.CurrentVersion = version
+}
+
+// ParseOrgWithAlias parses an org string that may contain an alias prefix (e.g., "alias:org")
+// Returns: (parsedOrg, alias, hasAlias)
+func (m *Manager) ParseOrgWithAlias(orgString string) (string, string, bool) {
+	parts := strings.SplitN(orgString, ":", 2)
+	if len(parts) == 2 {
+		// Format is "alias:org"
+		return parts[1], parts[0], true
+	}
+	// No alias present
+	return orgString, "", false
+}
+
+// GetURLForAlias returns the URL associated with an alias
+func (m *Manager) GetURLForAlias(alias string) (string, bool) {
+	if m.config.URLAliases == nil {
+		return "", false
+	}
+	url, exists := m.config.URLAliases[alias]
+	return url, exists
+}
+
+// SetURLAlias sets or updates an alias for a URL
+func (m *Manager) SetURLAlias(alias, url string) error {
+	if m.config.URLAliases == nil {
+		m.config.URLAliases = make(map[string]string)
+	}
+	m.config.URLAliases[alias] = url
+	return m.Save()
+}
+
+// GetAllURLs returns all configured URLs (both from URLs map and aliases)
+func (m *Manager) GetAllURLs() []string {
+	urlSet := make(map[string]bool)
+
+	// Add URLs from the URLs map
+	for url := range m.config.URLs {
+		urlSet[url] = true
+	}
+
+	// Add URLs from aliases
+	for _, url := range m.config.URLAliases {
+		urlSet[url] = true
+	}
+
+	// Convert to slice
+	urls := make([]string, 0, len(urlSet))
+	for url := range urlSet {
+		urls = append(urls, url)
+	}
+
+	return urls
 }

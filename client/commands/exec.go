@@ -556,7 +556,7 @@ func ExecCommand(ctx *GlobalContext, args []string) int {
 		// Use the new sprite proxy endpoint when we have a sprite name
 		exitCode = executeSpriteProxy(org, spriteName, remainingArgs, *workingDir, envList, *tty, *detachable, *sessionID, *controlMode)
 	} else {
-		// Use direct WebSocket for backward compatibility with SPRITE_URL/SPRITE_TOKEN
+		// Use direct WebSocket when no sprite is specified
 		token, err := org.GetTokenWithKeyringDisabled(ctx.ConfigMgr.IsKeyringDisabled())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
