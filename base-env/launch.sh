@@ -14,14 +14,47 @@ function debug() {
     fi
 }
 
-# Run network setup
-/home/sprite/network-setup.sh
-
 # Check if cgroup2 is mounted, if not mount it
 if ! mountpoint -q /sys/fs/cgroup; then
     mkdir -p /sys/fs/cgroup
     mount -t cgroup2 -o nsdelegate,memory_recursiveprot cgroup2 /sys/fs/cgroup
 fi
+
+
+# Create the init cgroup for system processes
+mkdir /sys/fs/cgroup/init
+
+# Move all processes from root cgroup to init cgroup
+# We need to do this before we can enable controllers in root's subtree_control
+# First, read all PIDs into an array (since the file changes as we move processes)
+echo "Reading PIDs from root cgroup..."
+pids=$(cat /sys/fs/cgroup/cgroup.procs)
+
+# Now move each PID
+for pid in $pids; do
+    echo $pid > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null || true
+done
+
+# Read available controllers and add them to subtree_control
+controllers=$(cat /sys/fs/cgroup/cgroup.controllers)
+ENABLED_CONTROLLERS=""
+for controller in $controllers; do
+    # Simply collect all available controllers
+    ENABLED_CONTROLLERS="$ENABLED_CONTROLLERS +$controller"
+    echo $controller
+done
+# Trim leading space
+ENABLED_CONTROLLERS="${ENABLED_CONTROLLERS# }"
+
+echo "$ENABLED_CONTROLLERS" > /sys/fs/cgroup/cgroup.subtree_control
+
+mkdir /sys/fs/cgroup/containers
+echo "$ENABLED_CONTROLLERS" > /sys/fs/cgroup/containers/cgroup.subtree_control
+
+
+# Run network setup
+/home/sprite/network-setup.sh
+
 mkdir -p /dev/fly_vol/local-storage/var/lib/docker
 
 mkdir -p /.sprite/tmp
@@ -254,7 +287,7 @@ CONFIG_JSON='{
     }
   ],
   "linux": {
-    "cgroupsPath": "/sprite-container",
+    "cgroupsPath": "/containers/sprite",
     "devices": [
       {
         "path": "/dev/fuse",
