@@ -4,12 +4,15 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/superfly/sprite-env/pkg/juicefs"
 	"github.com/superfly/sprite-env/pkg/leaser"
+	"github.com/superfly/sprite-env/pkg/services"
 	"github.com/superfly/sprite-env/pkg/tap"
 )
 
@@ -74,6 +77,7 @@ type System struct {
 	execProcessTracker interface{} // Will be *execProcessTracker, avoiding import issues
 	crashReporter      *tap.CrashReporter
 	adminChannel       *AdminChannel
+	servicesManager    *services.Manager
 
 	// Channels for monitoring
 	processDoneCh chan error
@@ -89,18 +93,19 @@ type System struct {
 }
 
 // NewSystem creates a new System instance
-func NewSystem(config SystemConfig, logger *slog.Logger, reaper *Reaper, adminChannel *AdminChannel) (*System, error) {
+func NewSystem(config SystemConfig, logger *slog.Logger, reaper *Reaper, adminChannel *AdminChannel, servicesManager *services.Manager) (*System, error) {
 	s := &System{
-		config:         config,
-		logger:         logger,
-		reaper:         reaper,
-		adminChannel:   adminChannel,
-		processDoneCh:  make(chan error, 1),
-		processReadyCh: make(chan struct{}),
-		juicefsReadyCh: make(chan struct{}),
-		stateCh:        make(chan stateOp),
-		stopCh:         make(chan struct{}),
-		stateMgr:       &systemState{},
+		config:          config,
+		logger:          logger,
+		reaper:          reaper,
+		adminChannel:    adminChannel,
+		servicesManager: servicesManager,
+		processDoneCh:   make(chan error, 1),
+		processReadyCh:  make(chan struct{}),
+		juicefsReadyCh:  make(chan struct{}),
+		stateCh:         make(chan stateOp),
+		stopCh:          make(chan struct{}),
+		stateMgr:        &systemState{},
 	}
 
 	// Start state manager goroutine
@@ -183,6 +188,16 @@ func NewSystem(config SystemConfig, logger *slog.Logger, reaper *Reaper, adminCh
 	}
 
 	return s, nil
+}
+
+// GetLogDir returns the directory where logs are stored
+func (s *System) GetLogDir() string {
+	// Get the base write directory from environment
+	writeDir := os.Getenv("SPRITE_WRITE_DIR")
+	if writeDir == "" {
+		writeDir = "/mnt/sprite"
+	}
+	return filepath.Join(writeDir, "logs")
 }
 
 // runStateManager manages state access via channels
@@ -315,6 +330,33 @@ func (s *System) Boot(ctx context.Context) error {
 		s.logger.Info("Boot: No process command configured, skipping process start", "step", "process_skip")
 	}
 
+	// Start all services after the supervised process is running
+	if s.servicesManager != nil {
+		servicesStart := time.Now()
+		s.logger.Info("Boot: Starting services manager...", "step", "services_start", "timestamp", servicesStart.Format(time.RFC3339Nano))
+
+		// First start the manager (initializes database)
+		if err := s.servicesManager.Start(); err != nil {
+			s.logger.Error("Boot: Failed to start services manager",
+				"error", err,
+				"duration", time.Since(servicesStart))
+			return fmt.Errorf("failed to start services manager: %w", err)
+		}
+
+		// Then start all services
+		if err := s.servicesManager.StartAll(); err != nil {
+			s.logger.Error("Boot: Failed to start services",
+				"error", err,
+				"duration_seconds", time.Since(servicesStart).Seconds(),
+				"step", "services_start_failed")
+			// Non-fatal error, continue boot
+		} else {
+			s.logger.Info("Boot: Services started successfully",
+				"duration_seconds", time.Since(servicesStart).Seconds(),
+				"step", "services_ready")
+		}
+	}
+
 	totalBootTime := time.Since(bootStart)
 	s.logger.Info("=== System boot sequence completed successfully ===",
 		"total_duration_seconds", totalBootTime.Seconds(),
@@ -327,6 +369,14 @@ func (s *System) Shutdown(ctx context.Context) error {
 	// Stop supervised process
 	if err := s.StopProcess(); err != nil {
 		s.logger.Error("Failed to stop process during shutdown", "error", err)
+	}
+
+	// Stop all services before stopping JuiceFS
+	if s.servicesManager != nil {
+		s.logger.Info("Stopping all services...")
+		if err := s.servicesManager.Shutdown(); err != nil {
+			s.logger.Error("Failed to stop services during shutdown", "error", err)
+		}
 	}
 
 	// Stop JuiceFS

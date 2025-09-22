@@ -115,6 +115,15 @@ FROM litestream/litestream:latest AS litestream
 
 FROM ghcr.io/superfly/juicefs:748b889 as juicefs
 
+# Assemble system files from multiple sources
+FROM alpine:latest AS assemble-system
+
+# First copy from utility-builder
+COPY --from=utility-builder /system /system
+
+# Then copy base-env/system from context (this will merge/overwrite)
+COPY base-env/system/ /system/
+
 # Final stage - based on juicedata/mount which includes juicefs
 FROM ubuntu:25.04
 
@@ -134,8 +143,9 @@ RUN apt-get update && \
 COPY --from=crun /crun /usr/local/bin/crun
 COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
 COPY --from=juicefs /usr/local/bin/juicefs /usr/local/bin/juicefs
-COPY --from=utility-builder /system/.sprite /system/.sprite
-COPY --from=utility-builder /system/etc /system/etc
+
+# Copy the complete assembled system directory
+COPY --from=assemble-system /system /system
 
 # Define environment variables for paths
 ENV SPRITE_WRITE_DIR=/dev/fly_vol \

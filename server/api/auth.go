@@ -170,3 +170,39 @@ func (a *AuthManager) ExtractAdminToken(r *http.Request) (string, error) {
 func (a *AuthManager) HasAdminToken() bool {
 	return a.adminToken != ""
 }
+
+// ExtractTokenWithProxyCheck extracts authentication token and checks if it's a proxy token
+// Returns: token, isProxy, error
+func (a *AuthManager) ExtractTokenWithProxyCheck(r *http.Request) (string, bool, error) {
+	// Check fly-replay-src header first for proxy tokens
+	replayHeader := r.Header.Get("fly-replay-src")
+	if replayHeader != "" {
+		// Parse the fly-replay-src header for state=token format
+		parts := strings.Split(replayHeader, ";")
+		for _, part := range parts {
+			kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+			if len(kv) != 2 {
+				continue
+			}
+			key := strings.TrimSpace(kv[0])
+			value := strings.TrimSpace(kv[1])
+
+			if key == "state" {
+				// Check if it's a proxy token
+				stateValue := strings.TrimSpace(value)
+				if strings.HasPrefix(stateValue, "proxy::") {
+					// Extract the actual token after proxy::
+					actualToken := strings.TrimPrefix(stateValue, "proxy::")
+					// For proxy tokens, we don't validate against apiToken
+					// The proxy destination will handle authentication
+					return actualToken, true, nil
+				}
+				break
+			}
+		}
+	}
+
+	// If not a proxy token, use regular authentication
+	token, err := a.ExtractToken(r)
+	return token, false, err
+}

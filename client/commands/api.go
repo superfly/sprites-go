@@ -3,6 +3,7 @@ package commands
 import (
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -29,6 +30,7 @@ func ApiCommand(ctx *GlobalContext, args []string) {
 			"This command wraps curl to automatically add authentication headers.",
 			"If a sprite is specified with -s, the path is relative to /v1/sprites/<sprite-name>/",
 			"If no sprite is specified, the path is relative to /v1/",
+			"Paths starting with /v1/sprites/ are always used as-is, ignoring any sprite context.",
 			"All arguments after the path are passed directly to curl.",
 		},
 	}
@@ -140,14 +142,27 @@ func ApiCommand(ctx *GlobalContext, args []string) {
 	curlArgs := remainingArgs[1:]
 
 	// Get organization (required)
-	org, err := EnsureOrg(ctx.ConfigMgr, flags.Org)
+	// Use global override if available
+	orgOverride := flags.Org
+	if ctx.OrgOverride != "" {
+		orgOverride = ctx.OrgOverride
+	}
+	slog.Default().Debug("API command org resolution", "flags.Org", flags.Org, "ctx.OrgOverride", ctx.OrgOverride, "finalOrgOverride", orgOverride)
+
+	org, err := EnsureOrg(ctx.ConfigMgr, orgOverride)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Get sprite name if provided
-	spriteName := flags.Sprite
+	// Use global override if available
+	spriteOverride := flags.Sprite
+	if ctx.SpriteOverride != "" {
+		spriteOverride = ctx.SpriteOverride
+	}
+
+	spriteName := spriteOverride
 	if spriteName == "" {
 		// Check .sprite file for sprite name
 		spriteFile, spritePath, err := config.ReadSpriteFile()
@@ -175,7 +190,11 @@ func ApiCommand(ctx *GlobalContext, args []string) {
 	baseURL := getSpritesAPIURL(org)
 
 	var fullURL string
-	if spriteName != "" {
+	// Check if the path is a full API path (starts with /v1/sprites/)
+	// In this case, we should use it directly regardless of current sprite context
+	if strings.HasPrefix(path, "/v1/sprites/") {
+		fullURL = baseURL + path
+	} else if spriteName != "" {
 		// Use buildSpriteProxyURL for sprite-specific requests
 		fullURL = buildSpriteProxyURL(org, spriteName, path)
 	} else {

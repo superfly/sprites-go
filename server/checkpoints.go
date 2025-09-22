@@ -65,6 +65,15 @@ func (s *System) Restore(ctx context.Context, checkpointID string) error {
 		return fmt.Errorf("failed to stop process for restore: %w", err)
 	}
 
+	// Stop all services before restore
+	if s.servicesManager != nil {
+		s.logger.Info("Stopping all services before restore")
+		if err := s.servicesManager.Shutdown(); err != nil {
+			s.logger.Error("Failed to stop services before restore", "error", err)
+			// Continue with restore even if service shutdown fails
+		}
+	}
+
 	// Perform JuiceFS restore
 	s.logger.Info("Restoring from checkpoint", "checkpointID", checkpointID)
 	if err := s.juicefs.Restore(ctx, checkpointID); err != nil {
@@ -75,6 +84,15 @@ func (s *System) Restore(ctx context.Context, checkpointID string) error {
 	s.logger.Info("Starting process after restore")
 	if err := s.StartProcess(); err != nil {
 		return fmt.Errorf("failed to start process after restore: %w", err)
+	}
+
+	// Restart all services after the process is running
+	if s.servicesManager != nil {
+		s.logger.Info("Starting all services after process is running")
+		if err := s.servicesManager.StartAll(); err != nil {
+			s.logger.Error("Failed to start services after restore", "error", err)
+			// Non-fatal error, restore is still successful
+		}
 	}
 
 	s.logger.Info("Restore sequence completed")
@@ -159,6 +177,31 @@ func (s *System) RestoreWithStream(ctx context.Context, checkpointID string, str
 		}
 	}
 
+	// Stop all services before restore
+	if s.servicesManager != nil {
+		streamCh <- api.StreamMessage{
+			Type: "info",
+			Data: "Stopping all services before restore...",
+			Time: time.Now(),
+		}
+		s.logger.Info("Stopping all services before restore")
+		if err := s.servicesManager.Shutdown(); err != nil {
+			s.logger.Error("Failed to stop services before restore", "error", err)
+			streamCh <- api.StreamMessage{
+				Type: "warning",
+				Data: fmt.Sprintf("Failed to stop some services: %v", err),
+				Time: time.Now(),
+			}
+			// Continue with restore even if service shutdown fails
+		} else {
+			streamCh <- api.StreamMessage{
+				Type: "info",
+				Data: "All services stopped successfully",
+				Time: time.Now(),
+			}
+		}
+	}
+
 	// Perform JuiceFS restore with streaming
 	if s.juicefs != nil {
 		// The restore will create a checkpoint before restoring
@@ -208,6 +251,31 @@ func (s *System) RestoreWithStream(ctx context.Context, checkpointID string, str
 			Time:  time.Now(),
 		}
 		return err
+	}
+
+	// Restart all services after the process is running
+	if s.servicesManager != nil {
+		streamCh <- api.StreamMessage{
+			Type: "info",
+			Data: "Starting all services now that process is running...",
+			Time: time.Now(),
+		}
+		s.logger.Info("Starting all services after process is running")
+		if err := s.servicesManager.StartAll(); err != nil {
+			s.logger.Error("Failed to start services after restore", "error", err)
+			streamCh <- api.StreamMessage{
+				Type: "warning",
+				Data: fmt.Sprintf("Failed to start some services: %v", err),
+				Time: time.Now(),
+			}
+			// Non-fatal error, restore is still successful
+		} else {
+			streamCh <- api.StreamMessage{
+				Type: "info",
+				Data: "All services started successfully",
+				Time: time.Now(),
+			}
+		}
 	}
 
 	s.logger.Info("Restore sequence completed")
@@ -281,6 +349,15 @@ func (s *System) ResetState() error {
 	// Stop the process if it's running
 	if err := s.StopProcess(); err != nil {
 		return fmt.Errorf("failed to stop process: %w", err)
+	}
+
+	// Stop all services
+	if s.servicesManager != nil {
+		s.logger.Info("Stopping all services during reset")
+		if err := s.servicesManager.Shutdown(); err != nil {
+			s.logger.Error("Failed to stop services during reset", "error", err)
+			// Continue with reset even if service shutdown fails
+		}
 	}
 
 	// Only proceed with cleanup if JuiceFS is configured

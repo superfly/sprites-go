@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/superfly/sprite-env/pkg/services"
 	"github.com/superfly/sprite-env/pkg/tap"
 	"github.com/superfly/sprite-env/pkg/terminal"
 	serverapi "github.com/superfly/sprite-env/server/api"
@@ -92,6 +93,8 @@ type Application struct {
 	cancel           context.CancelFunc
 	system           *System
 	apiServer        *serverapi.Server
+	sockServer       *SockServer
+	servicesManager  *services.Manager
 	keepAliveOnError bool
 	reaper           *Reaper
 	resourceMonitor  *ResourceMonitor
@@ -126,6 +129,25 @@ func NewApplication(config Config) (*Application, error) {
 	// Initialize admin channel (if configured)
 	app.adminChannel = NewAdminChannel(ctx)
 
+	// Require SPRITE_WRITE_DIR to be set
+	writeDir := os.Getenv("SPRITE_WRITE_DIR")
+	if writeDir == "" {
+		return nil, fmt.Errorf("SPRITE_WRITE_DIR environment variable is not set")
+	}
+
+	// Create services manager with logging
+	servicesDataPath := "/mnt/user-data"
+	logDir := filepath.Join(writeDir, "logs")
+	servicesManager, err := services.NewManager(servicesDataPath, services.WithLogDir(logDir))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create services manager: %w", err)
+	}
+	// Set the command prefix for executing services in the container
+	if len(config.ExecWrapperCommand) > 0 {
+		servicesManager.SetCmdPrefix(config.ExecWrapperCommand)
+	}
+	app.servicesManager = servicesManager
+
 	// Create System instance
 	systemConfig := SystemConfig{
 		ProcessCommand:                 config.ProcessCommand,
@@ -146,12 +168,19 @@ func NewApplication(config Config) (*Application, error) {
 		OverlaySkipOverlayFS:           config.OverlaySkipOverlayFS,
 	}
 
-	system, err := NewSystem(systemConfig, tap.Logger(ctx), app.reaper, app.adminChannel)
+	system, err := NewSystem(systemConfig, tap.Logger(ctx), app.reaper, app.adminChannel, servicesManager)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create system: %w", err)
 	}
 
 	app.system = system
+
+	// Set up services socket server
+	sockServer, err := NewSockServer(ctx, system, logDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create socket server: %w", err)
+	}
+	app.sockServer = sockServer
 
 	// Set up API server if configured
 	if config.APIListenAddr != "" {
@@ -301,6 +330,17 @@ func (app *Application) Run() error {
 		}()
 	}
 
+	// Start socket server for services API
+	if app.sockServer != nil {
+		socketPath := "/tmp/sprite.sock"
+		if err := app.sockServer.Start(socketPath); err != nil {
+			app.logger.Error("Failed to start socket server", "error", err)
+			// Non-fatal, services API will not be available
+		} else {
+			app.logger.Info("Socket server started", "path", socketPath)
+		}
+	}
+
 	// Wait for boot signal if configured - moved after HTTP server starts
 	if os.Getenv("WAIT_FOR_BOOT") == "true" {
 		app.logger.Info("WAIT_FOR_BOOT enabled, HTTP server is listening, waiting for SIGUSR1...")
@@ -418,6 +458,20 @@ func (app *Application) shutdown(exitCode int) error {
 			app.logger.Error("Failed to stop API server", "error", err)
 		}
 		cancel()
+	}
+
+	// Stop socket server
+	if app.sockServer != nil {
+		if err := app.sockServer.Stop(); err != nil {
+			app.logger.Error("Failed to stop socket server", "error", err)
+		}
+	}
+
+	// Close services manager
+	if app.servicesManager != nil {
+		if err := app.servicesManager.Close(); err != nil {
+			app.logger.Error("Failed to close services manager", "error", err)
+		}
 	}
 
 	// Stop admin channel

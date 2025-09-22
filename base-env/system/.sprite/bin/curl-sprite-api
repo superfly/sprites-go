@@ -1,0 +1,104 @@
+#!/bin/bash
+# Wrapper script for curl to access the sprite API via Unix socket
+
+# Function to display help and available endpoints
+show_help() {
+    cat << 'EOF'
+curl-sprite-api - Convenience wrapper for curl to access the sprite API via Unix socket
+
+This script is a convenience for running curl commands against the sprite API.
+
+Instead of typing:
+  curl --unix-socket /.sprite/api.sock -H "Content-Type: application/json" http://sprite/v1/services
+
+You can simply use:
+  curl-sprite-api /v1/services
+
+The script automatically:
+  • Adds --unix-socket /.sprite/api.sock
+  • Adds -H "Content-Type: application/json"
+  • Converts paths to full URLs (e.g., /v1/services → http://sprite/v1/services)
+
+USAGE:
+  curl-sprite-api [curl options] <url>
+  curl-sprite-api --help
+
+AVAILABLE ENDPOINTS:
+  GET    /v1/services           - List all services with their states
+  PUT    /v1/services/{name}    - Create a new service
+  GET    /v1/services/{name}    - Get a specific service's state
+  DELETE /v1/services/{name}    - Delete a service
+  POST   /v1/services/signal    - Send a signal to a service
+
+EXAMPLES:
+  # List all services
+  curl-sprite-api /v1/services
+
+  # Create a new service
+  curl-sprite-api -X PUT /v1/services/myapp -d '{
+    "cmd": "/usr/bin/myapp",
+    "args": ["--port", "8080"],
+    "needs": ["database"]
+  }'
+
+  # Create a service and stream logs for 10 seconds
+  curl-sprite-api -X PUT '/v1/services/myapp?duration=10s' -d '{
+    "cmd": "/usr/bin/myapp"
+  }'
+
+  # Get service state
+  curl-sprite-api /v1/services/myapp
+
+  # Delete a service
+  curl-sprite-api -X DELETE /v1/services/myapp
+
+  # Send a signal to a service
+  curl-sprite-api -X POST /v1/services/signal -d '{
+    "name": "myapp",
+    "signal": "TERM"
+  }'
+
+NOTE: Service creation (PUT) streams logs in NDJSON format by default.
+      Use the 'duration' query parameter to control monitoring time (default: 5s).
+
+EOF
+    exit 0
+}
+
+# Check for help flag or no arguments
+if [[ $# -eq 0 ]]; then
+    show_help
+fi
+
+for arg in "$@"; do
+    if [[ "$arg" == "--help" ]] || [[ "$arg" == "-h" ]]; then
+        show_help
+    fi
+done
+
+# Extract the URL from the arguments
+# We need to find the URL argument and prefix it with http://sprite if it's just a path
+args=()
+url_found=false
+
+for arg in "$@"; do
+    if [[ "$arg" =~ ^/ ]] && [[ ! "$arg" =~ ^-- ]] && [[ "$url_found" == "false" ]]; then
+        # This looks like a path starting with /
+        args+=("http://sprite$arg")
+        url_found=true
+    elif [[ "$arg" =~ ^http:// ]] || [[ "$arg" =~ ^https:// ]]; then
+        # This is already a full URL, use as-is
+        args+=("$arg")
+        url_found=true
+    else
+        args+=("$arg")
+    fi
+done
+
+# If no URL was found in the args, append http://sprite at the end
+if [[ "$url_found" == "false" ]]; then
+    args+=("http://sprite")
+fi
+
+# Execute curl with the Unix socket and Content-Type header
+exec curl --unix-socket /.sprite/api.sock -H "Content-Type: application/json" "${args[@]}"

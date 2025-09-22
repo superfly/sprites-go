@@ -23,6 +23,7 @@ fi
 
 # Create the init cgroup for system processes
 mkdir /sys/fs/cgroup/init
+mkdir -p /dev/fly_vol/logs
 
 # Move all processes from root cgroup to init cgroup
 # We need to do this before we can enable controllers in root's subtree_control
@@ -284,6 +285,18 @@ CONFIG_JSON='{
       "type": "bind",
       "source": "/.sprite/tmp",
       "options": ["rbind"]
+    },
+    {
+      "destination": "/.sprite/api.sock",
+      "type": "bind",
+      "source": "/tmp/sprite.sock",
+      "options": ["ro", "bind"]
+    },
+    {
+      "destination": "/.sprite/logs",
+      "type": "bind",
+      "source": "/dev/fly_vol/logs",
+      "options": ["ro", "rbind"]
     }
   ],
   "linux": {

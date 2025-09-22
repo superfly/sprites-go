@@ -62,7 +62,7 @@ func EnsureOrg(cfg *config.Manager, orgOverride string) (*config.Organization, e
 	// Check if we have command-line overrides
 	if orgOverride != "" {
 		// Try to find the organization with alias support
-		foundOrg, _, err := cfg.FindOrgWithAlias(orgOverride)
+		foundOrg, foundURL, err := cfg.FindOrgWithAlias(orgOverride)
 		if err != nil {
 			// Check if it's an unknown alias error
 			if strings.Contains(err.Error(), "unknown alias:") {
@@ -82,6 +82,9 @@ func EnsureOrg(cfg *config.Manager, orgOverride string) (*config.Organization, e
 		}
 
 		org = foundOrg
+		// Parse to get the alias that was used
+		_, alias, _ := cfg.ParseOrgWithAlias(orgOverride)
+		slog.Default().Debug("Found org via FindOrgWithAlias", "orgOverride", orgOverride, "orgName", org.Name, "orgURL", org.URL, "foundURL", foundURL, "alias", alias)
 		// Set as current for this session
 		if err := cfg.SetCurrentOrg(org.Name); err != nil {
 			return nil, fmt.Errorf("failed to set current org: %w", err)

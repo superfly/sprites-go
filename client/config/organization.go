@@ -199,6 +199,7 @@ func (m *Manager) AddOrgMetadataOnly(name, url string) error {
 func (m *Manager) FindOrgWithAlias(orgSpec string) (*Organization, string, error) {
 	// Parse the org specification
 	orgName, alias, hasAlias := m.ParseOrgWithAlias(orgSpec)
+	slog.Debug("FindOrgWithAlias: parsing orgSpec", "orgSpec", orgSpec, "orgName", orgName, "alias", alias, "hasAlias", hasAlias)
 
 	if hasAlias {
 		// Check if we know this alias
@@ -206,7 +207,9 @@ func (m *Manager) FindOrgWithAlias(orgSpec string) (*Organization, string, error
 		slog.Debug("FindOrgWithAlias: checking alias", "alias", alias, "found", exists, "url", url)
 		if exists {
 			// Look for the org under this specific URL
+			slog.Debug("FindOrgWithAlias: looking for org in URL config", "url", url, "orgName", orgName, "availableURLs", len(m.config.URLs))
 			if urlConfig, urlExists := m.config.URLs[url]; urlExists {
+				slog.Debug("FindOrgWithAlias: found URL config", "url", url, "orgsCount", len(urlConfig.Orgs))
 				if orgConfig, orgExists := urlConfig.Orgs[orgName]; orgExists {
 					org := &Organization{
 						Name:        orgConfig.Name,

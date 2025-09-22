@@ -24,7 +24,7 @@ import (
 // ${JUICEFS_BASE}/data/active/root-upper.img
 //
 // And is mounted at:
-// ${JUICEFS_BASE}/root-upper
+// /mnt/user-data
 type OverlayManager struct {
 	juiceFS    *JuiceFS
 	imagePath  string
@@ -42,11 +42,11 @@ type OverlayManager struct {
 // NewOverlay creates a new overlay manager instance
 func NewOverlay(j *JuiceFS, ctx context.Context) *OverlayManager {
 	logger := tap.Logger(ctx)
-	mountPath := filepath.Join(j.config.BaseDir, "data")
+	dataPath := filepath.Join(j.config.BaseDir, "data")
 	return &OverlayManager{
 		juiceFS:           j,
-		imagePath:         filepath.Join(mountPath, "active", "root-upper.img"),
-		mountPath:         filepath.Join(mountPath, "..", "root-upper"),
+		imagePath:         filepath.Join(dataPath, "active", "root-upper.img"),
+		mountPath:         "/mnt/user-data",
 		imageSize:         "100G",                       // 100GB sparse image
 		lowerPaths:        []string{"/mnt/system-base"}, // Default lower directories
 		overlayTargetPath: "/mnt/newroot",               // Default overlay mount point
@@ -331,9 +331,57 @@ func (om *OverlayManager) mountOverlayFS(ctx context.Context) error {
 		}
 	}
 
-	// Create upper and work directories in the mounted loopback
-	upperDir := filepath.Join(om.mountPath, "upper")
-	workDir := filepath.Join(om.mountPath, "work")
+	// Create root-upper directory if it doesn't exist
+	rootUpperDir := filepath.Join(om.mountPath, "root-upper")
+	rootUpperCreated := false
+	if _, err := os.Stat(rootUpperDir); os.IsNotExist(err) {
+		om.logger.Info("Creating root-upper directory", "path", rootUpperDir)
+		if err := os.MkdirAll(rootUpperDir, 0755); err != nil {
+			return fmt.Errorf("failed to create root-upper directory: %w", err)
+		}
+		rootUpperCreated = true
+	}
+
+	// Check for migration: if root-upper was just created and old directories exist, move them
+	if rootUpperCreated {
+		oldUpperDir := filepath.Join(om.mountPath, "upper")
+		oldWorkDir := filepath.Join(om.mountPath, "work")
+
+		// Check if both old directories exist
+		upperExists := false
+		workExists := false
+		if _, err := os.Stat(oldUpperDir); err == nil {
+			upperExists = true
+		}
+		if _, err := os.Stat(oldWorkDir); err == nil {
+			workExists = true
+		}
+
+		// If both exist, migrate them
+		if upperExists && workExists {
+			om.logger.Info("Migrating existing upper and work directories to root-upper")
+
+			// Move upper directory
+			newUpperDir := filepath.Join(rootUpperDir, "upper")
+			if err := os.Rename(oldUpperDir, newUpperDir); err != nil {
+				return fmt.Errorf("failed to migrate upper directory: %w", err)
+			}
+			om.logger.Info("Migrated upper directory", "from", oldUpperDir, "to", newUpperDir)
+
+			// Move work directory
+			newWorkDir := filepath.Join(rootUpperDir, "work")
+			if err := os.Rename(oldWorkDir, newWorkDir); err != nil {
+				// Try to rollback upper directory move
+				os.Rename(newUpperDir, oldUpperDir)
+				return fmt.Errorf("failed to migrate work directory: %w", err)
+			}
+			om.logger.Info("Migrated work directory", "from", oldWorkDir, "to", newWorkDir)
+		}
+	}
+
+	// Create upper and work directories inside root-upper
+	upperDir := filepath.Join(rootUpperDir, "upper")
+	workDir := filepath.Join(rootUpperDir, "work")
 
 	if err := os.MkdirAll(upperDir, 0755); err != nil {
 		return fmt.Errorf("failed to create upper directory: %w", err)
@@ -493,8 +541,9 @@ func (om *OverlayManager) UnfreezeAfterCheckpoint(ctx context.Context) error {
 
 // UpdateImagePath updates the image path after a restore operation
 func (om *OverlayManager) UpdateImagePath() {
-	mountPath := filepath.Join(om.juiceFS.config.BaseDir, "data")
-	om.imagePath = filepath.Join(mountPath, "active", "root-upper.img")
+	dataPath := filepath.Join(om.juiceFS.config.BaseDir, "data")
+	om.imagePath = filepath.Join(dataPath, "active", "root-upper.img")
+	om.mountPath = "/mnt/user-data"
 }
 
 // Helper methods

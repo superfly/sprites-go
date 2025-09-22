@@ -282,3 +282,117 @@ func TestAuthManagerHasAdminToken(t *testing.T) {
 		})
 	}
 }
+
+func TestAuthManagerExtractTokenWithProxyCheck(t *testing.T) {
+	authManager := NewAuthManager("test-token", "")
+
+	tests := []struct {
+		name         string
+		authHeader   string
+		replayHeader string
+		wantToken    string
+		wantIsProxy  bool
+		wantErr      bool
+		errContains  string
+	}{
+		{
+			name:         "proxy token via fly-replay-src",
+			replayHeader: "state=proxy::some-token-data",
+			wantToken:    "some-token-data",
+			wantIsProxy:  true,
+			wantErr:      false,
+		},
+		{
+			name:         "proxy token with additional parameters",
+			replayHeader: "region=ord;state=proxy::another-token;app=myapp",
+			wantToken:    "another-token",
+			wantIsProxy:  true,
+			wantErr:      false,
+		},
+		{
+			name:         "regular token via fly-replay-src",
+			replayHeader: "state=test-token",
+			wantToken:    "test-token",
+			wantIsProxy:  false,
+			wantErr:      false,
+		},
+		{
+			name:        "regular token via Bearer",
+			authHeader:  "Bearer test-token",
+			wantToken:   "test-token",
+			wantIsProxy: false,
+			wantErr:     false,
+		},
+		{
+			name:         "proxy token takes precedence over Bearer",
+			authHeader:   "Bearer test-token",
+			replayHeader: "state=proxy::proxy-token",
+			wantToken:    "proxy-token",
+			wantIsProxy:  true,
+			wantErr:      false,
+		},
+		{
+			name:         "invalid proxy token (wrong api token after proxy::)",
+			replayHeader: "state=proxy::wrong-token",
+			wantToken:    "wrong-token",
+			wantIsProxy:  true,
+			wantErr:      false, // Proxy tokens are not validated against apiToken
+		},
+		{
+			name:         "empty token after proxy::",
+			replayHeader: "state=proxy::",
+			wantToken:    "",
+			wantIsProxy:  true,
+			wantErr:      false,
+		},
+		{
+			name:        "no authentication provided",
+			wantErr:     true,
+			errContains: "no valid authentication token found",
+		},
+		{
+			name:         "invalid regular token",
+			replayHeader: "state=wrong-token",
+			wantErr:      true,
+			errContains:  "no valid authentication token found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/test", nil)
+			if tt.authHeader != "" {
+				req.Header.Set("Authorization", tt.authHeader)
+			}
+			if tt.replayHeader != "" {
+				req.Header.Set("fly-replay-src", tt.replayHeader)
+			}
+
+			token, isProxy, err := authManager.ExtractTokenWithProxyCheck(req)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("ExtractTokenWithProxyCheck() expected error, got nil")
+					return
+				}
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("ExtractTokenWithProxyCheck() error = %v, want error containing %v", err, tt.errContains)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("ExtractTokenWithProxyCheck() unexpected error = %v", err)
+				return
+			}
+
+			if token != tt.wantToken {
+				t.Errorf("ExtractTokenWithProxyCheck() token = %v, want %v", token, tt.wantToken)
+			}
+
+			if isProxy != tt.wantIsProxy {
+				t.Errorf("ExtractTokenWithProxyCheck() isProxy = %v, want %v", isProxy, tt.wantIsProxy)
+			}
+		})
+	}
+}
