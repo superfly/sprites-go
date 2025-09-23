@@ -28,7 +28,7 @@ func TestSignalService(t *testing.T) {
 	svc := &Service{
 		Name: "signal-test",
 		Cmd:  "bash",
-		Args: []string{"-c", "trap '' TERM; while true; do sleep 0.1; done"},
+		Args: []string{"-c", "trap 'echo ignoring SIGTERM' TERM; while true; do sleep 0.1; done"},
 	}
 	if err := manager.CreateService(svc); err != nil {
 		t.Fatal(err)
