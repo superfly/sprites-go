@@ -30,6 +30,12 @@ type ProxyResponseMessage struct {
 	Target string `json:"target"`
 }
 
+// PortMapping represents a mapping from local to remote port
+type PortMapping struct {
+	LocalPort  int
+	RemotePort int
+}
+
 // ProxyConfig holds configuration for proxy connections
 type ProxyConfig struct {
 	BaseURL string
@@ -37,11 +43,11 @@ type ProxyConfig struct {
 	Logger  *slog.Logger
 }
 
-// StartProxyListener starts a proxy listener for a single port
+// StartProxyListener starts a proxy listener for a single port mapping
 // Returns a function to stop the proxy
-func StartProxyListener(port int, config ProxyConfig) (func(), error) {
+func StartProxyListener(mapping PortMapping, config ProxyConfig) (func(), error) {
 	// Start local listener
-	listener, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
+	listener, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", mapping.LocalPort))
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen: %w", err)
 	}
@@ -50,7 +56,7 @@ func StartProxyListener(port int, config ProxyConfig) (func(), error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	logger.Info("Listening on port", "port", port)
+	logger.Info("Listening on port", "local", mapping.LocalPort, "remote", mapping.RemotePort)
 
 	// Channel to signal stop
 	stopCh := make(chan struct{})
@@ -72,12 +78,12 @@ func StartProxyListener(port int, config ProxyConfig) (func(), error) {
 					if strings.Contains(err.Error(), "use of closed network connection") {
 						return // Listener was closed
 					}
-					logger.Debug("Failed to accept connection on port", "port", port, "error", err)
+					logger.Debug("Failed to accept connection on port", "port", mapping.LocalPort, "error", err)
 					continue
 				}
 
 				// Handle connection in goroutine
-				go HandleProxyConnection(localConn, port, config)
+				go HandleProxyConnection(localConn, mapping, config)
 			}
 		}
 	}()
@@ -91,14 +97,14 @@ func StartProxyListener(port int, config ProxyConfig) (func(), error) {
 }
 
 // HandleProxyConnection handles a single proxy connection
-func HandleProxyConnection(localConn net.Conn, port int, config ProxyConfig) {
+func HandleProxyConnection(localConn net.Conn, mapping PortMapping, config ProxyConfig) {
 	defer localConn.Close()
 
 	logger := config.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
-	logger.Debug("Starting proxy connection", "port", port, "baseURL", config.BaseURL)
+	logger.Debug("Starting proxy connection", "local", mapping.LocalPort, "remote", mapping.RemotePort, "baseURL", config.BaseURL)
 
 	// Parse base URL and convert to WebSocket URL
 	parsedURL, err := url.Parse(config.BaseURL)
@@ -147,7 +153,7 @@ func HandleProxyConnection(localConn net.Conn, port int, config ProxyConfig) {
 	// Send initialization message with target host:port
 	initMsg := ProxyInitMessage{
 		Host: "localhost",
-		Port: port,
+		Port: mapping.RemotePort,
 	}
 	initData, err := json.Marshal(initMsg)
 	if err != nil {
@@ -186,7 +192,7 @@ func HandleProxyConnection(localConn net.Conn, port int, config ProxyConfig) {
 		return
 	}
 
-	logger.Debug("Proxy connection established", "port", port, "target", response.Target)
+	logger.Debug("Proxy connection established", "local", mapping.LocalPort, "remote", mapping.RemotePort, "target", response.Target)
 
 	// Start bidirectional data forwarding
 	var wg sync.WaitGroup
@@ -241,7 +247,7 @@ func HandleProxyConnection(localConn net.Conn, port int, config ProxyConfig) {
 	}()
 
 	wg.Wait()
-	logger.Debug("Proxy connection closed", "port", port)
+	logger.Debug("Proxy connection closed", "local", mapping.LocalPort, "remote", mapping.RemotePort)
 }
 
 // ProxyCommand handles the proxy command
@@ -249,16 +255,19 @@ func ProxyCommand(ctx *GlobalContext, args []string) {
 	// Create command structure
 	cmd := &Command{
 		Name:        "proxy",
-		Usage:       "proxy [options] <port1> [port2] [port3] ...",
+		Usage:       "proxy [options] <port1> [port2] ... or <local1:remote1> [local2:remote2] ...",
 		Description: "Forward local ports through the remote server proxy",
 		FlagSet:     flag.NewFlagSet("proxy", flag.ContinueOnError),
 		Examples: []string{
 			"sprite proxy 8080",
 			"sprite proxy 3000 8080",
+			"sprite proxy 4005:4000",
+			"sprite proxy 3001:3000 8081:8080",
 			"sprite proxy -o myorg -s mysprite 8080",
 		},
 		Notes: []string{
-			"Each port will be forwarded from localhost:<port> to the remote environment",
+			"Each port will be forwarded from localhost to the remote environment",
+			"Use LOCAL:REMOTE syntax to map different local and remote ports",
 			"Multiple ports can be specified to forward multiple services simultaneously",
 		},
 	}
@@ -279,15 +288,45 @@ func ProxyCommand(ctx *GlobalContext, args []string) {
 		os.Exit(1)
 	}
 
-	// Parse and validate ports
-	ports := make([]int, 0, len(remainingArgs))
+	// Parse and validate port mappings
+	mappings := make([]PortMapping, 0, len(remainingArgs))
 	for _, arg := range remainingArgs {
-		port, err := strconv.Atoi(arg)
-		if err != nil || port < 1 || port > 65535 {
-			fmt.Fprintf(os.Stderr, "Error: Invalid port number: %s\n", arg)
-			os.Exit(1)
+		var mapping PortMapping
+
+		// Check if it's a LOCAL:REMOTE format
+		if strings.Contains(arg, ":") {
+			parts := strings.Split(arg, ":")
+			if len(parts) != 2 {
+				fmt.Fprintf(os.Stderr, "Error: Invalid port mapping format: %s (expected LOCAL:REMOTE)\n", arg)
+				os.Exit(1)
+			}
+
+			localPort, err := strconv.Atoi(parts[0])
+			if err != nil || localPort < 1 || localPort > 65535 {
+				fmt.Fprintf(os.Stderr, "Error: Invalid local port number: %s\n", parts[0])
+				os.Exit(1)
+			}
+
+			remotePort, err := strconv.Atoi(parts[1])
+			if err != nil || remotePort < 1 || remotePort > 65535 {
+				fmt.Fprintf(os.Stderr, "Error: Invalid remote port number: %s\n", parts[1])
+				os.Exit(1)
+			}
+
+			mapping.LocalPort = localPort
+			mapping.RemotePort = remotePort
+		} else {
+			// Simple port format - use same port for local and remote
+			port, err := strconv.Atoi(arg)
+			if err != nil || port < 1 || port > 65535 {
+				fmt.Fprintf(os.Stderr, "Error: Invalid port number: %s\n", arg)
+				os.Exit(1)
+			}
+			mapping.LocalPort = port
+			mapping.RemotePort = port
 		}
-		ports = append(ports, port)
+
+		mappings = append(mappings, mapping)
 	}
 
 	// Ensure we have an org
@@ -320,7 +359,7 @@ func ProxyCommand(ctx *GlobalContext, args []string) {
 	}
 
 	logger := ctx.Logger
-	logger.Info("Starting proxy for ports", "ports", ports)
+	logger.Info("Starting proxy for port mappings", "mappings", mappings)
 
 	// Print connection info
 	fmt.Println()
@@ -335,8 +374,12 @@ func ProxyCommand(ctx *GlobalContext, args []string) {
 			format.Org(format.GetOrgDisplayName(org.Name, org.URL)))
 	}
 
-	for _, port := range ports {
-		fmt.Printf("  Port %d: localhost:%d -> remote:%d\n", port, port, port)
+	for _, mapping := range mappings {
+		if mapping.LocalPort == mapping.RemotePort {
+			fmt.Printf("  Port %d: localhost:%d -> remote:%d\n", mapping.LocalPort, mapping.LocalPort, mapping.RemotePort)
+		} else {
+			fmt.Printf("  Port mapping: localhost:%d -> remote:%d\n", mapping.LocalPort, mapping.RemotePort)
+		}
 	}
 	fmt.Println()
 
@@ -347,14 +390,14 @@ func ProxyCommand(ctx *GlobalContext, args []string) {
 		Logger:  logger,
 	}
 
-	// Start listeners for each port using the new public functions
+	// Start listeners for each port mapping using the new public functions
 	var stopFuncs []func()
 	var wg sync.WaitGroup
 
-	for _, port := range ports {
-		stopFunc, err := StartProxyListener(port, proxyConfig)
+	for _, mapping := range mappings {
+		stopFunc, err := StartProxyListener(mapping, proxyConfig)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error starting proxy on port %d: %v\n", port, err)
+			fmt.Fprintf(os.Stderr, "Error starting proxy on port %d: %v\n", mapping.LocalPort, err)
 			// Stop any previously started proxies
 			for _, sf := range stopFuncs {
 				sf()
@@ -376,7 +419,12 @@ func proxyPort(port int, baseURL, token string) error {
 		Logger:  slog.Default(),
 	}
 
-	stopFunc, err := StartProxyListener(port, config)
+	mapping := PortMapping{
+		LocalPort:  port,
+		RemotePort: port,
+	}
+
+	stopFunc, err := StartProxyListener(mapping, config)
 	if err != nil {
 		return err
 	}
@@ -392,5 +440,9 @@ func handleProxyConnection(localConn net.Conn, port int, baseURL, token string) 
 		Token:   token,
 		Logger:  slog.Default(),
 	}
-	HandleProxyConnection(localConn, port, config)
+	mapping := PortMapping{
+		LocalPort:  port,
+		RemotePort: port,
+	}
+	HandleProxyConnection(localConn, mapping, config)
 }
