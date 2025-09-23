@@ -271,7 +271,11 @@ func (pm *portManager) doCleanup() {
 
 func (pm *portManager) handleProxyConnection(ctx context.Context, localConn net.Conn, port int, address string) {
 	// Use the existing proxy implementation
-	HandleProxyConnection(localConn, port, pm.config)
+	mapping := PortMapping{
+		LocalPort:  port,
+		RemotePort: port,
+	}
+	HandleProxyConnection(localConn, mapping, pm.config)
 }
 
 // ExecCommand handles the exec command
