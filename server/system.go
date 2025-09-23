@@ -290,6 +290,14 @@ func (s *System) Boot(ctx context.Context) error {
 			"duration_seconds", time.Since(juicefsStart).Seconds(),
 			"step", "juicefs_ready")
 
+		// Send notification to admin channel
+		if s.adminChannel != nil {
+			s.adminChannel.SendActivityEvent("juicefs_ready", map[string]interface{}{
+				"timestamp":        time.Now().Unix(),
+				"duration_seconds": time.Since(juicefsStart).Seconds(),
+			})
+		}
+
 		// Mark JuiceFS as ready
 		s.setState("juicefsReady", true)
 		close(s.juicefsReadyCh)

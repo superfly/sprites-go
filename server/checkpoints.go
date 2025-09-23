@@ -132,6 +132,15 @@ func (s *System) CheckpointWithStream(ctx context.Context, checkpointID string, 
 		Time: time.Now(),
 	}
 
+	// Send notification to admin channel
+	if s.adminChannel != nil {
+		s.adminChannel.SendActivityEvent("checkpoint_created", map[string]interface{}{
+			"timestamp": time.Now().Unix(),
+			"version":   version,
+			"path":      fmt.Sprintf("checkpoints/%s", version),
+		})
+	}
+
 	// Send final completion message
 	streamCh <- api.StreamMessage{
 		Type: "complete",
@@ -200,6 +209,14 @@ func (s *System) RestoreWithStream(ctx context.Context, checkpointID string, str
 				Time: time.Now(),
 			}
 		}
+	}
+
+	// Send notification to admin channel that restore is starting
+	if s.adminChannel != nil {
+		s.adminChannel.SendActivityEvent("restore_started", map[string]interface{}{
+			"timestamp":    time.Now().Unix(),
+			"checkpoint_id": checkpointID,
+		})
 	}
 
 	// Perform JuiceFS restore with streaming
@@ -279,6 +296,15 @@ func (s *System) RestoreWithStream(ctx context.Context, checkpointID string, str
 	}
 
 	s.logger.Info("Restore sequence completed")
+
+	// Send notification to admin channel that restore is completed
+	if s.adminChannel != nil {
+		s.adminChannel.SendActivityEvent("restore_completed", map[string]interface{}{
+			"timestamp":    time.Now().Unix(),
+			"checkpoint_id": checkpointID,
+		})
+	}
+
 	streamCh <- api.StreamMessage{
 		Type: "complete",
 		Data: fmt.Sprintf("Restore from %s complete", checkpointID),

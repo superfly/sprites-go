@@ -89,13 +89,15 @@ func orgAuthCommand(ctx *GlobalContext, args []string) {
 	// Create command structure
 	cmd := &Command{
 		Name:        "org auth",
-		Usage:       "org auth [-o <api>:<org>]",
+		Usage:       "org auth [api-url] [-o <api>:<org>]",
 		Description: "Add an API token",
 		FlagSet:     flag.NewFlagSet("org auth", flag.ContinueOnError),
 		Examples: []string{
 			"sprite org auth",
+			"sprite org auth https://custom-api.sprites.dev",
 			"sprite org auth -o prod:my-org",
 			"sprite org auth -o staging:test-org",
+			"sprite org auth https://staging-api.sprites.dev -o staging:test-org",
 		},
 	}
 
@@ -108,8 +110,19 @@ func orgAuthCommand(ctx *GlobalContext, args []string) {
 		os.Exit(1)
 	}
 
+	// Check for optional API URL argument
+	var apiURLOverride string
 	if len(remainingArgs) > 0 {
-		fmt.Fprintf(os.Stderr, "Error: org auth takes no arguments\n\n")
+		// Check if the first argument looks like a URL
+		possibleURL := remainingArgs[0]
+		if strings.HasPrefix(possibleURL, "http://") || strings.HasPrefix(possibleURL, "https://") {
+			apiURLOverride = possibleURL
+			remainingArgs = remainingArgs[1:]
+		}
+	}
+
+	if len(remainingArgs) > 0 {
+		fmt.Fprintf(os.Stderr, "Error: unexpected argument '%s'\n\n", remainingArgs[0])
 		cmd.FlagSet.Usage()
 		os.Exit(1)
 	}
@@ -136,7 +149,7 @@ func orgAuthCommand(ctx *GlobalContext, args []string) {
 	}
 
 	// Try Fly authentication
-	org, err := AuthenticateWithFly(ctx.ConfigMgr, orgOverride, aliasOverride)
+	org, err := AuthenticateWithFly(ctx.ConfigMgr, orgOverride, aliasOverride, apiURLOverride)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -150,9 +163,9 @@ func orgAuthCommand(ctx *GlobalContext, args []string) {
 }
 
 // AuthenticateWithFly handles the Fly.io authentication flow
-func AuthenticateWithFly(cfg *config.Manager, orgOverride string, aliasOverride string) (*config.Organization, error) {
+func AuthenticateWithFly(cfg *config.Manager, orgOverride string, aliasOverride string, apiURLOverride string) (*config.Organization, error) {
 	fmt.Println("🚀 Checking for Fly.io authentication...")
-	slog.Debug("Starting Fly.io authentication flow", "orgOverride", orgOverride, "aliasOverride", aliasOverride)
+	slog.Debug("Starting Fly.io authentication flow", "orgOverride", orgOverride, "aliasOverride", aliasOverride, "apiURLOverride", apiURLOverride)
 
 	// Get Fly token
 	flyToken, source, err := GetFlyToken()
@@ -260,10 +273,15 @@ func AuthenticateWithFly(cfg *config.Manager, orgOverride string, aliasOverride 
 	fmt.Print("\r\033[K") // Clear the line
 
 	// Store the organization
+	// Priority: command-line arg > environment variable > default
 	apiURL := "https://api.sprites.dev"
 	if envURL := os.Getenv("SPRITES_API_URL"); envURL != "" {
 		apiURL = envURL
 		slog.Debug("Using custom API URL from environment", "url", apiURL)
+	}
+	if apiURLOverride != "" {
+		apiURL = apiURLOverride
+		slog.Debug("Using API URL from command line", "url", apiURL)
 	}
 
 	// Handle alias if provided

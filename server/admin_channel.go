@@ -113,10 +113,31 @@ func (ac *AdminChannel) Start() error {
 	})
 
 	// Join the channel - it will wait for socket connection if needed
-	_, err = ac.channel.Join()
+	ac.logger.Debug("Attempting to join admin channel", "topic", channelTopic)
+
+	join, err := ac.channel.Join()
 	if err != nil {
 		return fmt.Errorf("failed to join channel: %w", err)
 	}
+
+	// Set up callbacks to track join status
+	join.Receive("ok", func(response any) {
+		ac.logger.Info("Successfully joined admin channel",
+			"topic", channelTopic,
+			"response", response)
+	})
+
+	join.Receive("error", func(reason any) {
+		ac.logger.Error("Failed to join admin channel",
+			"topic", channelTopic,
+			"reason", reason)
+	})
+
+	join.Receive("timeout", func(response any) {
+		ac.logger.Warn("Admin channel join timed out",
+			"topic", channelTopic,
+			"response", response)
+	})
 
 	// Return immediately - connection and join happen asynchronously
 	return nil
@@ -142,7 +163,13 @@ func (ac *AdminChannel) Stop() error {
 
 // SendActivityEvent sends a simple activity event with a type and payload
 func (ac *AdminChannel) SendActivityEvent(eventType string, payload map[string]interface{}) {
-	if ac == nil || ac.channel == nil {
+	if ac == nil {
+		// This shouldn't happen if admin channel is properly initialized
+		return
+	}
+
+	if ac.channel == nil {
+		ac.logger.Warn("Admin channel not connected, cannot send event", "event_type", eventType)
 		return
 	}
 
@@ -150,8 +177,24 @@ func (ac *AdminChannel) SendActivityEvent(eventType string, payload map[string]i
 		payload = make(map[string]interface{})
 	}
 
-	// Send directly - Phoenix library handles queueing when not joined
-	ac.channel.Push(eventType, payload)
+	// Log the event being sent
+	ac.logger.Debug("Sending admin channel event",
+		"event_type", eventType,
+		"payload", payload,
+		"channel_joined", ac.channel.IsJoined(),
+		"channel_joining", ac.channel.IsJoining(),
+		"socket_connected", ac.socket != nil && ac.socket.IsConnected())
+
+	// Send the event - Phoenix library will queue if not joined and flush when joined
+	_, err := ac.channel.Push(eventType, payload)
+	if err != nil {
+		ac.logger.Error("Failed to push admin channel event",
+			"event_type", eventType,
+			"error", err)
+		return
+	}
+
+	// These are fire-and-forget events, no need to handle responses or timeouts
 }
 
 // EnrichContext adds the admin channel to the context

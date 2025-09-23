@@ -20,7 +20,6 @@ if ! mountpoint -q /sys/fs/cgroup; then
     mount -t cgroup2 -o nsdelegate,memory_recursiveprot cgroup2 /sys/fs/cgroup
 fi
 
-
 # Create the init cgroup for system processes
 mkdir /sys/fs/cgroup/init
 mkdir -p /dev/fly_vol/logs

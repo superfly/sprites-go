@@ -769,9 +769,9 @@ func setupFlyVolMount() error {
 	logger.Info("Performing bind mount", "source", upperLayerPath, "target", flyVolPath)
 	cmd = exec.Command("mount", "--bind", upperLayerPath, flyVolPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
-		logger.Error("Failed to bind mount /dev/fly_vol", 
-			"source", upperLayerPath, 
-			"target", flyVolPath, 
+		logger.Error("Failed to bind mount /dev/fly_vol",
+			"source", upperLayerPath,
+			"target", flyVolPath,
 			"error", err,
 			"output", string(output))
 		return fmt.Errorf("failed to bind mount /dev/fly_vol: %w", err)

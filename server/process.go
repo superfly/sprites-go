@@ -209,6 +209,17 @@ func (s *System) StartProcess() error {
 	// Mark process as running
 	s.setState("processRunning", true)
 
+	// Send notification to admin channel
+	if s.adminChannel != nil {
+		s.adminChannel.SendActivityEvent("container_started", map[string]interface{}{
+			"timestamp":      time.Now().Unix(),
+			"pid":            processCmd.Process.Pid,
+			"command":        s.config.ProcessCommand,
+			"working_dir":    workingDir,
+			"startup_time_s": time.Since(s.processStartTime).Seconds(),
+		})
+	}
+
 	// Close the ready channel to unblock waiting requests
 	close(s.processReadyCh)
 	s.processReadyCh = make(chan struct{})
