@@ -120,7 +120,8 @@ func (om *OverlayManager) GetOverlayTargetPath() string {
 // EnsureImage creates the sparse image if it doesn't exist
 func (om *OverlayManager) EnsureImage() error {
 	// Check if image already exists
-	if _, err := os.Stat(om.imagePath); err == nil {
+	if info, err := os.Stat(om.imagePath); err == nil {
+		om.logger.Debug("Overlay image already exists", "path", om.imagePath, "size", info.Size())
 		return nil // Image already exists
 	}
 
@@ -135,8 +136,16 @@ func (om *OverlayManager) EnsureImage() error {
 	// Create sparse image using dd
 	cmd := exec.Command("dd", "if=/dev/zero", fmt.Sprintf("of=%s", om.imagePath),
 		"bs=1", "count=0", fmt.Sprintf("seek=%s", om.imageSize))
+	om.logger.Debug("Running dd command", "cmd", cmd.String())
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to create sparse image: %w, output: %s", err, string(output))
+	}
+
+	// Verify sparse file was created
+	if info, err := os.Stat(om.imagePath); err != nil {
+		return fmt.Errorf("failed to verify sparse image creation: %w", err)
+	} else {
+		om.logger.Debug("Sparse image created", "actualSize", info.Size())
 	}
 
 	// Format with ext4 (optimized for JuiceFS block/slice layouts)
@@ -227,12 +236,15 @@ func (om *OverlayManager) Mount(ctx context.Context) error {
 	om.logger.Debug("Created loop device", "device", om.loopDevice)
 
 	// Now mount the loop device with discard option
+	om.logger.Debug("Mounting loop device", "device", om.loopDevice, "target", om.mountPath)
 	cmd := exec.CommandContext(mountCtx, "mount", "-o", "discard", om.loopDevice, om.mountPath)
+	mountStart := time.Now()
 	mountOutput, err := cmd.CombinedOutput()
+	mountDuration := time.Since(mountStart)
 
 	// Check if it was a timeout
 	if mountCtx.Err() == context.DeadlineExceeded {
-		om.logger.Error("Mount command timed out after 10 seconds, likely due to I/O error")
+		om.logger.Error("Mount command timed out after 10 seconds, likely due to I/O error", "duration", mountDuration)
 		err = fmt.Errorf("mount timeout")
 		// Clean up the loop device if mount failed
 		if om.loopDevice != "" {
@@ -247,23 +259,36 @@ func (om *OverlayManager) Mount(ctx context.Context) error {
 	if err != nil && (stringContains(string(mountOutput), "I/O error") ||
 		stringContains(string(mountOutput), "can't read superblock") ||
 		err.Error() == "mount timeout") {
-		om.logger.Error("Mount failed with I/O error, attempting recovery...", "error", err)
+		om.logger.Error("Mount failed with corruption indicators",
+			"error", err,
+			"duration", mountDuration,
+			"hasIOError", stringContains(string(mountOutput), "I/O error"),
+			"hasSuperblockError", stringContains(string(mountOutput), "can't read superblock"),
+			"isTimeout", err.Error() == "mount timeout")
 		if len(mountOutput) > 0 {
 			om.logger.Debug("Mount output", "output", string(mountOutput))
 		}
 
 		// Clean up the loop device if it was created
 		if om.loopDevice != "" {
+			om.logger.Debug("Detaching loop device due to corruption", "device", om.loopDevice)
 			if detachErr := detachLoopDevice(om.loopDevice); detachErr != nil {
 				om.logger.Warn("Failed to detach loop device during recovery", "device", om.loopDevice, "error", detachErr)
 			}
 			om.loopDevice = ""
 		}
 
-		// Delete the corrupted image
-		om.logger.Info("Removing corrupted image", "path", om.imagePath)
-		if removeErr := os.Remove(om.imagePath); removeErr != nil {
-			om.logger.Warn("Failed to remove corrupted image", "error", removeErr)
+		// Backup the corrupted image instead of deleting it
+		timestamp := time.Now().Format("20060102-150405")
+		backupPath := fmt.Sprintf("%s.corrupt-%s.bak", strings.TrimSuffix(om.imagePath, ".img"), timestamp)
+		om.logger.Info("Backing up corrupted image", "from", om.imagePath, "to", backupPath)
+		if backupErr := os.Rename(om.imagePath, backupPath); backupErr != nil {
+			om.logger.Warn("Failed to backup corrupted image, attempting removal", "error", backupErr)
+			if removeErr := os.Remove(om.imagePath); removeErr != nil {
+				om.logger.Error("Failed to remove corrupted image", "error", removeErr)
+			}
+		} else {
+			om.logger.Info("Corrupted image backed up successfully", "backupPath", backupPath)
 		}
 
 		// Recreate the image
@@ -276,6 +301,7 @@ func (om *OverlayManager) Mount(ctx context.Context) error {
 		om.logger.Info("Retrying mount after recreating image...")
 		mountCtx2, cancel2 := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel2()
+		om.logger.Debug("Starting retry mount attempt")
 
 		// Create a new loop device
 		loopDevice, err = attachLoopDevice(om.imagePath)
