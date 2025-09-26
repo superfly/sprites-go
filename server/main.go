@@ -458,6 +458,10 @@ func (app *Application) Run() error {
 func (app *Application) shutdown(exitCode int) error {
 	app.logger.Info("Shutting down application")
 
+	if err := syscall.Sync(); err != nil {
+		app.logger.Error("Failed to sync filesystem", "error", err)
+	}
+
 	// Cancel context to signal shutdown
 	app.cancel()
 
