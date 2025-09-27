@@ -21,7 +21,7 @@ RUN go mod download -x && cd cmd && go mod download -x
 # Copy all source code
 COPY . .
 
-FROM builder as builder-server
+FROM builder AS builder-server
 
 ARG VERSION=dev
 RUN cd server && \
@@ -31,7 +31,7 @@ RUN cd server && \
     -o ../spritectl .
 
 
-FROM builder as builder-client
+FROM builder AS builder-client
 
 ARG VERSION=dev
 # Also build the client
@@ -113,7 +113,7 @@ RUN ARCH=$(uname -m) && \
 # Get litestream binary
 FROM litestream/litestream:latest AS litestream
 
-FROM ghcr.io/superfly/juicefs:748b889 as juicefs
+FROM ghcr.io/superfly/juicefs:748b889 AS juicefs
 
 # Assemble system files from multiple sources
 FROM alpine:latest AS assemble-system
