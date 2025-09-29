@@ -541,11 +541,6 @@ func main() {
 				break
 			}
 		}
-
-		// If existing machine has no volume, fail
-		if volumeID == "" {
-			log.Fatal("Existing machine has no volume attached. Cannot deploy to a machine without persistent storage.")
-		}
 	}
 
 	// If no machine found, check all volumes
@@ -566,29 +561,6 @@ func main() {
 				break
 			}
 		}
-	}
-
-	// Create volume if still not found
-	if volumeID == "" {
-		log.Println("Creating new sprite_data volume...")
-		sizeGb := 10
-		encrypted := true
-		volInput := fly.CreateVolumeRequest{
-			Name:      "sprite_data",
-			Region:    "ord",
-			SizeGb:    &sizeGb,
-			Encrypted: &encrypted,
-		}
-
-		volume, err := flapsClient.CreateVolume(ctx, volInput)
-		if err != nil {
-			log.Fatal("Failed to create volume: ", err)
-		}
-		volumeID = volume.ID
-		log.Printf("Created volume: %s\n", volumeID)
-
-		// Wait a bit for volume to be ready
-		time.Sleep(5 * time.Second)
 	}
 
 	var machineConfig fly.MachineConfig

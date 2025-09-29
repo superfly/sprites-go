@@ -2,7 +2,7 @@ module github.com/sprite-env/cmd
 
 go 1.24.4
 
-require github.com/superfly/fly-go v0.1.47
+require github.com/superfly/fly-go v0.1.54
 
 require (
 	github.com/Khan/genqlient v0.7.1-0.20240819060157-4466fc10e4f3 // indirect
