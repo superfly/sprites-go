@@ -76,6 +76,37 @@ type Cmd struct {
 	// TTY support
 	tty     bool
 	ttySize *ttySize
+
+	// Session management
+	sessionID   string
+	detachable  bool
+	controlMode bool
+
+	// TextMessageHandler is called when text messages are received from the server.
+	// This is typically used for port notifications or other out-of-band messages.
+	// The handler is called with the raw message data.
+	//
+	// Example usage for handling port notifications:
+	//
+	//     import "encoding/json"
+	//
+	//     cmd.TextMessageHandler = func(data []byte) {
+	//         var notification sprites.PortNotificationMessage
+	//         if err := json.Unmarshal(data, &notification); err != nil {
+	//             log.Printf("Failed to parse notification: %v", err)
+	//             return
+	//         }
+	//
+	//         switch notification.Type {
+	//         case "port_opened":
+	//             fmt.Printf("Port %d opened by PID %d\n", notification.Port, notification.PID)
+	//             // Start local proxy or take other action
+	//         case "port_closed":
+	//             fmt.Printf("Port %d closed by PID %d\n", notification.Port, notification.PID)
+	//             // Stop local proxy or take other action
+	//         }
+	//     }
+	TextMessageHandler func([]byte)
 }
 
 // ttySize represents terminal dimensions
@@ -164,6 +195,11 @@ func (c *Cmd) Start() error {
 
 	// Set TTY mode
 	c.wsCmd.Tty = c.tty
+
+	// Set text message handler if provided
+	if c.TextMessageHandler != nil {
+		c.wsCmd.TextMessageHandler = c.TextMessageHandler
+	}
 
 	// Start goroutines for pipe handling
 	for _, fn := range c.goroutines {
@@ -329,24 +365,29 @@ func (c *Cmd) SetTTY(enable bool) {
 	c.tty = enable
 }
 
-// SetTTYSize sets the initial terminal size for TTY mode.
-// This must be called before Start().
+// SetTTYSize sets the terminal size for TTY mode.
+// If called before Start(), it sets the initial size.
+// If called after Start(), it resizes the running terminal.
 func (c *Cmd) SetTTYSize(rows, cols uint16) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.started {
-		return errors.New("sprite: SetTTYSize after process started")
-	}
 	if !c.tty {
 		return errors.New("sprite: SetTTYSize called but TTY mode not enabled")
 	}
 
+	// If process is already started, resize the running terminal
+	if c.started && !c.finished {
+		return c.wsCmd.Resize(cols, rows)
+	}
+
+	// Otherwise set the initial size
 	c.ttySize = &ttySize{Rows: rows, Cols: cols}
 	return nil
 }
 
 // Resize changes the terminal size of a running TTY command.
+// Deprecated: Use SetTTYSize instead, which works both before and after Start().
 func (c *Cmd) Resize(rows, cols uint16) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -392,7 +433,7 @@ func (c *Cmd) buildWebSocketURL() (*url.URL, error) {
 	}
 
 	// Build path
-	u.Path = fmt.Sprintf("/sprites/%s/exec", c.sprite.name)
+	u.Path = fmt.Sprintf("/v1/sprites/%s/exec", c.sprite.name)
 
 	// Build query parameters
 	q := u.Query()
@@ -422,6 +463,21 @@ func (c *Cmd) buildWebSocketURL() (*url.URL, error) {
 			q.Set("rows", fmt.Sprintf("%d", c.ttySize.Rows))
 			q.Set("cols", fmt.Sprintf("%d", c.ttySize.Cols))
 		}
+	}
+
+	// Add session ID if specified
+	if c.sessionID != "" {
+		q.Set("id", c.sessionID)
+	}
+
+	// Add detachable flag
+	if c.detachable {
+		q.Set("detachable", "true")
+	}
+
+	// Add control mode flag
+	if c.controlMode {
+		q.Set("cc", "true")
 	}
 
 	u.RawQuery = q.Encode()

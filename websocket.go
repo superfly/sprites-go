@@ -50,6 +50,9 @@ type wsCmd struct {
 	startChan chan error
 	exitChan  chan int
 	doneChan  chan struct{}
+
+	// TextMessageHandler is called when text messages are received over the WebSocket
+	TextMessageHandler func([]byte)
 }
 
 // wsAdapter wraps a WebSocket connection for terminal communication
@@ -218,6 +221,9 @@ func (c *wsCmd) runIO() {
 				stdout.Write(data)
 			case websocket.TextMessage:
 				// Handle control messages
+				if c.TextMessageHandler != nil {
+					c.TextMessageHandler(data)
+				}
 			}
 		}
 	}
@@ -262,6 +268,9 @@ func (c *wsCmd) runIO() {
 			}
 		case websocket.TextMessage:
 			// Handle control messages
+			if c.TextMessageHandler != nil {
+				c.TextMessageHandler(data)
+			}
 		}
 	}
 }

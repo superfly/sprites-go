@@ -1,15 +1,7 @@
 # Sprite SDK for Go
 
-The Sprite SDK provides an idiomatic Go API for working with sprites. It offers a familiar interface that mirrors the standard `exec.Cmd` API, making it easy to execute commands on remote sprites as if they were local processes.
+The Sprite SDK provides an idiomatic Go API for working with sprites. It mirrors the standard `exec.Cmd` API to execute commands on remote Sprites as if they were local.
 
-## Features
-
-- **Familiar API**: Works identically to `exec.Cmd` from the standard library
-- **Full I/O Support**: Complete stdin/stdout/stderr functionality
-- **Pipe Support**: StdinPipe, StdoutPipe, and StderrPipe for streaming I/O
-- **TTY Support**: Full pseudo-terminal support with resize capabilities
-- **WebSocket Transport**: Efficient bidirectional communication over WebSocket
-- **Context Support**: Proper context cancellation and timeout handling
 
 ## Installation
 
