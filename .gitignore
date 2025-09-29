@@ -31,3 +31,4 @@ server/api/handlers/static
 cmd/tmp/
 CLAUDE.md
 .tmux-ui
+.vscode/

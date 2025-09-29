@@ -458,6 +458,8 @@ func (app *Application) Run() error {
 func (app *Application) shutdown(exitCode int) error {
 	app.logger.Info("Shutting down application")
 
+	syscall.Sync()
+
 	// Cancel context to signal shutdown
 	app.cancel()
 
