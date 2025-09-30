@@ -235,6 +235,11 @@ func (c *wsCmd) runIO() {
 			io.Copy(stdinWriter, c.Stdin)
 			adapter.WriteStream(StreamStdinEOF, []byte{})
 		}()
+	} else {
+		// Send EOF immediately if no stdin is provided
+		go func() {
+			adapter.WriteStream(StreamStdinEOF, []byte{})
+		}()
 	}
 
 	for {
