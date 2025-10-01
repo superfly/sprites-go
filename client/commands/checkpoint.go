@@ -1,22 +1,17 @@
 package commands
 
 import (
-	"bufio"
-	"bytes"
-	"encoding/json"
+	"context"
 	"flag"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"strings"
 	"time"
 
 	"log/slog"
 
-	"github.com/superfly/sprite-env/client/config"
 	"github.com/superfly/sprite-env/client/format"
-	"github.com/superfly/sprite-env/lib/api"
+	sprites "github.com/superfly/sprites-go"
 )
 
 // CheckpointCommand handles the checkpoint command
@@ -64,8 +59,8 @@ func CheckpointCommand(ctx *GlobalContext, args []string) {
 		os.Exit(1)
 	}
 
-	// Ensure we have an org and sprite
-	org, spriteName, err := EnsureOrgAndSpriteWithContext(ctx, flags.Org, flags.Sprite)
+	// Get organization, client, and sprite using unified function
+	_, _, sprite, err := GetOrgClientAndSprite(ctx, flags.Org, flags.Sprite)
 	if err != nil {
 		// Check if it's a cancellation error
 		if strings.Contains(err.Error(), "cancelled") {
@@ -87,16 +82,16 @@ func CheckpointCommand(ctx *GlobalContext, args []string) {
 
 	switch subcommand {
 	case "create":
-		checkpointCreateCommand(ctx.ConfigMgr, org, spriteName, subArgs)
+		checkpointCreateCommand(ctx, sprite, subArgs)
 	case "list", "ls":
-		checkpointListCommandWithFlags(ctx, org, spriteName, subArgs)
+		checkpointListCommandWithFlags(ctx, sprite, subArgs)
 	case "info":
 		if len(subArgs) < 1 {
 			fmt.Fprintf(os.Stderr, "Error: checkpoint info requires a checkpoint ID\n\n")
 			cmd.FlagSet.Usage()
 			os.Exit(1)
 		}
-		checkpointInfoCommand(ctx.ConfigMgr, org, spriteName, subArgs)
+		checkpointInfoCommand(ctx, sprite, subArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "Error: Unknown checkpoint subcommand '%s'\n\n", subcommand)
 		cmd.FlagSet.Usage()
@@ -104,7 +99,7 @@ func CheckpointCommand(ctx *GlobalContext, args []string) {
 	}
 }
 
-func checkpointCreateCommand(cfg *config.Manager, org *config.Organization, spriteName string, args []string) {
+func checkpointCreateCommand(ctx *GlobalContext, sprite *sprites.Sprite, args []string) {
 	// Create command structure
 	cmd := &Command{
 		Name:        "checkpoint create",
@@ -128,62 +123,53 @@ func checkpointCreateCommand(cfg *config.Manager, org *config.Organization, spri
 		os.Exit(1)
 	}
 
-	// Create empty request (backward compatible)
-	req := api.CheckpointRequest{}
+	// Client is already created by GetOrgAndClient
 
-	jsonData, err := json.Marshal(req)
+	// Create checkpoint using SDK
+	reqCtx := context.Background()
+	stream, err := sprite.Client().CreateCheckpoint(reqCtx, sprite.Name())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to create request: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: Failed to create checkpoint: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Build the URL
-	var url string
-	if spriteName != "" && org.Name != "env" {
-		// Use sprite proxy endpoint
-		url = buildSpriteProxyURL(org, spriteName, "/checkpoint")
-	} else {
-		// Use direct endpoint for backward compatibility
-		url = fmt.Sprintf("%s/checkpoint", org.URL)
-	}
-
-	httpReq, err := http.NewRequest("POST", url, bytes.NewReader(jsonData))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to create HTTP request: %v\n", err)
-		os.Exit(1)
-	}
-
-	token, err := org.GetTokenWithKeyringDisabled(cfg.IsKeyringDisabled())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
-		os.Exit(1)
-	}
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	// Use client with no timeout for streaming
-	client := &http.Client{
-		Timeout: 0,
-	}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to make request: %v\n", err)
-		os.Exit(1)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		fmt.Fprintf(os.Stderr, "Error: API returned status %d: %s\n", resp.StatusCode, string(body))
-		os.Exit(1)
-	}
+	defer stream.Close()
 
 	// Process streaming response
-	exitCode := processStreamingResponse(resp.Body)
+	exitCode := 0
+	hasError := false
+
+	err = stream.ProcessAll(func(msg *sprites.StreamMessage) error {
+		switch msg.Type {
+		case "info":
+			fmt.Println(msg.Data)
+		case "stdout":
+			fmt.Println(msg.Data)
+		case "stderr":
+			fmt.Fprintln(os.Stderr, msg.Data)
+		case "error":
+			fmt.Fprintf(os.Stderr, "Error: %s\n", msg.Error)
+			hasError = true
+			if exitCode == 0 {
+				exitCode = 1
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to process stream: %v\n", err)
+		os.Exit(1)
+	}
+
+	// If we had errors but no specific exit code, return 1
+	if hasError && exitCode == 0 {
+		os.Exit(1)
+	}
+
 	os.Exit(exitCode)
 }
 
-func checkpointListCommandWithFlags(ctx *GlobalContext, org *config.Organization, spriteName string, args []string) {
+func checkpointListCommandWithFlags(ctx *GlobalContext, sprite *sprites.Sprite, args []string) {
 	// Create command structure
 	cmd := &Command{
 		Name:        "checkpoint list",
@@ -208,90 +194,39 @@ func checkpointListCommandWithFlags(ctx *GlobalContext, org *config.Organization
 		os.Exit(1)
 	}
 
-	checkpointListCommand(ctx, org, spriteName, *historyFilter)
+	checkpointListCommand(ctx, sprite, *historyFilter)
 }
 
-func checkpointListCommand(ctx *GlobalContext, org *config.Organization, spriteName string, historyFilter string) {
-	// Build the URL
-	var url string
-	if spriteName != "" && org.Name != "env" {
-		// Use sprite proxy endpoint
-		url = buildSpriteProxyURL(org, spriteName, "/checkpoints")
-	} else {
-		// Use direct endpoint for backward compatibility
-		url = fmt.Sprintf("%s/checkpoints", org.URL)
-	}
-
-	if historyFilter != "" {
-		url += fmt.Sprintf("?history=%s", historyFilter)
-	}
-
-	httpReq, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to create HTTP request: %v\n", err)
-		os.Exit(1)
-	}
-
-	token, err := org.GetTokenWithKeyringDisabled(ctx.ConfigMgr.IsKeyringDisabled())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
-		os.Exit(1)
-	}
-
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+func checkpointListCommand(ctx *GlobalContext, sprite *sprites.Sprite, historyFilter string) {
+	// Client is already created by GetOrgAndClient
 
 	// Debug log the request
-	slog.Debug("Checkpoint list request",
-		"url", url,
-		"org", org.Name,
-		"sprite", spriteName,
-		"authorization", fmt.Sprintf("Bearer %s", truncateToken(token)))
+	slog.Debug("Checkpoint list request", "sprite", sprite.Name())
 
 	// Debug: Track request timing
 	startTime := time.Now()
 	if ctx.IsDebugEnabled() {
-		fmt.Printf("Making checkpoint list request to %s...\n", url)
+		fmt.Printf("Making checkpoint list request...\n")
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(httpReq)
+	// List checkpoints using SDK
+	ctxReq := context.Background()
+	checkpoints, err := sprite.Client().ListCheckpoints(ctxReq, sprite.Name(), historyFilter)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to make request: %v\n", err)
+		// Check if it's a text response (history filter)
+		if strings.Contains(err.Error(), "text response not supported") {
+			// For now, we can't handle text responses with the SDK
+			fmt.Fprintf(os.Stderr, "Error: History filter not supported with SDK yet\n")
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "Error: Failed to list checkpoints: %v\n", err)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
 
 	// Debug: Log request timing
 	if ctx.IsDebugEnabled() {
 		duration := time.Since(startTime)
 		fmt.Printf("Request completed in %v\n", duration)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		fmt.Fprintf(os.Stderr, "Error: API returned status %d: %s\n", resp.StatusCode, string(body))
-		os.Exit(1)
-	}
-
-	// Check content type
-	contentType := resp.Header.Get("Content-Type")
-	if strings.HasPrefix(contentType, "text/plain") {
-		// History filter results - just print as-is
-		body, _ := io.ReadAll(resp.Body)
-		fmt.Print(string(body))
-		return
-	}
-
-	// Parse JSON response
-	if ctx.IsDebugEnabled() {
-		fmt.Printf("Parsing JSON response...\n")
-	}
-	var checkpoints []api.CheckpointInfo
-	if err := json.NewDecoder(resp.Body).Decode(&checkpoints); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to parse response: %v\n", err)
-		os.Exit(1)
-	}
-	if ctx.IsDebugEnabled() {
 		fmt.Printf("Parsed %d checkpoints\n", len(checkpoints))
 	}
 
@@ -318,7 +253,7 @@ func checkpointListCommand(ctx *GlobalContext, org *config.Organization, spriteN
 	}
 }
 
-func checkpointInfoCommand(cfg *config.Manager, org *config.Organization, spriteName string, args []string) {
+func checkpointInfoCommand(ctx *GlobalContext, sprite *sprites.Sprite, args []string) {
 	if len(args) != 1 {
 		fmt.Fprintf(os.Stderr, "Error: checkpoint info requires exactly one argument (checkpoint ID)\n")
 		fmt.Fprintf(os.Stderr, "Usage: sprite checkpoint info <checkpoint-id>\n")
@@ -327,56 +262,13 @@ func checkpointInfoCommand(cfg *config.Manager, org *config.Organization, sprite
 
 	checkpointID := args[0]
 
-	// Build the URL
-	var url string
-	if spriteName != "" && org.Name != "env" {
-		// Use sprite proxy endpoint
-		url = buildSpriteProxyURL(org, spriteName, fmt.Sprintf("/checkpoints/%s", checkpointID))
-	} else {
-		// Use direct endpoint for backward compatibility
-		url = fmt.Sprintf("%s/checkpoints/%s", org.URL, checkpointID)
-	}
+	// Client is already created by GetOrgAndClient
 
-	httpReq, err := http.NewRequest("GET", url, nil)
+	// Get checkpoint info using SDK
+	reqCtx := context.Background()
+	checkpoint, err := sprite.Client().GetCheckpoint(reqCtx, sprite.Name(), checkpointID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to create HTTP request: %v\n", err)
-		os.Exit(1)
-	}
-
-	token, err := org.GetTokenWithKeyringDisabled(cfg.IsKeyringDisabled())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
-		os.Exit(1)
-	}
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-
-	client := &http.Client{}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to make request: %v\n", err)
-		os.Exit(1)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		fmt.Fprintf(os.Stderr, "Error: API returned status %d: %s\n", resp.StatusCode, string(body))
-		os.Exit(1)
-	}
-
-	// Check content type
-	contentType := resp.Header.Get("Content-Type")
-	if strings.HasPrefix(contentType, "text/plain") {
-		// History filter results - just print as-is
-		body, _ := io.ReadAll(resp.Body)
-		fmt.Print(string(body))
-		return
-	}
-
-	// Parse JSON response
-	var checkpoint api.CheckpointInfo
-	if err := json.NewDecoder(resp.Body).Decode(&checkpoint); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to parse response: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: Failed to get checkpoint info: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -425,8 +317,8 @@ func RestoreCommand(ctx *GlobalContext, args []string) {
 
 	checkpointID := remainingArgs[0]
 
-	// Ensure we have an org and sprite
-	org, spriteName, err := EnsureOrgAndSpriteWithContext(ctx, flags.Org, flags.Sprite)
+	// Get organization, client, and sprite using unified function
+	org, _, sprite, err := GetOrgClientAndSprite(ctx, flags.Org, flags.Sprite)
 	if err != nil {
 		// Check if it's a cancellation error
 		if strings.Contains(err.Error(), "cancelled") {
@@ -437,81 +329,28 @@ func RestoreCommand(ctx *GlobalContext, args []string) {
 		os.Exit(1)
 	}
 
-	if spriteName != "" {
-		fmt.Println(format.ContextSprite(format.GetOrgDisplayName(org.Name, org.URL), fmt.Sprintf("Restoring checkpoint %s for sprite", format.Command(checkpointID)), spriteName))
+	if sprite.Name() != "" {
+		fmt.Println(format.ContextSprite(format.GetOrgDisplayName(org.Name, org.URL), fmt.Sprintf("Restoring checkpoint %s for sprite", format.Command(checkpointID)), sprite.Name()))
 		fmt.Println()
 	}
 
-	// Build the URL
-	var url string
-	if spriteName != "" && org.Name != "env" {
-		// Use sprite proxy endpoint
-		url = buildSpriteProxyURL(org, spriteName, fmt.Sprintf("/checkpoints/%s/restore", checkpointID))
-	} else {
-		// Use direct endpoint for backward compatibility
-		url = fmt.Sprintf("%s/checkpoints/%s/restore", org.URL, checkpointID)
-	}
-
 	// Debug log the request
-	slog.Debug("Restore request",
-		"url", url,
-		"org", org.Name,
-		"sprite", spriteName,
-		"checkpointID", checkpointID)
+	slog.Debug("Restore request", "sprite", sprite.Name(), "checkpointID", checkpointID)
 
-	httpReq, err := http.NewRequest("POST", url, nil)
+	// Restore checkpoint using SDK
+	ctxReq := context.Background()
+	stream, err := sprite.Client().RestoreCheckpoint(ctxReq, sprite.Name(), checkpointID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to create HTTP request: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: Failed to restore checkpoint: %v\n", err)
 		os.Exit(1)
 	}
-
-	token, err := org.GetTokenWithKeyringDisabled(ctx.ConfigMgr.IsKeyringDisabled())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
-		os.Exit(1)
-	}
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-
-	// Use client with no timeout for streaming
-	client := &http.Client{
-		Timeout: 0,
-	}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to make request: %v\n", err)
-		os.Exit(1)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		fmt.Fprintf(os.Stderr, "Error: API returned status %d: %s\n", resp.StatusCode, string(body))
-		os.Exit(1)
-	}
+	defer stream.Close()
 
 	// Process streaming response
-	exitCode := processStreamingResponse(resp.Body)
-	os.Exit(exitCode)
-}
-
-// processStreamingResponse processes NDJSON streaming responses
-func processStreamingResponse(reader io.Reader) int {
-	scanner := bufio.NewScanner(reader)
 	exitCode := 0
 	hasError := false
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-
-		var msg api.StreamMessage
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: Failed to parse message: %v\n", err)
-			continue
-		}
-
+	err = stream.ProcessAll(func(msg *sprites.StreamMessage) error {
 		switch msg.Type {
 		case "info":
 			fmt.Println(msg.Data)
@@ -526,17 +365,18 @@ func processStreamingResponse(reader io.Reader) int {
 				exitCode = 1
 			}
 		}
-	}
+		return nil
+	})
 
-	if err := scanner.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to read stream: %v\n", err)
-		return 1
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to process stream: %v\n", err)
+		os.Exit(1)
 	}
 
 	// If we had errors but no specific exit code, return 1
 	if hasError && exitCode == 0 {
-		return 1
+		os.Exit(1)
 	}
 
-	return exitCode
+	os.Exit(exitCode)
 }

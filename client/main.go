@@ -176,10 +176,6 @@ func main() {
 
 	case "proxy":
 		commands.ProxyCommand(globalCtx, subArgs)
-	case "sync":
-		commands.SyncCommand(cfg, subArgs)
-	case "admin":
-		commands.AdminCommand(globalCtx, subArgs)
 	case "api":
 		commands.ApiCommand(globalCtx, subArgs)
 	case "upgrade":
@@ -211,7 +207,6 @@ Commands:
   destroy                    Destroy the current sprite
 
   proxy <port1> [port2...]   Forward local ports through the remote server proxy
-  sync                       Synchronize git repository to sprite environment
   api [options] <path>       Make authenticated API calls with curl
   upgrade                    Upgrade the sprite client to the latest version
 

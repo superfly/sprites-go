@@ -4,12 +4,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/charmbracelet/huh"
 	"github.com/superfly/sprite-env/client/config"
 	"github.com/superfly/sprite-env/client/format"
-	"github.com/superfly/sprite-env/client/prompts"
 )
 
 // UseCommand handles the use command - creates a .sprite file to activate a sprite in the current directory
@@ -66,79 +64,16 @@ func UseCommand(ctx *GlobalContext, args []string) {
 		spriteName = flags.Sprite
 	}
 
-	// Ensure we have an organization
-	orgs := ctx.ConfigMgr.GetOrgs()
-	if len(orgs) == 0 {
-		fmt.Fprintf(os.Stderr, "Error: No organizations configured. Please run 'sprite org auth' first.\n")
+	// Get organization and client using unified function
+	org, client, err := GetOrgAndClient(ctx, flags.Org)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
-	}
-
-	// Get the organization (use override if provided)
-	var org *config.Organization
-	if flags.Org != "" {
-		// Try to find the organization with alias support
-		foundOrg, foundURL, err := ctx.ConfigMgr.FindOrgWithAlias(flags.Org)
-		if err != nil {
-			// Check if it's an unknown alias error
-			if strings.Contains(err.Error(), "unknown alias:") {
-				// Parse the org specification to get the alias
-				_, alias, _ := ctx.ConfigMgr.ParseOrgWithAlias(flags.Org)
-
-				// Get all available URLs
-				urls := ctx.ConfigMgr.GetAllURLs()
-				if len(urls) > 0 {
-					// Prompt user to select a URL for this alias
-					selectedURL, promptErr := prompts.SelectURLForAlias(alias, urls)
-					if promptErr != nil {
-						fmt.Fprintf(os.Stderr, "Error: Failed to select URL for alias: %v\n", promptErr)
-						os.Exit(1)
-					}
-
-					// Save the alias
-					if saveErr := ctx.ConfigMgr.SetURLAlias(alias, selectedURL); saveErr != nil {
-						fmt.Fprintf(os.Stderr, "Error: Failed to save alias: %v\n", saveErr)
-						os.Exit(1)
-					}
-
-					fmt.Printf("%s Saved alias '%s' for URL %s\n",
-						format.Success("✓"),
-						format.Bold(alias),
-						format.URL(selectedURL))
-
-					// Try again with the newly saved alias
-					foundOrg, foundURL, err = ctx.ConfigMgr.FindOrgWithAlias(flags.Org)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-						os.Exit(1)
-					}
-				} else {
-					fmt.Fprintf(os.Stderr, "Error: No URLs configured to associate with alias '%s'\n", alias)
-					os.Exit(1)
-				}
-			} else {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-		}
-		org = foundOrg
-		_ = foundURL // silence unused variable warning
-	} else {
-		// Use current org or prompt for one
-		org = ctx.ConfigMgr.GetCurrentOrg()
-		if org == nil {
-			// If no current org, prompt for one
-			selectedOrg, err := prompts.SelectOrganization(ctx.ConfigMgr)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-			org = selectedOrg
-		}
 	}
 
 	// If no sprite name provided, show interactive list
 	if spriteName == "" {
-		sprites, err := ListSprites(ctx.ConfigMgr, org)
+		sprites, err := ListSpritesWithClient(client, "")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error listing sprites: %v\n", err)
 			os.Exit(1)
@@ -153,14 +88,15 @@ func UseCommand(ctx *GlobalContext, args []string) {
 		// Create options for sprite selection
 		options := make([]huh.Option[string], len(sprites))
 		for i, sprite := range sprites {
-			label := fmt.Sprintf("%s (%s)", sprite.Name, sprite.Status)
-			options[i] = huh.NewOption(label, sprite.Name)
+			label := fmt.Sprintf("%s (%s)", sprite.Name(), sprite.Status)
+			options[i] = huh.NewOption(label, sprite.Name())
 		}
 
 		// Prompt user to select a sprite
 		err = huh.NewSelect[string]().
 			Title("Select a sprite").
 			Options(options...).
+			Height(15). // Maximum of 15 visible lines
 			Value(&spriteName).
 			Run()
 

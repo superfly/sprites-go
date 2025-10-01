@@ -1,7 +1,7 @@
 package commands
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,6 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/superfly/sprite-env/client/prompts"
+	sprites "github.com/superfly/sprites-go"
 )
 
 // FlyTokenInfo represents a token info from the current tokens endpoint
@@ -46,16 +47,6 @@ type FlyOrganizationsResponse struct {
 	Organizations []FlyOrganization `json:"organizations"`
 }
 
-// FlyTokenRequest represents the request to create a sprite token
-type FlyTokenRequest struct {
-	Description string `json:"description,omitempty"`
-	InviteCode  string `json:"invite_code,omitempty"`
-}
-
-// FlyTokenResponse represents the response from creating a sprite token
-type FlyTokenResponse struct {
-	Token string `json:"token"`
-}
 
 // GetFlyToken returns the Fly.io access token from the config file or environment
 // Returns the token and the source (either env var name or config file path)
@@ -213,21 +204,16 @@ func FetchFlyOrganizations(token string) ([]FlyOrganization, error) {
 
 // CreateSpriteToken creates a sprite token for the selected organization
 func CreateSpriteToken(flyToken string, orgSlug string) (string, error) {
-	// Get API URL from environment or use default
-	apiURL := "https://api.sprites.dev"
-	if envURL := os.Getenv("SPRITES_API_URL"); envURL != "" {
-		apiURL = strings.TrimRight(envURL, "/")
-	}
-
-	// Use the API URL to create organization-specific sprite tokens
-	url := fmt.Sprintf("%s/v1/organizations/%s/tokens", apiURL, orgSlug)
-
+	ctx := context.Background()
+	
 	// First attempt without invite code
-	token, statusCode, err := createSpriteTokenWithInvite(flyToken, url, "")
+	token, err := sprites.CreateToken(ctx, flyToken, orgSlug, "")
 	if err != nil {
-		// Check if the error indicates sprites not enabled (401) or forbidden (403)
-		if statusCode == http.StatusUnauthorized && strings.Contains(err.Error(), "Sprites not enabled") {
-			slog.Debug("Organization requires invite code - Sprites not enabled", "status", statusCode)
+		// Check if the error indicates sprites not enabled or forbidden
+		errStr := err.Error()
+		if strings.Contains(errStr, "401") || strings.Contains(errStr, "403") || 
+		   strings.Contains(errStr, "Sprites not enabled") || strings.Contains(errStr, "Forbidden") {
+			slog.Debug("Organization requires invite code", "error", err)
 
 			// Prompt for invite code
 			inviteCode, promptErr := prompts.PromptForInviteCode()
@@ -236,22 +222,7 @@ func CreateSpriteToken(flyToken string, orgSlug string) (string, error) {
 			}
 
 			// Retry with invite code
-			token, _, err = createSpriteTokenWithInvite(flyToken, url, inviteCode)
-			if err != nil {
-				return "", fmt.Errorf("failed to create token with invite code: %w", err)
-			}
-			return token, nil
-		} else if statusCode == http.StatusForbidden {
-			slog.Debug("Organization requires invite code - Forbidden", "status", statusCode)
-
-			// Prompt for invite code
-			inviteCode, promptErr := prompts.PromptForInviteCode()
-			if promptErr != nil {
-				return "", fmt.Errorf("organization requires an invite code: %w", promptErr)
-			}
-
-			// Retry with invite code
-			token, _, err = createSpriteTokenWithInvite(flyToken, url, inviteCode)
+			token, err = sprites.CreateToken(ctx, flyToken, orgSlug, inviteCode)
 			if err != nil {
 				return "", fmt.Errorf("failed to create token with invite code: %w", err)
 			}
@@ -263,74 +234,3 @@ func CreateSpriteToken(flyToken string, orgSlug string) (string, error) {
 	return token, nil
 }
 
-// createSpriteTokenWithInvite performs the actual API request to create a token
-func createSpriteTokenWithInvite(flyToken string, url string, inviteCode string) (string, int, error) {
-	// Create request body
-	req := FlyTokenRequest{
-		Description: "Sprite CLI Token",
-	}
-	if inviteCode != "" {
-		req.InviteCode = inviteCode
-	}
-
-	jsonData, err := json.Marshal(req)
-	if err != nil {
-		return "", 0, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	httpReq, err := http.NewRequest("POST", url, bytes.NewReader(jsonData))
-	if err != nil {
-		return "", 0, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	authHeader := "FlyV1 " + flyToken
-	httpReq.Header.Set("Authorization", authHeader)
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	// Debug logging
-	slog.Debug("Fly API request",
-		"method", httpReq.Method,
-		"url", url,
-		"authorization", authHeader,
-		"body", string(jsonData))
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		slog.Debug("Fly API request failed", "error", err)
-		return "", 0, fmt.Errorf("failed to create token: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", resp.StatusCode, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	// Debug logging of response
-	slog.Debug("Fly API response",
-		"status", resp.StatusCode,
-		"body", string(body))
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return "", resp.StatusCode, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var tokenResp FlyTokenResponse
-	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		slog.Debug("Failed to parse token response", "error", err, "body", string(body))
-		return "", resp.StatusCode, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	if tokenResp.Token == "" {
-		slog.Debug("Empty token in response", "response", tokenResp)
-		return "", resp.StatusCode, fmt.Errorf("no token returned in response")
-	}
-
-	// Log token details (careful not to log the full token in production)
-	slog.Debug("Token created",
-		"token_prefix", tokenResp.Token[:10]+"...",
-		"token_length", len(tokenResp.Token))
-
-	return tokenResp.Token, resp.StatusCode, nil
-}

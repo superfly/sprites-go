@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/superfly/sprite-env/client/config"
 	"github.com/superfly/sprite-env/client/format"
+	sprites "github.com/superfly/sprites-go"
 )
 
 // SessionItem represents a tmux session for the list
@@ -178,7 +179,7 @@ func (m sessionSelectorModel) View() string {
 }
 
 // runSessionSelector runs the interactive session selector and returns the selected session ID
-func runSessionSelector(sessions []SessionItem, org *config.Organization, spriteName, spriteOverride string, flags *SpriteFlags, ctx *GlobalContext) (string, error) {
+func runSessionSelector(sessions []SessionItem, org *config.Organization, sprite *sprites.Sprite) (string, error) {
 	if len(sessions) == 0 {
 		fmt.Println("No active tmux sessions found.")
 		fmt.Println("\nTo create a new detachable session:")
@@ -189,12 +190,12 @@ func runSessionSelector(sessions []SessionItem, org *config.Organization, sprite
 
 	// Show connection info
 	fmt.Println()
-	if spriteName != "" && org.Name != "env" {
+	if sprite.Name() != "" && org.Name != "env" {
 		fmt.Printf("Connected to %s sprite %s\n",
 			format.Org(format.GetOrgDisplayName(org.Name, org.URL)),
-			format.Sprite(spriteName))
-	} else if spriteName != "" {
-		fmt.Printf("Connected to sprite %s\n", format.Sprite(spriteName))
+			format.Sprite(sprite.Name()))
+	} else if sprite.Name() != "" {
+		fmt.Printf("Connected to sprite %s\n", format.Sprite(sprite.Name()))
 	}
 	fmt.Println()
 
@@ -219,25 +220,8 @@ func runSessionSelector(sessions []SessionItem, org *config.Organization, sprite
 	return "", fmt.Errorf("no session selected")
 }
 
-// executeSelectedSession runs exec -id <sessionID> for the selected session
-func executeSelectedSession(sessionID string, org *config.Organization, spriteName, spriteOverride string, flags *SpriteFlags, ctx *GlobalContext) int {
-	// Build the arguments for exec -id <sessionID>
-	args := []string{"-id", sessionID}
-
-	// Add org and sprite flags if needed
-	if flags.Org != "" {
-		args = append([]string{"-o", flags.Org}, args...)
-	}
-	if spriteOverride != "" {
-		args = append([]string{"-s", spriteOverride}, args...)
-	}
-
-	// Re-run exec command with the session ID
-	return ExecCommand(ctx, args)
-}
-
 // listSessionsNonInteractive displays sessions in a non-interactive table format
-func listSessionsNonInteractive(sessions []SessionItem, org *config.Organization, spriteName string) int {
+func listSessionsNonInteractive(sessions []SessionItem, org *config.Organization, sprite *sprites.Sprite) int {
 	if len(sessions) == 0 {
 		fmt.Println("No active tmux sessions found.")
 		fmt.Println("\nTo create a new detachable session:")

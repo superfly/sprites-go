@@ -63,21 +63,14 @@ func SelectOrganization(cfg *config.Manager) (*config.Organization, error) {
 
 	var selectedOrgKey string
 
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Key("org").
-				Title("Which organization are you working with?").
-				Description("Select an existing organization.").
-				Options(options...).
-				Value(&selectedOrgKey),
-		),
-	)
-
-	// Configure form with accessibility and theming
-	form = configureForm(form)
-
-	if err := form.Run(); err != nil {
+	// Use individual field for inline rendering
+	if err := huh.NewSelect[string]().
+		Title("Which organization are you working with?").
+		Description("Select an existing organization.").
+		Options(options...).
+		Height(15). // Maximum of 15 visible lines
+		Value(&selectedOrgKey).
+		Run(); err != nil {
 		return nil, fmt.Errorf("organization selection cancelled: %w", err)
 	}
 
@@ -105,28 +98,20 @@ func SelectOrganization(cfg *config.Manager) (*config.Organization, error) {
 func PromptForSpriteName() (string, error) {
 	var spriteName string
 
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewInput().
-				Key("sprite").
-				Title("Which Sprite are you connecting to?").
-				Description("Enter the name of the sprite you want to work with.").
-				Placeholder("my-sprite").
-				Value(&spriteName).
-				Validate(func(s string) error {
-					s = strings.TrimSpace(s)
-					if s == "" {
-						return fmt.Errorf("sprite name is required")
-					}
-					return nil
-				}),
-		),
-	)
-
-	// Configure form with accessibility and theming
-	form = configureForm(form)
-
-	if err := form.Run(); err != nil {
+	// Use individual field for inline rendering
+	if err := huh.NewInput().
+		Title("Which Sprite are you connecting to?").
+		Description("Enter the name of the sprite you want to work with.").
+		Placeholder("my-sprite").
+		Value(&spriteName).
+		Validate(func(s string) error {
+			s = strings.TrimSpace(s)
+			if s == "" {
+				return fmt.Errorf("sprite name is required")
+			}
+			return nil
+		}).
+		Run(); err != nil {
 		return "", fmt.Errorf("sprite selection cancelled: %w", err)
 	}
 
@@ -137,22 +122,14 @@ func PromptForSpriteName() (string, error) {
 func PromptForConfirmation(title, description string) (bool, error) {
 	var confirmed bool
 
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewConfirm().
-				Key("confirm").
-				Title(title).
-				Description(description).
-				Value(&confirmed).
-				Affirmative("Yes").
-				Negative("No"),
-		),
-	)
-
-	// Configure form with accessibility and theming
-	form = configureForm(form)
-
-	if err := form.Run(); err != nil {
+	// Use individual field for inline rendering
+	if err := huh.NewConfirm().
+		Title(title).
+		Description(description).
+		Value(&confirmed).
+		Affirmative("Yes").
+		Negative("No").
+		Run(); err != nil {
 		return false, fmt.Errorf("confirmation cancelled: %w", err)
 	}
 
@@ -233,27 +210,25 @@ func PromptForFlyOrganization(orgs []FlyOrganization) (*FlyOrganization, error) 
 
 	for i := range orgs {
 		org := &orgs[i]
-		options = append(options, huh.NewOption(org.Slug, org.Slug))
+		// Show more context in the option label for better inline experience
+		label := org.Slug
+		if org.Name != "" && org.Name != org.Slug {
+			label = fmt.Sprintf("%s (%s)", org.Slug, org.Name)
+		}
+		options = append(options, huh.NewOption(label, org.Slug))
 		orgMap[org.Slug] = org
 	}
 
 	var selectedSlug string
 
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Key("org").
-				Title("Which Fly.io organization would you like to use?").
-				Description("Select an organization to create a Sprite token for.").
-				Options(options...).
-				Value(&selectedSlug),
-		),
-	)
-
-	// Configure form with accessibility and theming
-	form = configureForm(form)
-
-	if err := form.Run(); err != nil {
+	// Use individual field for inline rendering
+	if err := huh.NewSelect[string]().
+		Title("Which Fly.io organization would you like to use?").
+		Description("Select an organization to create a Sprite token for.").
+		Options(options...).
+		Height(15). // Maximum of 15 visible lines
+		Value(&selectedSlug).
+		Run(); err != nil {
 		return nil, fmt.Errorf("organization selection cancelled: %w", err)
 	}
 
@@ -269,21 +244,13 @@ func PromptForFlyOrganization(orgs []FlyOrganization) (*FlyOrganization, error) 
 func PromptForInviteCode() (string, error) {
 	var inviteCode string
 
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewInput().
-				Key("invite_code").
-				Title("Have you received an invite code for this org?").
-				Description("Enter the invite code you received, or leave blank to cancel.").
-				Placeholder("a1b2c3d4e5f6g7h8").
-				Value(&inviteCode),
-		),
-	)
-
-	// Configure form with accessibility and theming
-	form = configureForm(form)
-
-	if err := form.Run(); err != nil {
+	// Use individual field for inline rendering
+	if err := huh.NewInput().
+		Title("Have you received an invite code for this org?").
+		Description("Enter the invite code you received, or leave blank to cancel.").
+		Placeholder("a1b2c3d4e5f6g7h8").
+		Value(&inviteCode).
+		Run(); err != nil {
 		return "", fmt.Errorf("invite code entry cancelled: %w", err)
 	}
 
@@ -319,25 +286,14 @@ func SelectURLForAlias(alias string, urls []string) (string, error) {
 
 	var selectedURL string
 
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewNote().
-				Title(fmt.Sprintf("🔍 Unknown alias: %s", format.Bold(alias))).
-				Description("This alias hasn't been used before. Which API URL should it point to?"),
-
-			huh.NewSelect[string]().
-				Key("url").
-				Title("Select API URL").
-				Description("Choose the API URL to associate with this alias.").
-				Options(options...).
-				Value(&selectedURL),
-		),
-	)
-
-	// Configure form with accessibility and theming
-	form = configureForm(form)
-
-	if err := form.Run(); err != nil {
+	// Use individual field for inline rendering
+	if err := huh.NewSelect[string]().
+		Title(fmt.Sprintf("Unknown alias: %s", format.Bold(alias))).
+		Description("This alias hasn't been used before. Which API URL should it point to?").
+		Options(options...).
+		Height(10). // Limit height for URL selection
+		Value(&selectedURL).
+		Run(); err != nil {
 		return "", fmt.Errorf("URL selection cancelled: %w", err)
 	}
 

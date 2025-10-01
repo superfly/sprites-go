@@ -2,6 +2,8 @@ module github.com/superfly/sprite-env
 
 go 1.24.4
 
+replace github.com/superfly/sprites-go => ./sdks/go
+
 require (
 	github.com/Masterminds/semver/v3 v3.3.0
 	github.com/Netflix/go-expect v0.0.0-20220104043353-73e0943537d2
@@ -18,6 +20,7 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/stretchr/testify v1.9.0
+	github.com/superfly/sprites-go v0.0.0
 	github.com/zalando/go-keyring v0.2.6
 	golang.org/x/term v0.33.0
 	gopkg.in/yaml.v3 v3.0.1

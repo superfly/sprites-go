@@ -1,22 +1,18 @@
 package commands
 
 import (
-	"encoding/json"
+	"context"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
-	"net/url"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
 	"github.com/superfly/sprite-env/client/config"
 	"github.com/superfly/sprite-env/client/format"
-	"github.com/superfly/sprite-env/client/prompts"
+	sprites "github.com/superfly/sprites-go"
 	"golang.org/x/term"
 )
 
@@ -50,79 +46,15 @@ func ListCommand(ctx *GlobalContext, args []string) {
 		os.Exit(1)
 	}
 
-	// Ensure we have an organization
-	orgs := ctx.ConfigMgr.GetOrgs()
-	if len(orgs) == 0 {
-		fmt.Fprintf(os.Stderr, "Error: No organizations configured. Please run 'sprite org auth' first.\n")
+	// Get organization and client using unified function
+	org, client, err := GetOrgAndClient(ctx, ctx.OrgOverride)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Get the organization (use override if provided)
-	var org *config.Organization
-	orgOverride := ctx.OrgOverride // Use the global context's org override
-	slog.Debug("Getting organization", "ctx.OrgOverride", ctx.OrgOverride)
-	if orgOverride != "" {
-		slog.Debug("Using org override with alias support", "orgSpec", orgOverride)
-		// Try to find the organization with alias support
-		foundOrg, _, err := ctx.ConfigMgr.FindOrgWithAlias(orgOverride)
-		if err != nil {
-			// Check if it's an unknown alias error
-			if strings.Contains(err.Error(), "unknown alias:") {
-				// Parse the org specification to get the alias
-				_, alias, _ := ctx.ConfigMgr.ParseOrgWithAlias(orgOverride)
-
-				// Get all configured URLs
-				urls := ctx.ConfigMgr.GetAllURLs()
-				if len(urls) == 0 {
-					fmt.Fprintf(os.Stderr, "Error: No URLs configured\n")
-					os.Exit(1)
-				}
-
-				// Prompt user to select URL for this alias
-				selectedURL, err := prompts.SelectURLForAlias(alias, urls)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-					os.Exit(1)
-				}
-
-				// Save the alias
-				if err := ctx.ConfigMgr.SetURLAlias(alias, selectedURL); err != nil {
-					fmt.Fprintf(os.Stderr, "Error: Failed to save alias: %v\n", err)
-					os.Exit(1)
-				}
-				fmt.Printf("✓ Saved alias '%s' for URL %s\n", alias, format.URL(selectedURL))
-
-				// Try again with the saved alias
-				foundOrg, _, err = ctx.ConfigMgr.FindOrgWithAlias(orgOverride)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-					os.Exit(1)
-				}
-			} else {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-		}
-		org = foundOrg
-		slog.Debug("Found organization with alias", "org", org.Name, "url", org.URL)
-	} else {
-		// Use current org or first available
-		org = ctx.ConfigMgr.GetCurrentOrg()
-		if org == nil && len(orgs) > 0 {
-			// Get the first org from the map
-			for _, o := range orgs {
-				org = o
-				break
-			}
-		}
-		if org == nil {
-			fmt.Fprintf(os.Stderr, "Error: No organization selected\n")
-			os.Exit(1)
-		}
-	}
-
 	// List sprites with prefix filter if provided
-	sprites, err := ListSpritesWithPrefix(ctx.ConfigMgr, org, prefix)
+	spriteList, err := ListSpritesWithClient(client, prefix)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error listing sprites: %v\n", err)
 		os.Exit(1)
@@ -131,14 +63,14 @@ func ListCommand(ctx *GlobalContext, args []string) {
 	// Check if output is being piped
 	if !term.IsTerminal(int(os.Stdout.Fd())) {
 		// Just output names when piped
-		for _, sprite := range sprites {
-			fmt.Println(sprite.Name)
+		for _, sprite := range spriteList {
+			fmt.Println(sprite.Name())
 		}
 		return
 	}
 
 	// Display results
-	if len(sprites) == 0 {
+	if len(spriteList) == 0 {
 		if prefix != "" {
 			fmt.Printf("No sprites found with prefix '%s' in organization %s\n",
 				prefix, format.Org(format.GetOrgDisplayName(org.Name, org.URL)))
@@ -154,13 +86,13 @@ func ListCommand(ctx *GlobalContext, args []string) {
 		format.Org(format.GetOrgDisplayName(org.Name, org.URL)))
 
 	// Create table data
-	rows := make([][]string, len(sprites))
-	for i, sprite := range sprites {
+	rows := make([][]string, len(spriteList))
+	for i, sprite := range spriteList {
 		createdAgo := time.Since(sprite.CreatedAt)
 		createdStr := formatDuration(createdAgo) + " ago"
 
 		rows[i] = []string{
-			sprite.Name,
+			sprite.Name(),
 			createdStr,
 		}
 	}
@@ -195,7 +127,7 @@ func ListCommand(ctx *GlobalContext, args []string) {
 		})
 
 	fmt.Println(t)
-	fmt.Printf("\nTotal: %d sprite(s)\n", len(sprites))
+	fmt.Printf("\nTotal: %d sprite(s)\n", len(spriteList))
 }
 
 // formatDuration formats a duration in a human-readable way
@@ -215,100 +147,52 @@ func formatDuration(d time.Duration) string {
 	}
 }
 
-// SpritesListResponse represents the response from listing sprites
-type SpritesListResponse struct {
-	Sprites               []SpriteInfo `json:"sprites"`
-	HasMore               bool         `json:"has_more"`
-	NextContinuationToken string       `json:"next_continuation_token,omitempty"`
+// ListSpritesWithClient fetches the list of sprites from the API with optional prefix filtering using an existing client
+func ListSpritesWithClient(client *sprites.Client, prefix string) ([]*sprites.Sprite, error) {
+	slog.Debug("Listing sprites", "prefix", prefix)
+
+	// List sprites using SDK
+	ctx := context.Background()
+	spriteList, err := client.ListAllSprites(ctx, prefix)
+	if err != nil {
+		slog.Debug("Sprite list request failed", "error", err)
+		return nil, fmt.Errorf("failed to list sprites: %w", err)
+	}
+
+	return spriteList, nil
 }
 
 // ListSpritesWithPrefix fetches the list of sprites from the API with optional prefix filtering
-func ListSpritesWithPrefix(cfg *config.Manager, org *config.Organization, prefix string) ([]SpriteInfo, error) {
-	var allSprites []SpriteInfo
-	continuationToken := ""
-
-	for {
-		// Build URL with query parameters
-		baseURL := fmt.Sprintf("%s/v1/sprites", getSpritesAPIURL(org))
-		u, err := url.Parse(baseURL)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse URL: %w", err)
-		}
-
-		q := u.Query()
-		q.Set("max_results", "100")
-		if continuationToken != "" {
-			q.Set("continuation_token", continuationToken)
-		}
-		if prefix != "" {
-			q.Set("prefix", prefix)
-		}
-		u.RawQuery = q.Encode()
-
-		// Create request
-		httpReq, err := http.NewRequest("GET", u.String(), nil)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create request: %w", err)
-		}
-
-		token, err := org.GetTokenWithKeyringDisabled(cfg.IsKeyringDisabled())
-		if err != nil {
-			return nil, fmt.Errorf("failed to get auth token: %w", err)
-		}
-		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-
-		slog.Debug("Sprite list request",
-			"url", u.String(),
-			"org", org.Name,
-			"prefix", prefix,
-			"continuation_token", continuationToken,
-			"authorization", fmt.Sprintf("Bearer %s", truncateToken(token)))
-
-		// Make request
-		client := &http.Client{Timeout: 30 * time.Second}
-		resp, err := client.Do(httpReq)
-		if err != nil {
-			slog.Debug("Sprite list request failed", "error", err)
-			return nil, fmt.Errorf("failed to list sprites: %w", err)
-		}
-		defer resp.Body.Close()
-
-		// Read response
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read response: %w", err)
-		}
-
-		slog.Debug("Sprite list response",
-			"status", resp.StatusCode,
-			"body", string(body))
-
-		// Check status
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("failed to list sprites (status %d): %s", resp.StatusCode, string(body))
-		}
-
-		// Parse response
-		var listResp SpritesListResponse
-		if err := json.Unmarshal(body, &listResp); err != nil {
-			return nil, fmt.Errorf("failed to parse response: %w", err)
-		}
-
-		allSprites = append(allSprites, listResp.Sprites...)
-
-		// Check if there are more results
-		if !listResp.HasMore || listResp.NextContinuationToken == "" {
-			break
-		}
-
-		continuationToken = listResp.NextContinuationToken
+// This is kept for backward compatibility but should be replaced with ListSpritesWithClient
+func ListSpritesWithPrefix(cfg *config.Manager, org *config.Organization, prefix string) ([]*sprites.Sprite, error) {
+	// Get token
+	token, err := org.GetTokenWithKeyringDisabled(cfg.IsKeyringDisabled())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get auth token: %w", err)
 	}
 
-	return allSprites, nil
+	// Create SDK client
+	client := sprites.New(token, sprites.WithBaseURL(getSpritesAPIURL(org)))
+
+	slog.Debug("Listing sprites",
+		"url", getSpritesAPIURL(org),
+		"org", org.Name,
+		"prefix", prefix,
+		"authorization", fmt.Sprintf("Bearer %s", truncateToken(token)))
+
+	// List sprites using SDK
+	ctx := context.Background()
+	spriteList, err := client.ListAllSprites(ctx, prefix)
+	if err != nil {
+		slog.Debug("Sprite list request failed", "error", err)
+		return nil, fmt.Errorf("failed to list sprites: %w", err)
+	}
+
+	return spriteList, nil
 }
 
 // ListSprites fetches the list of sprites from the API
-func ListSprites(cfg *config.Manager, org *config.Organization) ([]SpriteInfo, error) {
+func ListSprites(cfg *config.Manager, org *config.Organization) ([]*sprites.Sprite, error) {
 	return ListSpritesWithPrefix(cfg, org, "")
 }
 

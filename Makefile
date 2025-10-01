@@ -1,4 +1,4 @@
-.PHONY: test test-docker test-clean test-rebuild test-machine build build-linux help
+.PHONY: test test-docker test-clean test-rebuild test-machine build build-linux test-cli help
 
 # Run all tests in Docker container (mirrors production environment)
 test:
@@ -25,3 +25,8 @@ build:
 	go build -o dist/server ./server
 	@echo "Building client..."
 	go build -o dist/sprite ./client
+
+# Build test-cli binary
+test-cli:
+	@echo "Building test-cli..."
+	cd sdk && make test-cli

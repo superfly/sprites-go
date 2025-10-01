@@ -1,55 +1,16 @@
 package commands
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 	"os"
-	"strings"
-	"time"
 
 	"github.com/superfly/sprite-env/client/config"
 	"github.com/superfly/sprite-env/client/format"
-	"github.com/superfly/sprite-env/client/prompts"
+	sprites "github.com/superfly/sprites-go"
 )
-
-// SpriteCreateRequest represents the request to create a sprite
-type SpriteCreateRequest struct {
-	Name        string            `json:"name"`
-	Config      *SpriteConfig     `json:"config,omitempty"`
-	Environment map[string]string `json:"environment,omitempty"`
-}
-
-// SpriteConfig represents sprite configuration
-type SpriteConfig struct {
-	RamMB     int    `json:"ram_mb,omitempty"`
-	CPUs      int    `json:"cpus,omitempty"`
-	Region    string `json:"region,omitempty"`
-	StorageGB int    `json:"storage_gb,omitempty"`
-}
-
-// SpriteCreateResponse represents the response from sprite creation
-type SpriteCreateResponse struct {
-	Name string `json:"name"`
-}
-
-// SpriteInfo represents sprite information from the API
-type SpriteInfo struct {
-	ID            string            `json:"id"`
-	Name          string            `json:"name"`
-	Organization  string            `json:"organization"`
-	Status        string            `json:"status"`
-	Config        *SpriteConfig     `json:"config,omitempty"`
-	Environment   map[string]string `json:"environment,omitempty"`
-	CreatedAt     time.Time         `json:"created_at"`
-	UpdatedAt     time.Time         `json:"updated_at"`
-	BucketName    string            `json:"bucket_name,omitempty"`
-	PrimaryRegion string            `json:"primary_region,omitempty"`
-}
 
 // CreateCommand handles the create command - creates a new sprite
 func CreateCommand(ctx *GlobalContext, args []string) {
@@ -88,70 +49,11 @@ func CreateCommand(ctx *GlobalContext, args []string) {
 
 	spriteName := remainingArgs[0]
 
-	// Ensure we have an organization
-	orgs := ctx.ConfigMgr.GetOrgs()
-	if len(orgs) == 0 {
-		fmt.Fprintf(os.Stderr, "Error: No organizations configured. Please run 'sprite org auth' first.\n")
+	// Get organization and client using unified function
+	org, client, err := GetOrgAndClient(ctx, ctx.OrgOverride)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
-	}
-
-	// Get the organization (use override if provided)
-	var org *config.Organization
-	orgOverride := ctx.OrgOverride // Use the global context's org override
-	if orgOverride != "" {
-		// Try to find the organization with alias support
-		foundOrg, _, err := ctx.ConfigMgr.FindOrgWithAlias(orgOverride)
-		if err != nil {
-			// Check if it's an unknown alias error
-			if strings.Contains(err.Error(), "unknown alias:") {
-				// Parse the org specification to get the alias
-				_, alias, _ := ctx.ConfigMgr.ParseOrgWithAlias(orgOverride)
-
-				// Get all configured URLs
-				urls := ctx.ConfigMgr.GetAllURLs()
-				if len(urls) == 0 {
-					fmt.Fprintf(os.Stderr, "Error: No URLs configured\n")
-					os.Exit(1)
-				}
-
-				// Prompt user to select URL for this alias
-				selectedURL, err := prompts.SelectURLForAlias(alias, urls)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-					os.Exit(1)
-				}
-
-				// Save the alias
-				if err := ctx.ConfigMgr.SetURLAlias(alias, selectedURL); err != nil {
-					fmt.Fprintf(os.Stderr, "Error: Failed to save alias: %v\n", err)
-					os.Exit(1)
-				}
-				fmt.Printf("✓ Saved alias '%s' for URL %s\n", alias, format.URL(selectedURL))
-
-				// Try again with the saved alias
-				foundOrg, _, err = ctx.ConfigMgr.FindOrgWithAlias(orgOverride)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-					os.Exit(1)
-				}
-			} else {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-		}
-		org = foundOrg
-	} else {
-		// Use current org or prompt for one
-		org = ctx.ConfigMgr.GetCurrentOrg()
-		if org == nil {
-			// If no current org, prompt for one
-			selectedOrg, err := prompts.SelectOrganization(ctx.ConfigMgr)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-			org = selectedOrg
-		}
 	}
 
 	// Create the sprite
@@ -159,7 +61,7 @@ func CreateCommand(ctx *GlobalContext, args []string) {
 		format.Sprite(spriteName),
 		format.Org(format.GetOrgDisplayName(org.Name, org.URL)))
 
-	if err := CreateSprite(ctx.ConfigMgr, org, spriteName); err != nil {
+	if err := CreateSpriteWithClient(client, spriteName); err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating sprite: %v\n", err)
 		os.Exit(1)
 	}
@@ -167,29 +69,26 @@ func CreateCommand(ctx *GlobalContext, args []string) {
 	fmt.Printf("%s Sprite %s created successfully!\n", format.Success("✓"), format.Sprite(spriteName))
 }
 
+// CreateSpriteWithClient creates a new sprite on the server using an existing client
+func CreateSpriteWithClient(client *sprites.Client, spriteName string) error {
+	slog.Debug("Creating sprite", "sprite", spriteName)
+
+	// Create sprite using SDK
+	ctx := context.Background()
+	_, err := client.CreateSprite(ctx, spriteName, nil)
+	if err != nil {
+		slog.Debug("Sprite create request failed", "error", err)
+		return fmt.Errorf("failed to create sprite: %w", err)
+	}
+
+	return nil
+}
+
 // CreateSprite creates a new sprite on the server
 // When the API call returns successfully, the sprite is ready to use
+// This is kept for backward compatibility but should be replaced with CreateSpriteWithClient
 func CreateSprite(cfg *config.Manager, org *config.Organization, spriteName string) error {
-	// Create the request
-	req := SpriteCreateRequest{
-		Name: spriteName,
-		// TODO: Add config and environment based on user preferences or defaults
-	}
-
-	jsonData, err := json.Marshal(req)
-	if err != nil {
-		return fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	// Build the URL
-	url := fmt.Sprintf("%s/v1/sprites", getSpritesAPIURL(org))
-
-	// Create HTTP request
-	httpReq, err := http.NewRequest("POST", url, bytes.NewReader(jsonData))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
+	// Get token
 	token, err := org.GetToken()
 	if err != nil {
 		return fmt.Errorf("failed to get auth token: %w", err)
@@ -200,44 +99,21 @@ func CreateSprite(cfg *config.Manager, org *config.Organization, spriteName stri
 		return fmt.Errorf("auth token is empty for organization %s", org.Name)
 	}
 
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-	httpReq.Header.Set("Content-Type", "application/json")
+	// Create SDK client
+	client := sprites.New(token, sprites.WithBaseURL(getSpritesAPIURL(org)))
 
-	slog.Debug("Sprite create request",
-		"url", url,
+	slog.Debug("Creating sprite",
+		"url", getSpritesAPIURL(org),
 		"org", org.Name,
 		"sprite", spriteName,
-		"authorization", fmt.Sprintf("Bearer %s", truncateToken(token)),
-		"request_body", string(jsonData))
+		"authorization", fmt.Sprintf("Bearer %s", truncateToken(token)))
 
-	// Make the request
-	client := &http.Client{Timeout: 120 * time.Second}
-	resp, err := client.Do(httpReq)
+	// Create sprite using SDK
+	ctx := context.Background()
+	_, err = client.CreateSprite(ctx, spriteName, nil)
 	if err != nil {
 		slog.Debug("Sprite create request failed", "error", err)
 		return fmt.Errorf("failed to create sprite: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Read response body
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
-	}
-
-	slog.Debug("Sprite create response",
-		"status", resp.StatusCode,
-		"body", string(body))
-
-	// Check status code
-	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("failed to create sprite (status %d): %s", resp.StatusCode, string(body))
-	}
-
-	// Parse response
-	var createResp SpriteCreateResponse
-	if err := json.Unmarshal(body, &createResp); err != nil {
-		return fmt.Errorf("failed to parse response: %w", err)
 	}
 
 	// Save to local config (we don't need the ID since we're not tracking sprites locally)

@@ -11,6 +11,7 @@ import (
 	"github.com/superfly/sprite-env/client/config"
 	"github.com/superfly/sprite-env/client/format"
 	"github.com/superfly/sprite-env/client/prompts"
+	sprites "github.com/superfly/sprites-go"
 )
 
 // GlobalContext contains global state that should be available to all commands
@@ -417,4 +418,268 @@ func getCurrentDirectory() string {
 		return "."
 	}
 	return filepath.Base(dir)
+}
+
+// GetOrgAndClient returns the selected organization and a configured sprites client.
+// This is the unified function that all commands should use for organization selection
+// and client creation. It handles all the complex logic for org selection, aliases,
+// environment variables, .sprite files, and client configuration.
+func GetOrgAndClient(ctx *GlobalContext, orgOverride string) (*config.Organization, *sprites.Client, error) {
+	// Use global context override if available
+	if ctx.OrgOverride != "" {
+		orgOverride = ctx.OrgOverride
+	}
+
+	// Get the organization using the existing logic
+	org, err := getOrganization(ctx, orgOverride)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Get auth token
+	token, err := org.GetTokenWithKeyringDisabled(ctx.ConfigMgr.IsKeyringDisabled())
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get auth token: %w", err)
+	}
+
+	// Create and configure sprites client
+	client := sprites.New(token, sprites.WithBaseURL(getSpritesAPIURL(org)))
+
+	return org, client, nil
+}
+
+// getOrganization handles all organization selection logic in one place.
+// This consolidates the logic from EnsureOrg and EnsureOrgAndSpriteWithContext.
+func getOrganization(ctx *GlobalContext, orgOverride string) (*config.Organization, error) {
+	// Check for environment variables that might provide a default URL
+	envURL := os.Getenv("SPRITE_URL")
+	if envURL == "" {
+		envURL = os.Getenv("SPRITES_API_URL")
+	}
+	envToken := os.Getenv("SPRITE_TOKEN")
+
+	var org *config.Organization
+
+	// Check if we have command-line overrides
+	if orgOverride != "" {
+		slog.Debug("Checking for org override", "orgOverride", orgOverride)
+
+		// Try to find the organization with alias support
+		foundOrg, foundURL, err := ctx.ConfigMgr.FindOrgWithAlias(orgOverride)
+		if err != nil {
+			// Check if it's an unknown alias error
+			if strings.Contains(err.Error(), "unknown alias:") {
+				// Parse the org specification to get the alias
+				_, alias, _ := ctx.ConfigMgr.ParseOrgWithAlias(orgOverride)
+
+				// Get all available URLs
+				urls := ctx.ConfigMgr.GetAllURLs()
+				if len(urls) > 0 {
+					// Prompt user to select a URL for this alias
+					selectedURL, promptErr := prompts.SelectURLForAlias(alias, urls)
+					if promptErr != nil {
+						return nil, fmt.Errorf("failed to select URL for alias: %w", promptErr)
+					}
+
+					// Save the alias
+					if saveErr := ctx.ConfigMgr.SetURLAlias(alias, selectedURL); saveErr != nil {
+						return nil, fmt.Errorf("failed to save alias: %w", saveErr)
+					}
+
+					fmt.Printf("%s Saved alias '%s' for URL %s\n",
+						format.Success("✓"),
+						format.Bold(alias),
+						format.URL(selectedURL))
+
+					// Try again with the newly saved alias
+					foundOrg, foundURL, err = ctx.ConfigMgr.FindOrgWithAlias(orgOverride)
+					if err != nil {
+						return nil, err
+					}
+				} else {
+					return nil, fmt.Errorf("no URLs configured to associate with alias '%s'", alias)
+				}
+			} else {
+				return nil, err
+			}
+		}
+
+		org = foundOrg
+		// Set as current for this session
+		if err := ctx.ConfigMgr.SetCurrentOrg(org.Name); err != nil {
+			return nil, fmt.Errorf("failed to set current org: %w", err)
+		}
+		slog.Debug("Found organization from override", "org", org.Name, "url", foundURL)
+	}
+
+	// If no org override, check .sprite file or use current config
+	if org == nil {
+		slog.Debug("No org override, checking .sprite file")
+		// Check if we have a .sprite file in the current directory or parent directories
+		spriteFile, _, err := config.ReadSpriteFile()
+		if err == nil && spriteFile != nil && spriteFile.Organization != "" {
+			slog.Debug("Found .sprite file", "org", spriteFile.Organization, "sprite", spriteFile.Sprite)
+			// Find the organization
+			orgs := ctx.ConfigMgr.GetOrgs()
+			for _, o := range orgs {
+				if o.Name == spriteFile.Organization {
+					org = o
+					break
+				}
+			}
+
+			if org != nil {
+				// If environment URL is set, create a temporary org with the env URL
+				if envURL != "" {
+					slog.Debug("Found org from .sprite file but using environment URL", "org", org.Name, "configURL", org.URL, "envURL", envURL)
+					org = &config.Organization{
+						Name:  org.Name, // Keep the org name from .sprite file
+						URL:   envURL,   // Use the environment URL
+						Token: envToken, // Use environment token if available
+					}
+				}
+
+				// Set as current in the config (unless using env URL)
+				if envURL == "" {
+					if err := ctx.ConfigMgr.SetCurrentOrg(org.Name); err != nil {
+						return nil, fmt.Errorf("failed to set current org: %w", err)
+					}
+				}
+			}
+		}
+	}
+
+	// If still no org, check config or use fallback logic
+	if org == nil {
+		slog.Debug("No org from .sprite file, checking current org")
+		// Use current organization
+		org = ctx.ConfigMgr.GetCurrentOrg()
+		if org == nil {
+			slog.Debug("No current org, checking available orgs")
+			// If no current org, try to get the first available one
+			orgs := ctx.ConfigMgr.GetOrgs()
+			if len(orgs) == 0 {
+				// If we have an environment URL, use it as a default
+				if envURL != "" {
+					slog.Debug("No orgs configured, but have environment URL", "url", envURL)
+					// Create a temporary org structure
+					org = &config.Organization{
+						Name:  "default",
+						URL:   envURL,
+						Token: envToken, // Will be empty if not set
+					}
+					// This org is not saved to config, just used for this session
+				} else {
+					return nil, fmt.Errorf("no organizations configured. Please run 'sprite org auth' first")
+				}
+			} else {
+				// Check if all orgs are from the same URL (single API endpoint)
+				urls := make(map[string]bool)
+				for _, o := range orgs {
+					urls[o.URL] = true
+				}
+
+				if len(urls) == 1 {
+					// All orgs are from the same URL, use any of them
+					for _, o := range orgs {
+						org = o
+						slog.Debug("Using org from single API endpoint", "org", o.Name, "url", o.URL)
+						break
+					}
+				} else if envURL != "" {
+					// Multiple URLs configured, but we have an environment URL
+					// Create a temporary org for the environment URL
+					slog.Debug("Multiple URLs configured, using environment URL", "url", envURL)
+					org = &config.Organization{
+						Name:  "default",
+						URL:   envURL,
+						Token: envToken, // Will be empty if not set
+					}
+				} else {
+					// Multiple URLs and no environment URL, use the first org
+					for _, o := range orgs {
+						org = o
+						slog.Debug("Using first available org", "org", o.Name, "url", o.URL)
+						break
+					}
+				}
+			}
+		} else {
+			slog.Debug("Using current org", "org", org.Name, "url", org.URL)
+			// If environment URL is set, override the org's URL
+			if envURL != "" {
+				slog.Debug("Overriding current org URL with environment URL", "org", org.Name, "configURL", org.URL, "envURL", envURL)
+				org = &config.Organization{
+					Name:  org.Name, // Keep the org name
+					URL:   envURL,   // Use the environment URL
+					Token: envToken, // Use environment token if available
+				}
+			}
+		}
+	}
+
+	slog.Debug("Final organization selection", "org", org.Name, "url", org.URL)
+	return org, nil
+}
+
+// GetOrgClientAndSprite returns the selected organization, configured sprites client, and sprite instance.
+// This is the unified function that all commands should use for organization selection,
+// client creation, and sprite selection. It handles all the complex logic for org selection,
+// aliases, environment variables, .sprite files, client configuration, and sprite selection.
+func GetOrgClientAndSprite(ctx *GlobalContext, orgOverride, spriteOverride string) (*config.Organization, *sprites.Client, *sprites.Sprite, error) {
+	// Get organization and client using existing unified function
+	org, client, err := GetOrgAndClient(ctx, orgOverride)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	// Get sprite name using existing logic
+	spriteName, err := getSpriteName(ctx, spriteOverride)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	// Create sprite instance with organization information
+	orgInfo := &sprites.OrganizationInfo{
+		Name: org.Name,
+		URL:  org.URL,
+	}
+	sprite := client.SpriteWithOrg(spriteName, orgInfo)
+
+	return org, client, sprite, nil
+}
+
+// getSpriteName handles sprite name selection logic, similar to EnsureOrgAndSpriteWithContext
+func getSpriteName(ctx *GlobalContext, spriteOverride string) (string, error) {
+	// Use global context override if available
+	if ctx.SpriteOverride != "" {
+		spriteOverride = ctx.SpriteOverride
+	}
+
+	var spriteName string
+
+	// Check .sprite file for sprite name if no override
+	if spriteOverride == "" {
+		spriteFile, _, err := config.ReadSpriteFile()
+		if err == nil && spriteFile != nil && spriteFile.Sprite != "" {
+			spriteName = spriteFile.Sprite
+			slog.Debug("Found sprite name from .sprite file", "sprite", spriteName)
+		}
+	} else {
+		spriteName = spriteOverride
+		slog.Debug("Using sprite override", "sprite", spriteName)
+	}
+
+	// If we still don't have a sprite name, prompt for it
+	if spriteName == "" {
+		var err error
+		spriteName, err = promptForSpriteName()
+		if err != nil {
+			return "", err
+		}
+		slog.Debug("Got sprite name from prompt", "sprite", spriteName)
+	}
+
+	slog.Debug("Final sprite selection", "sprite", spriteName)
+	return spriteName, nil
 }

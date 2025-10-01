@@ -1,10 +1,9 @@
 package commands
 
 import (
+	"context"
 	"flag"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"strings"
 
@@ -43,8 +42,8 @@ func DestroyCommand(ctx *GlobalContext, args []string) {
 		os.Exit(1)
 	}
 
-	// Ensure we have an org and sprite
-	org, spriteName, err := EnsureOrgAndSpriteWithContext(ctx, flags.Org, flags.Sprite)
+	// Get organization, client, and sprite using unified function
+	org, _, sprite, err := GetOrgClientAndSprite(ctx, flags.Org, flags.Sprite)
 	if err != nil {
 		// Check if it's a cancellation error
 		if strings.Contains(err.Error(), "cancelled") {
@@ -55,16 +54,16 @@ func DestroyCommand(ctx *GlobalContext, args []string) {
 		os.Exit(1)
 	}
 
-	if spriteName == "" {
+	if sprite.Name() == "" {
 		fmt.Fprintf(os.Stderr, "Error: No sprite selected to destroy\n")
 		os.Exit(1)
 	}
 
-	fmt.Println(format.Context(format.GetOrgDisplayName(org.Name, org.URL), fmt.Sprintf("About to destroy sprite %s", format.Sprite(spriteName))))
+	fmt.Println(format.Context(format.GetOrgDisplayName(org.Name, org.URL), fmt.Sprintf("About to destroy sprite %s", format.Sprite(sprite.Name()))))
 	fmt.Println()
 
 	if !*forceFlag {
-		title := fmt.Sprintf("Destroy sprite %s?", spriteName)
+		title := fmt.Sprintf("Destroy sprite %s?", sprite.Name())
 		description := "⚠️  This will permanently destroy the sprite and all its data. This action cannot be undone."
 
 		confirmed := PromptForConfirmationOrExit(title, description)
@@ -75,51 +74,23 @@ func DestroyCommand(ctx *GlobalContext, args []string) {
 		}
 	}
 
-	// Build the URL using buildSpriteProxyURL
-	var url string
-	if org.Name != "env" && spriteName != "" {
-		// Use the sprites API with empty path for DELETE
-		url = buildSpriteProxyURL(org, spriteName, "")
-	} else {
-		// Use direct endpoint for backward compatibility
-		url = fmt.Sprintf("%s/sprite/destroy", org.URL)
-	}
+	// Client is already created by GetOrgAndClient
 
-	httpReq, err := http.NewRequest("DELETE", url, nil)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to create HTTP request: %v\n", err)
-		os.Exit(1)
-	}
-
-	token, err := org.GetTokenWithKeyringDisabled(ctx.ConfigMgr.IsKeyringDisabled())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
-		os.Exit(1)
-	}
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-
-	client := &http.Client{}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to make request: %v\n", err)
-		os.Exit(1)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		body, _ := io.ReadAll(resp.Body)
-		fmt.Fprintf(os.Stderr, "Error: Failed to destroy sprite (status %d): %s\n", resp.StatusCode, string(body))
+	// Delete sprite using SDK
+	ctxReq := context.Background()
+	if err := sprite.Client().DeleteSprite(ctxReq, sprite.Name()); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to destroy sprite: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Remove .sprite file if it exists and matches this sprite
 	if spriteFile, _, _ := config.ReadSpriteFile(); spriteFile != nil {
-		if spriteFile.Organization == org.Name && spriteFile.Sprite == spriteName {
+		if spriteFile.Organization == org.Name && spriteFile.Sprite == sprite.Name() {
 			if err := config.RemoveSpriteFile(); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: Failed to remove .sprite file: %v\n", err)
 			}
 		}
 	}
 
-	fmt.Printf("\n%s Sprite %s destroyed successfully.\n", format.Success("✓"), format.Sprite(spriteName))
+	fmt.Printf("\n%s Sprite %s destroyed successfully.\n", format.Success("✓"), format.Sprite(sprite.Name()))
 }
