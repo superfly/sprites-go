@@ -31,6 +31,9 @@ jobs:
     steps:
     - name: Checkout repo
       uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        token: ${{ secrets.GH_PAT || github.token }}
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3

@@ -91,6 +91,9 @@ WORKDIR /build
 COPY go.mod go.sum* ./
 COPY cmd/go.mod cmd/go.sum* ./cmd/
 
+# Copy SDK submodule (needed for replace directive in go.mod)
+COPY sdks/go ./sdks/go
+
 # Download dependencies
 RUN go mod download -x && cd cmd && go mod download -x
 
