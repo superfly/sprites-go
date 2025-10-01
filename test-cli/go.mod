@@ -1,6 +1,8 @@
 module github.com/superfly/sprites-go/test-cli
 
-go 1.21
+go 1.24
+
+toolchain go1.24.4
 
 require github.com/superfly/sprites-go v0.0.0
 
