@@ -111,7 +111,7 @@ RUN ARCH=$(uname -m) && \
     rm -rf gh.tar.gz gh_2.79.0_linux_${GH_ARCH}
 
 # Get litestream binary
-FROM litestream/litestream:latest AS litestream
+FROM litestream/litestream:0.3 AS litestream
 
 FROM ghcr.io/superfly/juicefs:748b889 AS juicefs
 
