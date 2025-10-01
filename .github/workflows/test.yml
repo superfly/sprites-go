@@ -5,6 +5,7 @@ on:
     branches:
       - main
     paths:
+      - '.github/workflows/test.yml'
       - 'go.*'
       - 'Dockerfile'
       - 'tests/**'
@@ -14,6 +15,7 @@ on:
       - 'client/**'
   pull_request:
     paths:
+      - '.github/workflows/test.yml'
       - 'go.*'
       - 'Dockerfile'
       - 'tests/**'
