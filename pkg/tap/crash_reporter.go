@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -206,33 +205,8 @@ func (cr *CrashReporter) ReportGoPanic(ctx context.Context, report *CrashReport)
 	return cr.saveReport(ctx, report)
 }
 
-// SetupPanicHandler sets up a global panic handler that reports crashes
-func (cr *CrashReporter) SetupPanicHandler() {
-	// Note: This should be called early in main() to ensure it catches all panics
-	go func() {
-		if r := recover(); r != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-
-			stackTrace := debug.Stack()
-
-			cr.logger.Error("Go runtime panic", "panic", r, "stack", string(stackTrace))
-
-			report := &CrashReport{
-				ExitCode:   1,
-				Error:      fmt.Sprintf("panic: %v", r),
-				StackTrace: string(stackTrace),
-			}
-
-			if err := cr.ReportGoPanic(ctx, report); err != nil {
-				cr.logger.Error("Failed to report panic", "error", err)
-			}
-
-			// Re-panic to maintain normal panic behavior
-			panic(r)
-		}
-	}()
-}
+// SetupPanicHandler is removed - we let Go crash naturally on panics
+// Panic recovery doesn't work across goroutines and can cause hangs
 
 // collectSystemInfo collects system information
 func (cr *CrashReporter) collectSystemInfo(report *CrashReport) {

@@ -326,6 +326,24 @@ func (m *Manager) Shutdown() error {
 	return resp.(error)
 }
 
+// StopForUnmount stops services and closes the database so underlying file
+// handles under the mount point are released. It does NOT cancel the manager
+// context, allowing a subsequent Start() to reopen the database.
+func (m *Manager) StopForUnmount() error {
+	// Stop services first
+	if err := m.Shutdown(); err != nil {
+		return err
+	}
+	// Close DB to release handles, but keep context for future restarts
+	if m.db != nil {
+		if err := m.db.Close(); err != nil {
+			return err
+		}
+		m.db = nil
+	}
+	return nil
+}
+
 // StartService starts a single service by name
 func (m *Manager) StartService(name string) error {
 	result := make(chan interface{})

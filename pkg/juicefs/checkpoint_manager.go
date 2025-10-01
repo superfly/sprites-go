@@ -11,25 +11,24 @@ import (
 	"strings"
 	"time"
 
+	"github.com/superfly/sprite-env/pkg/checkpoint"
 	"github.com/superfly/sprite-env/pkg/tap"
 )
 
 // CheckpointManager handles all checkpoint and restore operations for JuiceFS
 type CheckpointManager struct {
-	baseDir    string
-	db         *CheckpointDB
-	overlayMgr *OverlayManager
-	logger     *slog.Logger
+	baseDir string
+	db      *CheckpointDB
+	logger  *slog.Logger
 }
 
 // NewCheckpointManager creates a new checkpoint manager
-func NewCheckpointManager(baseDir string, overlayMgr *OverlayManager, ctx context.Context) *CheckpointManager {
+func NewCheckpointManager(baseDir string, ctx context.Context) *CheckpointManager {
 	logger := tap.Logger(ctx)
 
 	return &CheckpointManager{
-		baseDir:    baseDir,
-		overlayMgr: overlayMgr,
-		logger:     logger,
+		baseDir: baseDir,
+		logger:  logger,
 	}
 }
 
@@ -71,21 +70,10 @@ func (cm *CheckpointManager) Checkpoint(ctx context.Context, checkpointID string
 		return fmt.Errorf("failed to create checkpoints directory: %w", err)
 	}
 
-	// Prepare overlay for checkpoint (sync and freeze)
-	if cm.overlayMgr != nil {
-		if err := cm.overlayMgr.PrepareForCheckpoint(ctx); err != nil {
-			return fmt.Errorf("failed to prepare overlay for checkpoint: %w", err)
-		}
-
-		// Ensure we unfreeze the overlay even if the clone fails
-		defer func() {
-			if unfreezeErr := cm.overlayMgr.UnfreezeAfterCheckpoint(ctx); unfreezeErr != nil {
-				cm.logger.Warn("Failed to unfreeze overlay", "error", unfreezeErr)
-			}
-		}()
-	}
-
 	// Create checkpoint using the database transaction
+	// Determine clone command (allow override for tests)
+	cmd, args := resolveCloneCommand()
+
 	record, err := cm.db.CreateCheckpoint(
 		// Clone function
 		func(src, dst string) error {
@@ -94,7 +82,7 @@ func (cm *CheckpointManager) Checkpoint(ctx context.Context, checkpointID string
 			dstPath := filepath.Join(mountPath, dst)
 
 			cm.logger.Debug("Creating checkpoint", "src", src, "dst", dst)
-			cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", srcPath, dstPath)
+			cloneCmd := exec.CommandContext(ctx, cmd, append(args, srcPath, dstPath)...)
 			if output, err := cloneCmd.CombinedOutput(); err != nil {
 				return fmt.Errorf("failed to clone: %w, output: %s", err, string(output))
 			}
@@ -175,30 +163,18 @@ func (cm *CheckpointManager) Restore(ctx context.Context, checkpointID string) e
 		return fmt.Errorf("checkpoint directory does not exist at %s", fullCheckpointPath)
 	}
 
-	// Handle overlay if present
-	if cm.overlayMgr != nil {
-		// First sync and freeze the overlay (same as checkpoint)
-		if err := cm.overlayMgr.PrepareForCheckpoint(ctx); err != nil {
-			// If prepare fails, it might be because overlay is not mounted, which is ok
-			cm.logger.Debug("Could not prepare overlay for restore", "error", err)
-		} else {
-			// Unfreeze after sync
-			if err := cm.overlayMgr.UnfreezeAfterCheckpoint(ctx); err != nil {
-				cm.logger.Warn("Failed to unfreeze overlay", "error", err)
-			}
-		}
-
-		// Unmount the overlay before restore - error if this fails
-		if err := cm.overlayMgr.Unmount(ctx); err != nil {
-			return fmt.Errorf("failed to unmount overlay before restore: %w", err)
-		}
-	}
-
-	// If active directory exists, back it up
+	// If active directory exists, back it up with a unique name
 	if _, err := os.Stat(activeDir); err == nil {
-		timestamp := time.Now().Unix()
-		backupName := fmt.Sprintf("pre-restore-v%d-%d", record.ID, timestamp)
-		backupPath := filepath.Join(checkpointsDir, backupName)
+		ts := time.Now().UnixNano()
+		baseName := fmt.Sprintf("pre-restore-v%d-%d", record.ID, ts)
+		backupPath := filepath.Join(checkpointsDir, baseName)
+		// Ensure uniqueness in case of extremely fast successive restores
+		for i := 1; ; i++ {
+			if _, statErr := os.Stat(backupPath); os.IsNotExist(statErr) {
+				break
+			}
+			backupPath = filepath.Join(checkpointsDir, fmt.Sprintf("%s-%d", baseName, i))
+		}
 
 		cm.logger.Debug("Backing up current active directory", "backupPath", backupPath)
 		if err := os.Rename(activeDir, backupPath); err != nil {
@@ -209,23 +185,11 @@ func (cm *CheckpointManager) Restore(ctx context.Context, checkpointID string) e
 
 	// Clone checkpoint to active directory
 	cm.logger.Debug("Restoring from checkpoint", "id", record.ID, "path", checkpointPath)
-	cloneCmd := exec.CommandContext(ctx, "juicefs", "clone", fullCheckpointPath, activeDir)
+	// Determine clone command (allow override for tests)
+	cmd, args := resolveCloneCommand()
+	cloneCmd := exec.CommandContext(ctx, cmd, append(args, fullCheckpointPath, activeDir)...)
 	if output, err := cloneCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to restore from checkpoint: %w, output: %s", err, string(output))
-	}
-
-	// Mount the overlay from the restored active directory
-	if cm.overlayMgr != nil {
-		// Update the image path to point to the restored active directory
-		cm.overlayMgr.UpdateImagePath()
-
-		cm.logger.Info("Mounting overlay from restored checkpoint", "imagePath", cm.overlayMgr.GetImagePath())
-
-		// Mount the overlay
-		if err := cm.overlayMgr.Mount(ctx); err != nil {
-			// Log error but don't fail the restore
-			cm.logger.Warn("Failed to mount overlay after restore", "error", err)
-		}
 	}
 
 	// Apply quota asynchronously after restore
@@ -260,6 +224,7 @@ func (cm *CheckpointManager) applyActiveFsQuotaAsync() {
 	quotaCmd := exec.CommandContext(ctx, "juicefs", "quota", "set", metaURL,
 		"--path", "/active/fs",
 		"--capacity", "10240")
+	quotaCmd.Env = append(os.Environ(), "JUICEFS_LOG_FORMAT=json")
 
 	output, err := quotaCmd.CombinedOutput()
 	if err != nil {
@@ -282,5 +247,8 @@ func (cm *CheckpointManager) applyActiveFsQuotaAsync() {
 	}
 }
 
-// ListCheckpoints returns a list of all available checkpoints
-// ... existing code ...
+// PrepareCheckpoint wraps a checkpoint.PrepFunc (shim for legacy tests)
+func PrepareCheckpoint(inner checkpoint.PrepFunc) checkpoint.PrepFunc { return inner }
+
+// PrepareRestore wraps a checkpoint.PrepFunc (shim for legacy tests)
+func PrepareRestore(inner checkpoint.PrepFunc) checkpoint.PrepFunc { return inner }

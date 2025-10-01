@@ -1,48 +1,140 @@
-# Universal test container for running repo tests against the live workspace
-# Usage examples (run from repo root):
-#   Build once:
-#     docker build -f Dockerfile.test -t sprite-env-tests .
-#   Run all tests (bind-mount current dir):
-#     docker run --rm -it -v "$PWD":/workspace -w /workspace sprite-env-tests ./scripts/run-tests.sh
-#   Run pkg/port-watcher tests only:
-#     docker run --rm -it -v "$PWD":/workspace -w /workspace sprite-env-tests go test -v -race ./pkg/port-watcher/...
-#   Run juicefs tests (requires FUSE; use privileged or add caps+device):
-#     docker run --rm -it --privileged -v "$PWD":/workspace -w /workspace sprite-env-tests go test -v -race -tags=integration ./pkg/juicefs/...
+# syntax=docker/dockerfile:1
 
-# Stage to source JuiceFS binary from the custom superfly image
-FROM ghcr.io/superfly/juicefs:748b889 AS juicefs
+# Test container that mirrors production environment
+# Usage:
+#   Build: docker build -f Dockerfile.test -t sprite-env-tests .
+#   Run tests: docker run --rm --privileged --cgroupns=host -v "$PWD":/workspace sprite-env-tests
 
-# Base test image with Go and common tools
-FROM ubuntu:24.04
+# Download crun binary (same as production)
+FROM alpine:latest AS crun
+ARG TARGETARCH
+RUN apk add --no-cache curl
+RUN case ${TARGETARCH} in \
+        amd64) CRUN_ARCH="amd64" ;; \
+        arm64) CRUN_ARCH="arm64" ;; \
+        *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
+    esac && \
+    curl -fL https://github.com/containers/crun/releases/download/1.24/crun-1.24-linux-${CRUN_ARCH} -o /crun && \
+    chmod +x /crun
 
-# Install build/runtime dependencies needed across tests
+# Get litestream binary (same as production)
+FROM litestream/litestream:0.3 AS litestream
+
+# Get juicefs binary (same as production)
+FROM ghcr.io/superfly/juicefs:61e1f6e as juicefs
+
+# Build tmux and utilities (same as production)
+FROM alpine:3.20 AS utility-builder
+RUN apk add --no-cache \
+        build-base \
+        musl-dev \
+        ncurses-static \
+        ncurses-dev \
+        libevent-static \
+        libevent-dev \
+        git \
+        autoconf \
+        automake \
+        pkgconfig \
+        bison
+
+WORKDIR /src
+RUN git clone --depth 1 --branch 3.5a https://github.com/tmux/tmux.git .
+RUN sh autogen.sh && \
+    ./configure LDFLAGS="-static" CFLAGS="-O2" && \
+    make -j$(nproc)
+RUN mkdir -p /system/.sprite/bin && \
+    cp tmux /system/.sprite/bin/
+
+# Create /system/etc/hosts
+RUN mkdir -p /system/etc && \
+    cat > /system/etc/hosts <<EOF
+# IPv4
+127.0.0.1   localhost
+127.0.0.1   sprite
+
+# IPv6
+::1         localhost
+::1         sprite
+EOF
+
+# Download gh CLI
+RUN ARCH=$(uname -m) && \
+    case ${ARCH} in \
+        x86_64) GH_ARCH="amd64" ;; \
+        aarch64) GH_ARCH="arm64" ;; \
+        *) echo "Unsupported architecture: ${ARCH}" && exit 1 ;; \
+    esac && \
+    wget -O gh.tar.gz "https://github.com/cli/cli/releases/download/v2.79.0/gh_2.79.0_linux_${GH_ARCH}.tar.gz" && \
+    tar -xzf gh.tar.gz && \
+    cp gh_2.79.0_linux_${GH_ARCH}/bin/gh /system/.sprite/bin/ && \
+    chmod +x /system/.sprite/bin/gh && \
+    rm -rf gh.tar.gz gh_2.79.0_linux_${GH_ARCH}
+
+# Assemble system files (same as production)
+FROM alpine:latest AS assemble-system
+COPY --from=utility-builder /system /system
+COPY base-env/system/ /system/
+
+# Build stage for server
+FROM golang:1.24-bookworm AS builder
+ENV CGO_ENABLED=1
+
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive \
+    apt-get install --no-install-recommends --assume-yes \
+      build-essential \
+      libsqlite3-dev
+WORKDIR /build
+
+# Copy go.mod files
+COPY go.mod go.sum* ./
+COPY cmd/go.mod cmd/go.sum* ./cmd/
+
+# Download dependencies
+RUN go mod download -x && cd cmd && go mod download -x
+
+# Copy all source code
+COPY . .
+
+# Fix duplicate Config struct issues
+RUN cd server && \
+    if [ -f config_new.go ]; then mv config_new.go config_new.go.bak 2>/dev/null || true; fi && \
+    if [ -f main_new.go ]; then mv main_new.go main_new.go.bak 2>/dev/null || true; fi && \
+    if grep -q "^type Config struct" main.go; then \
+        sed -i.bak '/^type Config struct/,/^}$/s/^/\/\/ /' main.go && \
+        sed -i.bak '/^func (c \*Config) GetOverlayLowerPaths/,/^}$/s/^/\/\/ /' main.go; \
+    fi
+
+# Build the server
+ARG VERSION=dev
+RUN cd server && \
+    CGO_ENABLED=1 GOOS=linux go build \
+    -ldflags="-w -s -X main.version=${VERSION} -extldflags '-static'" \
+    -tags 'netgo osusergo' \
+    -o ../spritectl .
+
+# Final test image - Ubuntu 25.04 (same as production)
+FROM ubuntu:25.04
+
+# Install same packages as production plus test dependencies
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    bash \
-    git \
-    make \
-    ca-certificates \
-    curl \
-    wget \
-    build-essential \
-    gcc \
-    g++ \
-    sqlite3 \
-    libsqlite3-dev \
-    e2fsprogs \
-    util-linux \
-    fuse3 \
-    libfuse3-dev \
-    iproute2 \
-    netcat-openbsd \
-    procps \
-    tmux && \
+    apt-get install -y sqlite3 bash e2fsprogs fio jq nano coreutils \
+    lvm2 thin-provisioning-tools drbd-utils \
+    parted gdisk util-linux fdisk xfsprogs fuse3 curl iproute2 nftables iputils-ping vim rsync \
+    # Additional packages for testing
+    build-essential git make ca-certificates wget procps netcat-openbsd tmux util-linux \
+    && apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy JuiceFS binary into the image
+# Copy binaries from other stages (same as production)
+COPY --from=crun /crun /usr/local/bin/crun
+COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
 COPY --from=juicefs /usr/local/bin/juicefs /usr/local/bin/juicefs
+COPY --from=assemble-system /system /system
+COPY --from=builder /build/spritectl /usr/local/bin/spritectl
 
-# Install Go toolchain (Ubuntu's golang may be outdated)
+# Install Go for running tests
 ARG GO_VERSION=1.24.0
 ARG TARGETARCH
 RUN set -e; \
@@ -55,57 +147,52 @@ RUN set -e; \
     rm -rf /usr/local/go && \
     tar -C /usr/local -xzf /tmp/go.tgz && \
     rm -f /tmp/go.tgz
+
 ENV PATH="/usr/local/go/bin:${PATH}"
+ENV CGO_ENABLED=1
 
-# Install Litestream for JuiceFS-related tests
-ARG TARGETARCH
-RUN set -e; \
-    case ${TARGETARCH} in \
-      amd64) L_ARCH="amd64" ;; \
-      arm64) L_ARCH="arm64" ;; \
-      *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
-    esac; \
-    wget -q https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-${L_ARCH}.tar.gz && \
-    tar -xzf litestream-v0.3.13-linux-${L_ARCH}.tar.gz && \
-    mv litestream /usr/local/bin/ && \
-    rm -f litestream-v0.3.13-linux-${L_ARCH}.tar.gz && \
-    chmod +x /usr/local/bin/litestream
+# Set up environment
+ENV SPRITE_WRITE_DIR=/tmp/sprite-test \
+    SPRITE_HOME=/home/sprite
 
-# FUSE configuration expected by JuiceFS; Alpine provides fusermount3
+# Create directories
+RUN mkdir -p ${SPRITE_WRITE_DIR} ${SPRITE_HOME}
+
+# Copy base-env contents (for config and scripts)
+COPY base-env/ ${SPRITE_HOME}/
+
+# Create a test configuration with JuiceFS in local mode
+RUN cat > ${SPRITE_HOME}/test-config.json <<'EOF'
+{
+  "log_level": "debug",
+  "log_json": false,
+  "juicefs_local_mode": true,
+  "juicefs_base_dir": "/tmp/sprite-test/juicefs"
+}
+EOF
+
+# Set environment variables for testing
+ENV SPRITE_HTTP_API_TOKEN="test-token-12345" \
+    SPRITE_PRIMARY_REGION="test" \
+    LOG_LEVEL="debug" \
+    SPRITE_OVERLAY_ENABLED="false" \
+    SPRITE_CONTAINER_ENABLED="false" \
+    SPRITE_JUICEFS_LOCAL_MODE="true" \
+    SPRITE_TEST_DOCKER=1 \
+    SPRITE_URL="http://localhost:8080" \
+    SPRITE_TOKEN="test-token-12345" \
+    SPRITE_ADMIN_CHANNEL_URL="https://example.com/internal/whatever" \
+    SPRITE_DISABLE_ADMIN_CHANNEL="true" \
+    SPRITE_TEST_QUIET_PHX="true"
+
+# FUSE configuration for JuiceFS
 RUN echo "user_allow_other" >> /etc/fuse.conf && \
     ln -sf /usr/bin/fusermount3 /bin/fusermount || true
 
-# Set up workspace
+# Set working directory to workspace mount point
 WORKDIR /workspace
 
-# Cache Go dependencies - this layer will be cached unless go.mod/go.sum change
-# Copy go.mod and go.sum files from all modules in the project
-COPY go.mod go.sum ./
-COPY cmd/go.mod cmd/go.sum ./cmd/
+EXPOSE 8080
 
-# Download dependencies for all modules
-RUN go mod download && \
-    cd cmd && go mod download
-
-# Note: The actual source code will still be bind-mounted at runtime
-# This just ensures dependencies are cached in the image
-
-# Simple entrypoint: run the provided command (default to repo test script)
-RUN cat > /usr/local/bin/docker-entrypoint.sh <<'EOF' && chmod +x /usr/local/bin/docker-entrypoint.sh
-#!/bin/bash
-set -euo pipefail
-
-export PATH="/usr/local/go/bin:$PATH"
-
-CMD_STR="$*"
-if [ -z "$CMD_STR" ]; then
-  CMD_STR="./scripts/run-tests.sh"
-fi
-
-exec bash -lc "$CMD_STR"
-EOF
-
-ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-CMD ["/bin/sh"]
-
-
+# Use spritectl as entrypoint just like production
+#ENTRYPOINT ["/usr/local/bin/spritectl", "-config", "/home/sprite/test-config.json", "-listen", "0.0.0.0:8080"]

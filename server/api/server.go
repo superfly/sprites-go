@@ -12,7 +12,6 @@ import (
 	"github.com/superfly/sprite-env/pkg/sync"
 	"github.com/superfly/sprite-env/pkg/tap"
 	"github.com/superfly/sprite-env/pkg/terminal"
-	"github.com/superfly/sprite-env/server/api/handlers"
 )
 
 var (
@@ -24,8 +23,8 @@ type Server struct {
 	server          *http.Server
 	logger          *slog.Logger
 	config          Config
-	handlers        *handlers.Handlers
-	system          handlers.SystemManager
+	handlers        *Handlers
+	system          SystemManager
 	syncServer      *sync.Server
 	authManager     *AuthManager
 	contextEnricher ContextEnricher
@@ -34,7 +33,7 @@ type Server struct {
 }
 
 // NewServer creates a new API server
-func NewServer(config Config, system handlers.SystemManager, ctx context.Context) (*Server, error) {
+func NewServer(config Config, system SystemManager, ctx context.Context) (*Server, error) {
 	logger := tap.Logger(ctx)
 	if config.APIToken == "" {
 		return nil, ErrNoAuth
@@ -45,7 +44,7 @@ func NewServer(config Config, system handlers.SystemManager, ctx context.Context
 	}
 
 	// Create handlers config
-	handlersConfig := handlers.Config{
+	handlersConfig := HandlerConfig{
 		MaxWaitTime:        config.MaxWaitTime,
 		ExecWrapperCommand: config.ExecWrapperCommand,
 		ProxyLocalhostIPv4: config.ProxyLocalhostIPv4,
@@ -54,7 +53,7 @@ func NewServer(config Config, system handlers.SystemManager, ctx context.Context
 	}
 
 	// Create handlers
-	h := handlers.NewHandlers(ctx, system, handlersConfig)
+	h := NewHandlers(ctx, system, handlersConfig)
 
 	// Create sync server
 	syncConfig := sync.ServerConfig{
@@ -118,20 +117,25 @@ func NewServer(config Config, system handlers.SystemManager, ctx context.Context
 		})
 	}
 
-	// Add global JuiceFS wait middleware
+	// Add global overlay wait middleware
 	{
 		next := handler
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Wait for JuiceFS to be ready before processing any request
+			// Log when we receive a request that might need to wait
+			s.logger.Info("Received request, checking overlay readiness",
+				"requestPath", r.URL.Path,
+				"method", r.Method)
+
+			// Wait for overlay to be ready before processing any request
 			ctx, cancel := context.WithTimeout(r.Context(), s.config.MaxWaitTime)
 			defer cancel()
 
 			startTime := time.Now()
-			err := s.system.WaitForJuiceFS(ctx)
+			err := s.system.WhenStorageReady(ctx)
 			waitTime := time.Since(startTime)
 
 			if err != nil {
-				s.logger.Warn("Request timeout waiting for JuiceFS to be ready",
+				s.logger.Warn("Request timeout waiting for overlay to be ready",
 					"requestPath", r.URL.Path,
 					"waitTime", waitTime,
 					"error", err)
@@ -141,7 +145,7 @@ func NewServer(config Config, system handlers.SystemManager, ctx context.Context
 
 			// Log if we waited more than 5ms
 			if waitTime > 5*time.Millisecond {
-				s.logger.Info("JuiceFS became ready, processing request",
+				s.logger.Info("Overlay became ready, processing request",
 					"requestPath", r.URL.Path,
 					"waitTime", waitTime)
 			}
@@ -173,19 +177,19 @@ func (s *Server) SetActivityObserver(observe func(start bool)) {
 
 // setupEndpoints configures HTTP endpoints for the API
 func (s *Server) setupEndpoints(mux *http.ServeMux) {
-	// All other endpoints require authentication
+	// All endpoints require authentication
 
 	// Exec endpoint - waits for process to be running
 	mux.HandleFunc("/exec", s.authMiddleware(s.enrichContextMiddleware(s.waitForProcessMiddleware(s.handlers.HandleExec))))
 
 	mux.HandleFunc("/sync", s.authMiddleware(s.waitForProcessMiddleware(s.syncServer.HandleWebSocket)))
 
-	// Checkpoint endpoint - waits for JuiceFS to be ready
-	mux.HandleFunc("/checkpoint", s.authMiddleware(s.waitForJuiceFSMiddleware(s.handlers.HandleCheckpoint)))
+	// Checkpoint endpoint - waits for storage to be ready
+	mux.HandleFunc("/checkpoint", s.authMiddleware(s.waitForStorageMiddleware(s.handlers.HandleCheckpoint)))
 
-	// Checkpoint management endpoints - wait for JuiceFS to be ready
+	// Checkpoint management endpoints - wait for storage to be ready
 	// This pattern matches /checkpoints and any subpaths like /checkpoints/{id} or /checkpoints/{id}/restore
-	checkpointsHandler := s.authMiddleware(s.waitForJuiceFSMiddleware(func(w http.ResponseWriter, r *http.Request) {
+	checkpointsHandler := s.authMiddleware(s.waitForStorageMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		// Route to appropriate handler based on path
 		path := r.URL.Path
 		parts := strings.Split(strings.Trim(path, "/"), "/")
@@ -211,8 +215,8 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 	// Proxy endpoint - waits for process to be running
 	mux.HandleFunc("/proxy", s.authMiddleware(s.enrichContextMiddleware(s.waitForProcessMiddleware(s.handlers.HandleProxy))))
 
-	// Suspend endpoint - wait for JuiceFS to be ready, requires auth
-	mux.HandleFunc("/suspend", s.authMiddleware(s.waitForJuiceFSMiddleware(s.handlers.HandleSuspend)))
+	// Suspend endpoint - wait for storage to be ready, requires auth
+	mux.HandleFunc("/suspend", s.authMiddleware(s.waitForStorageMiddleware(s.handlers.HandleSuspend)))
 
 	// Debug endpoints - require auth but don't wait for process or JuiceFS
 	mux.HandleFunc("/debug/create-zombie", s.authMiddleware(s.handlers.HandleDebugCreateZombie))
@@ -284,7 +288,7 @@ func (s *Server) waitForProcessMiddleware(next http.HandlerFunc) http.HandlerFun
 		startTime := time.Now()
 
 		// Use efficient waiting instead of polling
-		err := s.system.WaitForProcessRunning(ctx)
+		err := s.system.WhenProcessRunning(ctx)
 		waitTime := time.Since(startTime)
 
 		if err != nil {
@@ -316,20 +320,20 @@ func (s *Server) waitForProcessMiddleware(next http.HandlerFunc) http.HandlerFun
 	}
 }
 
-// waitForJuiceFSMiddleware waits for JuiceFS to be ready before handling the request
-func (s *Server) waitForJuiceFSMiddleware(next http.HandlerFunc) http.HandlerFunc {
+// waitForStorageMiddleware waits for storage (overlay) to be ready before handling the request
+func (s *Server) waitForStorageMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), s.config.MaxWaitTime)
 		defer cancel()
 
 		startTime := time.Now()
 
-		// Use efficient waiting
-		err := s.system.WaitForJuiceFS(ctx)
+		// Use efficient waiting for storage (JuiceFS and overlay)
+		err := s.system.WhenStorageReady(ctx)
 		waitTime := time.Since(startTime)
 
 		if err != nil {
-			s.logger.Warn("Request timeout waiting for JuiceFS to be ready",
+			s.logger.Warn("Request timeout waiting for overlay to be ready",
 				"requestPath", r.URL.Path,
 				"waitTime", waitTime,
 				"error", err)
@@ -339,7 +343,7 @@ func (s *Server) waitForJuiceFSMiddleware(next http.HandlerFunc) http.HandlerFun
 
 		// Log if we waited more than 5ms
 		if waitTime > 5*time.Millisecond {
-			s.logger.Info("JuiceFS became ready, processing request",
+			s.logger.Info("Overlay became ready, processing request",
 				"requestPath", r.URL.Path,
 				"waitTime", waitTime)
 		}

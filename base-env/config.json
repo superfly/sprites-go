@@ -1,5 +1,4 @@
 {
-  "log_level": "debug",
   "log_json": false,
   "api_listen_addr": "0.0.0.0:7778",
   

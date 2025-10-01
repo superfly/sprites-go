@@ -82,13 +82,13 @@ temp/
 config.local.*
 config.example.json
 
-# Scripts and development tools
-scripts/
+# Scripts and development tools (excluding test scripts we need)
+# scripts/  # We need test-wrapper.sh from scripts/
 Makefile
 **/Makefile
 pytest.ini
-run-tests.sh
-**/run-tests.sh
+# run-tests.sh  # We need this for tests
+# **/run-tests.sh  # We need this for tests
 
 # Dockerfiles themselves (usually not needed in the build context)
 Dockerfile.test

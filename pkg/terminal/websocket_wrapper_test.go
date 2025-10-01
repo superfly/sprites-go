@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -49,6 +50,8 @@ wait $CHILD
 		t.Fatalf("failed to create wrapper script: %v", err)
 	}
 
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
 	session := NewSession(
 		WithCommand("dummy"), // This is replaced by the wrapper
 		WithTTY(false),
@@ -58,6 +61,7 @@ wait $CHILD
 			wrapperPID = pid
 			mu.Unlock()
 		}),
+		WithLogger(logger),
 	)
 
 	handler := NewWebSocketHandler(session)

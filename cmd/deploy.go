@@ -337,11 +337,13 @@ func main() {
 	var replaceConfig bool
 	var updateBase bool
 	var updateLanguages bool
+	var imageURL string
 	flag.StringVar(&appName, "a", "", "Fly app name")
 	flag.BoolVar(&skipBuild, "skip-build", false, "Skip docker build step and just push the image")
 	flag.BoolVar(&replaceConfig, "replace-config", false, "Replace entire machine config instead of just updating the image")
 	flag.BoolVar(&updateBase, "update-base", false, "Build and push base Ubuntu image")
 	flag.BoolVar(&updateLanguages, "update-languages", false, "Build and push languages image")
+	flag.StringVar(&imageURL, "image", "", "Use specified Docker image URL instead of building")
 	flag.Parse()
 
 	// Check for app name from flag or env var
@@ -368,7 +370,14 @@ func main() {
 
 	// Build and push Docker images
 	label := fmt.Sprintf("%d", time.Now().Unix())
-	imageRef := fmt.Sprintf("registry.fly.io/%s:%s", appName, label)
+	var imageRef string
+	if imageURL != "" {
+		imageRef = imageURL
+		skipBuild = true // If image URL is provided, skip the build
+		log.Printf("Using provided image: %s\n", imageRef)
+	} else {
+		imageRef = fmt.Sprintf("registry.fly.io/%s:%s", appName, label)
+	}
 
 	// Prepare image refs for base images
 	var ubuntuImageRef, languagesImageRef string
@@ -416,7 +425,11 @@ func main() {
 				}
 			}()
 		} else if buildCount == 0 {
-			log.Println("Skipping main docker image build.")
+			if imageURL != "" {
+				log.Printf("Using provided image: %s (skipping build)\n", imageRef)
+			} else {
+				log.Println("Skipping main docker image build.")
+			}
 		}
 
 		// Build Ubuntu base image if requested

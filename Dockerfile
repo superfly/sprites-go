@@ -113,7 +113,7 @@ RUN ARCH=$(uname -m) && \
 # Get litestream binary
 FROM litestream/litestream:0.3 AS litestream
 
-FROM ghcr.io/superfly/juicefs:748b889 AS juicefs
+FROM ghcr.io/superfly/juicefs:61e1f6e as juicefs
 
 # Assemble system files from multiple sources
 FROM alpine:latest AS assemble-system
@@ -171,4 +171,4 @@ EXPOSE 7778
 # /usr/local/bin/spritectl -config /home/sprite/config.json -listen 0.0.0.0:7778
 ENTRYPOINT ["/usr/local/bin/spritectl", "-config", "/home/sprite/config.json", "-listen", "0.0.0.0:7778"] 
 
-# juicefs mount --no-usage-report -o writeback_cache -o fsname=SpriteFS --writeback --upload-delay=1m --cache-dir=/dev/fly_vol/  --no-syslog --cache-size=8192 --buffer-size=819  sqlite3://dev/fly_vol/juicefs/metadata.db /data
+# juicefs mount --no-usage-report -o writeback_cache -o fsname=SpriteFS --writeback --upload-delay=0s --cache-dir=/dev/fly_vol/  --no-syslog --cache-size=8192 --buffer-size=819  sqlite3://dev/fly_vol/juicefs/metadata.db /data

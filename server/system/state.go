@@ -1,0 +1,84 @@
+package system
+
+import (
+	"context"
+	"fmt"
+)
+
+// IsProcessRunning returns true if the process is currently running
+func (s *System) IsProcessRunning() bool {
+	// A closed channel always returns immediately
+	select {
+	case <-s.processRunningCh:
+		return true
+	default:
+		return false
+	}
+}
+
+// WhenProcessRunning waits until the process is running or returns immediately if already running.
+// Returns an error if the context is cancelled before the process starts.
+func (s *System) WhenProcessRunning(ctx context.Context) error {
+	// No mutex needed - just select directly on the field
+	select {
+	case <-s.processRunningCh:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// WhenProcessStopped waits until the process has stopped or returns immediately if not running.
+// Returns an error if the context is cancelled before the process stops.
+func (s *System) WhenProcessStopped(ctx context.Context) error {
+	// No mutex needed - just select directly on the field
+	select {
+	case <-s.processStoppedCh:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// WhenServiceManagerStopped waits until the services manager has fully stopped
+// or returns immediately if it is not running. Returns an error if the context
+// is cancelled before the services manager stops.
+func (s *System) WhenServiceManagerStopped(ctx context.Context) error {
+	// No mutex needed - just select directly on the field
+	select {
+	case <-s.servicesManagerStoppedCh:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// WhenStorageReady waits until both JuiceFS and Overlay are ready or returns immediately if already ready.
+// Returns an error if the context is cancelled before storage is ready.
+func (s *System) WhenStorageReady(ctx context.Context) error {
+	// Wait for JuiceFS to be ready
+	if s.JuiceFS != nil {
+		if err := s.JuiceFS.WhenReady(ctx); err != nil {
+			return fmt.Errorf("JuiceFS not ready: %w", err)
+		}
+	}
+
+	// Wait for Overlay to be ready
+	if s.OverlayManager != nil {
+		if err := s.OverlayManager.WhenReady(ctx); err != nil {
+			return fmt.Errorf("Overlay not ready: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// WaitForJuiceFS waits for JuiceFS to be ready - deprecated, use WhenStorageReady instead
+func (s *System) WaitForJuiceFS(ctx context.Context) error {
+	return s.WhenStorageReady(ctx)
+}
+
+// WaitForOverlay waits for overlay to be ready - deprecated, use WhenStorageReady instead
+func (s *System) WaitForOverlay(ctx context.Context) error {
+	return s.WhenStorageReady(ctx)
+}

@@ -6,6 +6,20 @@ import (
 	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
+// RequestInfo contains information about a request
+type RequestInfo struct {
+	RequestID   string
+	Method      string
+	Path        string
+	StartTime   time.Time
+	EndTime     time.Time
+	DurationMS  int64
+	StatusCode  int
+	Error       error
+	RequestType string // "exec" or "proxy"
+	ExtraData   map[string]interface{}
+}
+
 // Config holds the API server configuration
 type Config struct {
 	ListenAddr  string

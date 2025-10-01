@@ -1,71 +1,49 @@
-.PHONY: test test-unit test-integration test-examples test-all clean coverage help
+# Makefile for pkg/juicefs
 
 # Default target
-default: test
+.PHONY: test
+test:
+	@echo "Running JuiceFS package tests..."
+	@cd ../.. && $(MAKE) test ARGS="go test ./pkg/juicefs/..."
 
-# Help target
+# Run tests with verbose output
+.PHONY: test-verbose
+test-verbose:
+	@echo "Running JuiceFS package tests (verbose)..."
+	@cd ../.. && $(MAKE) test ARGS="go test ./pkg/juicefs/... -v"
+
+# Run tests with coverage
+.PHONY: test-coverage
+test-coverage:
+	@echo "Running JuiceFS package tests with coverage..."
+	@cd ../.. && $(MAKE) test ARGS="go test ./pkg/juicefs/... -cover"
+
+# Run only short tests (non-Linux)
+.PHONY: test-short
+test-short:
+	@echo "Running JuiceFS package short tests..."
+	@cd ../.. && $(MAKE) test ARGS="go test ./pkg/juicefs/... -short"
+
+# Run tests in Docker (for Linux-specific tests)
+.PHONY: test-docker
+test-docker:
+	@echo "Running JuiceFS package tests in Docker..."
+	@cd ../.. && $(MAKE) test-docker ARGS="go test ./pkg/juicefs/..."
+
+# Clean test cache
+.PHONY: clean
+clean:
+	@echo "Cleaning test cache..."
+	@go clean -testcache
+
+# Help
+.PHONY: help
 help:
 	@echo "Available targets:"
-	@echo "  test              - Run all tests (unit + integration if binaries available)"
-	@echo "  test-unit         - Run unit tests only"
-	@echo "  test-integration  - Run integration tests (requires juicefs/litestream)"
-	@echo "  test-examples     - Run example tests (requires environment variables)"
-	@echo "  test-all          - Run all tests including examples"
-	@echo "  test-docker       - Run all tests in Docker container"
-	@echo "  coverage          - Generate test coverage report"
-	@echo "  clean             - Clean test artifacts"
-
-# Run all tests with integration tag; let it fail if deps missing
-test:
-	go test -v -race -tags=integration ./...
-
-# Run unit tests only
-test-unit:
-	@echo "Running unit tests..."
-	go test -v -race -coverprofile=coverage.out -run '^Test' ./...
-
-# Run integration tests (requires binaries)
-test-integration:
-	@echo "Running integration tests..."
-	@if ! command -v juicefs >/dev/null 2>&1; then \
-		echo "Error: juicefs binary not found in PATH"; \
-		exit 1; \
-	fi
-	@if ! command -v litestream >/dev/null 2>&1; then \
-		echo "Error: litestream binary not found in PATH"; \
-		exit 1; \
-	fi
-	go test -v -race -tags=integration ./...
-
-# Run example tests (requires environment variables)
-test-examples:
-	@echo "Running example tests..."
-	@echo "Note: Examples require SPRITE_S3_* environment variables to be set"
-	go test -v -run '^Example' ./...
-
-# Run all tests including examples
-test-all:
-	@echo "Running all tests including examples..."
-	@if command -v juicefs >/dev/null 2>&1 && command -v litestream >/dev/null 2>&1; then \
-		echo "JuiceFS and Litestream found, running all tests including integration..."; \
-		go test -v -race -tags=integration -coverprofile=coverage.out ./...; \
-	else \
-		echo "JuiceFS or Litestream not found, running unit tests only..."; \
-		go test -v -race -coverprofile=coverage.out ./...; \
-	fi
-
-
-# Generate coverage report
-coverage: test
-	@echo "Generating coverage report..."
-	go tool cover -html=coverage.out -o coverage.html
-	@echo "Coverage report generated at coverage.html"
-
-# Clean test artifacts
-clean:
-	@echo "Cleaning test artifacts..."
-	rm -f coverage.out coverage.html
-	@if docker images | grep -q juicefs-test; then \
-		docker rmi juicefs-test; \
-		echo "Removed Docker test image"; \
-	fi
+	@echo "  test          - Run all tests"
+	@echo "  test-verbose  - Run tests with verbose output"
+	@echo "  test-coverage - Run tests with coverage"
+	@echo "  test-short    - Run only short tests (skips Linux-specific)"
+	@echo "  test-docker   - Run tests in Docker (includes Linux-specific)"
+	@echo "  clean         - Clean test cache"
+	@echo "  help          - Show this help message"

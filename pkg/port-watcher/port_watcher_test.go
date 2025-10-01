@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"os/exec"
 	"strconv"
@@ -156,24 +155,57 @@ func TestPortWatcherIntegration(t *testing.T) {
 	if _, err := os.Stat("/proc/self/ns/net"); err != nil {
 		t.Skip("Skipping test on non-Linux system")
 	}
-
-	// Check if we can run nsenter and ss exactly as the test will
-	// This mimics what scanNamespace does in namespace_monitor.go
-	for _, pid := range []int{os.Getpid(), 1} {
-		cmd := exec.Command("nsenter", "--net=/proc/"+strconv.Itoa(pid)+"/ns/net", "ss", "-ltnp")
-		output, err := cmd.CombinedOutput()
-		if err == nil {
-			// Command succeeded, check if it shows any process information
-			if strings.Contains(string(output), "users:") || strings.Contains(string(output), "pid=") {
-				// Good, we can get process information
-				goto skipCheckPassed
-			}
-		}
+	
+	// Check if we're running as root
+	if os.Getuid() != 0 {
+		t.Skip("Integration test requires root privileges")
 	}
-	// If we get here, neither PID worked - skip the test
-	t.Skip("Skipping test - ss -ltnp not working in this environment (missing privileges or capabilities)")
+	
+	// Set up the test namespace
+	os.MkdirAll("/var/run/netns", 0755)
+	exec.Command("ip", "netns", "delete", "sprite").Run()
+	
+	cmd := exec.Command("ip", "netns", "add", "sprite")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Failed to create sprite namespace: %v\nOutput: %s", err, output)
+	}
+	
+	cmd = exec.Command("ip", "netns", "exec", "sprite", "ip", "link", "set", "lo", "up")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Failed to bring up loopback in sprite namespace: %v\nOutput: %s", err, output)
+	}
+	
+	t.Cleanup(func() {
+		exec.Command("ip", "netns", "delete", "sprite").Run()
+	})
 
-skipCheckPassed:
+	// Start a process inside the sprite namespace that will open a port
+	// Use a fixed port for simplicity since we control the namespace
+	expectedPort := 12346
+	cmd = exec.Command("ip", "netns", "exec", "sprite", "nc", "-l", "127.0.0.1", fmt.Sprintf("%d", expectedPort))
+	
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start listener in namespace: %v", err)
+	}
+	defer cmd.Process.Kill()
+	
+	// The actual process inside the namespace is nc, not the ip command
+	// We need to find the PID of nc inside the namespace
+	time.Sleep(100 * time.Millisecond) // Give nc time to start
+	
+	// Find the nc process
+	findCmd := exec.Command("ip", "netns", "exec", "sprite", "pidof", "nc")
+	output, err := findCmd.Output()
+	if err != nil {
+		t.Fatalf("Failed to find nc process: %v", err)
+	}
+	
+	var pid int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(output)), "%d", &pid); err != nil {
+		t.Fatalf("Failed to parse nc PID: %v", err)
+	}
+	
+	t.Logf("Started listener in sprite namespace on port %d (PID: %d)", expectedPort, pid)
 
 	// Create a channel to receive port notifications
 	portChan := make(chan Port, 10)
@@ -185,11 +217,10 @@ skipCheckPassed:
 		}
 	}
 
-	// Create port watcher directly without container PID resolution
-	// since this is a test process, not a container
+	// Create port watcher for the process inside the namespace
 	pw := &PortWatcher{
-		pids:      []int{os.Getpid()},
-		namespace: "sprite", // Use sprite namespace for test
+		pids:      []int{pid},
+		namespace: "sprite",
 		callback:  callback,
 		monitor:   GetGlobalMonitor(),
 	}
@@ -199,20 +230,6 @@ skipCheckPassed:
 	if err := pw.Start(); err != nil {
 		t.Fatalf("Failed to start port watcher: %v", err)
 	}
-
-	// Give it a moment to do initial scan
-	time.Sleep(100 * time.Millisecond)
-
-	// Start a listener on localhost
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Failed to create listener: %v", err)
-	}
-	defer listener.Close()
-
-	// Get the port
-	addr := listener.Addr().(*net.TCPAddr)
-	expectedPort := addr.Port
 
 	// Wait for the port to be detected
 	// Note: We may receive events for other ports (especially close events for ports
@@ -228,8 +245,8 @@ skipCheckPassed:
 				if port.Address != "127.0.0.1" {
 					t.Errorf("Expected address 127.0.0.1, got %s", port.Address)
 				}
-				if port.PID != os.Getpid() {
-					t.Errorf("Expected PID %d, got %d", os.Getpid(), port.PID)
+				if port.PID != pid {
+					t.Errorf("Expected PID %d, got %d", pid, port.PID)
 				}
 				// Success - we found our port
 				return

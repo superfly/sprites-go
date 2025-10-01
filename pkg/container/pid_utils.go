@@ -10,6 +10,7 @@ import (
 // GetContainerPID finds the actual container process PID given a wrapper process PID.
 // This is useful when using crun/runc with console-socket, where the command you start
 // is a wrapper that spawns the actual container process as its child.
+// Returns all child PIDs, not just the first one.
 func GetContainerPID(wrapperPID int) (int, error) {
 	children, err := getChildProcesses(wrapperPID)
 	if err != nil {
@@ -22,6 +23,11 @@ func GetContainerPID(wrapperPID int) (int, error) {
 
 	// For crun/runc, we typically want the first child process
 	return children[0], nil
+}
+
+// GetAllChildPIDs returns all child process PIDs for a given wrapper PID.
+func GetAllChildPIDs(wrapperPID int) ([]int, error) {
+	return getChildProcesses(wrapperPID)
 }
 
 // getChildProcesses reads the child PIDs of a given parent process.

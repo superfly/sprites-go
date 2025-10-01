@@ -2,11 +2,13 @@ package main
 
 import (
 	"testing"
+
+	"github.com/superfly/sprite-env/server/system"
 )
 
 func TestConfigGetOverlayLowerPaths(t *testing.T) {
 	// Test priority: OverlayLowerPaths takes precedence over OverlayLowerPath
-	config := Config{
+	config := system.Config{
 		OverlayLowerPath:  "/should/be/ignored",
 		OverlayLowerPaths: []string{"/first/priority", "/second/priority"},
 	}
@@ -27,7 +29,7 @@ func TestConfigGetOverlayLowerPaths(t *testing.T) {
 
 func TestConfigGetOverlayLowerPathsFallback(t *testing.T) {
 	// Test fallback to single path when array is empty
-	config := Config{
+	config := system.Config{
 		OverlayLowerPath:  "/fallback/path",
 		OverlayLowerPaths: []string{}, // Empty array
 	}
@@ -46,7 +48,7 @@ func TestConfigGetOverlayLowerPathsFallback(t *testing.T) {
 
 func TestConfigGetOverlayLowerPathsDefault(t *testing.T) {
 	// Test default fallback when both are empty
-	config := Config{
+	config := system.Config{
 		OverlayLowerPath:  "",
 		OverlayLowerPaths: []string{}, // Empty array
 	}
@@ -65,7 +67,7 @@ func TestConfigGetOverlayLowerPathsDefault(t *testing.T) {
 
 func TestConfigGetOverlayLowerPathsNilArray(t *testing.T) {
 	// Test fallback to single path when array is nil
-	config := Config{
+	config := system.Config{
 		OverlayLowerPath:  "/fallback/path",
 		OverlayLowerPaths: nil, // nil array
 	}
@@ -84,7 +86,7 @@ func TestConfigGetOverlayLowerPathsNilArray(t *testing.T) {
 
 func TestConfigGetOverlayLowerPathsCompletelyEmpty(t *testing.T) {
 	// Test default fallback when everything is empty/nil
-	config := Config{
+	config := system.Config{
 		OverlayLowerPath:  "",
 		OverlayLowerPaths: nil,
 	}

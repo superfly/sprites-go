@@ -697,22 +697,44 @@ func (s *Session) killContainerProcess() error {
 		return nil
 	}
 
-	// Get the actual container PID from the container package
-	containerPID, err := container.GetContainerPID(processPID)
+	// Get ALL child PIDs from the container package
+	childPIDs, err := container.GetAllChildPIDs(processPID)
 	if err != nil {
 		if s.logger != nil {
-			s.logger.Debug("Failed to get container PID, process may have already exited",
+			s.logger.Debug("Failed to get child PIDs, process may have already exited",
 				"wrapperPID", processPID,
 				"error", err)
 		}
 		return nil
 	}
 
-	if s.logger != nil {
-		s.logger.Debug("Attempting to kill container process",
-			"wrapperPID", processPID,
-			"containerPID", containerPID)
+	if len(childPIDs) == 0 {
+		return nil
 	}
+
+	if s.logger != nil {
+		s.logger.Debug("Killing child processes",
+			"wrapperPID", processPID,
+			"childPIDs", childPIDs)
+	}
+
+	// Kill each child process
+	for _, containerPID := range childPIDs {
+		if err := s.killSingleProcess(containerPID); err != nil {
+			if s.logger != nil {
+				s.logger.Debug("Failed to kill child process",
+					"containerPID", containerPID,
+					"error", err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// killSingleProcess kills a single process with escalating signals
+func (s *Session) killSingleProcess(containerPID int) error {
+	var err error
 
 	// For TTY sessions, try SIGHUP first (like SSH does when connection drops)
 	if s.tty {
@@ -721,7 +743,7 @@ func (s *Session) killContainerProcess() error {
 				"containerPID", containerPID)
 		}
 
-		err := syscall.Kill(containerPID, syscall.SIGHUP)
+		err = syscall.Kill(containerPID, syscall.SIGHUP)
 		if err != nil {
 			if s.logger != nil {
 				s.logger.Debug("SIGHUP failed", "containerPID", containerPID, "error", err)
@@ -784,6 +806,21 @@ func (s *Session) killContainerProcess() error {
 
 	if s.logger != nil {
 		s.logger.Debug("Sent SIGKILL to container process", "containerPID", containerPID)
+	}
+
+	// Wait a bit for SIGKILL to take effect
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify the process is dead
+	if err := syscall.Kill(containerPID, 0); err == nil {
+		// Process is still alive after SIGKILL!
+		if s.logger != nil {
+			s.logger.Warn("Process still alive after SIGKILL", "containerPID", containerPID)
+		}
+	} else {
+		if s.logger != nil {
+			s.logger.Debug("Process successfully killed", "containerPID", containerPID)
+		}
 	}
 
 	return nil

@@ -9,11 +9,11 @@ test: test-unit test-integration
 
 # Run integration tests
 test-integration: build
-	go test -v -failfast ./tests
+	go test -v -failfast ./system/tests
 
 # Run unit tests
 test-unit:
-	go test -v -failfast ./api/...
+	go test -v -failfast ./api/... ./system/...
 
 # Clean build artifacts
 clean:

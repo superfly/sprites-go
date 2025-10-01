@@ -14,48 +14,13 @@ function debug() {
     fi
 }
 
-# Check if cgroup2 is mounted, if not mount it
-if ! mountpoint -q /sys/fs/cgroup; then
-    mkdir -p /sys/fs/cgroup
-    mount -t cgroup2 -o nsdelegate,memory_recursiveprot cgroup2 /sys/fs/cgroup
-fi
-
-# Create the init cgroup for system processes
-mkdir /sys/fs/cgroup/init
-mkdir -p /dev/fly_vol/logs
-
-# Move all processes from root cgroup to init cgroup
-# We need to do this before we can enable controllers in root's subtree_control
-# First, read all PIDs into an array (since the file changes as we move processes)
-echo "Reading PIDs from root cgroup..."
-pids=$(cat /sys/fs/cgroup/cgroup.procs)
-
-# Now move each PID
-for pid in $pids; do
-    echo $pid > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null || true
-done
-
-# Read available controllers and add them to subtree_control
-controllers=$(cat /sys/fs/cgroup/cgroup.controllers)
-ENABLED_CONTROLLERS=""
-for controller in $controllers; do
-    # Simply collect all available controllers
-    ENABLED_CONTROLLERS="$ENABLED_CONTROLLERS +$controller"
-    echo $controller
-done
-# Trim leading space
-ENABLED_CONTROLLERS="${ENABLED_CONTROLLERS# }"
-
-echo "$ENABLED_CONTROLLERS" > /sys/fs/cgroup/cgroup.subtree_control
-
-mkdir /sys/fs/cgroup/containers
-echo "$ENABLED_CONTROLLERS" > /sys/fs/cgroup/containers/cgroup.subtree_control
-
+# Cgroup setup is now handled by the server at startup
 
 # Run network setup
 /home/sprite/network-setup.sh
 
 mkdir -p /dev/fly_vol/local-storage/var/lib/docker
+mkdir -p /dev/fly_vol/logs
 
 mkdir -p /.sprite/tmp
 mount -t tmpfs -o size=64M tmpfs /.sprite/tmp
@@ -584,14 +549,14 @@ echo "$CONFIG_JSON" > "${SPRITE_WRITE_DIR}/tmp/config.json"
 
 if [ -n "${CONSOLE_SOCKET:-}" ]; then
     if [ -n "${CRUN_PID_FILE:-}" ]; then
-        exec crun --debug run --pid-file="${CRUN_PID_FILE}" --console-socket="${CONSOLE_SOCKET}" -f "${SPRITE_WRITE_DIR}/tmp/config.json" app
+        exec crun run --pid-file="${CRUN_PID_FILE}" --console-socket="${CONSOLE_SOCKET}" -f "${SPRITE_WRITE_DIR}/tmp/config.json" app
     else
-        exec crun --debug run --console-socket="${CONSOLE_SOCKET}" -f "${SPRITE_WRITE_DIR}/tmp/config.json" app
+        exec crun run --console-socket="${CONSOLE_SOCKET}" -f "${SPRITE_WRITE_DIR}/tmp/config.json" app
     fi
 else
     if [ -n "${CRUN_PID_FILE:-}" ]; then
-        exec crun --debug run --pid-file="${CRUN_PID_FILE}" -f "${SPRITE_WRITE_DIR}/tmp/config.json" app
+        exec crun run --pid-file="${CRUN_PID_FILE}" -f "${SPRITE_WRITE_DIR}/tmp/config.json" app
     else
-        exec crun --debug run -f "${SPRITE_WRITE_DIR}/tmp/config.json" app
+        exec crun run -f "${SPRITE_WRITE_DIR}/tmp/config.json" app
     fi
 fi

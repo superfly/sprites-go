@@ -23,7 +23,7 @@ func TestCheckpointManager(t *testing.T) {
 	}
 
 	// Create checkpoint manager
-	cm := NewCheckpointManager(tmpDir, nil, nil)
+	cm := NewCheckpointManager(tmpDir, context.Background())
 
 	// Initialize the database
 	if err := cm.Initialize(dataDir); err != nil {
@@ -69,7 +69,7 @@ func TestCheckpointManager(t *testing.T) {
 
 func TestCheckpointManagerWithoutInit(t *testing.T) {
 	// Create checkpoint manager without initializing
-	cm := NewCheckpointManager("/tmp", nil, nil)
+	cm := NewCheckpointManager("/tmp", context.Background())
 
 	ctx := context.Background()
 

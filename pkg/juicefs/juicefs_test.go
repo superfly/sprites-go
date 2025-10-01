@@ -256,7 +256,7 @@ func TestCustomVolumeName(t *testing.T) {
 	}
 }
 
-func TestWatchForReady(t *testing.T) {
+func TestWhenReady(t *testing.T) {
 	tmpDir := t.TempDir()
 	mountPoint := filepath.Join(tmpDir, "mount")
 
@@ -273,35 +273,45 @@ func TestWatchForReady(t *testing.T) {
 		t.Fatalf("Failed to create JuiceFS: %v", err)
 	}
 
-	// Ensure cleanup of overlay mount
-	defer func() {
-		if jfs.overlayMgr != nil {
-			ctx := context.Background()
-			if err := jfs.overlayMgr.Unmount(ctx); err != nil {
-				t.Logf("Failed to unmount overlay during cleanup: %v", err)
+	// Start watching - simulate the new parseLogsForReady behavior
+	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+
+		timeout := time.After(2 * time.Minute)
+		for {
+			select {
+			case <-ticker.C:
+				if jfs.isMountReady(mountPoint) {
+					close(jfs.mountReady)
+					return
+				}
+			case <-timeout:
+				jfs.mountErrorMu.Lock()
+				jfs.mountError = fmt.Errorf("timeout waiting for mount")
+				jfs.mountErrorMu.Unlock()
+				close(jfs.mountReady)
+				return
 			}
 		}
 	}()
-
-	// Start watching
-	startTime := time.Now()
-	go jfs.watchForReady(mountPoint, startTime)
 
 	// Give it a moment to start polling
 	time.Sleep(50 * time.Millisecond)
 
 	// Check that it's still waiting (mount point doesn't exist yet so it should timeout)
-	select {
-	case err := <-jfs.mountReady:
-		// It should timeout after 2 minutes, but for testing we expect it to be trying
-		if err == nil {
-			t.Error("Should have received timeout error since no real mount exists")
-		} else if !strings.Contains(err.Error(), "timeout") {
-			t.Errorf("Expected timeout error, got: %v", err)
-		}
-	case <-time.After(100 * time.Millisecond):
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	
+	err = jfs.WhenReady(ctx)
+	if err == nil {
+		t.Error("Should have received timeout error since no real mount exists")
+	} else if err != context.DeadlineExceeded {
+		// The context should timeout before the mount is ready
+		t.Errorf("Expected context deadline exceeded, got: %v", err)
+	} else {
 		// This is expected - it should still be polling
-		t.Log("watchForReady is still polling as expected")
+		t.Log("WhenReady is still waiting as expected")
 	}
 }
 
