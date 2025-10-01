@@ -1,0 +1,121 @@
+name: SDK Tests
+
+on:
+  push:
+    branches: [ main, go-sdk, js-sdk ]
+    paths:
+      - 'sdks/**'
+      - '.github/workflows/sdk-tests.yml'
+  pull_request:
+    branches: [ main, go-sdk, js-sdk ]
+    paths:
+      - 'sdks/**'
+      - '.github/workflows/sdk-tests.yml'
+  workflow_dispatch:
+
+jobs:
+  test-go-sdk:
+    runs-on: ubuntu-latest
+    name: Test Go SDK
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        token: ${{ secrets.GH_PAT || github.token }}
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+    
+    - name: Build Go SDK test binary
+      run: |
+        cd sdks/go/test-cli
+        go mod tidy
+        go build -o test-cli main.go
+        echo "Built test-cli binary: $(pwd)/test-cli"
+        ls -la test-cli
+    
+    - name: Run SDK tests
+      env:
+        SPRITES_TEST_TOKEN: ${{ secrets.SPRITES_TEST_TOKEN }}
+        SDK_TEST_COMMAND: "../go/test-cli/test-cli"
+      run: |
+        echo "Running SDK tests with auto-generated sprite names"
+        cd sdks/test
+        go test -v .
+      continue-on-error: false
+
+  test-js-sdk:
+    runs-on: ubuntu-latest
+    name: Test JavaScript SDK
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        token: ${{ secrets.GH_PAT }}
+    
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '24'
+    
+    - name: Set up Go (for test harness)
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+    
+    - name: Build JavaScript SDK
+      run: |
+        cd sdks/js
+        npm install
+        npm run build
+        echo "Built JavaScript SDK"
+    
+    - name: Build JavaScript test-cli
+      run: |
+        cd sdks/js/test-node-cli
+        npm install
+        npm run build
+        chmod +x test-cli
+        echo "Built test-cli binary: $(pwd)/test-cli"
+        ls -la test-cli
+    
+    - name: Run SDK tests
+      env:
+        SPRITES_TEST_TOKEN: ${{ secrets.SPRITES_TEST_TOKEN }}
+        SDK_TEST_COMMAND: "../js/test-node-cli/test-cli"
+      run: |
+        echo "Running SDK tests with JavaScript test-cli"
+        cd sdks/test
+        go test -v .
+      continue-on-error: false
+
+  # Future SDKs can be added here following the same pattern
+  # test-python-sdk:
+  #   runs-on: ubuntu-latest
+  #   name: Test Python SDK
+  #   steps:
+  #   - name: Checkout code
+  #     uses: actions/checkout@v4
+  #     with:
+  #       submodules: recursive
+  #   - name: Set up Python
+  #     uses: actions/setup-python@v4
+  #     with:
+  #       python-version: '3.11'
+  #   - name: Build Python SDK test binary
+  #     run: |
+  #       cd sdks/python/test-cli
+  #       pip install -e .
+  #       python -m build
+  #   - name: Run SDK tests
+  #     env:
+  #       SPRITES_TEST_TOKEN: ${{ secrets.SPRITES_TEST_TOKEN }}
+  #     run: |
+  #       cd sdks/test
+  #       go test -v

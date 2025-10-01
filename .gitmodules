@@ -1,0 +1,6 @@
+[submodule "sdks/go"]
+	path = sdks/go
+	url = https://github.com/superfly/sprites-go.git
+[submodule "sdks/js"]
+	path = sdks/js
+	url = https://github.com/superfly/sprites-js.git
