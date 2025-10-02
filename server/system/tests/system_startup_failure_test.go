@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -29,6 +30,14 @@ func TestSystemShutdownBehavior(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
+
+	// Ensure cleanup even if test fails
+	t.Cleanup(func() {
+		// Try to shutdown if not already done
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = sys.Shutdown(ctx)
+	})
 
 	// Start the system
 	StartSystemWithTimeout(t, sys, 10*time.Second)

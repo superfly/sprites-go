@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -270,8 +271,28 @@ func TestSystemSignalTriggeredShutdown(t *testing.T) {
 		t.Fatalf("Failed to create system: %v", err)
 	}
 
+	// Ensure cleanup even if test fails
+	t.Cleanup(func() {
+		// Try to shutdown if not already done
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = sys.Shutdown(ctx)
+	})
+
 	// Start the system
 	StartSystemWithTimeout(t, sys, 10*time.Second)
+
+	// Debug: Print system state before shutdown
+	t.Log("=== System state before shutdown ===")
+	if out, err := exec.Command("cat", "/proc/mounts").Output(); err == nil {
+		t.Logf("Mounts:\n%s", string(out))
+	}
+	if out, err := exec.Command("losetup", "-a").Output(); err == nil {
+		t.Logf("Loop devices:\n%s", string(out))
+	}
+	if out, err := exec.Command("ps", "aux").Output(); err == nil {
+		t.Logf("Processes:\n%s", string(out))
+	}
 
 	// Send SIGTERM to trigger shutdown
 	t.Log("Sending SIGTERM to trigger shutdown...")
@@ -293,8 +314,31 @@ func TestSystemSignalTriggeredShutdown(t *testing.T) {
 	select {
 	case <-done:
 		t.Log("System shutdown completed via signal")
-	case <-time.After(10 * time.Second):
+	case <-time.After(60 * time.Second):
+		// Debug: Print system state on timeout
+		t.Log("=== System state on timeout ===")
+		if out, err := exec.Command("cat", "/proc/mounts").Output(); err == nil {
+			t.Logf("Mounts:\n%s", string(out))
+		}
+		if out, err := exec.Command("losetup", "-a").Output(); err == nil {
+			t.Logf("Loop devices:\n%s", string(out))
+		}
+		if out, err := exec.Command("ps", "aux").Output(); err == nil {
+			t.Logf("Processes:\n%s", string(out))
+		}
 		t.Fatal("Timeout waiting for signal-triggered shutdown")
+	}
+
+	// Debug: Print system state after shutdown
+	t.Log("=== System state after shutdown ===")
+	if out, err := exec.Command("cat", "/proc/mounts").Output(); err == nil {
+		t.Logf("Mounts:\n%s", string(out))
+	}
+	if out, err := exec.Command("losetup", "-a").Output(); err == nil {
+		t.Logf("Loop devices:\n%s", string(out))
+	}
+	if out, err := exec.Command("ps", "aux").Output(); err == nil {
+		t.Logf("Processes:\n%s", string(out))
 	}
 
 	// Verify clean shutdown

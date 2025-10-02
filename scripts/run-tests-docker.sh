@@ -45,6 +45,7 @@ run_in_container() {
     echo "Running $name tests in container..."
     docker run \
         --rm \
+        --init \
         --privileged \
         --cgroupns=host \
         -v "$(pwd)":/workspace \
