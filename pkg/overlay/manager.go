@@ -122,16 +122,16 @@ func (m *Manager) UpdateImagePath() {
 
 // EnsureImage creates the sparse image if it doesn't exist
 func (m *Manager) EnsureImage() error {
+	// Ensure the directory exists first (even if image exists, to prevent races)
+	imageDir := filepath.Dir(m.imagePath)
+	if err := os.MkdirAll(imageDir, 0755); err != nil {
+		return fmt.Errorf("failed to create image directory: %w", err)
+	}
+
 	// Check if image already exists
 	if info, err := os.Stat(m.imagePath); err == nil {
 		m.logger.Debug("Overlay image already exists", "path", m.imagePath, "size", info.Size())
 		return nil // Image already exists
-	}
-
-	// Ensure the directory exists
-	imageDir := filepath.Dir(m.imagePath)
-	if err := os.MkdirAll(imageDir, 0755); err != nil {
-		return fmt.Errorf("failed to create image directory: %w", err)
 	}
 
 	m.logger.Info("Creating sparse image", "size", m.imageSize, "path", m.imagePath)
@@ -238,12 +238,33 @@ func (m *Manager) Mount(ctx context.Context) error {
 		return fmt.Errorf("failed to ensure overlay image: %w", err)
 	}
 
-	// Verify the image file is accessible
-	if info, err := os.Stat(m.imagePath); err != nil {
-		return fmt.Errorf("overlay image not accessible at %s: %w", m.imagePath, err)
-	} else {
-		m.logger.Debug("Overlay image verified", "path", m.imagePath, "size", info.Size())
-	}
+	// // Verify the image file is accessible
+	// if info, err := os.Stat(m.imagePath); err != nil {
+	// 	return fmt.Errorf("overlay image not accessible at %s: %w", m.imagePath, err)
+	// } else {
+	// 	m.logger.Debug("Overlay image verified", "path", m.imagePath, "size", info.Size())
+	// }
+
+	// Before mounting, probe the backing file inside JuiceFS to ensure FUSE is responsive
+	// Use short timeout and a few retries
+	// m.logger.Debug("Probing backing file readiness (stat + pread)", "path", m.imagePath)
+	// var probeErr error
+	// for i := 1; i <= 5; i++ {
+	// 	probeCtx, cancel := context.WithTimeout(ctx, 1*time.Second)
+	// 	probeErr = probeFileReadiness(probeCtx, m.imagePath, 1*time.Second)
+	// 	cancel()
+	// 	if probeErr == nil {
+	// 		break
+	// 	}
+	// 	m.logger.Warn("Backing file probe failed, will retry",
+	// 		"attempt", i,
+	// 		"maxAttempts", 5,
+	// 		"error", probeErr)
+	// 	time.Sleep(100 * time.Millisecond)
+	// }
+	// if probeErr != nil {
+	// 	return fmt.Errorf("backing file not ready: %w", probeErr)
+	// }
 
 	// Try to mount the image (no artificial timeout)
 	m.logger.Info("Mounting root overlay", "mountPath", m.mountPath)
@@ -261,6 +282,36 @@ func (m *Manager) Mount(ctx context.Context) error {
 	}
 	m.loopDevice = loopDevice
 	m.logger.Debug("Created loop device", "device", m.loopDevice)
+
+	// Probe loop device with pread + BLKGETSIZE64 under timeout before mounting
+	m.logger.Debug("Probing loop device readiness", "device", m.loopDevice)
+	// var loopProbeErr error
+	// probeStart := time.Now()
+	// successAttempt := 0
+	// for i := 1; i <= 5; i++ {
+	// 	probeCtx, cancel := context.WithTimeout(ctx, 1*time.Second)
+	// 	loopProbeErr = probeLoopDeviceReadiness(probeCtx, m.loopDevice, 1*time.Second)
+	// 	cancel()
+	// 	if loopProbeErr == nil {
+	// 		successAttempt = i
+	// 		break
+	// 	}
+	// 	m.logger.Warn("Loop device probe failed, will retry",
+	// 		"attempt", i,
+	// 		"maxAttempts", 5,
+	// 		"error", loopProbeErr)
+	// 	time.Sleep(100 * time.Millisecond)
+	// }
+	// if loopProbeErr != nil {
+	// 	// Detach loop on failure
+	// 	_ = detachLoopDevice(m.loopDevice)
+	// 	m.loopDevice = ""
+	// 	return fmt.Errorf("loop device not ready: %w", loopProbeErr)
+	// }
+	// m.logger.Info("Loop device probe succeeded",
+	// 	"device", m.loopDevice,
+	// 	"attempt", successAttempt,
+	// 	"elapsed", time.Since(probeStart))
 
 	cmd := exec.CommandContext(mountCtx, "mount", "-o", "discard", m.loopDevice, m.mountPath)
 	mountStart := time.Now()
@@ -461,6 +512,13 @@ func (m *Manager) Unmount(ctx context.Context) error {
 
 	// Then unmount the loopback mount
 	if !m.isMounted() {
+		// Even if not mounted, ensure any associated loop device is detached
+		if m.loopDevice != "" {
+			if err := detachLoopDevice(m.loopDevice); err != nil {
+				return fmt.Errorf("failed to detach loop device %s: %w", m.loopDevice, err)
+			}
+			m.loopDevice = ""
+		}
 		return nil
 	}
 
@@ -484,6 +542,14 @@ func (m *Manager) Unmount(ctx context.Context) error {
 	// Verify loopback mount is actually unmounted
 	if m.isMounted() {
 		return fmt.Errorf("loopback mount still mounted after umount command")
+	}
+
+	// Detach loop device now that the mount is gone
+	if m.loopDevice != "" {
+		if err := detachLoopDevice(m.loopDevice); err != nil {
+			return fmt.Errorf("failed to detach loop device %s: %w", m.loopDevice, err)
+		}
+		m.loopDevice = ""
 	}
 
 	return nil

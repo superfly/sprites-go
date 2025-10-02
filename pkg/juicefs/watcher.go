@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -225,32 +226,44 @@ func (w *OutputWatcher) watchStream(stream io.ReadCloser, streamName string) {
 
 // isReadyMessage checks if a log line indicates JuiceFS is ready
 func (w *OutputWatcher) isReadyMessage(line string) bool {
-	readyIndicators := []string{
-		"listening on",
-		"FUSE started",
-		"mounted at",
-		"successfully mounted",
-		"Mounting volume",
-		"Mount point:",
-		"OK, " + w.mountPath + " is ready",
+	// We only consider the explicit JuiceFS readiness message emitted by checkMountpoint:
+	//   "OK, <VOLUME_NAME> is ready at <mountPath>"
+	// Message may contain ANSI color codes; strip them before matching.
+
+	stripANSI := func(s string) string {
+		// Matches ESC[...m sequences
+		ansiRegexp := regexp.MustCompile(`\x1b\[[0-9;]*m`)
+		return ansiRegexp.ReplaceAllString(s, "")
 	}
 
-	lineLower := strings.ToLower(line)
-	for _, indicator := range readyIndicators {
-		if strings.Contains(lineLower, strings.ToLower(indicator)) {
+	// Try to parse JSON line and inspect the msg/method/file fields
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(line), &parsed); err == nil && len(parsed) > 0 {
+		msg, _ := parsed["msg"].(string)
+		if msg == "" {
+			msg, _ = parsed["message"].(string)
+		}
+		msg = stripANSI(msg)
+		msgLower := strings.ToLower(msg)
+
+		// Ensure the canonical readiness phrase and the mountPath are present
+		if strings.Contains(msgLower, "ok,") && strings.Contains(msgLower, " is ready at ") && strings.Contains(msg, w.mountPath) {
+			// Prefer when method indicates the source is checkMountpoint, but don't require it
+			if m, ok := parsed["method"].(string); ok && m == "checkMountpoint" {
+				return true
+			}
+			if f, ok := parsed["file"].(string); ok && f == "mount_unix.go" {
+				return true
+			}
 			return true
 		}
+		return false
 	}
 
-	// Check for specific mount path mentions with success context
-	if strings.Contains(line, w.mountPath) &&
-		(strings.Contains(lineLower, "ready") ||
-			strings.Contains(lineLower, "mounted") ||
-			strings.Contains(lineLower, "success")) {
-		return true
-	}
-
-	return false
+	// Fallback: treat as plain text
+	lineStripped := stripANSI(line)
+	lower := strings.ToLower(lineStripped)
+	return strings.Contains(lower, "ok,") && strings.Contains(lower, " is ready at ") && strings.Contains(lineStripped, w.mountPath)
 }
 
 // isErrorMessage checks if a log line indicates an error

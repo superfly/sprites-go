@@ -1,8 +1,11 @@
 .PHONY: test test-docker test-clean test-rebuild test-machine build build-linux test-cli help
 
+# Forward any extra args after `make test` to the script
+TEST_ARGS := $(filter-out test,$(MAKECMDGOALS))
+
 # Run all tests in Docker container (mirrors production environment)
 test:
-	bash ./scripts/run-tests-docker.sh $(ARGS)
+	bash ./scripts/run-tests-docker.sh $(TEST_ARGS) $(ARGS)
 
 # Alias for backwards compatibility
 test-docker: test
@@ -30,3 +33,7 @@ build:
 test-cli:
 	@echo "Building test-cli..."
 	cd sdk && make test-cli
+
+# Treat unknown goals (used as test args) as no-ops so make doesn't error
+%:
+	@:

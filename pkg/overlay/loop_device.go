@@ -4,9 +4,11 @@
 package overlay
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -15,6 +17,7 @@ const (
 	LOOP_CLR_FD       = 0x4C01
 	LOOP_SET_STATUS64 = 0x4C04
 	LOOP_CTL_GET_FREE = 0x4C82
+	BLKGETSIZE64      = 0x80081272 // Get device size in bytes
 
 	LO_NAME_SIZE       = 64
 	LO_CRYPT_NAME_SIZE = 64
@@ -47,6 +50,87 @@ func ioctl(fd int, req uintptr, arg uintptr) error {
 		return errno
 	}
 	return nil
+}
+
+// probeFileReadiness performs a safe readiness check on a regular file:
+// 1) stat (metadata fetch)
+// 2) small pread (4KB) from offset 0
+// Both operations are executed under a timeout by running in a goroutine.
+func probeFileReadiness(ctx context.Context, path string, timeout time.Duration) error {
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("stat failed for %s: %w", path, err)
+	}
+
+	verifyCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		fd, err := syscall.Open(path, syscall.O_RDONLY, 0)
+		if err != nil {
+			errCh <- fmt.Errorf("open failed for %s: %w", path, err)
+			return
+		}
+		defer syscall.Close(fd)
+
+		buf := make([]byte, 4096)
+		if _, err := syscall.Pread(fd, buf, 0); err != nil {
+			errCh <- fmt.Errorf("pread failed for %s: %w", path, err)
+			return
+		}
+		errCh <- nil
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-verifyCtx.Done():
+		return fmt.Errorf("file probe timed out for %s: %w", path, verifyCtx.Err())
+	}
+}
+
+// probeLoopDeviceReadiness validates a loop device by performing:
+// 1) small pread (4KB)
+// 2) ioctl(BLKGETSIZE64)
+// Both under a timeout via goroutine to avoid blocking the caller.
+func probeLoopDeviceReadiness(ctx context.Context, loopPath string, timeout time.Duration) error {
+	verifyCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		fd, err := syscall.Open(loopPath, syscall.O_RDONLY, 0)
+		if err != nil {
+			errCh <- fmt.Errorf("open failed for %s: %w", loopPath, err)
+			return
+		}
+		defer syscall.Close(fd)
+
+		buf := make([]byte, 4096)
+		if _, err := syscall.Pread(fd, buf, 0); err != nil {
+			errCh <- fmt.Errorf("pread failed for %s: %w", loopPath, err)
+			return
+		}
+
+		var size uint64
+		if err := ioctl(fd, BLKGETSIZE64, uintptr(unsafe.Pointer(&size))); err != nil {
+			errCh <- fmt.Errorf("BLKGETSIZE64 failed for %s: %w", loopPath, err)
+			return
+		}
+		if size == 0 {
+			errCh <- fmt.Errorf("device %s reports zero size", loopPath)
+			return
+		}
+
+		errCh <- nil
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-verifyCtx.Done():
+		return fmt.Errorf("loop device probe timed out for %s: %w", loopPath, verifyCtx.Err())
+	}
 }
 
 // attachLoopDevice attaches a backing file to a loop device with discard support

@@ -202,10 +202,33 @@ func (h *Handlers) HandleExec(w http.ResponseWriter, r *http.Request) {
 			msgType = "port_closed"
 		}
 
+		// Translate localhost addresses to container bridge addresses for client proxying
+		proxyAddress := port.Address
+		switch port.Address {
+		case "127.0.0.1":
+			if h.proxyLocalhostIPv4 != "" {
+				proxyAddress = h.proxyLocalhostIPv4
+			}
+		case "::1":
+			if h.proxyLocalhostIPv6 != "" {
+				proxyAddress = h.proxyLocalhostIPv6
+			}
+		case "0.0.0.0":
+			// For wildcard IPv4, use the IPv4 bridge address if available
+			if h.proxyLocalhostIPv4 != "" {
+				proxyAddress = h.proxyLocalhostIPv4
+			}
+		case "::":
+			// For wildcard IPv6, use the IPv6 bridge address if available
+			if h.proxyLocalhostIPv6 != "" {
+				proxyAddress = h.proxyLocalhostIPv6
+			}
+		}
+
 		notification := PortNotificationMessage{
 			Type:    msgType,
 			Port:    port.Port,
-			Address: port.Address,
+			Address: proxyAddress,
 			PID:     port.PID,
 		}
 

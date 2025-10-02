@@ -183,16 +183,19 @@ func (s *System) monitorProcessLoop() {
 		default:
 		}
 
-		// Process exited - just log it, don't trigger shutdown
-		// Shutdown should be triggered by external signals (SIGTERM/SIGINT)
+		// Process exited - trigger shutdown sequence
 		if s.config.KeepAliveOnError {
 			s.logger.Info("Process exited, but keeping server alive (SPRITE_KEEP_ALIVE_ON_ERROR=true)")
 			s.logger.Info("Server is still running and accepting API requests")
 		} else {
-			s.logger.Warn("Container process exited unexpectedly", "exitCode", exitCode)
-			s.logger.Warn("System will continue running - send SIGTERM to trigger shutdown")
+			s.logger.Warn("Container process exited unexpectedly, triggering shutdown sequence", "exitCode", exitCode)
 			// Store the exit code in case we need it later
 			s.processExitCode = exitCode
+
+			// Trigger shutdown by closing the shutdown channel
+			s.shutdownTriggeredOnce.Do(func() {
+				close(s.shutdownTriggeredCh)
+			})
 		}
 	}
 }

@@ -278,17 +278,8 @@ setup_nat() {
     ip netns exec sprite nft add rule ip nat output ip daddr 10.0.0.1 tcp dport != 0 dnat to 127.0.0.1:tcp dport
 
 
-    # IPv6 NAT - redirect bridge IP to localhost
-    ip netns exec sprite nft add table ip6 nat
-    ip netns exec sprite nft add chain ip6 nat prerouting { type nat hook prerouting priority -100 \; }
-    ip netns exec sprite nft add chain ip6 nat output     { type nat hook output     priority -100 \; }
-    ip netns exec sprite nft add chain ip6 nat postrouting { type nat hook postrouting priority 100 \; }
-
-    # DNAT: host→ns traffic fdf::1:any → ::1:any
-    ip netns exec sprite nft add rule ip6 nat prerouting iifname "$VETH_CONT" ip6 daddr fdf::1 tcp dport != 0 dnat to [::1]:tcp dport
-
-    # DNAT: local ns traffic fdf::1:any → ::1:any
-    ip netns exec sprite nft add rule ip6 nat output ip6 daddr fdf::1 tcp dport != 0 dnat to [::1]:tcp dport
+    # IPv6: No NAT needed - fdf::1 is bound directly to the interface
+    # Applications can bind to fdf::1 and it will be routable from the host
     
     }
 

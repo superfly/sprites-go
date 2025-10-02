@@ -2,15 +2,22 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
+	osexec "os/exec"
 	"os/signal"
+	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/superfly/sprite-env/client/config"
 	"github.com/superfly/sprite-env/client/format"
+	"github.com/superfly/sprite-env/pkg/terminal"
 	sprites "github.com/superfly/sprites-go"
 	"golang.org/x/term"
 )
@@ -157,7 +164,9 @@ func ExecCommand(ctx *GlobalContext, args []string) int {
 
 		// Set up stdin/stdout/stderr for TTY mode
 		spriteCmd.Stdin = os.Stdin
-		spriteCmd.Stdout = os.Stdout
+		browserHandler := makeBrowserOSCHandler()
+		oscMonitor := terminal.NewOSCMonitor(browserHandler)
+		spriteCmd.Stdout = io.MultiWriter(os.Stdout, oscMonitor)
 		spriteCmd.Stderr = os.Stderr
 
 		// Handle terminal resize events
@@ -168,6 +177,10 @@ func ExecCommand(ctx *GlobalContext, args []string) int {
 		spriteCmd.Stdout = os.Stdout
 		spriteCmd.Stderr = os.Stderr
 	}
+
+	// Handle port notifications and auto-proxy. Ensure cleanup on exit.
+	cleanupProxies := setPortNotificationHandler(spriteCmd, sprite)
+	defer cleanupProxies()
 
 	// Prepare terminal for raw mode if using TTY
 	var oldState *term.State
@@ -228,6 +241,148 @@ func handleSpriteTerminalResize(cmd *sprites.Cmd) {
 	// For now, this is a placeholder
 }
 
+// setPortNotificationHandler sets a TextMessageHandler to decode port notifications,
+// automatically start/stop local proxies via the SDK, and returns a cleanup function.
+func setPortNotificationHandler(cmd *sprites.Cmd, sprite *sprites.Sprite) func() {
+	var mu sync.Mutex
+	// Track by remote host + port (e.g., "127.0.0.1:3000")
+	active := make(map[string]*sprites.ProxySession)
+
+	startProxy := func(remoteHost string, remotePort int) {
+		key := fmt.Sprintf("%s:%d", remoteHost, remotePort)
+		mu.Lock()
+		if _, exists := active[key]; exists {
+			mu.Unlock()
+			return
+		}
+		mu.Unlock()
+
+		// Use same local and remote port by default; include RemoteHost
+		ctx := context.Background()
+		mappings := []sprites.PortMapping{{
+			LocalPort:  remotePort,
+			RemotePort: remotePort,
+			RemoteHost: remoteHost,
+		}}
+		sessions, err := sprite.ProxyPorts(ctx, mappings)
+		if err != nil || len(sessions) == 0 {
+			slog.Default().Debug("Failed to start proxy",
+				"remote_host", remoteHost,
+				"remote_port", remotePort,
+				"error", err,
+			)
+			return
+		}
+		session := sessions[0]
+		mu.Lock()
+		active[key] = session
+		mu.Unlock()
+		slog.Default().Debug("Started proxy",
+			"local", session.LocalAddr().String(),
+			"remote_host", remoteHost,
+			"remote_port", remotePort,
+		)
+	}
+
+	stopProxy := func(remoteHost string, remotePort int) {
+		key := fmt.Sprintf("%s:%d", remoteHost, remotePort)
+		mu.Lock()
+		if sess, exists := active[key]; exists {
+			sess.Close()
+			delete(active, key)
+			mu.Unlock()
+			slog.Default().Debug("Stopped proxy", "remote_host", remoteHost, "remote_port", remotePort)
+			return
+		}
+		mu.Unlock()
+	}
+
+	cmd.TextMessageHandler = func(data []byte) {
+		var msg map[string]interface{}
+		if err := json.Unmarshal(data, &msg); err != nil {
+			// Not JSON control message
+			return
+		}
+		typeVal, _ := msg["type"].(string)
+		switch typeVal {
+		case "port_opened":
+			if p, ok := msg["port"].(float64); ok {
+				remotePort := int(p)
+				remoteHost, _ := msg["address"].(string)
+				if remoteHost == "" {
+					remoteHost = "localhost"
+				}
+				startProxy(remoteHost, remotePort)
+			}
+		case "port_closed":
+			if p, ok := msg["port"].(float64); ok {
+				remotePort := int(p)
+				remoteHost, _ := msg["address"].(string)
+				if remoteHost == "" {
+					remoteHost = "localhost"
+				}
+				stopProxy(remoteHost, remotePort)
+			}
+		}
+	}
+
+	// Cleanup function to close any active proxies
+	return func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for key, sess := range active {
+			_ = sess.Close()
+			delete(active, key)
+		}
+	}
+}
+
+// makeBrowserOSCHandler returns a handler that parses our OSC browser-open sequence
+// and opens the provided URL in the user's default browser.
+func makeBrowserOSCHandler() func(string) {
+	return func(sequence string) {
+		// Expected format: "9999;browser-open;{url};{port1,port2,...}"
+		slog.Default().Debug("Received OSC sequence", "sequence", sequence)
+		parts := strings.Split(sequence, ";")
+		if len(parts) < 3 {
+			slog.Default().Debug("OSC sequence too short", "parts_len", len(parts))
+			return
+		}
+		if parts[0] != "9999" || parts[1] != "browser-open" {
+			slog.Default().Debug("OSC not browser-open", "code", parts[0], "action", parts[1])
+			return
+		}
+		url := parts[2]
+		var ports []string
+		if len(parts) >= 4 && parts[3] != "" {
+			for _, port := range strings.Split(parts[3], ",") {
+				if trimmed := strings.TrimSpace(port); trimmed != "" {
+					ports = append(ports, trimmed)
+				}
+			}
+		}
+		slog.Default().Debug("Opening browser from OSC", "url", url, "ports", ports)
+		if url == "" {
+			return
+		}
+		if err := openBrowser(url); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to open browser: %v\n", err)
+		}
+	}
+}
+
+// openBrowser opens the specified URL in the default system browser.
+func openBrowser(url string) error {
+	switch runtime.GOOS {
+	case "darwin":
+		return osexec.Command("open", url).Start()
+	case "windows":
+		return osexec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+	default:
+		return osexec.Command("xdg-open", url).Start()
+	}
+}
+
 // listExecSessions lists running execution sessions in the sprite and allows interactive selection
 func listExecSessions(ctx *GlobalContext, org *config.Organization, sprite *sprites.Sprite) int {
 	// Get sessions list
@@ -285,8 +440,14 @@ func attachToSession(ctx *GlobalContext, sprite *sprites.Sprite, sessionID strin
 
 	// Attach always uses TTY
 	attachCmd.Stdin = os.Stdin
-	attachCmd.Stdout = os.Stdout
+	browserHandler := makeBrowserOSCHandler()
+	oscMonitor := terminal.NewOSCMonitor(browserHandler)
+	attachCmd.Stdout = io.MultiWriter(os.Stdout, oscMonitor)
 	attachCmd.Stderr = os.Stderr
+
+	// Handle port notifications and auto-proxy. Ensure cleanup on exit.
+	cleanupProxies := setPortNotificationHandler(attachCmd, sprite)
+	defer cleanupProxies()
 
 	// Get terminal size if available
 	if term.IsTerminal(int(os.Stdin.Fd())) {

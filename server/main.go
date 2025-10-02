@@ -56,7 +56,20 @@ func main() {
 	// Start the system
 	if err := sys.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to start system: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(os.Stderr, "Startup failed, triggering shutdown sequence...\n")
+
+		// Trigger shutdown by closing the shutdown channel
+		sys.HandleSignal(syscall.SIGTERM)
+
+		// Wait for shutdown to complete
+		exitCode, shutdownErr := sys.WaitForExit()
+		if shutdownErr != nil {
+			fmt.Fprintf(os.Stderr, "Shutdown error: %v\n", shutdownErr)
+			os.Exit(1)
+		}
+
+		// Exit with the code from shutdown
+		os.Exit(exitCode)
 	}
 
 	// Set up signal handling

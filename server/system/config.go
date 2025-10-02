@@ -335,6 +335,14 @@ func applyEnvironmentVariables(config *Config) {
 		config.OverlaySkipOverlayFS = false
 	}
 
+	// Proxy configuration
+	if proxyIPv4 := os.Getenv("SPRITE_PROXY_LOCALHOST_IPV4"); proxyIPv4 != "" {
+		config.ProxyLocalhostIPv4 = proxyIPv4
+	}
+	if proxyIPv6 := os.Getenv("SPRITE_PROXY_LOCALHOST_IPV6"); proxyIPv6 != "" {
+		config.ProxyLocalhostIPv6 = proxyIPv6
+	}
+
 	// Debug configuration
 	config.KeepAliveOnError = os.Getenv("SPRITE_KEEP_ALIVE_ON_ERROR") == "true"
 	config.WaitForBoot = os.Getenv("WAIT_FOR_BOOT") == "true"

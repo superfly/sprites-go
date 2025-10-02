@@ -84,11 +84,11 @@ func (s *System) Boot(ctx context.Context) error {
 	// JuiceFS (depends on DB)
 	if s.config.JuiceFSDataPath != "" {
 		s.logger.Info("Starting JuiceFS", "juiceFS_ptr", fmt.Sprintf("%p", s.JuiceFS))
-		// JuiceFS.Start() blocks until mount is ready
+		// JuiceFS.Start() blocks until mount is ready and verified for block device operations
 		if err := s.JuiceFS.Start(s.ctx); err != nil {
 			return fmt.Errorf("failed to start JuiceFS: %w", err)
 		}
-		s.logger.Info("JuiceFS started and mounted")
+		s.logger.Info("JuiceFS started and verified ready")
 
 		// Special wait point after JuiceFS is ready
 		if os.Getenv("WAIT_FOR_JUICEFS_READY") == "true" {
@@ -203,6 +203,7 @@ func (s *System) BootContainer(ctx context.Context) error {
 	s.logger.Info("Starting container boot sequence")
 
 	// Phase 1: Mount overlay filesystem (depends on JuiceFS)
+	// Note: JuiceFS is already verified ready during initial Start()
 	if s.config.OverlayEnabled {
 		s.logger.Info("Phase 1: Mounting overlay filesystem")
 		// Update the image path to point to the restored active directory

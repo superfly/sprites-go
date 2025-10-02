@@ -537,6 +537,9 @@ func (s *System) StopProcess() error {
 	if s.processWaitStarted {
 		// Release the lock while waiting so monitorProcess can update the channels
 		s.processMu.Unlock()
+		
+		// Give the monitoring goroutine a moment to process if the process just exited
+		time.Sleep(50 * time.Millisecond)
 
 		timer := time.NewTimer(gracePeriod)
 		defer timer.Stop()
@@ -585,18 +588,24 @@ func (s *System) StopProcess() error {
 
 forceKill:
 	// Send SIGKILL to process group
-	if err := syscall.Kill(-s.processCmd.Process.Pid, syscall.SIGKILL); err != nil {
-		s.logger.Error("Failed to send SIGKILL to process group", "error", err)
+	killErr := syscall.Kill(-s.processCmd.Process.Pid, syscall.SIGKILL)
+	if killErr != nil {
+		s.logger.Error("Failed to send SIGKILL to process group", "error", killErr)
 		// Try just the process
 		if err := s.processCmd.Process.Kill(); err != nil {
 			s.logger.Error("Failed to kill process", "error", err)
 		}
 	}
 
-	// Wait a bit for the process to die
+	// If Wait() has already been called, we need to wait for the monitoring goroutine
+	// to update the channels. The monitoring goroutine will acquire the lock, so we
+	// release it temporarily to let it proceed.
 	if s.processWaitStarted {
 		// Release lock while waiting so monitorProcess can update the channels
 		s.processMu.Unlock()
+		
+		// Give the monitoring goroutine a moment to process if the process just exited
+		time.Sleep(50 * time.Millisecond)
 
 		// Wait() already running, check if process becomes not running
 		waitTimer := time.NewTimer(5 * time.Second)
@@ -631,6 +640,8 @@ forceKill:
 					close(s.processStoppedCh) // Signal stopped
 				}
 				s.processRunningCh = make(chan struct{}) // Open = not running
+				s.processCmd = nil
+				s.processWaitStarted = false
 				// Lock will be released by defer at function exit
 				return fmt.Errorf("process did not exit after SIGKILL")
 			case <-time.After(100 * time.Millisecond):
@@ -639,6 +650,9 @@ forceKill:
 		}
 	} else {
 		// Normal path - wait for done channel
+		// Give a moment for the process to die before starting the wait
+		time.Sleep(50 * time.Millisecond)
+		
 		select {
 		case <-done:
 			s.logger.Info("Process killed successfully")
@@ -659,6 +673,8 @@ forceKill:
 				close(s.processStoppedCh) // Signal stopped
 			}
 			s.processRunningCh = make(chan struct{}) // Open = not running
+			s.processCmd = nil
+			s.processWaitStarted = false
 			return fmt.Errorf("process did not exit after SIGKILL")
 		}
 	}

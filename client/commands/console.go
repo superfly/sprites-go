@@ -62,17 +62,22 @@ func ConsoleCommand(ctx *GlobalContext, args []string) {
 		Examples: []string{
 			"sprite console",
 			"sprite console -o myorg -s mysprite",
+			"sprite console -detachable",
 		},
 		Notes: []string{
 			"Opens an interactive shell with a TTY allocated",
 			"Automatically detects and uses your current shell",
 			"Supported shells: bash, zsh, fish, tcsh, ksh",
 			"Falls back to bash if shell detection fails",
+			"When using -detachable, creates a tmux session that can be detached and reattached.",
 		},
 	}
 
 	// Set up sprite flags (org/sprite selection)
 	flags := NewSpriteFlags(cmd.FlagSet)
+
+	// Console-specific flags
+	detachable := cmd.FlagSet.Bool("detachable", false, "Create a detachable tmux session")
 
 	// Parse flags
 	remainingArgs, err := ParseFlags(cmd, args)
@@ -93,6 +98,11 @@ func ConsoleCommand(ctx *GlobalContext, args []string) {
 	// Always use tty for console, with detected shell
 	detectedShell := detectParentShell()
 	execArgs = append(execArgs, "-tty", detectedShell, "--login")
+
+	// Pass through detachable if requested
+	if *detachable {
+		execArgs = append(execArgs, "-detachable")
+	}
 
 	// If org/sprite were specified, pass them through
 	if flags.Org != "" {

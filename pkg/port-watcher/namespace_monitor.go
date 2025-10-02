@@ -280,6 +280,9 @@ func (nm *NamespaceMonitor) parseAndNotify(r io.Reader, watcher *namespaceWatche
 				} else if addrHex == "00000000000000000000000000000001" {
 					// Alternative representation of ::1
 					addr = "::1"
+				} else if strings.HasPrefix(addrHex, "0FDF0000000000000000000000000001") {
+					// fdf::1 (sprite container address)
+					addr = "fdf::1"
 				} else {
 					// Log unrecognized IPv6 patterns for debugging
 					if len(addrHex) >= 32 {
@@ -413,6 +416,8 @@ func (nm *NamespaceMonitor) parseSSOutput(output string, watcher *namespaceWatch
 			normalizedAddr = "::"
 		case "::1":
 			normalizedAddr = "::1"
+		case "fdf::1":
+			normalizedAddr = "fdf::1"
 		default:
 			// Skip addresses we don't monitor
 			continue

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -31,6 +32,9 @@ type ActivityMonitor struct {
 	activityCh chan activityEvent
 	stopCh     chan struct{}
 	errCh      chan error // Reports panics from goroutines
+
+	// Ensure Stop() is idempotent
+	stopOnce sync.Once
 }
 
 type activityEvent struct {
@@ -53,6 +57,13 @@ func NewActivityMonitor(ctx context.Context, sys *System, idleAfter time.Duratio
 func (m *ActivityMonitor) Start(ctx context.Context) {
 	tap.Go(m.logger, m.errCh, func() {
 		m.run(ctx)
+	})
+}
+
+// Stop immediately stops the activity monitor loop to prevent further suspend attempts
+func (m *ActivityMonitor) Stop() {
+	m.stopOnce.Do(func() {
+		close(m.stopCh)
 	})
 }
 
@@ -193,17 +204,36 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 	var idleTimer *time.Timer
 	var idleTimerCh <-chan time.Time
 
-	// Start idle timer immediately at boot if no activity
+	// If a main process is configured, wait until it's started before
+	// enabling the idle timer. This avoids suspend attempts during boot.
+	if m.system != nil && m.system.config != nil && len(m.system.config.ProcessCommand) > 0 {
+		// Poll until process is running or context is cancelled
+		for !m.system.IsProcessRunning() {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+	}
+
+	// Start idle timer if there is no active activity after process start (if any)
 	currentCount := atomic.LoadInt64(&m.activeCount)
 	if currentCount == 0 {
 		idleTimer = time.NewTimer(m.idleAfter)
 		idleTimerCh = idleTimer.C
-		m.logger.Info("Starting idle timer at boot", "duration", m.idleAfter)
+		m.logger.Info("Starting idle timer", "duration", m.idleAfter)
 	}
 
 	for {
 		select {
 		case <-ctx.Done():
+			if idleTimer != nil {
+				idleTimer.Stop()
+			}
+			return
+
+		case <-m.stopCh:
 			if idleTimer != nil {
 				idleTimer.Stop()
 			}
@@ -302,10 +332,14 @@ func (m *ActivityMonitor) suspend(inactive time.Duration) {
 
 	// Defer unfreeze and litestream restart to run after suspend/resume detection
 	defer func() {
-		if err := unfreezeFunc(); err != nil {
-			m.logger.Error("Failed to unfreeze filesystem after resume", "error", err)
+		if unfreezeFunc != nil {
+			if err := unfreezeFunc(); err != nil {
+				m.logger.Error("Failed to unfreeze filesystem after resume", "error", err)
+			} else {
+				m.logger.Info("Filesystem unfrozen after resume")
+			}
 		} else {
-			m.logger.Info("Filesystem unfrozen after resume")
+			m.logger.Debug("Skipping unfreeze after resume: overlay not prepared or SyncOverlay failed")
 		}
 
 		// Restart litestream async after resume

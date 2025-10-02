@@ -15,6 +15,9 @@ WORKDIR /build
 COPY go.mod go.sum* ./
 COPY cmd/go.mod cmd/go.sum* ./cmd/
 
+# Copy the SDK submodule since go.mod has a replace directive pointing to it
+COPY sdks/go ./sdks/go
+
 # Download dependencies
 RUN go mod download -x && cd cmd && go mod download -x
 
@@ -93,8 +96,8 @@ RUN mkdir -p /system/etc && \
 127.0.0.1   sprite
 
 # IPv6
-::1         localhost
-::1         sprite
+fdf::1         localhost
+fdf::1         sprite
 EOF
 
 # Download and install gh CLI with appropriate architecture

@@ -32,6 +32,11 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 	s.running = false
 	s.mu.Unlock()
 
+	// Immediately stop the activity monitor to prevent suspend during shutdown
+	if s.ActivityMonitor != nil {
+		s.ActivityMonitor.Stop()
+	}
+
 	// DO NOT cancel the system context here - let components finish their work
 	// Components should respect the shutdownCtx passed to them
 
