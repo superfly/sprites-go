@@ -199,6 +199,115 @@ if err != nil {
 }
 ```
 
+### Port Forwarding
+
+Forward local ports to services running in the sprite:
+
+```go
+// Simple port forwarding (same port locally and remotely)
+session, err := sprite.ProxyPort(ctx, 3000, 3000)
+if err != nil {
+    log.Fatal(err)
+}
+defer session.Close()
+
+// Now localhost:3000 connects to the sprite's port 3000
+// The session runs until Close() is called or context is cancelled
+```
+
+Forward multiple ports:
+
+```go
+sessions, err := sprite.ProxyPorts(ctx, []sprites.PortMapping{
+    {LocalPort: 3000, RemotePort: 3000},
+    {LocalPort: 8080, RemotePort: 80},
+    {LocalPort: 5432, RemotePort: 5432},
+})
+if err != nil {
+    log.Fatal(err)
+}
+defer func() {
+    for _, s := range sessions {
+        s.Close()
+    }
+}()
+```
+
+### Port Notifications and Auto-Forwarding
+
+When running commands, you can receive notifications when ports are opened or closed inside the sprite and automatically set up port forwarding:
+
+```go
+import (
+    "encoding/json"
+    "sync"
+)
+
+// Track active proxy sessions
+var (
+    proxies = make(map[int]*sprites.ProxySession)
+    mu      sync.Mutex
+)
+
+cmd := sprite.Command("npm", "start")
+
+// Handle port notifications
+cmd.TextMessageHandler = func(data []byte) {
+    var notification sprites.PortNotificationMessage
+    if err := json.Unmarshal(data, &notification); err != nil {
+        return
+    }
+
+    switch notification.Type {
+    case "port_opened":
+        fmt.Printf("Port %d opened on %s (PID %d)\n", 
+            notification.Port, notification.Address, notification.PID)
+        
+        // Create proxy session with the specific address
+        session, err := sprite.ProxyPorts(ctx, []sprites.PortMapping{
+            {
+                LocalPort:  notification.Port,
+                RemotePort: notification.Port,
+                RemoteHost: notification.Address, // Use the address from notification
+            },
+        })
+        if err != nil {
+            log.Printf("Failed to create proxy for port %d: %v", notification.Port, err)
+            return
+        }
+        
+        mu.Lock()
+        proxies[notification.Port] = session[0]
+        mu.Unlock()
+        
+        fmt.Printf("Forwarding localhost:%d -> %s:%d\n", 
+            notification.Port, notification.Address, notification.Port)
+
+    case "port_closed":
+        fmt.Printf("Port %d closed (PID %d)\n", notification.Port, notification.PID)
+        
+        mu.Lock()
+        if session, ok := proxies[notification.Port]; ok {
+            session.Close()
+            delete(proxies, notification.Port)
+            fmt.Printf("Stopped forwarding port %d\n", notification.Port)
+        }
+        mu.Unlock()
+    }
+}
+
+// Run the command
+err := cmd.Run()
+
+// Clean up any remaining proxies
+mu.Lock()
+for port, session := range proxies {
+    session.Close()
+    delete(proxies, port)
+}
+mu.Unlock()
+```
+
 ## Complete Example
 
 Here's a complete example showing various features:

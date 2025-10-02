@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -16,6 +17,7 @@ import (
 type ProxySession struct {
 	LocalPort  int
 	RemotePort int
+	RemoteHost string // Optional: specific host to connect to (e.g., "10.0.0.1", "fdf::1"). Defaults to "localhost" if empty.
 
 	listener  net.Listener
 	conn      *websocket.Conn
@@ -32,6 +34,7 @@ type ProxySession struct {
 type PortMapping struct {
 	LocalPort  int
 	RemotePort int
+	RemoteHost string // Optional: specific host to connect to (e.g., "10.0.0.1", "fdf::1"). Defaults to "localhost" if empty.
 }
 
 // ProxyPort creates a proxy session for a single port
@@ -85,6 +88,7 @@ func (c *Client) createProxySession(ctx context.Context, spriteName string, mapp
 	session := &ProxySession{
 		LocalPort:  mapping.LocalPort,
 		RemotePort: mapping.RemotePort,
+		RemoteHost: mapping.RemoteHost,
 		listener:   listener,
 		ctx:        sessionCtx,
 		cancel:     cancel,
@@ -92,6 +96,19 @@ func (c *Client) createProxySession(ctx context.Context, spriteName string, mapp
 		client:     c,
 		spriteName: spriteName,
 	}
+
+	// Log start of proxy listening
+	slog.Default().Debug("Starting proxy listener",
+		"sprite", spriteName,
+		"local", fmt.Sprintf("localhost:%d", session.LocalPort),
+		"remote_host", func() string {
+			if session.RemoteHost != "" {
+				return session.RemoteHost
+			}
+			return "localhost"
+		}(),
+		"remote_port", session.RemotePort,
+	)
 
 	// Start accepting connections
 	go session.acceptLoop()
@@ -176,8 +193,13 @@ func (ps *ProxySession) handleConnection(localConn net.Conn) {
 	defer wsConn.Close()
 
 	// Send initialization message
+	// Use specified RemoteHost if provided, otherwise default to "localhost"
+	host := ps.RemoteHost
+	if host == "" {
+		host = "localhost"
+	}
 	initMsg := ProxyInitMessage{
-		Host: "localhost",
+		Host: host,
 		Port: ps.RemotePort,
 	}
 
@@ -194,6 +216,15 @@ func (ps *ProxySession) handleConnection(localConn net.Conn) {
 	if response.Status != "connected" {
 		return
 	}
+
+	// Log established proxy connection with resolved target
+	slog.Default().Debug("Proxy connection established",
+		"sprite", ps.spriteName,
+		"local", localConn.LocalAddr().String(),
+		"remote_host", host,
+		"remote_port", ps.RemotePort,
+		"target", response.Target,
+	)
 
 	// Start bidirectional copy
 	var wg sync.WaitGroup
