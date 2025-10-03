@@ -1,9 +1,5 @@
 # Default fish configuration for sprite
 
-# Add sprite bin to PATH if it exists
-if test -d /.sprite/bin
-    set -x PATH /.sprite/bin $PATH
-end
 
 # Enable colors
 set -g fish_color_normal normal

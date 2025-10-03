@@ -1,0 +1,6 @@
+#!/bin/sh
+# Wrapper script for kitty terminal emulator
+# kitty should not be copied out of its installation directory
+# This script execs the kitty binary from its proper location
+exec "/.sprite/bin/kitty.app/bin/kitty" "$@"
+

@@ -428,7 +428,19 @@ func (s *System) getCrunInitPID(containerPID int) (int, error) {
 func (s *System) monitorProcess(cmd *exec.Cmd, stdoutBuffer, stderrBuffer *tap.CircularBuffer) {
 	err := cmd.Wait()
 	processRuntime := time.Since(s.processStartTime)
-	s.logger.Info("Process exited", "error", err, "runtime", processRuntime)
+
+	// Extract and store exit code
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+				exitCode = status.ExitStatus()
+			}
+		}
+	}
+	s.processExitCode = exitCode
+
+	s.logger.Info("Process exited", "error", err, "exitCode", exitCode, "runtime", processRuntime)
 
 	// Generate crash report if needed
 	s.generateCrashReport(err, processRuntime, stdoutBuffer, stderrBuffer)
@@ -537,7 +549,7 @@ func (s *System) StopProcess() error {
 	if s.processWaitStarted {
 		// Release the lock while waiting so monitorProcess can update the channels
 		s.processMu.Unlock()
-		
+
 		// Give the monitoring goroutine a moment to process if the process just exited
 		time.Sleep(50 * time.Millisecond)
 
@@ -603,7 +615,7 @@ forceKill:
 	if s.processWaitStarted {
 		// Release lock while waiting so monitorProcess can update the channels
 		s.processMu.Unlock()
-		
+
 		// Give the monitoring goroutine a moment to process if the process just exited
 		time.Sleep(50 * time.Millisecond)
 
@@ -652,7 +664,7 @@ forceKill:
 		// Normal path - wait for done channel
 		// Give a moment for the process to die before starting the wait
 		time.Sleep(50 * time.Millisecond)
-		
+
 		select {
 		case <-done:
 			s.logger.Info("Process killed successfully")

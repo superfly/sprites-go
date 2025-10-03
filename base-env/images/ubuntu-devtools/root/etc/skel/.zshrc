@@ -24,6 +24,3 @@ setopt SHARE_HISTORY
 alias ls='ls --color=auto'
 alias ll='ls -la'
 alias l='ls -l'
-
-# Source sprite environment if available
-[ -r /.sprite/etc/profile.d/sprite.sh ] && . /.sprite/etc/profile.d/sprite.sh

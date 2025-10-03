@@ -87,19 +87,6 @@ RUN sh autogen.sh && \
 RUN mkdir -p /system/.sprite/bin && \
     cp tmux /system/.sprite/bin/
 
-
-# Create /system/etc/hosts with localhost and sprite entries
-RUN mkdir -p /system/etc && \
-    cat > /system/etc/hosts <<EOF
-# IPv4
-127.0.0.1   localhost
-127.0.0.1   sprite
-
-# IPv6
-fdf::1         localhost
-fdf::1         sprite
-EOF
-
 # Download and install gh CLI with appropriate architecture
 RUN ARCH=$(uname -m) && \
     case ${ARCH} in \

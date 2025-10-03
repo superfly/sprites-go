@@ -438,7 +438,18 @@ func attachToSession(ctx *GlobalContext, sprite *sprites.Sprite, sessionID strin
 	execCtx := context.Background()
 	attachCmd := sprite.AttachSessionContext(execCtx, sessionID)
 
-	// Attach always uses TTY
+	// Attach always uses TTY - set up terminal environment variables
+	var envList []string
+	terminalEnvVars := []string{"TERM", "COLORTERM", "LANG", "LC_ALL"}
+	for _, envVar := range terminalEnvVars {
+		if value := os.Getenv(envVar); value != "" {
+			envList = append(envList, envVar+"="+value)
+		}
+	}
+	if len(envList) > 0 {
+		attachCmd.Env = envList
+	}
+
 	attachCmd.Stdin = os.Stdin
 	browserHandler := makeBrowserOSCHandler()
 	oscMonitor := terminal.NewOSCMonitor(browserHandler)

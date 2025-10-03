@@ -185,6 +185,8 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 			"metaDB", metaDB,
 			"volumeName", j.config.VolumeName)
 		if err := j.formatJuiceFS(ctx, metaURL); err != nil {
+			// Close stoppedCh since monitorProcess will never run
+			close(j.stoppedCh)
 			return fmt.Errorf("failed to format JuiceFS: %w", err)
 		}
 		j.logger.Debug("JuiceFS formatting completed", "duration", time.Since(stepStart).Seconds())
@@ -231,10 +233,14 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	// Capture JuiceFS output to parse for readiness
 	stdout, err := j.mountCmd.StdoutPipe()
 	if err != nil {
+		// Close stoppedCh since monitorProcess will never run
+		close(j.stoppedCh)
 		return fmt.Errorf("failed to create stdout pipe: %w", err)
 	}
 	stderr, err := j.mountCmd.StderrPipe()
 	if err != nil {
+		// Close stoppedCh since monitorProcess will never run
+		close(j.stoppedCh)
 		return fmt.Errorf("failed to create stderr pipe: %w", err)
 	}
 
@@ -251,6 +257,8 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 
 	// Start the mount command
 	if err := j.mountCmd.Start(); err != nil {
+		// Close stoppedCh since monitorProcess will never run
+		close(j.stoppedCh)
 		return fmt.Errorf("failed to start JuiceFS mount: %w", err)
 	}
 	j.logger.Debug("JuiceFS mount command startup completed", "duration", time.Since(stepStart).Seconds())

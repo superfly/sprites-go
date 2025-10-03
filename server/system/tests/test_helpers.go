@@ -13,6 +13,14 @@ import (
 	"github.com/superfly/sprite-env/server/system"
 )
 
+// requireDockerTest skips the test if not running in Docker test container
+func requireDockerTest(t *testing.T) {
+	t.Helper()
+	if os.Getenv("SPRITE_TEST_DOCKER") != "1" {
+		t.Skip("This test requires Docker test container (run via 'make test')")
+	}
+}
+
 // TestConfig creates a minimal test configuration
 func TestConfig(testDir string) *system.Config {
 	// Configure JuiceFS and overlay for tests to enable checkpoint manager
@@ -36,6 +44,41 @@ func TestConfig(testDir string) *system.Config {
 		OverlayLowerPaths:              []string{lowerPath},
 		OverlayTargetPath:              "/mnt/newroot",
 	}
+}
+
+// RegisterSystemCleanup registers a cleanup handler to ensure the system is properly shut down
+// This should be called immediately after creating a system instance in tests
+func RegisterSystemCleanup(t *testing.T, sys *system.System) {
+	t.Helper()
+	t.Cleanup(func() {
+		// Always try to shutdown, even if test failed or system already stopped
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		t.Logf("Test cleanup: shutting down system")
+		if err := sys.Shutdown(ctx); err != nil {
+			t.Logf("Cleanup shutdown error (may be expected if already shut down): %v", err)
+		}
+
+		// Extra verification: manually unmount any leftover mounts
+		if sys.OverlayManager != nil {
+			if sys.OverlayManager.IsOverlayFSMounted() {
+				t.Logf("Cleanup: OverlayFS still mounted, forcing unmount")
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				_ = sys.OverlayManager.Unmount(cleanupCtx)
+			}
+		}
+
+		if sys.JuiceFS != nil {
+			if sys.JuiceFS.IsMounted() {
+				t.Logf("Cleanup: JuiceFS still mounted, forcing stop")
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer cancel()
+				_ = sys.JuiceFS.Stop(cleanupCtx)
+			}
+		}
+	})
 }
 
 // TestConfigWithLogLevel creates a test configuration with custom log level

@@ -1,0 +1,8 @@
+# IPv4
+127.0.0.1   localhost
+127.0.0.1   sprite
+
+# IPv6
+fdf::1      localhost
+fdf::1      sprite
+

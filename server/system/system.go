@@ -160,17 +160,18 @@ func (s *System) monitorProcessLoop() {
 			continue
 		}
 
+		// Wait for process to exit
+		// Note: monitorProcess() has already stored the exit code in s.processExitCode
 		err := s.WaitForProcess()
-		exitCode := 0
 		if err != nil {
-			s.logger.Error("Container process exited with error", "error", err)
-			// Extract exit code from error if available
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
-					exitCode = status.ExitStatus()
-					s.logger.Info("Container process exit code", "exitCode", exitCode)
-				}
-			}
+			s.logger.Error("Error waiting for process", "error", err)
+		}
+
+		// Get the exit code that was stored by monitorProcess()
+		exitCode := s.processExitCode
+
+		if exitCode != 0 {
+			s.logger.Info("Container process exited with code", "exitCode", exitCode)
 		} else {
 			s.logger.Info("Container process exited normally")
 		}
@@ -189,8 +190,7 @@ func (s *System) monitorProcessLoop() {
 			s.logger.Info("Server is still running and accepting API requests")
 		} else {
 			s.logger.Warn("Container process exited unexpectedly, triggering shutdown sequence", "exitCode", exitCode)
-			// Store the exit code in case we need it later
-			s.processExitCode = exitCode
+			// Exit code already stored by monitorProcess(), just trigger shutdown
 
 			// Trigger shutdown by closing the shutdown channel
 			s.shutdownTriggeredOnce.Do(func() {

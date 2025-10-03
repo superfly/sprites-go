@@ -1,54 +1,42 @@
 package commands
 
 import (
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
-// detectParentShell detects the shell that invoked the sprite command
-func detectParentShell() string {
-	// Check shell-specific environment variables first
-	// These are set when running inside the respective shell
-	if os.Getenv("BASH_VERSION") != "" {
-		return "/bin/bash"
-	}
-	if os.Getenv("ZSH_VERSION") != "" {
-		return "/bin/zsh"
-	}
-	if os.Getenv("FISH_VERSION") != "" {
-		return "/usr/bin/fish"
-	}
-	// tcsh sets tcsh and version variables
-	if os.Getenv("tcsh") != "" {
-		return "/bin/tcsh"
-	}
-	// ksh sets KSH_VERSION
-	if os.Getenv("KSH_VERSION") != "" {
-		return "/bin/ksh"
+// getTerminfoData reads the local terminfo database entry for the current terminal
+func getTerminfoData() string {
+	term := os.Getenv("TERM")
+	if term == "" {
+		return ""
 	}
 
-	// Fall back to SHELL environment variable (user's default shell)
-	// but only if it's one of our supported shells
-	if shell := os.Getenv("SHELL"); shell != "" {
-		shellName := filepath.Base(shell)
-		switch shellName {
-		case "bash", "zsh", "fish", "tcsh", "ksh":
-			// Check common locations for the shell
-			for _, prefix := range []string{"/bin/", "/usr/bin/"} {
-				fullPath := prefix + shellName
-				if _, err := os.Stat(fullPath); err == nil {
-					return fullPath
-				}
-			}
-			// If we can't find it in standard locations, use the original path
-			return shell
+	// Try to find the terminfo file in common locations
+	// The terminfo database uses the first letter of TERM as a subdirectory
+	termLetter := string(term[0])
+
+	// Common terminfo locations
+	terminfoLocations := []string{
+		filepath.Join(os.Getenv("HOME"), ".terminfo", termLetter, term),
+		filepath.Join("/usr/share/terminfo", termLetter, term),
+		filepath.Join("/lib/terminfo", termLetter, term),
+		filepath.Join("/etc/terminfo", termLetter, term),
+	}
+
+	// Try each location
+	for _, path := range terminfoLocations {
+		if data, err := os.ReadFile(path); err == nil {
+			// Encode to base64 for safe transport
+			return base64.StdEncoding.EncodeToString(data)
 		}
 	}
 
-	// Default to bash
-	return "/bin/bash"
+	return ""
 }
 
 // ConsoleCommand handles the console command - opens an interactive shell
@@ -66,7 +54,7 @@ func ConsoleCommand(ctx *GlobalContext, args []string) {
 		},
 		Notes: []string{
 			"Opens an interactive shell with a TTY allocated",
-			"Automatically detects and uses your current shell",
+			"Uses shell environment variables to determine which shell to use",
 			"Supported shells: bash, zsh, fish, tcsh, ksh",
 			"Falls back to bash if shell detection fails",
 			"When using -detachable, creates a tmux session that can be detached and reattached.",
@@ -92,25 +80,54 @@ func ConsoleCommand(ctx *GlobalContext, args []string) {
 		os.Exit(1)
 	}
 
+	// Collect shell-related environment variables to pass through
+	var envVars []string
+	shellEnvVars := []string{
+		"BASH_VERSION",
+		"ZSH_VERSION",
+		"FISH_VERSION",
+		"KSH_VERSION",
+		"tcsh",
+		"SHELL",
+	}
+
+	for _, envVar := range shellEnvVars {
+		if value := os.Getenv(envVar); value != "" {
+			envVars = append(envVars, envVar+"="+value)
+		}
+	}
+
+	// Read and encode local terminfo if available
+	if terminfoData := getTerminfoData(); terminfoData != "" {
+		envVars = append(envVars, "SPRITE_TERMINFO_DATA="+terminfoData)
+	}
+
 	// Build the exec command arguments
 	execArgs := []string{}
 
-	// Always use tty for console, with detected shell
-	detectedShell := detectParentShell()
-	execArgs = append(execArgs, "-tty", detectedShell, "--login")
+	// If org/sprite were specified, pass them through
+	if flags.Org != "" {
+		execArgs = append(execArgs, "-org", flags.Org)
+	}
+	if flags.Sprite != "" {
+		execArgs = append(execArgs, "-sprite", flags.Sprite)
+	}
+
+	// Add environment variables
+	if len(envVars) > 0 {
+		execArgs = append(execArgs, "-env", strings.Join(envVars, ","))
+	}
+
+	// Always use tty for console
+	execArgs = append(execArgs, "-tty")
 
 	// Pass through detachable if requested
 	if *detachable {
 		execArgs = append(execArgs, "-detachable")
 	}
 
-	// If org/sprite were specified, pass them through
-	if flags.Org != "" {
-		execArgs = append([]string{"-org", flags.Org}, execArgs...)
-	}
-	if flags.Sprite != "" {
-		execArgs = append([]string{"-sprite", flags.Sprite}, execArgs...)
-	}
+	// Execute the sprite-console script which will handle shell selection
+	execArgs = append(execArgs, "/.sprite/bin/sprite-console")
 
 	// Call ExecCommand with the constructed arguments
 	ExecCommand(ctx, execArgs)

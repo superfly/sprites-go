@@ -19,8 +19,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libffi-dev libyaml-dev gosu xdg-utils \
         tmux rsync zsh fish tcsh ksh \
     && locale-gen en_US.UTF-8 \
-    && apt-get clean
+    && apt-get clean \
+    && curl -L https://sw.kovidgoyal.net/kitty/installer.sh | sh /dev/stdin launch=n dest=/.sprite/bin/
 # we are keeping indexes for future apts
+# Note: kitty wrapper script is provided in root/.sprite/bin/kitty
 
 # --- setup environment ---
 ENV LANG=en_US.UTF-8 \
@@ -98,8 +100,8 @@ COPY root/ /
 # The shell config files are copied from root/etc/skel/* during COPY root/ /
 RUN chmod 644 /etc/skel/.* 2>/dev/null || true
 
-# Make language dependency installer executable
-RUN chmod +x /.sprite/bin/install-language-deps
+# Make language dependency installer executable if it exists
+RUN chmod +x /.sprite/bin/install-language-deps 2>/dev/null || true
 
 # Source sprite scripts in /etc/profile for login shells
 RUN echo '' >> /etc/profile && \
@@ -118,7 +120,7 @@ USER sprite
 ENV LANG=en_US.UTF-8
 
 # --- user env ---
-ENV BROWSER="/usr/local/bin/sprite-browser" \
+ENV BROWSER="/.sprite/bin/sprite-browser" \
     HOME="/home/sprite"
 
 WORKDIR /home/sprite
