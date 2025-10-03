@@ -170,6 +170,13 @@ func (s *Server) SetAdminChannel(enricher ContextEnricher) {
 	s.contextEnricher = enricher
 }
 
+// SetTMUXManager sets the TMUX manager on the handlers
+func (s *Server) SetTMUXManager(tmuxManager *terminal.TMUXManager) {
+	if s.handlers != nil {
+		s.handlers.SetTMUXManager(tmuxManager)
+	}
+}
+
 // SetActivityObserver sets a callback to observe request start/end
 func (s *Server) SetActivityObserver(observe func(start bool)) {
 	s.activityObs = observe

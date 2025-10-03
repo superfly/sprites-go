@@ -68,8 +68,15 @@ type TMUXManager struct {
 
 // NewTMUXManager creates a new TMUXManager
 func NewTMUXManager(ctx context.Context) *TMUXManager {
+	logger := tap.Logger(ctx)
+	if logger == nil {
+		logger = slog.Default()
+	}
+	// Force debug logging for tmux manager
+	logger = logger.With("component", "tmux_manager")
+
 	tm := &TMUXManager{
-		logger:         tap.Logger(ctx),
+		logger:         logger,
 		nextID:         -1,
 		socketPath:     "/.sprite/tmp/exec-tmux",
 		configPath:     "/.sprite/etc/tmux.conf",
@@ -77,6 +84,9 @@ func NewTMUXManager(ctx context.Context) *TMUXManager {
 		monitorStartCh: make(chan struct{}, 1),
 		paneCallbacks:  make(map[string]PaneLifecycleCallback),
 	}
+
+	tm.logger.Debug("TMUXManager created")
+
 	// Initialize nextID based on existing sessions
 	tm.initializeNextID()
 
@@ -539,16 +549,11 @@ func (tm *TMUXManager) GetActiveSessionsInfo() []SessionActivityInfo {
 		}
 
 		info := SessionActivityInfo{
-			SessionID:    session.ID,
-			Name:         session.Name,
-			IsActive:     stats.IsActive,
-			LastActivity: stats.LastActivity,
-		}
-
-		// Calculate bytes per second
-		duration := now.Sub(stats.StartTime).Seconds()
-		if duration > 0 {
-			info.BytesPerSecond = float64(stats.ByteCount) / duration
+			SessionID:      session.ID,
+			Name:           session.Name,
+			IsActive:       stats.IsActive,
+			LastActivity:   stats.LastActivity,
+			BytesPerSecond: stats.RecentDataRate, // Use rolling rate over last 10 seconds
 		}
 
 		result = append(result, info)
@@ -567,37 +572,62 @@ func (tm *TMUXManager) GetAllSessionActivityInfo() map[string]*SessionActivityIn
 		activityStats = make(map[string]*tmux.ActivityStats)
 	}
 
+	tm.logger.Debug("GetAllSessionActivityInfo called",
+		"activityStatsCount", len(activityStats),
+		"activityStatsKeys", func() []string {
+			keys := make([]string, 0, len(activityStats))
+			for k := range activityStats {
+				keys = append(keys, k)
+			}
+			return keys
+		}())
+
 	// Get the mapping between tmux session IDs and user session IDs
 	mapping := tm.getSessionIDMapping()
 
+	tm.logger.Debug("Session ID mapping",
+		"mapping", mapping,
+		"mappingCount", len(mapping))
+
 	result := make(map[string]*SessionActivityInfo)
-	now := time.Now()
 
 	for tmuxSessionID, stats := range activityStats {
 		// Map from tmux session ID (e.g., "1") to user session ID (e.g., "0")
 		userSessionID, ok := mapping[tmuxSessionID]
 		if !ok {
 			// If we can't map it, skip this session
-			tm.logger.Debug("No mapping found for tmux session ID",
-				"tmuxSessionID", tmuxSessionID)
+			tm.logger.Warn("No mapping found for tmux session ID",
+				"tmuxSessionID", tmuxSessionID,
+				"availableMappings", mapping)
 			continue
 		}
 
-		info := &SessionActivityInfo{
-			SessionID:    userSessionID,
-			Name:         fmt.Sprintf("sprite-exec-%s", userSessionID),
-			IsActive:     stats.IsActive,
-			LastActivity: stats.LastActivity,
-		}
+		tm.logger.Debug("Mapped session activity",
+			"tmuxSessionID", tmuxSessionID,
+			"userSessionID", userSessionID,
+			"isActive", stats.IsActive,
+			"bytesPerSecond", stats.RecentDataRate)
 
-		// Calculate bytes per second
-		duration := now.Sub(stats.StartTime).Seconds()
-		if duration > 0 {
-			info.BytesPerSecond = float64(stats.ByteCount) / duration
+		info := &SessionActivityInfo{
+			SessionID:      userSessionID,
+			Name:           fmt.Sprintf("sprite-exec-%s", userSessionID),
+			IsActive:       stats.IsActive,
+			LastActivity:   stats.LastActivity,
+			BytesPerSecond: stats.RecentDataRate, // Use rolling rate over last 10 seconds
 		}
 
 		result[userSessionID] = info
 	}
+
+	tm.logger.Debug("GetAllSessionActivityInfo returning",
+		"resultCount", len(result),
+		"resultKeys", func() []string {
+			keys := make([]string, 0, len(result))
+			for k := range result {
+				keys = append(keys, k)
+			}
+			return keys
+		}())
 
 	return result
 }
@@ -628,13 +658,17 @@ func (tm *TMUXManager) getSessionIDMapping() map[string]string {
 	if err != nil {
 		// Log the error for debugging
 		if tm.logger != nil {
-			tm.logger.Debug("Failed to get session ID mapping",
+			tm.logger.Warn("Failed to get session ID mapping",
 				"error", err,
 				"cmd", cmd.String())
 		}
 		// If tmux server is not running, return empty mapping
 		return make(map[string]string)
 	}
+
+	tm.logger.Debug("Got tmux list-sessions output",
+		"output", string(output),
+		"cmd", cmd.String())
 
 	mapping := make(map[string]string)
 	lines := strings.Split(string(output), "\n")
@@ -644,18 +678,39 @@ func (tm *TMUXManager) getSessionIDMapping() map[string]string {
 			continue
 		}
 
+		tm.logger.Debug("Parsing session line", "line", line)
+
 		parts := strings.Split(line, ":")
 		if len(parts) >= 2 {
 			tmuxSessionID := strings.TrimPrefix(parts[0], "$") // Remove $ prefix
 			sessionName := parts[1]
 
+			tm.logger.Debug("Parsed session parts",
+				"rawTmuxID", parts[0],
+				"cleanTmuxID", tmuxSessionID,
+				"sessionName", sessionName)
+
 			// Extract user session ID from sprite-exec-X name
 			if strings.HasPrefix(sessionName, "sprite-exec-") {
 				userSessionID := strings.TrimPrefix(sessionName, "sprite-exec-")
 				mapping[tmuxSessionID] = userSessionID
+				tm.logger.Debug("Added to mapping",
+					"tmuxSessionID", tmuxSessionID,
+					"userSessionID", userSessionID)
+			} else {
+				tm.logger.Debug("Skipping non-sprite-exec session",
+					"sessionName", sessionName)
 			}
+		} else {
+			tm.logger.Warn("Unexpected line format",
+				"line", line,
+				"parts", parts)
 		}
 	}
+
+	tm.logger.Debug("Final mapping created",
+		"mapping", mapping,
+		"size", len(mapping))
 
 	return mapping
 }
@@ -693,7 +748,7 @@ func (tm *TMUXManager) StartActivityMonitor(ctx context.Context) error {
 		return nil
 	}
 
-	// Create window monitor
+	// Create window monitor with the same context so it gets the logger
 	tm.logger.Debug("Creating new window monitor",
 		"monitorSession", "sprite-monitor",
 		"socketPath", tm.socketPath,
@@ -705,7 +760,7 @@ func (tm *TMUXManager) StartActivityMonitor(ctx context.Context) error {
 		WithCmdPrefix(tm.cmdPrefix)
 
 	// Start the window monitor
-	tm.logger.Debug("About to call windowMonitor.Start()")
+	tm.logger.Debug("Starting window monitor")
 	if err := tm.windowMonitor.Start(ctx); err != nil {
 		tm.logger.Error("Failed to start tmux window monitor",
 			"error", err,
@@ -735,7 +790,7 @@ func (tm *TMUXManager) processWindowMonitorEvents(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			tm.logger.Debug("Window monitor event processor stopped due to context cancellation")
+			tm.logger.Info("Window monitor event processor stopped due to context cancellation")
 			return
 		case event, ok := <-eventChan:
 			if !ok {
@@ -743,50 +798,69 @@ func (tm *TMUXManager) processWindowMonitorEvents(ctx context.Context) {
 				return
 			}
 
+			// Only log state change events at INFO level, activity events at DEBUG
+			if event.EventType == "activity" {
+				tm.logger.Debug("Received activity event",
+					"originalSession", event.OriginalSession,
+					"windowID", event.WindowID,
+					"paneID", event.PaneID)
+			} else {
+				tm.logger.Info("Received window monitor event",
+					"eventType", event.EventType,
+					"originalSession", event.OriginalSession,
+					"windowID", event.WindowID,
+					"paneID", event.PaneID)
+			}
+
 			// Extract session ID from original session format (e.g., "$1" -> "1")
 			sessionID := strings.TrimPrefix(event.OriginalSession, "$")
 			if sessionID == "" || !strings.HasPrefix(event.OriginalSession, "$") {
+				tm.logger.Debug("Skipping event with invalid session format",
+					"originalSession", event.OriginalSession)
 				continue
 			}
 
 			switch event.EventType {
 			case "active":
 				// Session became active
-				tm.logger.Debug("Session became active", "sessionID", sessionID)
+				tm.logger.Info("Session became active", "sessionID", sessionID)
 				select {
 				case tm.activityChan <- SessionActivity{
 					SessionID: sessionID,
 					Active:    true,
 					Type:      "window_activity",
 				}:
+					tm.logger.Debug("Sent active event to activity channel", "sessionID", sessionID)
 				default:
-					tm.logger.Debug("Activity channel full, dropping event")
+					tm.logger.Warn("Activity channel full, dropping active event", "sessionID", sessionID)
 				}
 
 			case "inactive":
 				// Session became inactive
-				tm.logger.Debug("Session became inactive", "sessionID", sessionID)
+				tm.logger.Info("Session became inactive", "sessionID", sessionID)
 				select {
 				case tm.activityChan <- SessionActivity{
 					SessionID: sessionID,
 					Active:    false,
 					Type:      "window_idle",
 				}:
+					tm.logger.Debug("Sent inactive event to activity channel", "sessionID", sessionID)
 				default:
-					tm.logger.Debug("Activity channel full, dropping event")
+					tm.logger.Warn("Activity channel full, dropping inactive event", "sessionID", sessionID)
 				}
 
 			case "closed":
 				// Session/window closed
-				tm.logger.Debug("Session ended", "sessionID", sessionID)
+				tm.logger.Info("Session ended", "sessionID", sessionID)
 				select {
 				case tm.activityChan <- SessionActivity{
 					SessionID: sessionID,
 					Active:    false,
 					Type:      "session_end",
 				}:
+					tm.logger.Debug("Sent closed event to activity channel", "sessionID", sessionID)
 				default:
-					tm.logger.Debug("Activity channel full, dropping event")
+					tm.logger.Warn("Activity channel full, dropping closed event", "sessionID", sessionID)
 				}
 			}
 		}

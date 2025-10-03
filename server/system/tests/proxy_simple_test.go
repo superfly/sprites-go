@@ -13,6 +13,7 @@ import (
 
 	libapi "github.com/superfly/sprite-env/lib/api"
 	"github.com/superfly/sprite-env/pkg/tap"
+	"github.com/superfly/sprite-env/pkg/terminal"
 	"github.com/superfly/sprite-env/server/api"
 )
 
@@ -31,7 +32,7 @@ func TestProxyHandlerDirect(t *testing.T) {
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)
 	mockSys := &simpleSystemManager{}
-	config := api.HandlerConfig{}
+	config := api.HandlerConfig{TMUXManager: terminal.NewTMUXManager(ctx)}
 	h := api.NewHandlers(ctx, mockSys, config)
 
 	t.Run("MethodValidation", func(t *testing.T) {
@@ -99,9 +100,11 @@ func TestProxyWithAuthentication(t *testing.T) {
 
 	// Create handlers with auth
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, logger)
 	mockSys := &simpleSystemManager{}
-	config := api.HandlerConfig{}
-	h := api.NewHandlers(logger, mockSys, config)
+	config := api.HandlerConfig{TMUXManager: terminal.NewTMUXManager(ctx)}
+	h := api.NewHandlers(ctx, mockSys, config)
 
 	// Create auth middleware
 	apiToken := "test-token-123"
@@ -166,9 +169,11 @@ func TestProxyWithAuthentication(t *testing.T) {
 // TestProxyPortParsing tests various port parsing scenarios
 func TestProxyPortParsing(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, logger)
 	mockSys := &simpleSystemManager{}
-	config := api.HandlerConfig{}
-	h := api.NewHandlers(logger, mockSys, config)
+	config := api.HandlerConfig{TMUXManager: terminal.NewTMUXManager(ctx)}
+	h := api.NewHandlers(ctx, mockSys, config)
 
 	tests := []struct {
 		name         string

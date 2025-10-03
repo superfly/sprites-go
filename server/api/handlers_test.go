@@ -11,18 +11,21 @@ import (
 	"time"
 
 	"github.com/superfly/sprite-env/pkg/tap"
+	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
 // Test NewHandlers constructor
 func TestNewHandlers(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, logger)
+
 	config := HandlerConfig{
 		MaxWaitTime: 30 * time.Second,
+		TMUXManager: terminal.NewTMUXManager(ctx),
 	}
 	mockSys := &mockSystemManager{}
 
-	ctx := context.Background()
-	ctx = tap.WithLogger(ctx, logger)
 	h := NewHandlers(ctx, mockSys, config)
 
 	if h == nil {
@@ -33,10 +36,11 @@ func TestNewHandlers(t *testing.T) {
 // Test HandleCheckpoint validates request method
 func TestHandleCheckpointMethod(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	config := HandlerConfig{}
-	mockSys := newMockSystemManager()
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)
+
+	config := HandlerConfig{TMUXManager: terminal.NewTMUXManager(ctx)}
+	mockSys := newMockSystemManager()
 	h := NewHandlers(ctx, mockSys, config)
 
 	req := httptest.NewRequest(http.MethodGet, "/checkpoint", nil)
@@ -56,10 +60,11 @@ func TestHandleCheckpointMethod(t *testing.T) {
 // Test HandleCheckpointRestore validates request method
 func TestHandleCheckpointRestoreMethod(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	config := HandlerConfig{}
-	mockSys := newMockSystemManager()
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)
+
+	config := HandlerConfig{TMUXManager: terminal.NewTMUXManager(ctx)}
+	mockSys := newMockSystemManager()
 	h := NewHandlers(ctx, mockSys, config)
 
 	req := httptest.NewRequest(http.MethodGet, "/checkpoints/test-cp/restore", nil)
@@ -79,10 +84,11 @@ func TestHandleCheckpointRestoreMethod(t *testing.T) {
 // Test HandleProxy validates request method
 func TestHandleProxyMethod(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	config := HandlerConfig{}
-	mockSys := &mockSystemManager{}
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)
+
+	config := HandlerConfig{TMUXManager: terminal.NewTMUXManager(ctx)}
+	mockSys := &mockSystemManager{}
 	h := NewHandlers(ctx, mockSys, config)
 
 	// Test non-GET method (POST should fail)
@@ -103,10 +109,11 @@ func TestHandleProxyMethod(t *testing.T) {
 // Test HandleProxy with GET method - will fail at WebSocket upgrade but method should be allowed
 func TestHandleProxyGetMethod(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	config := HandlerConfig{}
-	mockSys := &mockSystemManager{}
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)
+
+	config := HandlerConfig{TMUXManager: terminal.NewTMUXManager(ctx)}
+	mockSys := &mockSystemManager{}
 	h := NewHandlers(ctx, mockSys, config)
 
 	req := httptest.NewRequest(http.MethodGet, "/proxy", nil)
@@ -129,10 +136,11 @@ func TestHandleProxyGetMethod(t *testing.T) {
 // Test HandleDebugCreateZombie validates request method
 func TestHandleDebugCreateZombieMethod(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	config := HandlerConfig{}
-	mockSys := &mockSystemManager{}
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)
+
+	config := HandlerConfig{TMUXManager: terminal.NewTMUXManager(ctx)}
+	mockSys := &mockSystemManager{}
 	h := NewHandlers(ctx, mockSys, config)
 
 	req := httptest.NewRequest(http.MethodGet, "/debug/create-zombie", nil)
@@ -152,10 +160,11 @@ func TestHandleDebugCreateZombieMethod(t *testing.T) {
 // Test HandleDebugCheckProcess validates request method
 func TestHandleDebugCheckProcessMethod(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	config := HandlerConfig{}
-	mockSys := &mockSystemManager{}
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)
+
+	config := HandlerConfig{TMUXManager: terminal.NewTMUXManager(ctx)}
+	mockSys := &mockSystemManager{}
 	h := NewHandlers(ctx, mockSys, config)
 
 	req := httptest.NewRequest(http.MethodPost, "/debug/check-process", nil)

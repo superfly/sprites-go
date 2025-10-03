@@ -43,6 +43,21 @@ run_in_container() {
     local name="$1"
     local cmd="$2"
     echo "Running $name tests in container..."
+    
+    # Build environment variables
+    ENV_VARS=(
+        -e SPRITE_TEST_DOCKER=1
+        -e SPRITE_URL="http://localhost:8080"
+        -e SPRITE_TOKEN="test-token-12345"
+        -e SPRITE_DISABLE_ADMIN_CHANNEL=true
+        -e SPRITE_TEST_QUIET_PHX=true
+    )
+    
+    # Pass through SPRITE_LOG_LEVEL if set
+    if [ -n "${SPRITE_LOG_LEVEL:-}" ]; then
+        ENV_VARS+=(-e SPRITE_LOG_LEVEL="$SPRITE_LOG_LEVEL")
+    fi
+    
     docker run \
         --rm \
         --init \
@@ -51,11 +66,7 @@ run_in_container() {
         -v "$(pwd)":/workspace \
         -v sprite-go-home:/root \
         -v sprite-go-mod:/go \
-        -e SPRITE_TEST_DOCKER=1 \
-        -e SPRITE_URL="http://localhost:8080" \
-        -e SPRITE_TOKEN="test-token-12345" \
-        -e SPRITE_DISABLE_ADMIN_CHANNEL=true \
-        -e SPRITE_TEST_QUIET_PHX=true \
+        "${ENV_VARS[@]}" \
         "$IMAGE_NAME" \
         bash -lc "$cmd"
 }

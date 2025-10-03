@@ -434,6 +434,19 @@ func (h *Handlers) handleListExecSessions(w http.ResponseWriter, r *http.Request
 	// Get activity info for all sessions
 	activityMap := h.tmuxManager.GetAllSessionActivityInfo()
 
+	h.logger.Debug("Got activity info from TMUXManager",
+		"activityMapSize", len(activityMap),
+		"sessionsCount", len(sessions))
+
+	// Log the activity map for debugging
+	for sessionID, activity := range activityMap {
+		h.logger.Debug("Activity map entry",
+			"sessionID", sessionID,
+			"isActive", activity.IsActive,
+			"bytesPerSecond", activity.BytesPerSecond,
+			"lastActivity", activity.LastActivity)
+	}
+
 	// Merge session info with activity data
 	type SessionWithActivity struct {
 		terminal.SessionInfo
@@ -451,9 +464,23 @@ func (h *Handlers) handleListExecSessions(w http.ResponseWriter, r *http.Request
 		}
 
 		if activity, ok := activityMap[session.ID]; ok {
+			h.logger.Debug("Found activity for session",
+				"sessionID", session.ID,
+				"isActive", activity.IsActive,
+				"bytesPerSecond", activity.BytesPerSecond)
 			s.BytesPerSecond = activity.BytesPerSecond
 			s.IsActive = activity.IsActive
 			s.LastActivity = &activity.LastActivity
+		} else {
+			h.logger.Debug("No activity found for session",
+				"sessionID", session.ID,
+				"availableKeys", func() []string {
+					keys := make([]string, 0, len(activityMap))
+					for k := range activityMap {
+						keys = append(keys, k)
+					}
+					return keys
+				}())
 		}
 
 		sessionsWithActivity = append(sessionsWithActivity, s)

@@ -149,7 +149,7 @@ func ApiCommand(ctx *GlobalContext, args []string) {
 	}
 	slog.Default().Debug("API command org resolution", "flags.Org", flags.Org, "ctx.OrgOverride", ctx.OrgOverride, "finalOrgOverride", orgOverride)
 
-	org, err := EnsureOrg(ctx.ConfigMgr, orgOverride)
+	org, err := getOrganization(ctx, orgOverride)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

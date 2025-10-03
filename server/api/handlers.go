@@ -37,21 +37,17 @@ type HandlerConfig struct {
 	ExecWrapperCommand []string
 	ProxyLocalhostIPv4 string
 	ProxyLocalhostIPv6 string
-	TMUXManager        *terminal.TMUXManager // Optional, will be created if nil
+	TMUXManager        *terminal.TMUXManager // Optional - can be set later via SetTMUXManager
 }
 
 // NewHandlers creates a new Handlers instance
 func NewHandlers(ctx context.Context, system SystemManager, config HandlerConfig) *Handlers {
 	logger := tap.Logger(ctx)
 
-	// Use provided TMUXManager or create a new one
+	// TMUXManager is optional - it may be set later
 	tmuxManager := config.TMUXManager
 	if tmuxManager == nil {
-		tmuxManager = terminal.NewTMUXManager(ctx)
-		// Set the command prefix for executing tmux in the container
-		if len(config.ExecWrapperCommand) > 0 {
-			tmuxManager.SetCmdPrefix(config.ExecWrapperCommand)
-		}
+		logger.Warn("NewHandlers called without TMUXManager - terminal operations will be unavailable until set")
 	}
 
 	return &Handlers{
@@ -62,6 +58,14 @@ func NewHandlers(ctx context.Context, system SystemManager, config HandlerConfig
 		proxyLocalhostIPv4: config.ProxyLocalhostIPv4,
 		proxyLocalhostIPv6: config.ProxyLocalhostIPv6,
 		tmuxManager:        tmuxManager,
+	}
+}
+
+// SetTMUXManager sets the TMUX manager (can be called after handlers are created)
+func (h *Handlers) SetTMUXManager(tmuxManager *terminal.TMUXManager) {
+	h.tmuxManager = tmuxManager
+	if tmuxManager != nil {
+		h.logger.Info("TMUXManager set on handlers")
 	}
 }
 

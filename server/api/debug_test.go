@@ -14,6 +14,7 @@ import (
 
 	"github.com/superfly/sprite-env/lib/api"
 	"github.com/superfly/sprite-env/pkg/tap"
+	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
 // mockSystemManager implements SystemManager for testing
@@ -181,10 +182,10 @@ func (m *mockSystemManager) Wait() error {
 // TestHandleDebugCreateZombie tests the debug zombie creation handler
 func TestHandleDebugCreateZombie(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	config := HandlerConfig{}
-	mockSys := newMockSystemManager()
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)
+	config := HandlerConfig{TMUXManager: terminal.NewTMUXManager(ctx)}
+	mockSys := newMockSystemManager()
 	h := NewHandlers(ctx, mockSys, config)
 
 	tests := []struct {
@@ -237,10 +238,10 @@ func TestHandleDebugCreateZombie(t *testing.T) {
 // TestHandleDebugCheckProcess tests the debug process check handler
 func TestHandleDebugCheckProcess(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	config := HandlerConfig{}
-	mockSys := newMockSystemManager()
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)
+	config := HandlerConfig{TMUXManager: terminal.NewTMUXManager(ctx)}
+	mockSys := newMockSystemManager()
 	h := NewHandlers(ctx, mockSys, config)
 
 	tests := []struct {

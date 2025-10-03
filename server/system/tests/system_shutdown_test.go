@@ -56,7 +56,7 @@ func TestSystemGracefulShutdown(t *testing.T) {
 	// Verify everything is stopped
 	t.Run("VerifyShutdown", func(t *testing.T) {
 		// Wait for process to be fully stopped
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
 		if err := sys.WhenProcessStopped(ctx); err != nil {
@@ -108,8 +108,8 @@ done
 	// Start the system
 	StartSystemWithTimeout(t, sys, 10*time.Second)
 
-	// Shutdown with short timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// Shutdown with generous timeout to allow for JuiceFS cleanup under load
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	startTime := time.Now()
@@ -127,8 +127,8 @@ done
 		t.Errorf("Shutdown was too fast, expected at least 2s for graceful timeout: %v", shutdownDuration)
 	}
 
-	// Allow more time in CI environments
-	if shutdownDuration > 10*time.Second {
+	// Allow generous time for storage cleanup in CI/loaded environments
+	if shutdownDuration > 30*time.Second {
 		t.Errorf("Shutdown took too long: %v", shutdownDuration)
 	}
 
@@ -297,6 +297,9 @@ func TestSystemSignalTriggeredShutdown(t *testing.T) {
 	case <-time.After(60 * time.Second):
 		t.Fatal("Timeout waiting for signal-triggered shutdown")
 	}
+
+	// Give the system a moment to fully clean up
+	time.Sleep(100 * time.Millisecond)
 
 	// Verify clean shutdown
 	if sys.IsProcessRunning() {

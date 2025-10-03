@@ -126,6 +126,12 @@ func (s *System) Boot(ctx context.Context) error {
 	}
 	s.logger.Info("Services manager started")
 
+	// Update API server with TMUXManager now that services are initialized
+	if s.APIServer != nil && s.TMUXManager != nil {
+		s.APIServer.SetTMUXManager(s.TMUXManager)
+		s.logger.Info("TMUXManager set on API server")
+	}
+
 	// Phase 6: Start activity monitor (after process starts)
 	s.logger.Info("Phase 6: Starting activity monitor")
 	s.ActivityMonitor.Start(s.ctx)
