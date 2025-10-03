@@ -52,11 +52,18 @@ jobs:
         cache-to: type=gha,mode=max
         platforms: linux/amd64
 
+    - name: Create Docker volumes for caching
+      run: |
+        docker volume create sprite-test-cache || true
+        docker volume create sprite-test-go-cache || true
+
     - name: Run tests in Docker
       run: |
         docker run --rm --privileged \
           -e SPRITE_TEST_DOCKER=1 \
           -v "$(pwd)":/workspace \
+          -v sprite-test-cache:/tmp \
+          -v sprite-test-go-cache:/go/pkg/mod \
           -w /workspace \
           sprite-env-tests \
           ./scripts/run-tests.sh

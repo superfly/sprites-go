@@ -3,17 +3,19 @@ package system
 import (
 	"context"
 	"fmt"
+	"syscall"
 )
 
 // IsProcessRunning returns true if the process is currently running
 func (s *System) IsProcessRunning() bool {
-	// A closed channel always returns immediately
-	select {
-	case <-s.processRunningCh:
-		return true
-	default:
+	if s.processCmd == nil || s.processCmd.Process == nil {
 		return false
 	}
+
+	// Check if the process still exists by sending signal 0
+	// Signal 0 doesn't actually send a signal, it just checks if the process exists
+	err := syscall.Kill(s.processCmd.Process.Pid, 0)
+	return err == nil
 }
 
 // WhenProcessRunning waits until the process is running or returns immediately if already running.
