@@ -48,6 +48,56 @@ func TestConfig(testDir string) *system.Config {
 	}
 }
 
+// TestSystem creates a new system and returns a cleanup function
+// Usage: sys, cleanup, err := TestSystem(config); defer cleanup()
+func TestSystem(config *system.Config) (*system.System, func(), error) {
+	sys, err := system.New(config)
+	if err != nil {
+		return nil, func() {}, err
+	}
+
+	cleanup := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		// Stop each component individually, swallowing errors
+		// Components are responsible for cleaning up their own resources
+
+		// Stop overlay manager (unmounts overlayfs and loop devices)
+		if sys.OverlayManager != nil {
+			_ = sys.OverlayManager.Unmount(ctx)
+		}
+
+		// Stop JuiceFS (unmounts and stops litestream)
+		if sys.JuiceFS != nil {
+			_ = sys.JuiceFS.Stop(ctx)
+		}
+
+		// Stop database manager (stops litestream for metadata DB)
+		if sys.DBManager != nil {
+			_ = sys.DBManager.Stop(ctx)
+		}
+
+		// Stop network services
+		if sys.APIServer != nil {
+			_ = sys.APIServer.Stop(ctx)
+		}
+		if sys.SocketServer != nil {
+			_ = sys.SocketServer.Stop()
+		}
+
+		// Stop utilities
+		if sys.AdminChannel != nil {
+			_ = sys.AdminChannel.Stop()
+		}
+		if sys.Reaper != nil {
+			_ = sys.Reaper.Stop(time.Second)
+		}
+	}
+
+	return sys, cleanup, nil
+}
+
 // RegisterSystemCleanup registers a cleanup handler to ensure the system is properly shut down
 // This should be called immediately after creating a system instance in tests
 func RegisterSystemCleanup(t *testing.T, sys *system.System) {

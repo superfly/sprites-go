@@ -26,7 +26,8 @@ func TestSystemGracefulShutdown(t *testing.T) {
 	config.ProcessCommand = []string{testScript}
 	config.ProcessGracefulShutdownTimeout = 5 * time.Second
 
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
@@ -101,7 +102,8 @@ done
 	config.ProcessCommand = []string{ignoreSigScript}
 	config.ProcessGracefulShutdownTimeout = 2 * time.Second
 
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
@@ -149,7 +151,8 @@ func TestSystemShutdownIdempotency(t *testing.T) {
 
 	config := TestConfig(testDir)
 
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
@@ -187,7 +190,8 @@ func TestSystemShutdownWithActiveConnections(t *testing.T) {
 
 	config := TestConfig(testDir)
 
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
@@ -232,7 +236,8 @@ done
 	config := TestConfig(testDir)
 	config.ProcessCommand = []string{crashScript}
 
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
@@ -318,7 +323,8 @@ func TestSystemShutdownOrder(t *testing.T) {
 
 	config := TestConfig(testDir)
 
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
