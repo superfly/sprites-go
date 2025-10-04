@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 
+# conforms to llm.txt and matches node layout
+
 echo "=========================================="
 echo "Installing Go (direct download)..."
 echo "=========================================="
@@ -12,7 +14,8 @@ BIN_DIR="$BASE_DIR/bin"
 ETC_DIR="$BASE_DIR/etc/profile.d"
 
 # Go specific configuration
-GO_VERSION="${GO_VERSION:-1.23.4}"
+# Baseline pinned version as of 2025-10-04: 1.25.1
+GO_VERSION="${GO_VERSION:-1.25.1}"
 GO_BASE_DIR="$LANG_BASE_DIR/go"
 
 echo "Installing Go..."
@@ -54,15 +57,36 @@ rm "/tmp/go${GO_VERSION}.tar.gz"
 # Create symlink for current version
 ln -sf "$GO_VERSION_DIR" "$GO_BASE_DIR/current"
 
-# Create symlinks in BIN_DIR
-echo "Creating symlinks in $BIN_DIR..."
-for binary in "$GO_VERSION_DIR/bin"/*; do
-    if [ -f "$binary" ] && [ -x "$binary" ]; then
-        binary_name=$(basename "$binary")
-        ln -sf "$binary" "$BIN_DIR/$binary_name"
-        echo "  Linked: $binary_name"
-    fi
-done
+# Create shims in BIN_DIR (no profile reliance, no PATH cleaning)
+echo "Creating shims in $BIN_DIR..."
+create_go_shim() {
+  local shim_name="$1"
+  cat > "$BIN_DIR/$shim_name" << 'WRAP_EOF'
+#!/bin/bash
+set -e
+
+BIN_DIR="REPLACE_BIN_DIR"
+GO_BASE_DIR="REPLACE_GO_BASE_DIR"
+
+ACTIVE_BIN_DIR="$GO_BASE_DIR/current/bin"
+
+# Prepend ACTIVE_BIN_DIR to PATH if not present
+case ":$PATH:" in
+  *":$ACTIVE_BIN_DIR:") ;;
+  *) export PATH="$ACTIVE_BIN_DIR:$PATH" ;;
+esac
+
+cmd_name="$(basename "$0")"
+exec "$ACTIVE_BIN_DIR/$cmd_name" "$@"
+WRAP_EOF
+  sed -i "s|REPLACE_BIN_DIR|$BIN_DIR|g" "$BIN_DIR/$shim_name"
+  sed -i "s|REPLACE_GO_BASE_DIR|$GO_BASE_DIR|g" "$BIN_DIR/$shim_name"
+  chmod +x "$BIN_DIR/$shim_name"
+  echo "  Created shim: $shim_name"
+}
+
+create_go_shim "go"
+create_go_shim "gofmt"
 
 # Create workspace directory
 GOPATH="$GO_BASE_DIR/workspace"
@@ -89,6 +113,8 @@ func main() {
 EOF
 "$BIN_DIR/go" run /tmp/hello.go
 rm /tmp/hello.go
+
+# Cleanup Go download cache (none besides tarball) and test artifacts cleaned above
 
 # Create Go version manager script
 echo ""
@@ -188,15 +214,9 @@ case "$1" in
             exit 1
         fi
         
-        # Update symlinks
+        # Update current symlink only; shims target current/bin
         echo "Switching to Go $version..."
         ln -sf "$GO_BASE_DIR/versions/$version" "$GO_BASE_DIR/current"
-        for binary in "$GO_BASE_DIR/versions/$version/bin"/*; do
-            if [ -f "$binary" ] && [ -x "$binary" ]; then
-                binary_name=$(basename "$binary")
-                ln -sf "$binary" "$BIN_DIR/$binary_name"
-            fi
-        done
         
         echo "Go $version is now active"
         "$BIN_DIR/go" version
@@ -230,18 +250,7 @@ sed -i "s|REPLACE_GO_BASE_DIR|$GO_BASE_DIR|g" $BIN_DIR/go-version
 sed -i "s|REPLACE_BIN_DIR|$BIN_DIR|g" $BIN_DIR/go-version
 chmod +x $BIN_DIR/go-version
 
-# Create profile script
-echo ""
-echo "Creating Go environment configuration..."
-tee $ETC_DIR/go.sh > /dev/null << EOF
-# Go environment configuration
-export GOROOT="$GO_BASE_DIR/current"
-export GOPATH="$GO_BASE_DIR/workspace"
-export GOCACHE="$GO_BASE_DIR/.cache/go-build"
-export GOMODCACHE="$GO_BASE_DIR/.cache/mod"
-export PATH="\$GOPATH/bin:\$PATH"
-# PATH should already include $BIN_DIR from elsewhere
-EOF
+# No profile script creation; shims handle PATH dynamically
 
 # Create documentation
 echo ""

@@ -1,0 +1,67 @@
+Shims directory: /.sprite/bin
+
+Shim behavior
+- Shims minimally initialize the language manager only if needed.
+- Shims prepend the active toolchain bin directory to PATH (only if missing) and exec the real binary.
+- If your environment keeps that bin directory earlier than /.sprite/bin on PATH, subsequent commands resolve to the real binary and bypass the sprite shim.
+
+Node.js
+- Manager: nvm at /.sprite/languages/node/nvm
+- Shims: node, npm, npx, corepack
+- Manage versions: nvm install <version>; nvm use <version>; nvm alias default <version>
+- Default installed: 22.20.0
+
+Python
+- Manager: pyenv at /.sprite/languages/python/pyenv
+- Shims: python, python3, pip, pip3, pipenv, poetry, virtualenv, pyenv
+- Manage versions: pyenv install <version>; pyenv versions; pyenv global <version>; pyenv local <version>
+- Default installed: 3.13.7
+
+Ruby
+- Manager: rbenv at /.sprite/languages/ruby/rbenv
+- Shims: ruby, gem, bundle, bundler, irb, rake, rbenv
+- Manage versions: rbenv install <version>; rbenv versions; rbenv global <version>; rbenv local <version>
+- Default installed: 3.4.6
+
+Rust
+- Manager: rustup at /.sprite/languages/rust/rustup; cargo at /.sprite/languages/rust/cargo
+- Shims: rustc, cargo, rustup, rustfmt, rustdoc
+- Manage versions: rustup toolchain install <version|stable|nightly>; rustup toolchain list; rustup default <version>; rustup override set <version>
+- Default installed: 1.90.0
+
+Go
+- Manager: versions directory at /.sprite/languages/go/versions with current symlink at /.sprite/languages/go/current
+- Shims: go, gofmt
+- Manage versions: go-version install <version>; go-version list; go-version use <version>; go-version current
+- Default installed: 1.25.1
+
+Erlang
+- Manager: kerl at /.sprite/languages/erlang/kerl; installs in /.sprite/languages/erlang/kerl/installs; current symlink at /.sprite/languages/erlang/current
+- Shims: erl, erlc, escript, dialyzer, rebar3, kerl
+- Manage versions: kerl-helper install <version>; kerl-helper list; kerl-helper activate <version>; kerl-helper update; or use kerl directly
+- Default installed: 28.1
+
+Elixir
+- Manager: versions directory at /.sprite/languages/elixir/versions with current symlink at /.sprite/languages/elixir/current
+- Shims: elixir, elixirc, iex, mix
+- Manage versions: elixir-version install <version>; elixir-version list; elixir-version use <version>; elixir-version current
+- Default installed: 1.18.4 (OTP 28)
+
+Java
+- Manager: SDKMAN at /.sprite/languages/java/sdkman
+- Shims: java, javac, jar, jshell, javadoc, jcmd, jstack, jmap, jps, jstat, keytool, jlink, jdeps
+- Manage versions: sdk install java <version>; sdk default java <version> (set SDKMAN_DIR and source "$SDKMAN_DIR/bin/sdkman-init.sh" before using sdk)
+- Default installed: 25-tem
+
+Bun
+- Manager: official installer at /.sprite/languages/bun
+- Shims: bun, bunx
+- Manage versions: not provided by this image
+- Default installed: latest at build time
+
+Deno
+- Manager: official installer at /.sprite/languages/deno
+- Shims: deno
+- Manage versions: not provided by this image
+- Default installed: latest at build time
+

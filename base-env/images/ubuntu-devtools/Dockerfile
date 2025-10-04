@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential clang sudo inotify-tools \
         curl git ca-certificates gnupg dirmngr \
         autoconf automake libtool pkg-config xz-utils \
+        bison libgdbm-dev libncurses5-dev \
         libssl-dev zlib1g-dev libreadline-dev libsqlite3-dev \
         unzip wget tar \
         coreutils util-linux findutils grep sed gawk \
@@ -67,7 +68,6 @@ RUN chmod +x /tmp/java.sh && /tmp/java.sh /.sprite && rm /tmp/java.sh
 COPY languages/python.sh /tmp/
 RUN chmod +x /tmp/python.sh && /tmp/python.sh /.sprite && rm /tmp/python.sh
 
-# Install agents (depends on Node.js being installed)
 COPY languages/agents.sh /tmp/
 RUN chmod +x /tmp/agents.sh && /tmp/agents.sh /.sprite && rm /tmp/agents.sh
 
@@ -100,9 +100,6 @@ COPY root/ /
 # The shell config files are copied from root/etc/skel/* during COPY root/ /
 RUN chmod 644 /etc/skel/.* 2>/dev/null || true
 
-# Make language dependency installer executable if it exists
-RUN chmod +x /.sprite/bin/install-language-deps 2>/dev/null || true
-
 # Source sprite scripts in /etc/profile for login shells
 RUN echo '' >> /etc/profile && \
     echo '# Source sprite environment' >> /etc/profile && \
@@ -122,6 +119,8 @@ ENV LANG=en_US.UTF-8
 # --- user env ---
 ENV BROWSER="/.sprite/bin/sprite-browser" \
     HOME="/home/sprite"
+
+# Node.js is installed in the languages layer and available via PATH shims
 
 WORKDIR /home/sprite
 

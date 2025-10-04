@@ -1,8 +1,10 @@
 #!/bin/bash
 set -e
 
+# conforms to llm.txt and matches node layout
+
 echo "=========================================="
-echo "Installing Elixir (prebuilt binary approach)..."
+echo "Installing Elixir (precompiled + lightweight manager)..."
 echo "=========================================="
 
 # Configuration with argument support
@@ -12,10 +14,12 @@ BIN_DIR="$BASE_DIR/bin"
 ETC_DIR="$BASE_DIR/etc/profile.d"
 
 # Elixir specific configuration
+# Use a kiex-known Elixir release by default; override via ELIXIR_VERSION
+# Baseline pinned version as of 2025-10-04: 1.18.4 (OTP 28)
 ELIXIR_VERSION="${ELIXIR_VERSION:-1.18.4}"
-OTP_VERSION="${OTP_VERSION:-27}"
+OTP_VERSION="${OTP_VERSION:-28}"
 ELIXIR_ROOT="$LANG_BASE_DIR/elixir"
-ELIXIR_INSTALL_DIR="$ELIXIR_ROOT/elixir-${ELIXIR_VERSION}-otp-${OTP_VERSION}"
+KIEX_DIR="$ELIXIR_ROOT/kiex"
 
 echo "Installing Elixir..."
 echo "Base directory: $BASE_DIR"
@@ -26,7 +30,7 @@ echo "Default version: $ELIXIR_VERSION (OTP $OTP_VERSION)"
 
 # Create directories with proper permissions
 echo "Creating directories..."
-mkdir -p "$ELIXIR_ROOT" "$BIN_DIR" "$ETC_DIR"
+mkdir -p "$ELIXIR_ROOT" "$BIN_DIR"
 chown -R $(id -u):$(id -g) "$LANG_BASE_DIR/elixir" "$BIN_DIR"
 
 # Ensure Erlang is available
@@ -39,48 +43,66 @@ fi
 echo "Checking Erlang/OTP version..."
 ERLANG_OTP_VERSION=$(erl -eval 'io:format("~s", [erlang:system_info(otp_release)]), halt().' -noshell)
 echo "Found Erlang/OTP $ERLANG_OTP_VERSION"
+VERSIONS_DIR="$ELIXIR_ROOT/versions"
+ELIXIR_OTP_MAJOR="$ERLANG_OTP_VERSION"
+INSTALL_DIR="$VERSIONS_DIR/$ELIXIR_VERSION-otp-$ELIXIR_OTP_MAJOR"
 
-# Download prebuilt Elixir
-echo "Downloading Elixir ${ELIXIR_VERSION} (prebuilt for OTP ${OTP_VERSION})..."
-ELIXIR_URL="https://github.com/elixir-lang/elixir/releases/download/v${ELIXIR_VERSION}/elixir-otp-${OTP_VERSION}.zip"
-curl -L -o "/tmp/elixir-${ELIXIR_VERSION}.zip" "$ELIXIR_URL"
+echo "Downloading precompiled Elixir $ELIXIR_VERSION for OTP $ELIXIR_OTP_MAJOR..."
+mkdir -p "$INSTALL_DIR"
 
-# Extract Elixir
-echo "Extracting Elixir..."
-mkdir -p "$ELIXIR_INSTALL_DIR"
-unzip -q "/tmp/elixir-${ELIXIR_VERSION}.zip" -d "$ELIXIR_INSTALL_DIR"
-rm "/tmp/elixir-${ELIXIR_VERSION}.zip"
+TMP_ZIP="/tmp/elixir-precompiled.zip"
+set +e
+curl -fsSL "https://repo.hex.pm/builds/elixir/v$ELIXIR_VERSION-otp-$ELIXIR_OTP_MAJOR.zip" -o "$TMP_ZIP" || \
+curl -fsSL "https://github.com/elixir-lang/elixir/releases/download/v$ELIXIR_VERSION/elixir-otp-$ELIXIR_OTP_MAJOR.zip" -o "$TMP_ZIP" || \
+curl -fsSL "https://github.com/elixir-lang/elixir/releases/download/v$ELIXIR_VERSION/Precompiled.zip" -o "$TMP_ZIP"
+rc=$?
+set -e
+if [ $rc -ne 0 ] || [ ! -s "$TMP_ZIP" ]; then
+    echo "Failed to download precompiled Elixir for version $ELIXIR_VERSION (OTP $ELIXIR_OTP_MAJOR)."
+    exit 1
+fi
 
-# Make binaries executable
-chmod +x "$ELIXIR_INSTALL_DIR/bin"/*
+unzip -q "$TMP_ZIP" -d "$INSTALL_DIR"
+rm -f "$TMP_ZIP"
 
-# Create wrapper scripts in BIN_DIR
-echo "Creating wrapper scripts in $BIN_DIR..."
-for binary in elixir elixirc iex mix; do
-    if [ -f "$ELIXIR_INSTALL_DIR/bin/$binary" ]; then
-        cat > "$BIN_DIR/$binary" << EOF
-#!/bin/bash
-# Wrapper script for $binary
-# Ensures Elixir bin directory is in PATH
-export PATH="$ELIXIR_INSTALL_DIR/bin:\$PATH"
-exec "$ELIXIR_INSTALL_DIR/bin/$binary" "\$@"
-EOF
-        chmod +x "$BIN_DIR/$binary"
-        echo "  Created wrapper: $binary"
-    fi
+# Set current symlink
+ln -sfn "$INSTALL_DIR" "$ELIXIR_ROOT/current"
+
+echo "Creating shims in $BIN_DIR..."
+for cmd in elixir elixirc iex mix; do
+    cat > "$BIN_DIR/$cmd" << 'WRAP_EOF'
+#!/bin/sh
+set -e
+
+DEFAULT_ELIXIR_CURRENT="REPLACE_ELIXIR_CURRENT"
+BIN_PATH="$DEFAULT_ELIXIR_CURRENT/bin"
+
+case ":$PATH:" in
+  *":$BIN_PATH:") ;;
+  *) PATH="$BIN_PATH:$PATH" ;;
+esac
+
+exec "$BIN_PATH/$(basename "$0")" "$@"
+WRAP_EOF
+    sed -i "s|REPLACE_ELIXIR_CURRENT|$ELIXIR_ROOT/current|g" "$BIN_DIR/$cmd"
+    chmod +x "$BIN_DIR/$cmd"
+    echo "  Created shim: $cmd"
 done
 
-# Set up environment for mix commands
 export PATH="$BIN_DIR:$PATH"
 export MIX_HOME="$LANG_BASE_DIR/elixir/.mix"
+export HEX_HOME="$LANG_BASE_DIR/elixir/.hex"
 
-# Install Hex package manager
+# Install Hex and rebar3 for the default Elixir
 echo "Installing Hex package manager..."
-"$BIN_DIR/mix" local.hex --force
+"$ELIXIR_ROOT/current/bin/mix" local.hex --force
 
-# Install rebar3 (Erlang build tool, used by some dependencies)
 echo "Installing rebar3..."
-"$BIN_DIR/mix" local.rebar --force
+"$ELIXIR_ROOT/current/bin/mix" local.rebar --force
+
+# Cleanup Mix/Hex build caches
+echo "Cleaning Mix/Hex caches..."
+rm -rf "$LANG_BASE_DIR/elixir/.mix/archives/tmp" "$LANG_BASE_DIR/elixir/.hex/httpreqs" 2>/dev/null || true
 
 # Verify installation
 echo ""
@@ -93,155 +115,106 @@ echo ""
 echo "Testing Elixir..."
 "$BIN_DIR/elixir" -e 'IO.puts("Hello from Elixir #{System.version()}!")'
 
-# Create version management helper script
+"$BIN_DIR/elixir" --version >/dev/null 2>&1 || true
+
+# Create version management helper script (lightweight)
 echo ""
 echo "Creating elixir-version helper script..."
 tee $BIN_DIR/elixir-version > /dev/null << 'SCRIPT_EOF'
 #!/bin/bash
-# Helper script for Elixir version management
+# Lightweight Elixir version manager (downloads precompiled archives)
 
-LANG_BASE_DIR="REPLACE_LANG_BASE_DIR"
-BIN_DIR="REPLACE_BIN_DIR"
-CURRENT_VERSION_FILE="$LANG_BASE_DIR/elixir/.current-version"
+set -e
+
+ELIXIR_ROOT="REPLACE_ELIXIR_ROOT"
+VERSIONS_DIR="$ELIXIR_ROOT/versions"
+
+ensure_dirs() {
+  mkdir -p "$VERSIONS_DIR"
+}
+
+download_and_install() {
+  local version="$1"
+  local otp_major
+  otp_major=$(erl -eval 'io:format("~s", [erlang:system_info(otp_release)]), halt().' -noshell)
+  local install_dir="$VERSIONS_DIR/$version-otp-$otp_major"
+  local tmp_zip
+  tmp_zip=$(mktemp)
+  echo "Downloading Elixir $version for OTP $otp_major..."
+  set +e
+  curl -fsSL "https://repo.hex.pm/builds/elixir/v$version-otp-$otp_major.zip" -o "$tmp_zip" || \
+  curl -fsSL "https://github.com/elixir-lang/elixir/releases/download/v$version/elixir-otp-$otp_major.zip" -o "$tmp_zip" || \
+  curl -fsSL "https://github.com/elixir-lang/elixir/releases/download/v$version/Precompiled.zip" -o "$tmp_zip"
+  local rc=$?
+  set -e
+  if [ $rc -ne 0 ] || [ ! -s "$tmp_zip" ]; then
+    echo "Failed to download Elixir $version"
+    exit 1
+  fi
+  mkdir -p "$install_dir"
+  unzip -q "$tmp_zip" -d "$install_dir"
+  rm -f "$tmp_zip"
+  ln -sfn "$install_dir" "$ELIXIR_ROOT/current"
+}
 
 case "$1" in
-    install)
-        version="$2"
-        otp_version="${3:-27}"  # Default to OTP 27 if not specified
-        if [ -z "$version" ]; then
-            echo "Usage: elixir-version install <version> [otp_version]"
-            echo "Example: elixir-version install 1.17.0 26"
-            exit 1
-        fi
-        
-        install_dir="$LANG_BASE_DIR/elixir/elixir-${version}-otp-${otp_version}"
-        if [ -d "$install_dir" ]; then
-            echo "Elixir $version (OTP $otp_version) is already installed"
-            exit 0
-        fi
-        
-        echo "Downloading Elixir ${version} (prebuilt for OTP ${otp_version})..."
-        url="https://github.com/elixir-lang/elixir/releases/download/v${version}/elixir-otp-${otp_version}.zip"
-        curl -L -o "/tmp/elixir-${version}.zip" "$url" || {
-            echo "Failed to download Elixir $version for OTP $otp_version"
-            echo "Check if this combination exists at: https://github.com/elixir-lang/elixir/releases"
-            exit 1
-        }
-        
-        echo "Extracting Elixir..."
-        mkdir -p "$install_dir"
-        unzip -q "/tmp/elixir-${version}.zip" -d "$install_dir"
-        rm "/tmp/elixir-${version}.zip"
-        chmod +x "$install_dir/bin"/*
-        
-        echo "Elixir $version (OTP $otp_version) installed successfully"
-        echo "To use: elixir-version use $version $otp_version"
-        ;;
-    list)
-        echo "Installed Elixir versions:"
-        for dir in "$LANG_BASE_DIR/elixir"/elixir-*-otp-*; do
-            if [ -d "$dir" ]; then
-                version_info=$(basename "$dir" | sed 's/elixir-//')
-                if [ -f "$CURRENT_VERSION_FILE" ] && [ "$(cat "$CURRENT_VERSION_FILE")" = "$(basename "$dir")" ]; then
-                    echo "* $version_info (current)"
-                else
-                    echo "  $version_info"
-                fi
-            fi
-        done
-        ;;
-    use)
-        version="$2"
-        otp_version="${3:-27}"
-        if [ -z "$version" ]; then
-            echo "Usage: elixir-version use <version> [otp_version]"
-            echo "Example: elixir-version use 1.17.0 26"
-            exit 1
-        fi
-        
-        install_dir="$LANG_BASE_DIR/elixir/elixir-${version}-otp-${otp_version}"
-        if [ ! -d "$install_dir" ]; then
-            echo "Elixir $version (OTP $otp_version) is not installed"
-            echo "Run: elixir-version install $version $otp_version"
-            exit 1
-        fi
-        
-        # Update wrapper scripts
-        for binary in elixir elixirc iex mix; do
-            if [ -f "$install_dir/bin/$binary" ]; then
-                cat > "$BIN_DIR/$binary" << WRAPPER_EOF
-#!/bin/bash
-# Wrapper script for $binary
-# Ensures Elixir bin directory is in PATH
-export PATH="$install_dir/bin:\\\$PATH"
-exec "$install_dir/bin/$binary" "\\\$@"
-WRAPPER_EOF
-                chmod +x "$BIN_DIR/$binary"
-            fi
-        done
-        
-        # Save current version
-        echo "elixir-${version}-otp-${otp_version}" > "$CURRENT_VERSION_FILE"
-        
-        echo "Now using Elixir $version (OTP $otp_version)"
-        ;;
-    current)
-        if [ -f "$CURRENT_VERSION_FILE" ]; then
-            current=$(cat "$CURRENT_VERSION_FILE" | sed 's/elixir-//')
-            echo "Current: $current"
-        else
-            echo "No Elixir version set"
-        fi
-        ;;
-    *)
-        echo "Elixir version manager"
-        echo ""
-        echo "Usage: elixir-version <command> [args]"
-        echo ""
-        echo "Commands:"
-        echo "  install <version> [otp]  - Install an Elixir version"
-        echo "  list                     - List installed versions"
-        echo "  use <version> [otp]      - Switch to a specific version"
-        echo "  current                  - Show current version"
-        echo ""
-        echo "Examples:"
-        echo "  elixir-version install 1.17.0 26"
-        echo "  elixir-version list"
-        echo "  elixir-version use 1.17.0 26"
-        ;;
+  install)
+    ensure_dirs
+    if [ -z "$2" ]; then
+      echo "Usage: elixir-version install <version>"
+      exit 1
+    fi
+    download_and_install "$2"
+    ;;
+  use)
+    ensure_dirs
+    if [ -z "$2" ]; then
+      echo "Usage: elixir-version use <version>"
+      exit 1
+    fi
+    dest=$(ls -d "$VERSIONS_DIR/$2"* 2>/dev/null | head -n1)
+    if [ -z "$dest" ]; then
+      echo "Version $2 not installed"
+      exit 1
+    fi
+    ln -sfn "$dest" "$ELIXIR_ROOT/current"
+    ;;
+  list)
+    ensure_dirs
+    ls -1 "$VERSIONS_DIR" || true
+    ;;
+  current)
+    if [ -L "$ELIXIR_ROOT/current" ]; then
+      readlink "$ELIXIR_ROOT/current"
+    else
+      echo "none"
+    fi
+    ;;
+  *)
+    echo "Elixir lightweight manager"
+    echo "Usage: elixir-version <install|use|list|current> [args]"
+    ;;
 esac
 SCRIPT_EOF
-
-# Replace placeholders in the helper script
-sed -i "s|REPLACE_LANG_BASE_DIR|$LANG_BASE_DIR|g" $BIN_DIR/elixir-version
-sed -i "s|REPLACE_BIN_DIR|$BIN_DIR|g" $BIN_DIR/elixir-version
+sed -i "s|REPLACE_ELIXIR_ROOT|$ELIXIR_ROOT|g" $BIN_DIR/elixir-version
 chmod +x $BIN_DIR/elixir-version
 
-# Save current version info
-echo "elixir-${ELIXIR_VERSION}-otp-${OTP_VERSION}" > "$ELIXIR_ROOT/.current-version"
+## No separate versions/ layout; managed by kiex under $ELIXIR_ROOT/kiex
 
-# Create profile script
-echo ""
-echo "Creating Elixir environment configuration..."
-tee $ETC_DIR/elixir.sh > /dev/null << EOF
-# Elixir environment setup
-export MIX_HOME="$LANG_BASE_DIR/elixir/.mix"
-export HEX_HOME="$LANG_BASE_DIR/elixir/.hex"
-# PATH should already include $BIN_DIR from elsewhere
-EOF
+## No profile scripts; shims handle PATH at runtime per llm.txt
 
-# Create documentation
 echo ""
 echo "Creating Elixir documentation..."
 cat > "$LANG_BASE_DIR/elixir/llm.txt" << 'EOF'
 Elixir Installation (prebuilt binaries)
 =======================================
 
-This installation uses prebuilt Elixir binaries from the official releases.
+This installation uses a lightweight manager with a versions/ layout and a current symlink.
 
 Installation Location:
-- Elixir versions: LANG_BASE_DIR/elixir/elixir-VERSION-otp-OTP
-- Binaries: BIN_DIR (symlinked from active version)
+- Elixir versions: LANG_BASE_DIR/elixir/versions/<ver>-otp-<otp>
+- Current symlink: LANG_BASE_DIR/elixir/current -> versions/<ver>-otp-<otp>
+- Binaries: BIN_DIR (shims to current/bin)
 - Mix home: LANG_BASE_DIR/elixir/.mix
 - Hex home: LANG_BASE_DIR/elixir/.hex
 
@@ -264,9 +237,9 @@ The default Elixir version is immediately available:
 Managing Versions:
 ------------------
 Use the elixir-version helper script:
-  elixir-version install 1.17.0 26   # Install Elixir 1.17.0 for OTP 26
+  elixir-version install 1.17.3      # Install Elixir 1.17.3
   elixir-version list                # List installed versions
-  elixir-version use 1.17.0 26       # Switch to a specific version
+  elixir-version use 1.17.3          # Switch to a specific version (sets current)
   elixir-version current             # Show current version
 
 Note: You need to specify the OTP version when installing/using Elixir
@@ -323,7 +296,7 @@ ERL_AFLAGS                  # Erlang VM flags
 Notes:
 ------
 - Each Elixir version is isolated
-- Elixir must match the installed Erlang/OTP version
+- Elixir should match the installed Erlang/OTP version
 - Use .tool-versions for project-specific versions
 - Hex and rebar are installed globally in MIX_HOME
 - Mix tasks are available after running 'mix deps.get'
@@ -337,16 +310,14 @@ sed -i "s|OTP_VERSION|$OTP_VERSION|g" "$LANG_BASE_DIR/elixir/llm.txt"
 
 echo ""
 echo "✅ Elixir $ELIXIR_VERSION installed successfully!"
-echo "   - Installation directory: $ELIXIR_INSTALL_DIR"
+echo "   - Installation directory: $INSTALL_DIR"
 echo "   - Binaries available in: $BIN_DIR"
-echo "   - Version: $ELIXIR_VERSION (OTP $OTP_VERSION)"
+echo "   - Version: $ELIXIR_VERSION (OTP $ERLANG_OTP_VERSION)"
 echo "   - Documentation: $LANG_BASE_DIR/elixir/llm.txt"
 echo ""
 echo "Managing Elixir versions:"
-echo "   elixir-version install 1.17.0 26  - Install Elixir for specific OTP"
-echo "   elixir-version list               - List installed versions"
-echo "   elixir-version use 1.17.0 26      - Switch to a version"
+echo "   elixir-version install <version>   - Install Elixir"
+echo "   elixir-version list                - List installed versions"
+echo "   elixir-version use <version>       - Switch to a version"
 echo ""
-echo "Note: Elixir versions must match your Erlang/OTP version."
-echo "Check available combinations at:"
-echo "https://github.com/elixir-lang/elixir/releases"
+echo "Note: Prefer versions compatible with your Erlang/OTP."

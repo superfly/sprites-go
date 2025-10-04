@@ -1,6 +1,11 @@
 #!/bin/bash
 set -e
 
+# Implementation notes:
+# See ./llm.txt in this directory for the filesystem layout and shim standard
+# that other languages should follow (manager-first install, nvm-style shims).
+# conforms to llm.txt and matches node layout
+
 echo "=========================================="
 echo "Installing Ruby (canonical rbenv approach)..."
 echo "=========================================="
@@ -12,7 +17,8 @@ BIN_DIR="$BASE_DIR/bin"
 ETC_DIR="$BASE_DIR/etc/profile.d"
 
 # Ruby specific configuration
-RUBY_VERSION="${RUBY_VERSION:-3.3.5}"
+# Baseline pinned version as of 2025-10-04: 3.4.6
+RUBY_VERSION="${RUBY_VERSION:-3.4.6}"
 RBENV_ROOT="$LANG_BASE_DIR/ruby/rbenv"
 
 echo "Installing rbenv and Ruby..."
@@ -42,41 +48,62 @@ git clone https://github.com/rbenv/ruby-build.git "$RBENV_ROOT/plugins/ruby-buil
 rm -rf "$RBENV_ROOT/.git"
 rm -rf "$RBENV_ROOT/plugins/ruby-build/.git"
 
-# Setup rbenv environment
+# Setup rbenv environment (no shell eval)
 export RBENV_ROOT="$RBENV_ROOT"
 export PATH="$RBENV_ROOT/bin:$PATH"
-eval "$(rbenv init -)"
+RBENV_BIN="$RBENV_ROOT/bin/rbenv"
 
-# Install Ruby
+# Install Ruby using explicit rbenv binary
 echo "Installing Ruby ${RUBY_VERSION}..."
-rbenv install "$RUBY_VERSION"
-rbenv global "$RUBY_VERSION"
+"$RBENV_BIN" install "$RUBY_VERSION"
+"$RBENV_BIN" global "$RUBY_VERSION"
+"$RBENV_BIN" rehash
 
-# Update RubyGems
+# Update RubyGems via shim directly
 echo "Updating RubyGems..."
-gem update --system
+"$RBENV_ROOT/shims/gem" update --system
 
 # Install bundler
 echo "Installing bundler..."
-gem install bundler
+"$RBENV_ROOT/shims/gem" install bundler
 
-# Create symlinks in BIN_DIR
-echo "Creating symlinks in $BIN_DIR..."
-for binary in "$RBENV_ROOT/bin"/*; do
-    if [ -f "$binary" ] && [ -x "$binary" ]; then
-        binary_name=$(basename "$binary")
-        ln -sf "$binary" "$BIN_DIR/$binary_name"
-        echo "  Linked: $binary_name"
-    fi
-done
+# Clean Ruby build artifacts and gem caches
+echo "Cleaning Ruby caches..."
+rm -rf "$RBENV_ROOT/sources" 2>/dev/null || true
+"$RBENV_ROOT/shims/gem" cleanup --silent || true
 
-# Also symlink Ruby binaries from the shims directory
-for binary in "$RBENV_ROOT/shims"/{ruby,gem,bundle,bundler,irb,rake}; do
-    if [ -f "$binary" ] && [ -x "$binary" ]; then
-        binary_name=$(basename "$binary")
-        ln -sf "$binary" "$BIN_DIR/$binary_name"
-        echo "  Linked: $binary_name"
-    fi
+# Create wrapper shims in BIN_DIR for core Ruby commands
+echo "Creating rbenv-enabled shims in $BIN_DIR..."
+for cmd in ruby gem bundle bundler irb rake rbenv; do
+    cat > "$BIN_DIR/$cmd" << 'WRAP_EOF'
+#!/bin/bash
+set -e
+
+# rbenv-enabled shim that ensures active Ruby is available
+DEFAULT_RBENV_ROOT="REPLACE_RBENV_ROOT"
+
+export RBENV_ROOT="${RBENV_ROOT:-$DEFAULT_RBENV_ROOT}"
+
+# Ensure rbenv bin and shims are on PATH
+case ":$PATH:" in
+  *":$RBENV_ROOT/bin:") ;;
+  *) PATH="$RBENV_ROOT/bin:$PATH" ;;
+esac
+case ":$PATH:" in
+  *":$RBENV_ROOT/shims:") ;;
+  *) PATH="$RBENV_ROOT/shims:$PATH" ;;
+esac
+
+cmd_name="$(basename "$0")"
+if [ "$cmd_name" = "rbenv" ]; then
+  exec "$RBENV_ROOT/bin/rbenv" "$@"
+else
+  exec "$RBENV_ROOT/shims/$cmd_name" "$@"
+fi
+WRAP_EOF
+    sed -i "s|REPLACE_RBENV_ROOT|$RBENV_ROOT|g" "$BIN_DIR/$cmd"
+    chmod +x "$BIN_DIR/$cmd"
+    echo "  Created shim: $cmd"
 done
 
 
@@ -97,107 +124,8 @@ echo ""
 echo "Testing Ruby..."
 "$BIN_DIR/ruby" -e "puts 'Hello from Ruby #{RUBY_VERSION}!'"
 
-# Create rbenv helper script
-echo ""
-echo "Creating rbenv helper script..."
-tee $BIN_DIR/rbenv-helper > /dev/null << 'SCRIPT_EOF'
-#!/bin/bash
-# Helper script for rbenv operations
-
-RBENV_ROOT="REPLACE_RBENV_ROOT"
-BIN_DIR="REPLACE_BIN_DIR"
-
-export RBENV_ROOT="$RBENV_ROOT"
-export PATH="$RBENV_ROOT/bin:$PATH"
-eval "$(rbenv init -)"
-
-case "$1" in
-    install)
-        version="$2"
-        if [ -z "$version" ]; then
-            echo "Usage: rbenv-helper install <version>"
-            echo "Example: rbenv-helper install 3.2.0"
-            exit 1
-        fi
-        
-        rbenv install "$version"
-        echo "Ruby $version installed"
-        echo "To use: rbenv-helper global $version"
-        ;;
-    list)
-        rbenv versions
-        ;;
-    global)
-        version="$2"
-        if [ -z "$version" ]; then
-            echo "Usage: rbenv-helper global <version>"
-            echo "Example: rbenv-helper global 3.2.0"
-            exit 1
-        fi
-        
-        rbenv global "$version"
-        
-        # Update symlinks
-        for binary in "$RBENV_ROOT/shims"/{ruby,gem,bundle,bundler,irb,rake}; do
-            if [ -f "$binary" ] && [ -x "$binary" ]; then
-                binary_name=$(basename "$binary")
-                ln -sf "$binary" "$BIN_DIR/$binary_name"
-            fi
-        done
-        
-        echo "Ruby $version is now the global default"
-        echo "Symlinks updated in $BIN_DIR"
-        ;;
-    local)
-        version="$2"
-        if [ -z "$version" ]; then
-            echo "Usage: rbenv-helper local <version>"
-            echo "Example: rbenv-helper local 3.2.0"
-            echo ""
-            echo "This sets the Ruby version for the current directory"
-            exit 1
-        fi
-        
-        rbenv local "$version"
-        echo "Ruby $version set for current directory"
-        ;;
-    *)
-        echo "Ruby version manager (rbenv) helper"
-        echo ""
-        echo "Usage: rbenv-helper <command> [args]"
-        echo ""
-        echo "Commands:"
-        echo "  install <version>  - Install a Ruby version"
-        echo "  list              - List installed versions"
-        echo "  global <version>  - Set global Ruby version"
-        echo "  local <version>   - Set local Ruby version for current directory"
-        echo ""
-        echo "Examples:"
-        echo "  rbenv-helper install 3.2.0"
-        echo "  rbenv-helper list"
-        echo "  rbenv-helper global 3.3.0"
-        ;;
-esac
-SCRIPT_EOF
-
-# Replace placeholders in the helper script
-sed -i "s|REPLACE_RBENV_ROOT|$RBENV_ROOT|g" $BIN_DIR/rbenv-helper
-sed -i "s|REPLACE_BIN_DIR|$BIN_DIR|g" $BIN_DIR/rbenv-helper
-chmod +x $BIN_DIR/rbenv-helper
-
-# Create profile script
-echo ""
-echo "Creating Ruby/rbenv environment configuration..."
-tee $ETC_DIR/rbenv.sh > /dev/null << EOF
-# Ruby/rbenv environment setup
-export RBENV_ROOT="$RBENV_ROOT"
-export PATH="\$RBENV_ROOT/bin:\$PATH"
-eval "\$(rbenv init -)"
-# Configure gem cache location
-export GEM_HOME="\$RBENV_ROOT/versions/\$(rbenv version-name)/lib/ruby/gems"
-export GEM_PATH="\$GEM_HOME"
-# PATH should already include $BIN_DIR from elsewhere
-EOF
+## No helper script; rbenv is invoked via shims
+## No profile script; shims ensure PATH dynamically
 
 # Create documentation
 echo ""
@@ -210,7 +138,7 @@ This installation uses rbenv for managing Ruby versions.
 
 Installation Location:
 - rbenv: LANG_BASE_DIR/ruby/rbenv
-- Binaries: BIN_DIR (symlinked from shims)
+- Binaries: BIN_DIR (shim wrappers)
 - Gems: Within each Ruby version
 
 Default Version: RUBY_VERSION
@@ -226,13 +154,7 @@ The default Ruby version is immediately available:
 
 Managing Versions:
 ------------------
-Option 1: Use the helper script (no sourcing required):
-  rbenv-helper install 3.2.0   # Install a new version
-  rbenv-helper list            # List installed versions
-  rbenv-helper global 3.2.0    # Set global default
-  rbenv-helper local 3.1.0     # Set version for current directory
-
-Option 2: Use rbenv directly (requires environment setup):
+Use rbenv directly (shims handle PATH at runtime):
   rbenv install 3.2.0
   rbenv global 3.2.0
   rbenv local 3.1.0
@@ -275,8 +197,7 @@ Notes:
 ------
 - Each Ruby version has its own gems
 - Use .ruby-version files in projects to specify Ruby version
-- rbenv shims automatically select the right Ruby version
-- The helper script updates symlinks when switching versions
+- Shims dynamically set PATH; no shell profile scripts are modified
 - Bundler is the preferred way to manage project dependencies
 EOF
 
@@ -298,7 +219,4 @@ echo "   rbenv versions            - List installed versions"
 echo "   rbenv global <version>    - Set global default"
 echo "   rbenv local <version>     - Set version for current directory"
 echo ""
-echo "Helper commands (works without sourcing rbenv):"
-echo "   rbenv-helper install 3.2.0"
-echo "   rbenv-helper list"
-echo "   rbenv-helper global 3.3.0"
+echo "Shims provided for: ruby, gem, bundle, bundler, irb, rake, rbenv"

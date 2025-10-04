@@ -20,6 +20,7 @@ function debug() {
 /home/sprite/network-setup.sh
 
 mkdir -p /dev/fly_vol/local-storage/var/lib/docker
+mkdir -p /dev/fly_vol/local-storage/tmp
 mkdir -p /dev/fly_vol/logs
 
 mkdir -p /.sprite/tmp
@@ -223,11 +224,6 @@ CONFIG_JSON='{
         "options": ["rbind","nosuid", "nodev"]
     },
     {
-      "destination": "/.pilot/swapon",
-      "source": "/.pilot/swapon",
-      "options": ["rbind"]
-    },
-    {
       "destination": "/.pilot/tini",
       "source": "/.pilot/tini",
       "options": ["rbind"]
@@ -241,7 +237,7 @@ CONFIG_JSON='{
     {
       "destination": "/.sprite/tmp",
       "type": "bind",
-      "source": "/.sprite/tmp",
+      "source": "/dev/fly_vol/local-storage/tmp",
       "options": ["rbind"]
     },
     {

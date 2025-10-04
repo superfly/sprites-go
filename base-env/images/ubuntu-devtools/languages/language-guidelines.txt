@@ -1,0 +1,76 @@
+Language Layout and Shim Standard (Canonical Example: Node.js)
+==============================================================
+
+Purpose
+-------
+Define a consistent, manager-first filesystem layout and runtime shim pattern that works without shell profile initialization. Use Node.js (via nvm) as the canonical example that other languages should model after.
+
+Core Principles
+---------------
+1) Prefer canonical version managers. If none exists, mimic a manager layout (versions/ + current symlink).
+2) Do not rely on shell init files. Provide executable shims in `/.sprite/bin` that do minimal, deterministic setup when invoked.
+3) Keep the image minimal. Install the manager, a default toolchain, and shims.
+
+Filesystem Layout
+-----------------
+Language artifacts live under `/.sprite/languages/<language>/...`.
+- Manager home: `/.sprite/languages/<lang>/<manager>` (e.g., Node.js: `/.sprite/languages/node/nvm`).
+- Versions layout: defined by the manager (e.g., nvm `versions/node/vX.Y.Z`).
+- Optional caches live under the language root.
+
+Shim Responsibilities
+---------------------
+Create an executable at `/.sprite/bin/<cmd>` for each user-facing command. Shims should:
+1) Export manager env vars only if unset.
+2) Source manager init (non-interactive).
+3) Quietly activate a default toolchain if supported.
+4) Resolve the active binary directory for the toolchain.
+5) Do NOT clean or rewrite PATH. Prepend the active bin dir only if not already present.
+6) Exec the absolute binary from the resolved bin dir.
+
+Node.js Canonical Shim (nvm)
+----------------------------
+Example wrapper logic used for `node`, `npm`, `npx`, `corepack`:
+
+```
+#!/bin/sh
+set -e
+
+DEFAULT_NVM_DIR="/.sprite/languages/node/nvm"
+export NVM_DIR="${NVM_DIR:-$DEFAULT_NVM_DIR}"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+nvm use default >/dev/null 2>&1 || true
+
+NODE_BIN="$(nvm which default 2>/dev/null || nvm which current 2>/dev/null || command -v node)"
+NODE_BIN_DIR="$(dirname "$NODE_BIN")"
+
+case ":$PATH:" in
+  *":$NODE_BIN_DIR:") ;;
+  *) PATH="$NODE_BIN_DIR:$PATH" ;;
+esac
+
+exec "$NODE_BIN_DIR/$(basename "$0")" "$@"
+```
+
+Install-Time Expectations
+-------------------------
+- Install the manager under `/.sprite/languages/<lang>/<manager>`.
+- Install a default toolchain and mark it as the global/default (e.g., `nvm alias default`).
+- Create shims in `/.sprite/bin` for all user-visible commands.
+- Do not modify `/etc/profile`, `~/.bashrc`, or similar.
+
+Adapting to Other Languages
+---------------------------
+Model your language after the Node.js example:
+- Identify the manager (or emulate one with a `versions/` tree and a `current` symlink).
+- Determine the env vars the manager requires (export them only if unset).
+- Source its non-interactive init fragment if needed.
+- Resolve the active toolchain’s bin directory.
+- Prepend that bin directory to PATH only if it’s not already present.
+- Exec the absolute binary (`$BIN_DIR/$cmd` should always be a thin wrapper).
+
+Notes
+-----
+- If a language lacks a first-class manager, implement a simple `versions/<ver>` layout and a `current` symlink, then provide shims that point to `current/bin`.
+- Shims must not clean PATH. They should only add what’s required if missing.
+- Installers must include a comment near the top: `conforms to llm.txt and matches node layout` to make intent explicit.

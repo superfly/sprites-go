@@ -1,6 +1,11 @@
 #!/bin/bash
 set -e
 
+# Implementation notes:
+# See ./llm.txt in this directory for the filesystem layout and shim standard
+# that other languages should follow (manager-first install, nvm-style shims).
+# conforms to llm.txt and matches node layout
+
 echo "=========================================="
 echo "Installing Rust (canonical rustup approach)..."
 echo "=========================================="
@@ -12,7 +17,8 @@ BIN_DIR="$BASE_DIR/bin"
 ETC_DIR="$BASE_DIR/etc/profile.d"
 
 # Rust specific configuration
-RUST_VERSION="${RUST_VERSION:-1.89.0}"
+# Baseline pinned version as of 2025-10-04: 1.90.0
+RUST_VERSION="${RUST_VERSION:-1.90.0}"
 RUSTUP_HOME="$LANG_BASE_DIR/rust/rustup"
 CARGO_HOME="$LANG_BASE_DIR/rust/cargo"
 
@@ -31,26 +37,47 @@ export RUSTUP_HOME="$RUSTUP_HOME"
 export CARGO_HOME="$CARGO_HOME"
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain none
 
-# Source cargo env
-source "$CARGO_HOME/env"
-
-# Install the specified Rust version
+# Install the specified Rust version using explicit rustup path
+RUSTUP_BIN="$CARGO_HOME/bin/rustup"
 echo "Installing Rust ${RUST_VERSION}..."
-rustup toolchain install "$RUST_VERSION"
-rustup default "$RUST_VERSION"
+"$RUSTUP_BIN" toolchain install "$RUST_VERSION"
+"$RUSTUP_BIN" default "$RUST_VERSION"
 
 # Install common Rust components
 echo "Installing Rust components..."
-rustup component add clippy rust-src rust-analysis rustfmt
+"$RUSTUP_BIN" component add clippy rust-src rust-analysis rustfmt
 
-# Create symlinks
-echo "Creating symlinks in $BIN_DIR..."
-for binary in "$CARGO_HOME/bin"/*; do
-    if [ -f "$binary" ] && [ -x "$binary" ]; then
-        binary_name=$(basename "$binary")
-        ln -sf "$binary" "$BIN_DIR/$binary_name"
-        echo "  Linked: $binary_name"
-    fi
+# Create wrapper shims in BIN_DIR for core Rust commands
+echo "Creating rustup-enabled shims in $BIN_DIR..."
+for cmd in rustc cargo rustup rustfmt rustdoc; do
+    cat > "$BIN_DIR/$cmd" << 'WRAP_EOF'
+#!/bin/bash
+set -e
+
+# rustup-enabled shim that ensures active Rust toolchain is available
+DEFAULT_RUSTUP_HOME="REPLACE_RUSTUP_HOME"
+DEFAULT_CARGO_HOME="REPLACE_CARGO_HOME"
+
+# Only set manager env vars if not already set
+export RUSTUP_HOME="${RUSTUP_HOME:-$DEFAULT_RUSTUP_HOME}"
+export CARGO_HOME="${CARGO_HOME:-$DEFAULT_CARGO_HOME}"
+
+# Resolve the Rust binary directory (proxies live in CARGO_HOME/bin)
+RUST_BIN_DIR="$CARGO_HOME/bin"
+
+# Add RUST_BIN_DIR to PATH only if not already present
+case ":$PATH:" in
+  *":$RUST_BIN_DIR:") ;;
+  *) export PATH="$RUST_BIN_DIR:$PATH" ;;
+esac
+
+cmd_name="$(basename "$0")"
+exec "$RUST_BIN_DIR/$cmd_name" "$@"
+WRAP_EOF
+    sed -i "s|REPLACE_RUSTUP_HOME|$RUSTUP_HOME|g" "$BIN_DIR/$cmd"
+    sed -i "s|REPLACE_CARGO_HOME|$CARGO_HOME|g" "$BIN_DIR/$cmd"
+    chmod +x "$BIN_DIR/$cmd"
+    echo "  Created shim: $cmd"
 done
 
 
@@ -64,7 +91,7 @@ echo "Verifying Rust installation..."
 # Show installed toolchains
 echo ""
 echo "Installed toolchains:"
-rustup toolchain list
+"$RUSTUP_BIN" toolchain list
 
 # Test Rust
 echo ""
@@ -74,75 +101,13 @@ echo 'fn main() { println!("Hello from Rust!"); }' > /tmp/hello.rs
 /tmp/hello
 rm /tmp/hello.rs /tmp/hello
 
-# Create a simple rust helper script
-echo ""
-echo "Creating rust helper script..."
-tee $BIN_DIR/rust-toolchain > /dev/null << 'SCRIPT_EOF'
-#!/bin/bash
-# Helper script for Rust toolchain operations
+# Cleanup cargo/rustup download caches
+echo "Cleaning Rust caches..."
+"$RUSTUP_BIN" self update -y >/dev/null 2>&1 || true
+rm -rf "$CARGO_HOME/registry/index" "$CARGO_HOME/registry/cache" "$CARGO_HOME/git/db" "$RUSTUP_HOME/downloads" "$RUSTUP_HOME/tmp" 2>/dev/null || true
 
-RUSTUP_HOME="REPLACE_RUSTUP_HOME"
-CARGO_HOME="REPLACE_CARGO_HOME"
-
-export RUSTUP_HOME="$RUSTUP_HOME"
-export CARGO_HOME="$CARGO_HOME"
-export PATH="$CARGO_HOME/bin:$PATH"
-
-case "$1" in
-    install)
-        version="$2"
-        if [ -z "$version" ]; then
-            echo "Usage: rust-toolchain install <version>"
-            echo "Example: rust-toolchain install stable"
-            echo "Example: rust-toolchain install 1.88.0"
-            echo "Example: rust-toolchain install nightly"
-            exit 1
-        fi
-        rustup toolchain install "$version"
-        ;;
-    list)
-        rustup toolchain list
-        ;;
-    default)
-        version="$2"
-        if [ -z "$version" ]; then
-            echo "Usage: rust-toolchain default <version>"
-            echo "Example: rust-toolchain default 1.88.0"
-            exit 1
-        fi
-        rustup default "$version"
-        echo "Default toolchain set to $version"
-        ;;
-    *)
-        echo "Rust toolchain helper"
-        echo ""
-        echo "Usage: rust-toolchain <command> [args]"
-        echo ""
-        echo "Commands:"
-        echo "  install <version>  - Install a toolchain (stable, nightly, 1.88.0)"
-        echo "  list              - List installed toolchains"
-        echo "  default <version> - Set default toolchain"
-        echo ""
-        echo "Note: This is a wrapper around rustup commands"
-        ;;
-esac
-SCRIPT_EOF
-
-# Replace placeholders in the helper script
-sed -i "s|REPLACE_RUSTUP_HOME|$RUSTUP_HOME|g" $BIN_DIR/rust-toolchain
-sed -i "s|REPLACE_CARGO_HOME|$CARGO_HOME|g" $BIN_DIR/rust-toolchain
-chmod +x $BIN_DIR/rust-toolchain
-
-# Create profile script
-echo ""
-echo "Creating Rust environment configuration..."
-tee $ETC_DIR/rust.sh > /dev/null << EOF
-# Rust environment setup
-export RUSTUP_HOME="$RUSTUP_HOME"
-export CARGO_HOME="$CARGO_HOME"
-source "\$CARGO_HOME/env"
-# PATH should already include $BIN_DIR from elsewhere
-EOF
+## No helper script; rustup proxies are invoked via shims
+## No profile script; shims ensure PATH dynamically
 
 # Create documentation
 echo ""
@@ -156,7 +121,7 @@ This installation uses rustup for managing Rust toolchains.
 Installation Location:
 - rustup: LANG_BASE_DIR/rust/rustup
 - cargo: LANG_BASE_DIR/rust/cargo
-- Binaries: BIN_DIR (symlinked)
+- Binaries: BIN_DIR (shim wrappers)
 
 Default Version: RUST_VERSION
 
@@ -180,11 +145,6 @@ Using rustup directly:
   rustup default stable               # Set default
   rustup override set nightly         # Set for current directory
   rustup update                       # Update toolchains
-
-Using helper script:
-  rust-toolchain install stable
-  rust-toolchain list
-  rust-toolchain default 1.88.0
 
 Installing Crates:
 ------------------
@@ -232,6 +192,7 @@ Notes:
 - cargo install puts binaries in CARGO_HOME/bin
 - Each project has its own target/ directory for builds
 - Use cargo workspaces for multi-crate projects
+- Shims dynamically set PATH; no shell profile scripts are modified
 EOF
 
 # Replace placeholders in documentation
@@ -252,12 +213,3 @@ echo "   rustup toolchain list              - List installed toolchains"
 echo "   rustup default <version>           - Set global default"
 echo "   rustup override set <version>      - Set version for current directory"
 echo "   cargo +<version> <command>         - Use version for one command"
-echo ""
-echo "Helper commands:"
-echo "   rust-toolchain install stable      - Wrapper for rustup toolchain install"
-echo "   rust-toolchain list                - Wrapper for rustup toolchain list"
-echo ""
-echo "Examples:"
-echo "   rustup toolchain install nightly"
-echo "   rustup override set 1.88.0"
-echo "   cargo +nightly test"

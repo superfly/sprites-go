@@ -1,6 +1,11 @@
 #!/bin/bash
 set -e
 
+# Implementation notes:
+# See ./llm.txt in this directory for the filesystem layout and shim standard
+# that other languages should follow (manager-first install, nvm-style shims).
+# conforms to llm.txt and matches node layout
+
 echo "=========================================="
 echo "Installing Node.js (canonical nvm approach)..."
 echo "=========================================="
@@ -12,7 +17,8 @@ BIN_DIR="$BASE_DIR/bin"
 ETC_DIR="$BASE_DIR/etc/profile.d"
 
 # Node.js specific configuration
-NODE_VERSION="${NODE_VERSION:-20.18.0}"
+# Baseline pinned LTS as of 2025-10-04: 22.20.0
+NODE_VERSION="${NODE_VERSION:-22.20.0}"
 NVM_VERSION="${NVM_VERSION:-v0.39.4}"
 NVM_DIR="$LANG_BASE_DIR/node/nvm"
 
@@ -46,29 +52,43 @@ nvm use default
 echo "Installing common global packages..."
 npm install -g npm@latest
 
-# Get npm global bin path and append to languages.sh
-echo "Adding npm global bin path to languages.sh..."
-# npm bin -g is deprecated, use npm config get prefix instead
-NPM_PREFIX=$(npm config get prefix)
-NPM_GLOBAL_BIN="$NPM_PREFIX/bin"
-if [ -f "$ETC_DIR/languages.sh" ]; then
-    echo "" >> "$ETC_DIR/languages.sh"
-    echo "# Node.js/npm global bin directory" >> "$ETC_DIR/languages.sh"
-    echo "export PATH=\"$NPM_GLOBAL_BIN:\$PATH\"" >> "$ETC_DIR/languages.sh"
-    echo "  Added npm global bin path: $NPM_GLOBAL_BIN"
-else
-    echo "  Note: languages.sh not found, skipping npm global bin path addition"
-fi
+# No global PATH modification; shims handle PATH at runtime
 
-# Create symlinks in BIN_DIR for core Node.js binaries only
-echo "Creating symlinks in $BIN_DIR..."
-NODE_BIN_PATH="$(dirname $(which node))"
-for binary in "$NODE_BIN_PATH"/{node,npm,npx,corepack}; do
-    if [ -f "$binary" ] && [ -x "$binary" ]; then
-        binary_name=$(basename "$binary")
-        ln -sf "$binary" "$BIN_DIR/$binary_name"
-        echo "  Linked: $binary_name"
-    fi
+# Create wrapper shims in BIN_DIR for core Node.js commands
+echo "Creating nvm-enabled shims in $BIN_DIR..."
+for cmd in node npm npx corepack; do
+    cat > "$BIN_DIR/$cmd" << 'WRAP_EOF'
+#!/bin/bash
+set -e
+
+# nvm-enabled shim that ensures active Node.js is available
+BIN_DIR="REPLACE_BIN_DIR"
+DEFAULT_NVM_DIR="REPLACE_NVM_DIR"
+
+# Only set NVM_DIR if not already set
+export NVM_DIR="${NVM_DIR:-$DEFAULT_NVM_DIR}"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+
+# Activate default (if available) without noisy output
+nvm use default >/dev/null 2>&1 || true
+
+# Resolve the Node binary directory for the active/default toolchain
+NODE_BIN="$(nvm which default 2>/dev/null || nvm which current 2>/dev/null || command -v node)"
+NODE_BIN_DIR="$(dirname "$NODE_BIN")"
+
+# Add NODE_BIN_DIR to PATH only if not already present
+case ":$PATH:" in
+  *":$NODE_BIN_DIR:") ;;
+  *) export PATH="$NODE_BIN_DIR:$PATH" ;;
+esac
+
+cmd_name="$(basename "$0")"
+exec "$NODE_BIN_DIR/$cmd_name" "$@"
+WRAP_EOF
+    sed -i "s|REPLACE_BIN_DIR|$BIN_DIR|g" "$BIN_DIR/$cmd"
+    sed -i "s|REPLACE_NVM_DIR|$NVM_DIR|g" "$BIN_DIR/$cmd"
+    chmod +x "$BIN_DIR/$cmd"
+    echo "  Created shim: $cmd"
 done
 
 
@@ -88,99 +108,14 @@ echo ""
 echo "Testing Node.js..."
 "$BIN_DIR/node" -e "console.log('Hello from Node.js ' + process.version + '!')"
 
-# Create nvm helper script
-echo ""
-echo "Creating nvm helper script..."
-tee $BIN_DIR/nvm-helper > /dev/null << 'SCRIPT_EOF'
-#!/bin/bash
-# Helper script for nvm operations
+# Cleanup caches to reduce image size
+echo "Cleaning up Node.js caches..."
+npm cache clean --force || true
+rm -rf "$LANG_BASE_DIR/node/.npm-cache" "$NVM_DIR/.cache" 2>/dev/null || true
 
-NVM_DIR="REPLACE_NVM_DIR"
-BIN_DIR="REPLACE_BIN_DIR"
+# No helper script; nvm is sourced directly by shims
 
-export NVM_DIR="$NVM_DIR"
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-
-case "$1" in
-    install)
-        version="$2"
-        if [ -z "$version" ]; then
-            echo "Usage: nvm-helper install <version>"
-            echo "Example: nvm-helper install 18.17.0"
-            exit 1
-        fi
-        
-        nvm install "$version"
-        
-        # Update symlinks if this is now the default
-        if nvm use "$version" &>/dev/null; then
-            NODE_BIN_PATH="$(dirname $(which node))"
-            for binary in "$NODE_BIN_PATH"/{node,npm,npx,corepack}; do
-                if [ -f "$binary" ] && [ -x "$binary" ]; then
-                    binary_name=$(basename "$binary")
-                    ln -sf "$binary" "$BIN_DIR/$binary_name"
-                fi
-            done
-        fi
-        ;;
-    list)
-        nvm list
-        ;;
-    use)
-        version="$2"
-        if [ -z "$version" ]; then
-            echo "Usage: nvm-helper use <version>"
-            echo "Example: nvm-helper use 18.17.0"
-            exit 1
-        fi
-        
-        nvm use "$version"
-        
-        # Update symlinks
-        NODE_BIN_PATH="$(dirname $(which node))"
-        for binary in "$NODE_BIN_PATH"/{node,npm,npx,corepack}; do
-            if [ -f "$binary" ] && [ -x "$binary" ]; then
-                binary_name=$(basename "$binary")
-                ln -sf "$binary" "$BIN_DIR/$binary_name"
-            fi
-        done
-        echo "Symlinks updated in $BIN_DIR"
-        ;;
-    *)
-        echo "Node.js version manager (nvm) helper"
-        echo ""
-        echo "Usage: nvm-helper <command> [args]"
-        echo ""
-        echo "Commands:"
-        echo "  install <version>  - Install a Node.js version"
-        echo "  list              - List installed versions"
-        echo "  use <version>     - Switch to a specific version"
-        echo ""
-        echo "Examples:"
-        echo "  nvm-helper install 18.17.0"
-        echo "  nvm-helper list"
-        echo "  nvm-helper use 18.17.0"
-        ;;
-esac
-SCRIPT_EOF
-
-# Replace placeholders in the helper script
-sed -i "s|REPLACE_NVM_DIR|$NVM_DIR|g" $BIN_DIR/nvm-helper
-sed -i "s|REPLACE_BIN_DIR|$BIN_DIR|g" $BIN_DIR/nvm-helper
-chmod +x $BIN_DIR/nvm-helper
-
-# Create profile script
-echo ""
-echo "Creating Node.js/nvm environment configuration..."
-tee $ETC_DIR/nvm.sh > /dev/null << EOF
-# Node.js/nvm environment setup
-export NVM_DIR="$NVM_DIR"
-[ -s "\$NVM_DIR/nvm.sh" ] && \. "\$NVM_DIR/nvm.sh"  # This loads nvm
-[ -s "\$NVM_DIR/bash_completion" ] && \. "\$NVM_DIR/bash_completion"  # This loads nvm bash_completion
-# Configure npm cache location
-export NPM_CONFIG_CACHE="$LANG_BASE_DIR/node/.npm-cache"
-# PATH should already include $BIN_DIR from elsewhere
-EOF
+# No profile script; shims ensure PATH dynamically
 
 # Create documentation
 echo ""
@@ -255,8 +190,7 @@ Notes:
 - nvm is a shell function, not a binary
 - Each Node.js version has its own global packages
 - Use .nvmrc files in projects to specify Node.js version
-- The helper script automatically updates symlinks when switching versions
-- Symlinks in BIN_DIR always point to the active version
+- Shims dynamically set PATH; no static symlinks are used
 EOF
 
 # Replace placeholders in documentation

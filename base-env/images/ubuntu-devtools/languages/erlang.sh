@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 
+# conforms to llm.txt and matches node layout
+
 echo "=========================================="
 echo "Installing Erlang (canonical kerl approach)..."
 echo "=========================================="
@@ -12,11 +14,13 @@ BIN_DIR="$BASE_DIR/bin"
 ETC_DIR="$BASE_DIR/etc/profile.d"
 
 # Erlang specific configuration
-ERLANG_VERSION="${ERLANG_VERSION:-27.0}"
+# Baseline pinned version as of 2025-10-04: 28.1
+ERLANG_VERSION="${ERLANG_VERSION:-28.1}"
 KERL_ROOT="$LANG_BASE_DIR/erlang/kerl"
 KERL_BUILD_DIR="$KERL_ROOT/builds"
 KERL_INSTALL_DIR="$KERL_ROOT/installs"
 KERL_DOWNLOAD_DIR="$KERL_ROOT/archives"
+ERLANG_ROOT="$LANG_BASE_DIR/erlang"
 
 echo "Installing kerl and Erlang..."
 echo "Base directory: $BASE_DIR"
@@ -29,7 +33,7 @@ echo "Default version: $ERLANG_VERSION"
 
 # Create directories with proper permissions
 echo "Creating directories..."
-mkdir -p "$KERL_ROOT" "$KERL_BUILD_DIR" "$KERL_INSTALL_DIR" "$KERL_DOWNLOAD_DIR" "$BIN_DIR" "$ETC_DIR"
+mkdir -p "$KERL_ROOT" "$KERL_BUILD_DIR" "$KERL_INSTALL_DIR" "$KERL_DOWNLOAD_DIR" "$BIN_DIR"
 chown -R $(id -u):$(id -g) "$LANG_BASE_DIR/erlang" "$BIN_DIR"
 
 # Download and install kerl
@@ -50,7 +54,7 @@ KERL_BASE_DIR="$KERL_ROOT"
 KERL_BUILD_DIR="$KERL_BUILD_DIR"
 KERL_DOWNLOAD_DIR="$KERL_DOWNLOAD_DIR"
 KERL_DEFAULT_INSTALL_DIR="$KERL_INSTALL_DIR"
-KERL_BUILD_DOCS=yes
+KERL_BUILD_DOCS=no
 EOF
 
 # Update kerl list
@@ -65,23 +69,45 @@ echo "Building Erlang ${ERLANG_VERSION}..."
 echo "Installing Erlang ${ERLANG_VERSION}..."
 "$KERL_ROOT/kerl" install "$ERLANG_VERSION" "$KERL_INSTALL_DIR/$ERLANG_VERSION"
 
-# Activate Erlang
-. "$KERL_INSTALL_DIR/$ERLANG_VERSION/activate"
+# Point current -> installed version
+ln -sfn "$KERL_INSTALL_DIR/$ERLANG_VERSION" "$ERLANG_ROOT/current"
 
-# Create symlinks in BIN_DIR
-echo "Creating symlinks in $BIN_DIR..."
-# Symlink kerl binary
-ln -sf "$KERL_ROOT/kerl" "$BIN_DIR/kerl"
-echo "  Linked: kerl"
+# Create shims in BIN_DIR
+echo "Creating shims in $BIN_DIR..."
+for cmd in erl erlc escript dialyzer rebar3 kerl; do
+    cat > "$BIN_DIR/$cmd" << 'WRAP_EOF'
+#!/bin/sh
+set -e
 
-# Symlink Erlang binaries
-ERLANG_BIN_PATH="$KERL_INSTALL_DIR/$ERLANG_VERSION/bin"
-for binary in "$ERLANG_BIN_PATH"/{erl,erlc,escript,dialyzer,rebar3}; do
-    if [ -f "$binary" ] && [ -x "$binary" ]; then
-        binary_name=$(basename "$binary")
-        ln -sf "$binary" "$BIN_DIR/$binary_name"
-        echo "  Linked: $binary_name"
-    fi
+DEFAULT_LANG_ROOT="REPLACE_ERLANG_ROOT"
+# Export kerl env only if unset (useful for kerl itself)
+export KERL_BASE_DIR="${KERL_BASE_DIR:-$DEFAULT_LANG_ROOT/kerl}"
+export KERL_BUILD_DIR="${KERL_BUILD_DIR:-$KERL_BASE_DIR/builds}"
+export KERL_DOWNLOAD_DIR="${KERL_DOWNLOAD_DIR:-$KERL_BASE_DIR/archives}"
+export KERL_DEFAULT_INSTALL_DIR="${KERL_DEFAULT_INSTALL_DIR:-$KERL_BASE_DIR/installs}"
+
+ACTIVE_DIR="$DEFAULT_LANG_ROOT/current"
+if [ ! -d "$ACTIVE_DIR" ]; then
+  ACTIVE_DIR="$KERL_DEFAULT_INSTALL_DIR/REPLACE_DEFAULT_VER"
+fi
+
+cmd_name="$(basename "$0")"
+if [ "$cmd_name" = "kerl" ]; then
+  exec "$KERL_BASE_DIR/kerl" "$@"
+fi
+
+ERL_BIN_DIR="$ACTIVE_DIR/bin"
+case ":$PATH:" in
+  *":$ERL_BIN_DIR:") ;;
+  *) PATH="$ERL_BIN_DIR:$PATH" ;;
+esac
+
+exec "$ERL_BIN_DIR/$cmd_name" "$@"
+WRAP_EOF
+    sed -i "s|REPLACE_ERLANG_ROOT|$ERLANG_ROOT|g" "$BIN_DIR/$cmd"
+    sed -i "s|REPLACE_DEFAULT_VER|$ERLANG_VERSION|g" "$BIN_DIR/$cmd"
+    chmod +x "$BIN_DIR/$cmd"
+    echo "  Created shim: $cmd"
 done
 
 # Verify installation
@@ -106,7 +132,7 @@ KERL_ROOT="REPLACE_KERL_ROOT"
 KERL_BUILD_DIR="REPLACE_KERL_BUILD_DIR"
 KERL_INSTALL_DIR="REPLACE_KERL_INSTALL_DIR"
 KERL_DOWNLOAD_DIR="REPLACE_KERL_DOWNLOAD_DIR"
-BIN_DIR="REPLACE_BIN_DIR"
+LANG_ROOT="REPLACE_LANG_ROOT"
 
 export KERL_BASE_DIR="$KERL_ROOT"
 export KERL_BUILD_DIR="$KERL_BUILD_DIR"
@@ -151,20 +177,9 @@ case "$1" in
             exit 1
         fi
         
-        # Update symlinks
-        ERLANG_BIN_PATH="$KERL_INSTALL_DIR/$version/bin"
-        for binary in "$ERLANG_BIN_PATH"/{erl,erlc,escript,dialyzer,rebar3}; do
-            if [ -f "$binary" ] && [ -x "$binary" ]; then
-                binary_name=$(basename "$binary")
-                ln -sf "$binary" "$BIN_DIR/$binary_name"
-            fi
-        done
-        
-        echo "Erlang $version activated"
-        echo "Symlinks updated in $BIN_DIR"
-        echo ""
-        echo "To activate in current shell, run:"
-        echo "  . $KERL_INSTALL_DIR/$version/activate"
+        # Point current to selected version
+        ln -sfn "$KERL_INSTALL_DIR/$version" "$LANG_ROOT/current"
+        echo "Erlang $version activated (updated current symlink)"
         ;;
     update)
         echo "Updating kerl releases list..."
@@ -195,22 +210,10 @@ sed -i "s|REPLACE_KERL_ROOT|$KERL_ROOT|g" $BIN_DIR/kerl-helper
 sed -i "s|REPLACE_KERL_BUILD_DIR|$KERL_BUILD_DIR|g" $BIN_DIR/kerl-helper
 sed -i "s|REPLACE_KERL_INSTALL_DIR|$KERL_INSTALL_DIR|g" $BIN_DIR/kerl-helper
 sed -i "s|REPLACE_KERL_DOWNLOAD_DIR|$KERL_DOWNLOAD_DIR|g" $BIN_DIR/kerl-helper
-sed -i "s|REPLACE_BIN_DIR|$BIN_DIR|g" $BIN_DIR/kerl-helper
+sed -i "s|REPLACE_LANG_ROOT|$ERLANG_ROOT|g" $BIN_DIR/kerl-helper
 chmod +x $BIN_DIR/kerl-helper
 
-# Create profile script
-echo ""
-echo "Creating Erlang/kerl environment configuration..."
-tee $ETC_DIR/kerl.sh > /dev/null << EOF
-# Erlang/kerl environment setup
-export KERL_BASE_DIR="$KERL_ROOT"
-export KERL_BUILD_DIR="$KERL_BUILD_DIR"
-export KERL_DOWNLOAD_DIR="$KERL_DOWNLOAD_DIR"
-export KERL_DEFAULT_INSTALL_DIR="$KERL_INSTALL_DIR"
-# Activate default Erlang version
-[ -f "$KERL_INSTALL_DIR/$ERLANG_VERSION/activate" ] && . "$KERL_INSTALL_DIR/$ERLANG_VERSION/activate"
-# PATH should already include $BIN_DIR from elsewhere
-EOF
+## No profile scripts; shims handle PATH at runtime per llm.txt
 
 # Create documentation
 echo ""

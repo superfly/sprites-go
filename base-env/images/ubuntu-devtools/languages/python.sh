@@ -1,6 +1,11 @@
 #!/bin/bash
 set -e
 
+# Implementation notes:
+# See ./llm.txt in this directory for the filesystem layout and shim standard
+# that other languages should follow (manager-first install, nvm-style shims).
+# conforms to llm.txt and matches node layout
+
 echo "=========================================="
 echo "Installing Python (canonical pyenv approach)..."
 echo "=========================================="
@@ -12,7 +17,8 @@ BIN_DIR="$BASE_DIR/bin"
 ETC_DIR="$BASE_DIR/etc/profile.d"
 
 # Python specific configuration
-PYTHON_VERSION="${PYTHON_VERSION:-3.12.4}"
+# Baseline pinned version as of 2025-10-04: 3.13.7
+PYTHON_VERSION="${PYTHON_VERSION:-3.13.7}"
 PYENV_ROOT="$LANG_BASE_DIR/python/pyenv"
 
 echo "Installing pyenv and Python..."
@@ -43,37 +49,62 @@ git clone https://github.com/pyenv/pyenv-virtualenv.git "$PYENV_ROOT/plugins/pye
 rm -rf "$PYENV_ROOT/.git"
 rm -rf "$PYENV_ROOT/plugins/pyenv-virtualenv/.git"
 
-# Setup pyenv environment
+# Setup pyenv environment (no shell eval)
 export PYENV_ROOT="$PYENV_ROOT"
 export PATH="$PYENV_ROOT/bin:$PATH"
-eval "$(pyenv init -)"
+PYENV_BIN="$PYENV_ROOT/bin/pyenv"
 
-# Install Python
+# Install Python using explicit pyenv binary
 echo "Installing Python ${PYTHON_VERSION}..."
-pyenv install "$PYTHON_VERSION"
-pyenv global "$PYTHON_VERSION"
+"$PYENV_BIN" install "$PYTHON_VERSION"
+"$PYENV_BIN" global "$PYTHON_VERSION"
+"$PYENV_BIN" rehash
 
-# Upgrade pip
+# Upgrade pip via shim directly
 echo "Upgrading pip..."
-pip install --upgrade pip
+"$PYENV_ROOT/shims/pip" install --upgrade pip
 
 # Install common Python tools
 echo "Installing common Python tools..."
-pip install setuptools wheel virtualenv pipenv poetry
+"$PYENV_ROOT/shims/pip" install setuptools wheel virtualenv pipenv poetry
 
-# Create symlinks in BIN_DIR
-echo "Creating symlinks in $BIN_DIR..."
-# Symlink pyenv binary
-ln -sf "$PYENV_ROOT/bin/pyenv" "$BIN_DIR/pyenv"
-echo "  Linked: pyenv"
+# Cleanup pip and build caches to reduce image size
+echo "Cleaning Python caches..."
+"$PYENV_ROOT/shims/pip" cache purge || true
+rm -rf "$PYENV_ROOT/sources" 2>/dev/null || true
 
-# Symlink Python binaries from shims
-for binary in "$PYENV_ROOT/shims"/{python,python3,pip,pip3,pipenv,poetry,virtualenv}; do
-    if [ -f "$binary" ] && [ -x "$binary" ]; then
-        binary_name=$(basename "$binary")
-        ln -sf "$binary" "$BIN_DIR/$binary_name"
-        echo "  Linked: $binary_name"
-    fi
+# Create wrapper shims in BIN_DIR for core Python commands
+echo "Creating pyenv-enabled shims in $BIN_DIR..."
+for cmd in python python3 pip pip3 pipenv poetry virtualenv pyenv; do
+    cat > "$BIN_DIR/$cmd" << 'WRAP_EOF'
+#!/bin/bash
+set -e
+
+# pyenv-enabled shim that ensures active Python is available
+DEFAULT_PYENV_ROOT="REPLACE_PYENV_ROOT"
+
+export PYENV_ROOT="${PYENV_ROOT:-$DEFAULT_PYENV_ROOT}"
+
+# Ensure pyenv bin and shims are on PATH
+case ":$PATH:" in
+  *":$PYENV_ROOT/bin:") ;;
+  *) PATH="$PYENV_ROOT/bin:$PATH" ;;
+esac
+case ":$PATH:" in
+  *":$PYENV_ROOT/shims:") ;;
+  *) PATH="$PYENV_ROOT/shims:$PATH" ;;
+esac
+
+cmd_name="$(basename "$0")"
+if [ "$cmd_name" = "pyenv" ]; then
+  exec "$PYENV_ROOT/bin/pyenv" "$@"
+else
+  exec "$PYENV_ROOT/shims/$cmd_name" "$@"
+fi
+WRAP_EOF
+    sed -i "s|REPLACE_PYENV_ROOT|$PYENV_ROOT|g" "$BIN_DIR/$cmd"
+    chmod +x "$BIN_DIR/$cmd"
+    echo "  Created shim: $cmd"
 done
 
 
@@ -87,114 +118,15 @@ echo "Verifying Python installation..."
 # Show installed versions
 echo ""
 echo "Installed Python versions:"
-pyenv versions
+"$PYENV_BIN" versions
 
 # Test Python
 echo ""
 echo "Testing Python..."
 "$BIN_DIR/python" -c "import sys; print(f'Hello from Python {sys.version.split()[0]}!')"
 
-# Create pyenv helper script
-echo ""
-echo "Creating pyenv helper script..."
-tee $BIN_DIR/pyenv-helper > /dev/null << 'SCRIPT_EOF'
-#!/bin/bash
-# Helper script for pyenv operations
-
-PYENV_ROOT="REPLACE_PYENV_ROOT"
-BIN_DIR="REPLACE_BIN_DIR"
-
-export PYENV_ROOT="$PYENV_ROOT"
-export PATH="$PYENV_ROOT/bin:$PATH"
-eval "$(pyenv init -)"
-
-case "$1" in
-    install)
-        version="$2"
-        if [ -z "$version" ]; then
-            echo "Usage: pyenv-helper install <version>"
-            echo "Example: pyenv-helper install 3.11.0"
-            exit 1
-        fi
-        
-        pyenv install "$version"
-        echo "Python $version installed"
-        echo "To use: pyenv-helper global $version"
-        ;;
-    list)
-        pyenv versions
-        ;;
-    global)
-        version="$2"
-        if [ -z "$version" ]; then
-            echo "Usage: pyenv-helper global <version>"
-            echo "Example: pyenv-helper global 3.12.0"
-            exit 1
-        fi
-        
-        pyenv global "$version"
-        
-        # Update symlinks
-        for binary in "$PYENV_ROOT/shims"/{python,python3,pip,pip3,pipenv,poetry,virtualenv}; do
-            if [ -f "$binary" ] && [ -x "$binary" ]; then
-                binary_name=$(basename "$binary")
-                ln -sf "$binary" "$BIN_DIR/$binary_name"
-            fi
-        done
-        
-        echo "Python $version is now the global default"
-        echo "Symlinks updated in $BIN_DIR"
-        ;;
-    local)
-        version="$2"
-        if [ -z "$version" ]; then
-            echo "Usage: pyenv-helper local <version>"
-            echo "Example: pyenv-helper local 3.11.0"
-            echo ""
-            echo "This sets the Python version for the current directory"
-            exit 1
-        fi
-        
-        pyenv local "$version"
-        echo "Python $version set for current directory"
-        ;;
-    *)
-        echo "Python version manager (pyenv) helper"
-        echo ""
-        echo "Usage: pyenv-helper <command> [args]"
-        echo ""
-        echo "Commands:"
-        echo "  install <version>  - Install a Python version"
-        echo "  list              - List installed versions"
-        echo "  global <version>  - Set global Python version"
-        echo "  local <version>   - Set local Python version for current directory"
-        echo ""
-        echo "Examples:"
-        echo "  pyenv-helper install 3.11.0"
-        echo "  pyenv-helper list"
-        echo "  pyenv-helper global 3.12.0"
-        ;;
-esac
-SCRIPT_EOF
-
-# Replace placeholders in the helper script
-sed -i "s|REPLACE_PYENV_ROOT|$PYENV_ROOT|g" $BIN_DIR/pyenv-helper
-sed -i "s|REPLACE_BIN_DIR|$BIN_DIR|g" $BIN_DIR/pyenv-helper
-chmod +x $BIN_DIR/pyenv-helper
-
-# Create profile script
-echo ""
-echo "Creating Python/pyenv environment configuration..."
-tee $ETC_DIR/pyenv.sh > /dev/null << EOF
-# Python/pyenv environment setup
-export PYENV_ROOT="$PYENV_ROOT"
-export PATH="\$PYENV_ROOT/bin:\$PATH"
-eval "\$(pyenv init -)"
-eval "\$(pyenv virtualenv-init -)"
-# Configure pip cache location
-export PIP_CACHE_DIR="$LANG_BASE_DIR/python/.cache/pip"
-# PATH should already include $BIN_DIR from elsewhere
-EOF
+## No helper script; pyenv is invoked via shims
+## No profile script; shims ensure PATH dynamically
 
 # Create documentation
 echo ""
@@ -207,7 +139,7 @@ This installation uses pyenv for managing Python versions.
 
 Installation Location:
 - pyenv: LANG_BASE_DIR/python/pyenv
-- Binaries: BIN_DIR (symlinked from shims)
+- Binaries: BIN_DIR (shim wrappers)
 - Packages: Within each Python version's site-packages
 
 Default Version: PYTHON_VERSION
@@ -223,13 +155,7 @@ The default Python version is immediately available:
 
 Managing Versions:
 ------------------
-Option 1: Use the helper script (no sourcing required):
-  pyenv-helper install 3.11.0  # Install a new version
-  pyenv-helper list            # List installed versions
-  pyenv-helper global 3.11.0   # Set global default
-  pyenv-helper local 3.10.0    # Set version for current directory
-
-Option 2: Use pyenv directly (requires environment setup):
+Use pyenv directly (shims handle PATH at runtime):
   pyenv install 3.11.0
   pyenv global 3.11.0
   pyenv local 3.10.0
@@ -288,8 +214,7 @@ Notes:
 - Use .python-version files in projects to specify Python version
 - pyenv-virtualenv plugin is installed for virtual environment management
 - Common tools pre-installed: setuptools, wheel, virtualenv, pipenv, poetry
-- Binary symlinks in BIN_DIR always point to the global version
-- The helper script updates symlinks when switching versions
+- Shims dynamically set PATH; no shell profile scripts are modified
 EOF
 
 # Replace placeholders in documentation
