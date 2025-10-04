@@ -438,9 +438,9 @@ func (s *System) monitorProcess(cmd *exec.Cmd, stdoutBuffer, stderrBuffer *tap.C
 			}
 		}
 	}
-	s.processExitCode = exitCode
 
 	s.logger.Info("Process exited", "error", err, "exitCode", exitCode, "runtime", processRuntime)
+	s.SetProcessExitCode(exitCode, "monitorProcess")
 
 	// Generate crash report if needed
 	s.generateCrashReport(err, processRuntime, stdoutBuffer, stderrBuffer)

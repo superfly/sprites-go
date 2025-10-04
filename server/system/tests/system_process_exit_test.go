@@ -87,7 +87,7 @@ exit 42
 		t.Fatal(err)
 	}
 
-	config := TestConfig(testDir)
+	config := VerboseTestConfig(testDir) // Use verbose logging to debug exit code
 	config.ProcessCommand = []string{shortRunScript}
 	config.KeepAliveOnError = false // Ensure shutdown is triggered on process exit
 

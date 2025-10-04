@@ -65,7 +65,8 @@ type System struct {
 	processWaitStarted  bool
 	processRunningCh    chan struct{} // Closed when process is running
 	processStoppedCh    chan struct{} // Closed when process is stopped
-	processExitCode     int           // Exit code for WaitForExit
+	processExitCode     atomic.Int32  // Exit code for WaitForExit
+	processExitCodeSet  atomic.Bool   // Track if exit code has been set
 	gracefulShutdown    bool
 	restoringInProgress atomic.Bool // Flag to prevent shutdown trigger during restore
 
@@ -107,6 +108,10 @@ func New(config *Config) (*System, error) {
 		}(),
 	}
 
+	// Default exit code to -1 to detect race conditions where it's read before being set
+	s.processExitCode.Store(-1)
+	s.processExitCodeSet.Store(false) // Not yet set by actual process
+
 	logger.Info("Created new System instance", "system_ptr", fmt.Sprintf("%p", s))
 
 	// Initialize all modules but don't start them yet
@@ -142,6 +147,25 @@ func (s *System) Start() error {
 	return nil
 }
 
+// GetProcessExitCode returns the process exit code as an int
+func (s *System) GetProcessExitCode() int {
+	return int(s.processExitCode.Load())
+}
+
+// SetProcessExitCode sets the process exit code and warns if called multiple times
+func (s *System) SetProcessExitCode(exitCode int, source string) {
+	if s.processExitCodeSet.Swap(true) {
+		// Exit code was already set
+		oldValue := s.processExitCode.Load()
+		s.logger.Warn("Process exit code being overwritten",
+			"oldValue", oldValue,
+			"newValue", exitCode,
+			"source", source)
+	}
+	s.processExitCode.Store(int32(exitCode))
+	s.logger.Info("Process exit code set", "exitCode", exitCode, "source", source)
+}
+
 // monitorProcessLoop monitors the container process and handles exits
 func (s *System) monitorProcessLoop() {
 	for {
@@ -167,13 +191,9 @@ func (s *System) monitorProcessLoop() {
 		}
 
 		// Get the exit code that was stored by monitorProcess()
-		exitCode := s.processExitCode
+		exitCode := s.GetProcessExitCode()
 
-		if exitCode != 0 {
-			s.logger.Info("Container process exited with code", "exitCode", exitCode)
-		} else {
-			s.logger.Info("Container process exited normally")
-		}
+		s.logger.Info("Container process exited with code", "exitCode", exitCode)
 
 		// Check if we're already shutting down
 		select {
@@ -221,7 +241,7 @@ func (s *System) HandleSignal(sig os.Signal) {
 	// We do NOT forward signals to the container - we handle them ourselves
 	if sig == syscall.SIGTERM || sig == syscall.SIGINT {
 		// Use exit code 0 for graceful shutdown
-		s.processExitCode = 0
+		s.SetProcessExitCode(0, "HandleSignal")
 		// Close channel exactly once
 		s.shutdownTriggeredOnce.Do(func() {
 			close(s.shutdownTriggeredCh)
@@ -234,8 +254,8 @@ func (s *System) WaitForExit() (int, error) {
 	// Wait for shutdown to be triggered
 	<-s.shutdownTriggeredCh
 
-	// Get the exit code (default to 0 if not set)
-	exitCode := s.processExitCode
+	// Get the exit code
+	exitCode := s.GetProcessExitCode()
 
 	// Perform shutdown
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
