@@ -4,4 +4,3 @@ globs:
 alwaysApply: true
 ---
 - NEVER run `flyctl deploy` or `fly deploy`
-- Use make test-machine to do a live test of the app

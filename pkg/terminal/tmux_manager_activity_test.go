@@ -66,7 +66,8 @@ func TestTMUXManager_GetAllSessionActivityInfo_ActiveStatus(t *testing.T) {
 
 	wm := tmux.NewWindowMonitor(ctx, monitorSession).
 		WithSocketPath(socketPath).
-		WithConfigPath("")
+		WithConfigPath("").
+		WithTmuxBinary("tmux")
 
 	// Start window monitor
 	if err := wm.Start(ctx); err != nil {
@@ -252,7 +253,8 @@ func TestTMUXManager_GetAllSessionActivityInfo_BugScenario(t *testing.T) {
 
 	wm := tmux.NewWindowMonitor(ctx, monitorSession).
 		WithSocketPath(socketPath).
-		WithConfigPath("")
+		WithConfigPath("").
+		WithTmuxBinary("tmux")
 
 	// Start window monitor
 	if err := wm.Start(ctx); err != nil {
@@ -273,7 +275,7 @@ func TestTMUXManager_GetAllSessionActivityInfo_BugScenario(t *testing.T) {
 	time.Sleep(1 * time.Second)
 
 	// Create TMUXManager to test the mapping
-	tm := NewTMUXManager(ctx).WithSocketPath(socketPath).WithConfigPath("")
+	tm := NewTMUXManager(ctx).WithSocketPath(socketPath).WithConfigPath("").WithTmuxBinary("tmux")
 
 	// Set the window monitor in TMUXManager
 	// Note: Normally this is done internally, but for testing we need to set it manually

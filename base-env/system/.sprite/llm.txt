@@ -4,6 +4,19 @@
 - Runs as `sprite` user
 - Passwordless sudo access enabled
 
+## Lifecycle
+- Sprites run while actively servicing HTTP requests
+- Sprites run while detachable sessions are generating output
+- When neither condition is true, sprites pause
+- Sprites may remain paused or be fully stopped at any time
+- When stopped, detachable sessions are lost
+- Services restart automatically at boot time
+
+## Services
+- Long-running processes that persist between reboots
+- Managed through the internal API
+- Automatically restarted when sprite boots
+
 ## Checkpoints
 - Point-in-time checkpoints and restores available
 - Copy-on-write implementation for storage efficiency

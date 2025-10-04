@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -57,6 +56,7 @@ type TMUXManager struct {
 	cmdPrefix      []string // Prefix for server-side tmux commands (e.g., ["crun", "exec", "app"])
 	socketPath     string   // Path to tmux socket
 	configPath     string   // Path to tmux config
+	tmuxBinary     string   // Path to tmux binary
 
 	// Channel-based synchronization for monitor startup
 	monitorStartCh chan struct{}
@@ -80,6 +80,7 @@ func NewTMUXManager(ctx context.Context) *TMUXManager {
 		nextID:         -1,
 		socketPath:     "/.sprite/tmp/exec-tmux",
 		configPath:     "/.sprite/etc/tmux.conf",
+		tmuxBinary:     "tmux", // Default to tmux in PATH
 		activityChan:   make(chan SessionActivity, 100),
 		monitorStartCh: make(chan struct{}, 1),
 		paneCallbacks:  make(map[string]PaneLifecycleCallback),
@@ -108,6 +109,12 @@ func (tm *TMUXManager) WithSocketPath(path string) *TMUXManager {
 // WithConfigPath sets the tmux config path
 func (tm *TMUXManager) WithConfigPath(path string) *TMUXManager {
 	tm.configPath = path
+	return tm
+}
+
+// WithTmuxBinary sets a custom tmux binary path (mainly for testing)
+func (tm *TMUXManager) WithTmuxBinary(path string) *TMUXManager {
+	tm.tmuxBinary = path
 	return tm
 }
 
@@ -233,22 +240,8 @@ func (tm *TMUXManager) SessionExists(id string) bool {
 	// Check if tmux session exists by running tmux has-session with sprite-exec-<id> naming
 	sessionName := fmt.Sprintf("sprite-exec-%s", id)
 	tmuxArgs := []string{"-f", tm.configPath, "-S", tm.socketPath, "has-session", "-t", sessionName}
-
-	var cmd *exec.Cmd
-	if len(tm.cmdPrefix) > 0 {
-		// Use prefix for server-side command
-		allArgs := append([]string{"/.sprite/bin/tmux"}, tmuxArgs...)
-		cmd = exec.Command(tm.cmdPrefix[0], append(tm.cmdPrefix[1:], allArgs...)...)
-	} else {
-		// Use system tmux if /.sprite/bin/tmux doesn't exist (e.g., in tests)
-		tmuxBinary := "/.sprite/bin/tmux"
-		if _, err := os.Stat(tmuxBinary); os.IsNotExist(err) {
-			tmuxBinary = "tmux"
-		}
-		cmd = exec.Command(tmuxBinary, tmuxArgs...)
-	}
+	cmd := tm.buildTmuxCommand(tmuxArgs)
 	err := cmd.Run()
-
 	return err == nil
 }
 
@@ -261,20 +254,7 @@ func (tm *TMUXManager) KillSession(id string) error {
 	// Send kill-session command to tmux with sprite-exec-<id> naming
 	sessionName := fmt.Sprintf("sprite-exec-%s", id)
 	tmuxArgs := []string{"-f", tm.configPath, "-S", tm.socketPath, "kill-session", "-t", sessionName}
-
-	var cmd *exec.Cmd
-	if len(tm.cmdPrefix) > 0 {
-		// Use prefix for server-side command
-		allArgs := append([]string{"/.sprite/bin/tmux"}, tmuxArgs...)
-		cmd = exec.Command(tm.cmdPrefix[0], append(tm.cmdPrefix[1:], allArgs...)...)
-	} else {
-		// Use system tmux if /.sprite/bin/tmux doesn't exist (e.g., in tests)
-		tmuxBinary := "/.sprite/bin/tmux"
-		if _, err := os.Stat(tmuxBinary); os.IsNotExist(err) {
-			tmuxBinary = "tmux"
-		}
-		cmd = exec.Command(tmuxBinary, tmuxArgs...)
-	}
+	cmd := tm.buildTmuxCommand(tmuxArgs)
 	return cmd.Run()
 }
 
@@ -282,21 +262,7 @@ func (tm *TMUXManager) KillSession(id string) error {
 func (tm *TMUXManager) ListSessions() ([]string, error) {
 	// List all tmux sessions
 	tmuxArgs := []string{"-f", tm.configPath, "-S", tm.socketPath, "list-sessions", "-F", "#{session_name}"}
-
-	var cmd *exec.Cmd
-	if len(tm.cmdPrefix) > 0 {
-		// Use prefix for server-side command
-		allArgs := append([]string{"/.sprite/bin/tmux"}, tmuxArgs...)
-		cmd = exec.Command(tm.cmdPrefix[0], append(tm.cmdPrefix[1:], allArgs...)...)
-	} else {
-		// Use system tmux if /.sprite/bin/tmux doesn't exist (e.g., in tests)
-		tmuxBinary := "/.sprite/bin/tmux"
-		if _, err := os.Stat(tmuxBinary); os.IsNotExist(err) {
-			tmuxBinary = "tmux"
-		}
-		cmd = exec.Command(tmuxBinary, tmuxArgs...)
-	}
-
+	cmd := tm.buildTmuxCommand(tmuxArgs)
 	output, err := cmd.Output()
 	if err != nil {
 		// If tmux server is not running, there are no sessions
@@ -328,21 +294,7 @@ func (tm *TMUXManager) ListSessionsWithInfo() ([]SessionInfo, error) {
 	tmuxArgs := []string{"-f", tm.configPath, "-S", tm.socketPath,
 		"list-sessions", "-F",
 		"#{session_name}|#{session_created}|#{session_windows}|#{pane_current_command}"}
-
-	var cmd *exec.Cmd
-	if len(tm.cmdPrefix) > 0 {
-		// Use prefix for server-side command
-		allArgs := append([]string{"/.sprite/bin/tmux"}, tmuxArgs...)
-		cmd = exec.Command(tm.cmdPrefix[0], append(tm.cmdPrefix[1:], allArgs...)...)
-	} else {
-		// Use system tmux if /.sprite/bin/tmux doesn't exist (e.g., in tests)
-		tmuxBinary := "/.sprite/bin/tmux"
-		if _, err := os.Stat(tmuxBinary); os.IsNotExist(err) {
-			tmuxBinary = "tmux"
-		}
-		cmd = exec.Command(tmuxBinary, tmuxArgs...)
-	}
-
+	cmd := tm.buildTmuxCommand(tmuxArgs)
 	output, err := cmd.Output()
 	if err != nil {
 		// If tmux server is not running, there are no sessions
@@ -394,21 +346,7 @@ func (tm *TMUXManager) GetSessionPanePIDs(id string) ([]int, error) {
 		"-t", sessionName,
 		"-F", "#{pane_pid}",
 	}
-
-	var cmd *exec.Cmd
-	if len(tm.cmdPrefix) > 0 {
-		// Use prefix for server-side command
-		allArgs := append([]string{"/.sprite/bin/tmux"}, tmuxArgs...)
-		cmd = exec.Command(tm.cmdPrefix[0], append(tm.cmdPrefix[1:], allArgs...)...)
-	} else {
-		// Use system tmux if /.sprite/bin/tmux doesn't exist (e.g., in tests)
-		tmuxBinary := "/.sprite/bin/tmux"
-		if _, err := os.Stat(tmuxBinary); os.IsNotExist(err) {
-			tmuxBinary = "tmux"
-		}
-		cmd = exec.Command(tmuxBinary, tmuxArgs...)
-	}
-
+	cmd := tm.buildTmuxCommand(tmuxArgs)
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get pane PIDs: %w", err)
@@ -443,21 +381,7 @@ func (tm *TMUXManager) getSessionCommand(sessionName string) string {
 	// Get the command from the first pane of the session
 	tmuxArgs := []string{"-f", tm.configPath, "-S", tm.socketPath,
 		"list-panes", "-t", sessionName, "-F", "#{pane_current_command}"}
-
-	var cmd *exec.Cmd
-	if len(tm.cmdPrefix) > 0 {
-		// Use prefix for server-side command
-		allArgs := append([]string{"/.sprite/bin/tmux"}, tmuxArgs...)
-		cmd = exec.Command(tm.cmdPrefix[0], append(tm.cmdPrefix[1:], allArgs...)...)
-	} else {
-		// Use system tmux if /.sprite/bin/tmux doesn't exist (e.g., in tests)
-		tmuxBinary := "/.sprite/bin/tmux"
-		if _, err := os.Stat(tmuxBinary); os.IsNotExist(err) {
-			tmuxBinary = "tmux"
-		}
-		cmd = exec.Command(tmuxBinary, tmuxArgs...)
-	}
-
+	cmd := tm.buildTmuxCommand(tmuxArgs)
 	output, err := cmd.Output()
 	if err != nil {
 		return "unknown"
@@ -489,6 +413,24 @@ func (tm *TMUXManager) SetCmdPrefix(prefix []string) {
 	if tm.logger != nil {
 		tm.logger.Info("TMUXManager command prefix has been set", "prefix", prefix)
 	}
+}
+
+// buildTmuxCommand constructs an exec.Cmd for running tmux with the configured prefix
+func (tm *TMUXManager) buildTmuxCommand(tmuxArgs []string) *exec.Cmd {
+	// Use /.sprite/bin/tmux in production (indicated by default socket path)
+	// In test environments with custom socket paths, use the configured binary
+	tmuxBinary := tm.tmuxBinary
+	if tmuxBinary == "tmux" && strings.HasPrefix(tm.socketPath, "/.sprite/") {
+		tmuxBinary = "/.sprite/bin/tmux"
+	}
+
+	if len(tm.cmdPrefix) > 0 {
+		// Use prefix for server-side command (e.g., crun exec app /.sprite/bin/tmux ...)
+		allArgs := append([]string{tmuxBinary}, tmuxArgs...)
+		return exec.Command(tm.cmdPrefix[0], append(tm.cmdPrefix[1:], allArgs...)...)
+	}
+	// Direct execution without prefix
+	return exec.Command(tmuxBinary, tmuxArgs...)
 }
 
 // GetActivityChannel returns the activity channel for monitoring
@@ -639,21 +581,7 @@ func (tm *TMUXManager) getSessionIDMapping() map[string]string {
 	// Format: tmux_session_id:session_name
 	tmuxArgs := []string{"-f", tm.configPath, "-S", tm.socketPath,
 		"list-sessions", "-F", "#{session_id}:#{session_name}"}
-
-	var cmd *exec.Cmd
-	if len(tm.cmdPrefix) > 0 {
-		// Use prefix for server-side command
-		allArgs := append([]string{"/.sprite/bin/tmux"}, tmuxArgs...)
-		cmd = exec.Command(tm.cmdPrefix[0], append(tm.cmdPrefix[1:], allArgs...)...)
-	} else {
-		// Use system tmux if /.sprite/bin/tmux doesn't exist (e.g., in tests)
-		tmuxBinary := "/.sprite/bin/tmux"
-		if _, err := os.Stat(tmuxBinary); os.IsNotExist(err) {
-			tmuxBinary = "tmux"
-		}
-		cmd = exec.Command(tmuxBinary, tmuxArgs...)
-	}
-
+	cmd := tm.buildTmuxCommand(tmuxArgs)
 	output, err := cmd.Output()
 	if err != nil {
 		// Log the error for debugging
@@ -736,15 +664,6 @@ func (tm *TMUXManager) StartActivityMonitor(ctx context.Context) error {
 	// Check if monitor is already running
 	if tm.windowMonitor != nil {
 		tm.logger.Debug("Window monitor already running, returning early")
-		return nil
-	}
-
-	// Check if socket directory exists - might not exist in test environments
-	socketDir := "/.sprite/tmp"
-	if _, err := os.Stat(socketDir); os.IsNotExist(err) {
-		tm.logger.Warn("Socket directory does not exist, skipping tmux activity monitor",
-			"socketDir", socketDir,
-			"info", "This is expected in test environments")
 		return nil
 	}
 

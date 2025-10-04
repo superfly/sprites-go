@@ -65,7 +65,7 @@ func ConsoleCommand(ctx *GlobalContext, args []string) {
 	flags := NewSpriteFlags(cmd.FlagSet)
 
 	// Console-specific flags
-	detachable := cmd.FlagSet.Bool("detachable", false, "Create a detachable tmux session")
+	detachable := cmd.FlagSet.Bool("detachable", true, "Create a detachable tmux session")
 
 	// Parse flags
 	remainingArgs, err := ParseFlags(cmd, args)

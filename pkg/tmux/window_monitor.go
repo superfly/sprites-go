@@ -4,9 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -97,6 +95,23 @@ func (wm *WindowMonitor) WithCmdPrefix(prefix []string) *WindowMonitor {
 	return wm
 }
 
+// WithTmuxBinary sets a custom tmux binary path (mainly for testing)
+func (wm *WindowMonitor) WithTmuxBinary(path string) *WindowMonitor {
+	wm.tmuxBinary = path
+	return wm
+}
+
+// buildTmuxCommand constructs an exec.Cmd for running tmux with the configured prefix
+func (wm *WindowMonitor) buildTmuxCommand(tmuxArgs []string) *exec.Cmd {
+	if len(wm.cmdPrefix) > 0 {
+		// Use prefix for container execution (e.g., crun exec app /.sprite/bin/tmux ...)
+		allArgs := append([]string{wm.tmuxBinary}, tmuxArgs...)
+		return exec.Command(wm.cmdPrefix[0], append(wm.cmdPrefix[1:], allArgs...)...)
+	}
+	// Direct execution without prefix
+	return exec.Command(wm.tmuxBinary, tmuxArgs...)
+}
+
 // Start begins monitoring all windows
 func (wm *WindowMonitor) Start(ctx context.Context) error {
 	// Ensure we have a logger
@@ -122,50 +137,16 @@ func (wm *WindowMonitor) Start(ctx context.Context) error {
 	}
 	createArgs = append(createArgs, "-S", wm.socketPath, "new-session", "-d", "-s", wm.monitorSession)
 
-	// Determine tmux binary - use /.sprite/bin/tmux if it exists or if we have cmdPrefix
-	// Otherwise fall back to system tmux
-	tmuxBinary := "/.sprite/bin/tmux"
-	if len(wm.cmdPrefix) == 0 {
-		// No cmdPrefix - check if /.sprite/bin/tmux exists on host
-		if _, err := os.Stat(tmuxBinary); err != nil {
-			// Doesn't exist, use system tmux
-			tmuxBinary = "tmux"
-			wm.logger.Info("/.sprite/bin/tmux not found, using system tmux")
-		}
+	// Use /.sprite/bin/tmux in production (indicated by default socket path)
+	// In test environments with custom socket paths, use the configured binary
+	if wm.tmuxBinary == "tmux" && strings.HasPrefix(wm.socketPath, "/.sprite/") {
+		wm.tmuxBinary = "/.sprite/bin/tmux"
 	}
-	wm.tmuxBinary = tmuxBinary
 	wm.logger.Debug("Using tmux binary",
 		"path", wm.tmuxBinary,
 		"cmdPrefix", wm.cmdPrefix)
 
-	// Check if socket directory exists
-	// Extract directory from socket path - handle both /path/to/dir/exec-tmux and /path/to/socket formats
-	var socketDir string
-	if strings.HasSuffix(wm.socketPath, "/exec-tmux") {
-		socketDir = strings.TrimSuffix(wm.socketPath, "/exec-tmux")
-	} else {
-		socketDir = filepath.Dir(wm.socketPath)
-	}
-
-	if info, err := os.Stat(socketDir); err != nil {
-		wm.logger.Error("Socket directory not found",
-			"dir", socketDir,
-			"error", err)
-		return fmt.Errorf("socket directory not found at %s: %w", socketDir, err)
-	} else if !info.IsDir() {
-		wm.logger.Error("Socket path is not a directory",
-			"dir", socketDir)
-		return fmt.Errorf("socket path %s is not a directory", socketDir)
-	}
-
-	var createCmd *exec.Cmd
-	if len(wm.cmdPrefix) > 0 {
-		// Use prefix for container execution
-		allArgs := append([]string{wm.tmuxBinary}, createArgs...)
-		createCmd = exec.Command(wm.cmdPrefix[0], append(wm.cmdPrefix[1:], allArgs...)...)
-	} else {
-		createCmd = exec.Command(wm.tmuxBinary, createArgs...)
-	}
+	createCmd := wm.buildTmuxCommand(createArgs)
 
 	wm.logger.Debug("Creating tmux monitor session",
 		"fullCommand", createCmd.String(),
@@ -191,14 +172,7 @@ func (wm *WindowMonitor) Start(ctx context.Context) error {
 	}
 	attachArgs = append(attachArgs, "-S", wm.socketPath, "-C", "attach-session", "-t", wm.monitorSession)
 
-	var attachCmd *exec.Cmd
-	if len(wm.cmdPrefix) > 0 {
-		// Use prefix for container execution
-		allArgs := append([]string{wm.tmuxBinary}, attachArgs...)
-		attachCmd = exec.Command(wm.cmdPrefix[0], append(wm.cmdPrefix[1:], allArgs...)...)
-	} else {
-		attachCmd = exec.Command(wm.tmuxBinary, attachArgs...)
-	}
+	attachCmd := wm.buildTmuxCommand(attachArgs)
 
 	wm.logger.Info("Attaching to tmux control mode",
 		"fullCommand", attachCmd.String(),
@@ -398,15 +372,7 @@ func (wm *WindowMonitor) getWindowIDFromPane(paneID string) string {
 	}
 	args = append(args, "-S", wm.socketPath, "display-message", "-p", "-t", paneID, "#{window_id}")
 
-	var cmd *exec.Cmd
-	if len(wm.cmdPrefix) > 0 {
-		// Use prefix for container execution
-		allArgs := append([]string{wm.tmuxBinary}, args...)
-		cmd = exec.Command(wm.cmdPrefix[0], append(wm.cmdPrefix[1:], allArgs...)...)
-	} else {
-		cmd = exec.Command(wm.tmuxBinary, args...)
-	}
-
+	cmd := wm.buildTmuxCommand(args)
 	output, err := cmd.Output()
 	if err != nil {
 		wm.logger.Debug("Failed to get window ID for pane", "paneID", paneID, "error", err)
@@ -439,15 +405,7 @@ func (wm *WindowMonitor) discoverAndLinkWindows() {
 	args = append(args, "-S", wm.socketPath, "list-windows", "-a", "-F",
 		"#{window_id}:#{session_id}:#{session_name}:#{window_name}")
 
-	var cmd *exec.Cmd
-	if len(wm.cmdPrefix) > 0 {
-		// Use prefix for container execution
-		allArgs := append([]string{wm.tmuxBinary}, args...)
-		cmd = exec.Command(wm.cmdPrefix[0], append(wm.cmdPrefix[1:], allArgs...)...)
-	} else {
-		cmd = exec.Command(wm.tmuxBinary, args...)
-	}
-
+	cmd := wm.buildTmuxCommand(args)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		wm.logger.Debug("Failed to list windows",

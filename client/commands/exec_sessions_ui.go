@@ -38,6 +38,11 @@ func formatTimeAgo(t time.Time) string {
 
 // formatActivityRate formats the activity rate for display
 func formatActivityRate(bytesPerSec float64, isActive bool) string {
+	// Don't show activity when status is Idle
+	if !isActive {
+		return "-"
+	}
+
 	if bytesPerSec > 0 {
 		if bytesPerSec < 1024 {
 			return fmt.Sprintf("%.0f B/s", bytesPerSec)
@@ -46,10 +51,8 @@ func formatActivityRate(bytesPerSec float64, isActive bool) string {
 		} else {
 			return fmt.Sprintf("%.1f MB/s", bytesPerSec/(1024*1024))
 		}
-	} else if isActive {
-		return "Active"
 	}
-	return "Idle"
+	return "Active"
 }
 
 // Style definitions
@@ -246,14 +249,7 @@ func listSessionsNonInteractive(sessions []SessionItem, org *config.Organization
 		timeStr := formatTimeAgo(session.Created)
 
 		// Format activity
-		var activityStr string
-		if session.BytesPerSecond > 0 {
-			activityStr = formatActivityRate(session.BytesPerSecond, session.IsActive)
-		} else if session.IsActive {
-			activityStr = "Active"
-		} else {
-			activityStr = "-"
-		}
+		activityStr := formatActivityRate(session.BytesPerSecond, session.IsActive)
 
 		fmt.Printf("%-6s %-20s %-30s %-15s\n", session.ID, cmdStr, timeStr, activityStr)
 	}
