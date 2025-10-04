@@ -1,0 +1,25 @@
+# Sprite Environment
+
+## User Account
+- Runs as `sprite` user
+- Passwordless sudo access enabled
+
+## Checkpoints
+- Point-in-time checkpoints and restores available
+- Copy-on-write implementation for storage efficiency
+- Last 5 checkpoints mounted at `/.sprite/checkpoints`
+- Checkpoints capture only the writable overlay, not the base image
+
+## File System
+- Base Docker image with writable overlay
+- Underlying image upgraded out-of-band without modifying overlay
+- All modifications stored in overlay layer
+
+## Internal API
+- Unix socket at `/.sprite/api.sock`
+- Manages environment, checkpoints, and services
+- Run `curl-sprite-api --help` for endpoint documentation
+
+## Development Tools
+- If `llm-dev.txt` exists, it documents pre-installed language runtimes, version managers, and dev tools
+

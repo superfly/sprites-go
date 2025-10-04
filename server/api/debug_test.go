@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/superfly/sprite-env/lib/api"
+	"github.com/superfly/sprite-env/pkg/services"
 	"github.com/superfly/sprite-env/pkg/tap"
 	"github.com/superfly/sprite-env/pkg/terminal"
 )
@@ -177,6 +178,14 @@ func (m *mockSystemManager) Shutdown(ctx context.Context) error {
 
 func (m *mockSystemManager) Wait() error {
 	return nil
+}
+
+func (m *mockSystemManager) GetServicesManager() *services.Manager {
+	return nil
+}
+
+func (m *mockSystemManager) GetLogDir() string {
+	return "/tmp/test-logs"
 }
 
 // TestHandleDebugCreateZombie tests the debug zombie creation handler

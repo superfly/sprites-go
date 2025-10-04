@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-
-	"github.com/superfly/sprite-env/pkg/checkpoint"
 )
 
 func TestPrepareCheckpoint(t *testing.T) {
@@ -18,7 +16,7 @@ func TestPrepareCheckpoint(t *testing.T) {
 			return func() error { return nil }, nil
 		}
 
-		prep := PrepareCheckpoint(nil, next)
+		prep := prepareCheckpoint(nil, next)
 		resume, err := prep(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -37,7 +35,7 @@ func TestPrepareCheckpoint(t *testing.T) {
 			return nil, nextErr
 		}
 
-		prep := PrepareCheckpoint(nil, next)
+		prep := prepareCheckpoint(nil, next)
 		_, err := prep(ctx)
 		if err == nil {
 			t.Fatal("expected error")
@@ -58,7 +56,7 @@ func TestPrepareRestore(t *testing.T) {
 			return func() error { return nil }, nil
 		}
 
-		prep := PrepareRestore(nil, next)
+		prep := prepareRestore(nil, next)
 		resume, err := prep(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -79,7 +77,7 @@ func TestMiddlewareChaining(t *testing.T) {
 	var order []string
 
 	// Create wrapper functions that track order
-	wrapPrep := func(name string, next checkpoint.PrepFunc) checkpoint.PrepFunc {
+	wrapPrep := func(name string, next PrepFunc) PrepFunc {
 		return func(ctx context.Context) (func() error, error) {
 			order = append(order, name+"-prepare")
 

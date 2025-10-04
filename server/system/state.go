@@ -18,6 +18,14 @@ func (s *System) IsProcessRunning() bool {
 	return err == nil
 }
 
+// ProcessPID returns the PID of the running process, or 0 if no process is running
+func (s *System) ProcessPID() int {
+	if s.processCmd == nil || s.processCmd.Process == nil {
+		return 0
+	}
+	return s.processCmd.Process.Pid
+}
+
 // WhenProcessRunning waits until the process is running or returns immediately if already running.
 // Returns an error if the context is cancelled before the process starts.
 func (s *System) WhenProcessRunning(ctx context.Context) error {

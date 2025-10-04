@@ -121,11 +121,6 @@ func NewServer(config Config, system SystemManager, ctx context.Context) (*Serve
 	{
 		next := handler
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Log when we receive a request that might need to wait
-			s.logger.Info("Received request, checking overlay readiness",
-				"requestPath", r.URL.Path,
-				"method", r.Method)
-
 			// Wait for overlay to be ready before processing any request
 			ctx, cancel := context.WithTimeout(r.Context(), s.config.MaxWaitTime)
 			defer cancel()
@@ -143,9 +138,9 @@ func NewServer(config Config, system SystemManager, ctx context.Context) (*Serve
 				return
 			}
 
-			// Log if we waited more than 5ms
+			// Log if we waited more than 5ms (i.e., we held the request)
 			if waitTime > 5*time.Millisecond {
-				s.logger.Info("Overlay became ready, processing request",
+				s.logger.Info("Held request while waiting for overlay to be ready",
 					"requestPath", r.URL.Path,
 					"waitTime", waitTime)
 			}

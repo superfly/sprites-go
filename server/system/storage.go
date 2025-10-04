@@ -6,13 +6,13 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/superfly/sprite-env/pkg/checkpoint"
 	"github.com/superfly/sprite-env/pkg/db"
 	"github.com/superfly/sprite-env/pkg/juicefs"
 	"github.com/superfly/sprite-env/pkg/overlay"
 )
 
 // initializeStorage initializes storage components in order: DB → JuiceFS → Overlay
+// Note: Checkpoint manager is initialized by overlay manager during Mount()
 func (s *System) initializeStorage() error {
 	// 1. Initialize DB manager
 	if err := s.initializeDBManager(); err != nil {
@@ -25,15 +25,11 @@ func (s *System) initializeStorage() error {
 	}
 
 	// 3. Initialize Overlay (depends on JuiceFS)
+	// Overlay will initialize checkpoint manager during Mount() when filesystem is ready
 	if s.config.OverlayEnabled {
 		if err := s.initializeOverlay(); err != nil {
 			return fmt.Errorf("failed to initialize overlay: %w", err)
 		}
-	}
-
-	// 4. Initialize checkpoint manager (wraps all storage components)
-	if err := s.initializeCheckpointManager(); err != nil {
-		return fmt.Errorf("failed to initialize checkpoint manager: %w", err)
 	}
 
 	return nil
@@ -136,79 +132,50 @@ func (s *System) initializeOverlay() error {
 
 	overlayMgr := overlay.New(overlayConfig)
 
+	// Set restore container callbacks for checkpoint restore operations
+	overlayMgr.SetRestoreContainerCallbacks(
+		func(ctx context.Context) error {
+			s.logger.Info("Restore prep: shutting down container")
+			return s.ShutdownContainer(ctx)
+		},
+		func(ctx context.Context) error {
+			s.logger.Info("Restore resume: booting container")
+			return s.BootContainer(ctx)
+		},
+	)
+
 	s.OverlayManager = overlayMgr
 
 	return nil
 }
 
-// initializeCheckpointManager creates the checkpoint manager
-func (s *System) initializeCheckpointManager() error {
-	// Require JuiceFS to be configured, since checkpoint operations require it
-	if s.JuiceFS == nil {
-		return fmt.Errorf("checkpoint manager requires JuiceFS to be configured")
+// initializeCheckpointInfrastructure sets up checkpoint manager and mounts after overlay is ready
+func (s *System) initializeCheckpointInfrastructure(ctx context.Context) error {
+	if s.OverlayManager == nil {
+		return nil
 	}
 
-	// Build checkpoint manager with DB path, filesystem base, and juicefs clone command
+	// Determine checkpoint database path
 	checkpointDBDir := filepath.Join(s.config.WriteDir, "checkpoints")
-	if err := os.MkdirAll(checkpointDBDir, 0755); err != nil {
-		return fmt.Errorf("ensure checkpoint db dir: %w", err)
-	}
-	dbPath := filepath.Join(checkpointDBDir, "checkpoints.db")
-	fsBaseDir := s.JuiceFS.GetMountPath()
-	copyCommand := []string{"juicefs", "clone"}
+	checkpointDBPath := filepath.Join(checkpointDBDir, "checkpoints.db")
 
-	// Compose checkpoint preparation chain: overlay wraps final
-	final := checkpoint.NoopPrep()
-	var checkpointPrep checkpoint.PrepFunc
-	if s.OverlayManager != nil {
-		checkpointPrep = overlay.PrepareCheckpoint(s.OverlayManager, final)
-	} else {
-		checkpointPrep = final
+	// Set up checkpoint mount directory with shared propagation
+	if err := s.OverlayManager.SetupCheckpointMountBase(ctx); err != nil {
+		s.logger.Warn("Failed to setup checkpoint mount base", "error", err)
+		// Non-fatal - continue
 	}
 
-	// Compose restore preparation chain: shutdown container, then overlay, then boot back
-	restorePrep := func(ctx context.Context) (func() error, error) {
-		// Shutdown container before restore
-		s.logger.Info("Restore prep: shutting down container")
-		if err := s.ShutdownContainer(ctx); err != nil {
-			return nil, fmt.Errorf("shutdown container for restore: %w", err)
-		}
-
-		// Then run overlay restore prep if available
-		var overlayResume func() error
-		if s.OverlayManager != nil {
-			overlayPrepRestore := overlay.PrepareRestore(s.OverlayManager, final)
-			resume, err := overlayPrepRestore(ctx)
-			if err != nil {
-				return nil, fmt.Errorf("overlay restore prep: %w", err)
-			}
-			overlayResume = resume
-		}
-
-		// Return resume function that boots container back
-		return func() error {
-			// First resume overlay if needed
-			if overlayResume != nil {
-				if err := overlayResume(); err != nil {
-					s.logger.Error("Failed to resume overlay after restore", "error", err)
-				}
-			}
-
-			// Then boot container back
-			s.logger.Info("Restore resume: booting container")
-			if err := s.BootContainer(ctx); err != nil {
-				return fmt.Errorf("boot container after restore: %w", err)
-			}
-			return nil
-		}, nil
+	// Initialize checkpoint manager
+	if err := s.OverlayManager.InitializeCheckpointManager(ctx, checkpointDBPath); err != nil {
+		s.logger.Warn("Failed to initialize checkpoint manager", "error", err)
+		// Non-fatal - continue
 	}
 
-	// Create the Manager and attach to System
-	mgr, err := checkpoint.NewManager(dbPath, fsBaseDir, copyCommand, s.logger, checkpointPrep, restorePrep)
-	if err != nil {
-		return fmt.Errorf("init checkpoint manager: %w", err)
+	// Mount checkpoints readonly at /.sprite/checkpoints/
+	if err := s.OverlayManager.MountCheckpoints(ctx); err != nil {
+		s.logger.Warn("Failed to mount checkpoints", "error", err)
+		// Non-fatal - continue
 	}
-	s.CheckpointManager = mgr
-	s.logger.Info("Checkpoint manager initialized", "manager_ptr", fmt.Sprintf("%p", s.CheckpointManager))
+
 	return nil
 }

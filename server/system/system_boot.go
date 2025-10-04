@@ -109,6 +109,14 @@ func (s *System) Boot(ctx context.Context) error {
 			return fmt.Errorf("failed to mount overlay: %w", err)
 		}
 		s.logger.Info("Overlay mounted")
+
+		// Initialize checkpoint infrastructure asynchronously (non-blocking)
+		go func() {
+			if err := s.initializeCheckpointInfrastructure(s.ctx); err != nil {
+				s.logger.Warn("Failed to initialize checkpoint infrastructure", "error", err)
+			}
+		}()
+		s.logger.Info("Checkpoint infrastructure initializing asynchronously")
 	}
 
 	// Phase 4: Start process if configured
@@ -220,6 +228,14 @@ func (s *System) BootContainer(ctx context.Context) error {
 			return fmt.Errorf("failed to mount overlay: %w", err)
 		}
 		s.logger.Info("Overlay mounted successfully")
+
+		// Mount checkpoints asynchronously (non-blocking)
+		go func() {
+			if err := s.OverlayManager.MountCheckpoints(ctx); err != nil {
+				s.logger.Warn("Failed to mount checkpoints after restore", "error", err)
+			}
+		}()
+		s.logger.Info("Checkpoint mounts initializing asynchronously")
 	}
 
 	// Phase 2: Start process if configured

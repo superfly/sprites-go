@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/superfly/sprite-env/pkg/checkpoint"
+	"github.com/superfly/sprite-env/pkg/overlay"
 	"github.com/superfly/sprite-env/pkg/tap"
 )
 
@@ -247,8 +247,8 @@ func (cm *CheckpointManager) applyActiveFsQuotaAsync() {
 	}
 }
 
-// PrepareCheckpoint wraps a checkpoint.PrepFunc (shim for legacy tests)
-func PrepareCheckpoint(inner checkpoint.PrepFunc) checkpoint.PrepFunc { return inner }
+// PrepareCheckpoint wraps a overlay.PrepFunc (shim for legacy tests)
+func PrepareCheckpoint(inner overlay.PrepFunc) overlay.PrepFunc { return inner }
 
-// PrepareRestore wraps a checkpoint.PrepFunc (shim for legacy tests)
-func PrepareRestore(inner checkpoint.PrepFunc) checkpoint.PrepFunc { return inner }
+// PrepareRestore wraps a overlay.PrepFunc (shim for legacy tests)
+func PrepareRestore(inner overlay.PrepFunc) overlay.PrepFunc { return inner }

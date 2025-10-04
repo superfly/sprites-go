@@ -10,12 +10,19 @@ import (
 	"github.com/superfly/sprite-env/lib/api"
 )
 
+// sendStream safely sends a message to a stream channel, handling nil channels
+func sendStream(streamCh chan<- api.StreamMessage, msg api.StreamMessage) {
+	if streamCh != nil {
+		streamCh <- msg
+	}
+}
+
 // Checkpoint creates a checkpoint of the current system state
 func (s *System) Checkpoint(ctx context.Context, checkpointID string) error {
-	if s.CheckpointManager == nil {
-		return fmt.Errorf("checkpoint manager not configured")
+	if s.OverlayManager == nil {
+		return fmt.Errorf("overlay manager not configured")
 	}
-	if _, err := s.CheckpointManager.Checkpoint(ctx); err != nil {
+	if _, err := s.OverlayManager.Checkpoint(ctx); err != nil {
 		return fmt.Errorf("failed to create checkpoint: %w", err)
 	}
 	s.logger.Info("Checkpoint created successfully")
@@ -45,14 +52,14 @@ func (s *System) Restore(ctx context.Context, checkpointID string) error {
 		return fmt.Errorf("checkpoint ID is required")
 	}
 
-	if s.CheckpointManager == nil {
-		return fmt.Errorf("checkpoint manager not configured")
+	if s.OverlayManager == nil {
+		return fmt.Errorf("overlay manager not configured")
 	}
 
 	s.logger.Info("Starting restore sequence", "checkpointID", checkpointID)
 
-	// Checkpoint manager handles shutdown/boot via restore prep function
-	if err := s.CheckpointManager.Restore(ctx, checkpointID); err != nil {
+	// Overlay manager handles shutdown/boot via restore prep function
+	if err := s.OverlayManager.Restore(ctx, checkpointID); err != nil {
 		return fmt.Errorf("failed to restore checkpoint: %w", err)
 	}
 
@@ -61,83 +68,133 @@ func (s *System) Restore(ctx context.Context, checkpointID string) error {
 }
 
 // CheckpointWithStream creates a checkpoint with streaming output
-func (s *System) CheckpointWithStream(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) error {
-	defer close(streamCh)
+func (s *System) CheckpointWithStream(ctx context.Context, _ string, streamCh chan<- api.StreamMessage) error {
+	if streamCh != nil {
+		defer close(streamCh)
+	}
 
 	if s.JuiceFS == nil {
 		return fmt.Errorf("JuiceFS not configured")
 	}
 
 	// Send initial message
-	streamCh <- api.StreamMessage{
+	sendStream(streamCh, api.StreamMessage{
 		Type: "info",
 		Data: "Creating checkpoint...",
 		Time: time.Now(),
-	}
+	})
 
-	// Create the checkpoint
-	if err := s.Checkpoint(ctx, checkpointID); err != nil {
-		streamCh <- api.StreamMessage{
+	// Create the checkpoint and get the record
+	record, err := s.OverlayManager.Checkpoint(ctx)
+	if err != nil {
+		sendStream(streamCh, api.StreamMessage{
 			Type:  "error",
 			Error: fmt.Sprintf("Failed to create checkpoint: %v", err),
 			Time:  time.Now(),
-		}
+		})
 		return err
 	}
 
-	version := checkpointID
+	// Extract checkpoint ID from path (e.g., "v3" from "checkpoints/v3")
+	checkpointID := filepath.Base(record.Path)
 
-	streamCh <- api.StreamMessage{
+	sendStream(streamCh, api.StreamMessage{
 		Type: "info",
-		Data: fmt.Sprintf("Checkpoint created successfully at checkpoints/%s", version),
+		Data: "Checkpoint created successfully",
 		Time: time.Now(),
-	}
+	})
 
 	// Send notification to admin channel
 	if s.AdminChannel != nil {
 		s.AdminChannel.SendActivityEvent("checkpoint_created", map[string]interface{}{
-			"timestamp": time.Now().Unix(),
-			"version":   version,
-			"path":      fmt.Sprintf("checkpoints/%s", version),
+			"timestamp":     time.Now().Unix(),
+			"checkpoint_id": checkpointID,
+			"created_at":    record.CreatedAt.Format(time.RFC3339),
+			"path":          record.Path,
 		})
 	}
 
-	// Send final completion message
-	streamCh <- api.StreamMessage{
-		Type: "complete",
-		Data: fmt.Sprintf("Checkpoint %s created successfully", version),
+	// Send detailed information message
+	sendStream(streamCh, api.StreamMessage{
+		Type: "info",
+		Data: "\nCheckpoint Details:",
 		Time: time.Now(),
-	}
+	})
+	sendStream(streamCh, api.StreamMessage{
+		Type: "info",
+		Data: fmt.Sprintf("  ID: %s", checkpointID),
+		Time: time.Now(),
+	})
+	sendStream(streamCh, api.StreamMessage{
+		Type: "info",
+		Data: fmt.Sprintf("  Created: %s", record.CreatedAt.Format("2006-01-02 15:04:05")),
+		Time: time.Now(),
+	})
+	sendStream(streamCh, api.StreamMessage{
+		Type: "info",
+		Data: fmt.Sprintf("  Path: %s", record.Path),
+		Time: time.Now(),
+	})
+
+	// Send restore instructions
+	sendStream(streamCh, api.StreamMessage{
+		Type: "info",
+		Data: "\nTo restore this checkpoint:",
+		Time: time.Now(),
+	})
+	sendStream(streamCh, api.StreamMessage{
+		Type: "info",
+		Data: fmt.Sprintf("  sprite checkpoint restore %s", checkpointID),
+		Time: time.Now(),
+	})
+	sendStream(streamCh, api.StreamMessage{
+		Type: "info",
+		Data: fmt.Sprintf("  curl -X POST /checkpoints/%s/restore", checkpointID),
+		Time: time.Now(),
+	})
+
+	// Send final completion message
+	sendStream(streamCh, api.StreamMessage{
+		Type: "complete",
+		Data: fmt.Sprintf("Checkpoint %s created successfully", checkpointID),
+		Time: time.Now(),
+	})
 
 	return nil
 }
 
 // RestoreWithStream restores the system from a checkpoint with streaming output
 func (s *System) RestoreWithStream(ctx context.Context, checkpointID string, streamCh chan<- api.StreamMessage) error {
-	defer close(streamCh)
+	if streamCh != nil {
+		defer close(streamCh)
+	}
 
 	s.logger.Info("Starting restore sequence", "checkpointID", checkpointID)
 
+	// Mark that we're in a restore operation to prevent process monitor from triggering shutdown
+	s.restoringInProgress.Store(true)
+	defer s.restoringInProgress.Store(false)
+
 	// Shutdown container components
-	streamCh <- api.StreamMessage{
+	sendStream(streamCh, api.StreamMessage{
 		Type: "info",
 		Data: "Shutting down container components...",
 		Time: time.Now(),
-	}
+	})
 	if err := s.ShutdownContainer(ctx); err != nil {
 		s.logger.Error("Failed to shutdown container for restore", "error", err)
-		streamCh <- api.StreamMessage{
+		sendStream(streamCh, api.StreamMessage{
 			Type: "warning",
 			Data: fmt.Sprintf("Failed to shutdown container components: %v", err),
 			Time: time.Now(),
-		}
+		})
 		// Continue with restore even if container shutdown fails
 	} else {
-		streamCh <- api.StreamMessage{
+		sendStream(streamCh, api.StreamMessage{
 			Type: "info",
 			Data: "Container components stopped successfully",
 			Time: time.Now(),
-		}
+		})
 	}
 
 	// Send notification to admin channel that restore is starting
@@ -149,18 +206,18 @@ func (s *System) RestoreWithStream(ctx context.Context, checkpointID string, str
 	}
 
 	// Perform Restore via CheckpointManager with streaming notifications
-	streamCh <- api.StreamMessage{Type: "info", Data: "Shutting down container...", Time: time.Now()}
-	streamCh <- api.StreamMessage{Type: "info", Data: fmt.Sprintf("Restoring from checkpoint %s...", checkpointID), Time: time.Now()}
+	sendStream(streamCh, api.StreamMessage{Type: "info", Data: "Shutting down container...", Time: time.Now()})
+	sendStream(streamCh, api.StreamMessage{Type: "info", Data: fmt.Sprintf("Restoring from checkpoint %s...", checkpointID), Time: time.Now()})
 	s.logger.Info("Restoring from checkpoint", "checkpointID", checkpointID)
 
 	if err := s.Restore(ctx, checkpointID); err != nil {
 		s.logger.Error("Failed to restore checkpoint", "error", err)
-		streamCh <- api.StreamMessage{Type: "error", Error: fmt.Sprintf("Failed to restore checkpoint: %v", err), Time: time.Now()}
+		sendStream(streamCh, api.StreamMessage{Type: "error", Error: fmt.Sprintf("Failed to restore checkpoint: %v", err), Time: time.Now()})
 		return err
 	}
 
 	s.logger.Info("Checkpoint restored successfully")
-	streamCh <- api.StreamMessage{Type: "info", Data: "Container components started successfully", Time: time.Now()}
+	sendStream(streamCh, api.StreamMessage{Type: "info", Data: "Container components started successfully", Time: time.Now()})
 
 	s.logger.Info("Restore sequence completed")
 
@@ -172,25 +229,25 @@ func (s *System) RestoreWithStream(ctx context.Context, checkpointID string, str
 		})
 	}
 
-	streamCh <- api.StreamMessage{
+	sendStream(streamCh, api.StreamMessage{
 		Type: "complete",
 		Data: fmt.Sprintf("Restore from %s complete", checkpointID),
 		Time: time.Now(),
-	}
+	})
 
 	return nil
 }
 
 // ListCheckpoints returns a list of all available checkpoints
 func (s *System) ListCheckpoints(ctx context.Context) ([]api.CheckpointInfo, error) {
-	if s.CheckpointManager == nil {
-		return nil, fmt.Errorf("checkpoint manager not configured")
+	if s.OverlayManager == nil {
+		return nil, fmt.Errorf("overlay manager not configured")
 	}
-	latest, err := s.CheckpointManager.GetLatest()
+	latest, err := s.OverlayManager.GetLatestCheckpoint()
 	if err != nil {
 		return nil, fmt.Errorf("get latest checkpoint: %w", err)
 	}
-	records, err := s.CheckpointManager.ListAll()
+	records, err := s.OverlayManager.ListCheckpoints()
 	if err != nil {
 		return nil, fmt.Errorf("list checkpoints: %w", err)
 	}
@@ -210,18 +267,18 @@ func (s *System) ListCheckpointsByHistory(ctx context.Context, version string) (
 
 // GetCheckpoint returns information about a specific checkpoint
 func (s *System) GetCheckpoint(ctx context.Context, checkpointID string) (*api.CheckpointInfo, error) {
-	if s.CheckpointManager == nil {
-		return nil, fmt.Errorf("checkpoint manager not configured")
+	if s.OverlayManager == nil {
+		return nil, fmt.Errorf("overlay manager not configured")
 	}
 	// Handle special "active" checkpoint ID via latest record
 	if checkpointID == "active" || checkpointID == "Current" {
-		latest, err := s.CheckpointManager.GetLatest()
+		latest, err := s.OverlayManager.GetLatestCheckpoint()
 		if err != nil {
 			return nil, fmt.Errorf("failed to get latest checkpoint: %w", err)
 		}
 		return &api.CheckpointInfo{ID: filepath.Base(latest.Path), CreateTime: latest.CreatedAt}, nil
 	}
-	rec, err := s.CheckpointManager.FindByIdentifier(checkpointID)
+	rec, err := s.OverlayManager.FindCheckpointByIdentifier(checkpointID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get checkpoint: %w", err)
 	}

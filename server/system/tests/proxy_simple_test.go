@@ -12,6 +12,7 @@ import (
 	"time"
 
 	libapi "github.com/superfly/sprite-env/lib/api"
+	"github.com/superfly/sprite-env/pkg/services"
 	"github.com/superfly/sprite-env/pkg/tap"
 	"github.com/superfly/sprite-env/pkg/terminal"
 	"github.com/superfly/sprite-env/server/api"
@@ -310,4 +311,12 @@ func (m *simpleSystemManager) Wait() error {
 
 func (m *simpleSystemManager) SyncOverlay(ctx context.Context) (func() error, error) {
 	return func() error { return nil }, nil
+}
+
+func (m *simpleSystemManager) GetServicesManager() *services.Manager {
+	return nil
+}
+
+func (m *simpleSystemManager) GetLogDir() string {
+	return "/tmp/test-logs"
 }

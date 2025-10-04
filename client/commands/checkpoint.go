@@ -25,7 +25,8 @@ func CheckpointCommand(ctx *GlobalContext, args []string) {
 		Examples: []string{
 			"sprite checkpoint create",
 			"sprite checkpoint list",
-			"sprite checkpoint info <checkpoint-id>",
+			"sprite checkpoint info v2",
+			"sprite checkpoint restore v1",
 			"sprite checkpoint list --history VERSION",
 		},
 	}
@@ -40,7 +41,8 @@ func CheckpointCommand(ctx *GlobalContext, args []string) {
 		fmt.Fprintf(os.Stderr, "Subcommands:\n")
 		fmt.Fprintf(os.Stderr, "  create    Create a new checkpoint\n")
 		fmt.Fprintf(os.Stderr, "  list      List all checkpoints\n")
-		fmt.Fprintf(os.Stderr, "  info      Show information about a specific checkpoint\n\n")
+		fmt.Fprintf(os.Stderr, "  info      Show information about a specific checkpoint\n")
+		fmt.Fprintf(os.Stderr, "  restore   Restore from a checkpoint\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		cmd.FlagSet.PrintDefaults()
 		fmt.Fprintln(os.Stderr)
@@ -92,6 +94,13 @@ func CheckpointCommand(ctx *GlobalContext, args []string) {
 			os.Exit(1)
 		}
 		checkpointInfoCommand(ctx, sprite, subArgs)
+	case "restore":
+		if len(subArgs) < 1 {
+			fmt.Fprintf(os.Stderr, "Error: checkpoint restore requires a checkpoint ID\n\n")
+			cmd.FlagSet.Usage()
+			os.Exit(1)
+		}
+		checkpointRestoreCommand(ctx, sprite, subArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "Error: Unknown checkpoint subcommand '%s'\n\n", subcommand)
 		cmd.FlagSet.Usage()
@@ -255,8 +264,9 @@ func checkpointListCommand(ctx *GlobalContext, sprite *sprites.Sprite, historyFi
 
 func checkpointInfoCommand(ctx *GlobalContext, sprite *sprites.Sprite, args []string) {
 	if len(args) != 1 {
-		fmt.Fprintf(os.Stderr, "Error: checkpoint info requires exactly one argument (checkpoint ID)\n")
-		fmt.Fprintf(os.Stderr, "Usage: sprite checkpoint info <checkpoint-id>\n")
+		fmt.Fprintf(os.Stderr, "Error: checkpoint info requires exactly one argument (version ID)\n")
+		fmt.Fprintf(os.Stderr, "Usage: sprite checkpoint info <version-id>\n")
+		fmt.Fprintf(os.Stderr, "Example: sprite checkpoint info v2\n")
 		os.Exit(1)
 	}
 
@@ -286,17 +296,95 @@ func checkpointInfoCommand(ctx *GlobalContext, sprite *sprites.Sprite, args []st
 	}
 }
 
+func checkpointRestoreCommand(ctx *GlobalContext, sprite *sprites.Sprite, args []string) {
+	// Create command structure
+	cmd := &Command{
+		Name:        "checkpoint restore",
+		Usage:       "checkpoint restore <version-id>",
+		Description: "Restore from a checkpoint version",
+		FlagSet:     flag.NewFlagSet("checkpoint restore", flag.ContinueOnError),
+		Examples: []string{
+			"sprite checkpoint restore v1",
+			"sprite checkpoint restore v0",
+		},
+	}
+
+	// Set up flags
+	_ = NewGlobalFlags(cmd.FlagSet)
+
+	// Parse flags
+	remainingArgs, err := ParseFlags(cmd, args)
+	if err != nil {
+		os.Exit(1)
+	}
+
+	if len(remainingArgs) != 1 {
+		fmt.Fprintf(os.Stderr, "Error: checkpoint restore requires exactly one argument (version ID)\n\n")
+		cmd.FlagSet.Usage()
+		os.Exit(1)
+	}
+
+	checkpointID := remainingArgs[0]
+
+	// Restore checkpoint using SDK
+	reqCtx := context.Background()
+	stream, err := sprite.RestoreCheckpoint(reqCtx, checkpointID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to restore checkpoint: %v\n", err)
+		os.Exit(1)
+	}
+	defer stream.Close()
+
+	// Process streaming response
+	exitCode := 0
+	hasError := false
+
+	err = stream.ProcessAll(func(msg *sprites.StreamMessage) error {
+		switch msg.Type {
+		case "info":
+			fmt.Println(msg.Data)
+		case "stdout":
+			fmt.Println(msg.Data)
+		case "stderr":
+			fmt.Fprintln(os.Stderr, msg.Data)
+		case "warning":
+			fmt.Fprintf(os.Stderr, "Warning: %s\n", msg.Data)
+		case "error":
+			fmt.Fprintf(os.Stderr, "Error: %s\n", msg.Error)
+			hasError = true
+			if exitCode == 0 {
+				exitCode = 1
+			}
+		case "complete":
+			fmt.Println(msg.Data)
+		}
+		return nil
+	})
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to process stream: %v\n", err)
+		os.Exit(1)
+	}
+
+	// If we had errors but no specific exit code, return 1
+	if hasError && exitCode == 0 {
+		os.Exit(1)
+	}
+
+	os.Exit(exitCode)
+}
+
 // RestoreCommand handles the restore command
 func RestoreCommand(ctx *GlobalContext, args []string) {
 	// Create command structure
 	cmd := &Command{
 		Name:        "restore",
-		Usage:       "restore [options] <checkpoint-id>",
-		Description: "Restore from a checkpoint",
+		Usage:       "restore [options] <version-id>",
+		Description: "Restore from a checkpoint version",
 		FlagSet:     flag.NewFlagSet("restore", flag.ContinueOnError),
 		Examples: []string{
-			"sprite restore my-checkpoint-id",
-			"sprite restore -o myorg -s mysprite checkpoint-123",
+			"sprite restore v1",
+			"sprite restore -o myorg -s mysprite v2",
 		},
 	}
 
@@ -310,7 +398,7 @@ func RestoreCommand(ctx *GlobalContext, args []string) {
 	}
 
 	if len(remainingArgs) != 1 {
-		fmt.Fprintf(os.Stderr, "Error: restore requires exactly one argument (checkpoint ID)\n\n")
+		fmt.Fprintf(os.Stderr, "Error: restore requires exactly one argument (version ID)\n\n")
 		cmd.FlagSet.Usage()
 		os.Exit(1)
 	}

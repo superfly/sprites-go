@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/superfly/sprite-env/lib/api"
+	"github.com/superfly/sprite-env/pkg/services"
 )
 
 // SystemManager interface provides methods for managing the system (process + storage)
@@ -43,6 +44,10 @@ type SystemManager interface {
 	SubscribeToReapEvents() <-chan int
 	UnsubscribeFromReapEvents(ch <-chan int)
 	WasProcessReaped(pid int) (bool, time.Time)
+
+	// Services management
+	GetServicesManager() *services.Manager
+	GetLogDir() string
 }
 
 // ProcessManager interface for process operations

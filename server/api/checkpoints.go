@@ -228,7 +228,7 @@ func (h *Handlers) HandleCheckpointRestore(w http.ResponseWriter, r *http.Reques
 // @public
 // @operation POST /v1/sprites/{id}/checkpoint
 // @summary Create sprite checkpoint
-// @description Create a new checkpoint of the current sprite state with real-time streaming progress. Optionally accepts a JSON body with checkpoint_id field.
+// @description Create a new checkpoint of the current sprite state with real-time streaming progress. Checkpoints are automatically versioned as v0, v1, v2, etc.
 // @tags Sprites
 // @security Bearer
 // @param id path string true "Sprite ID"
@@ -241,13 +241,6 @@ func (h *Handlers) HandleCheckpoint(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
-	// Parse request body (optional now, for backward compatibility)
-	var req struct {
-		CheckpointID string `json:"checkpoint_id"`
-	}
-	// Try to parse body but don't fail if empty
-	json.NewDecoder(r.Body).Decode(&req)
 
 	h.logger.Info("Checkpoint request")
 

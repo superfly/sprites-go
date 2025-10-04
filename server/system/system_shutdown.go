@@ -166,7 +166,7 @@ func (s *System) UnmountOverlayWithVerification(shutdownCtx context.Context) err
 		return nil
 	}
 
-	// Unmount overlay (unmounts both overlayfs and loopback mount)
+	// Unmount overlay (also unmounts checkpoints and both overlayfs and loopback mount)
 	if err := s.OverlayManager.Unmount(shutdownCtx); err != nil {
 		return fmt.Errorf("failed to unmount overlay: %w", err)
 	}
@@ -240,6 +240,7 @@ func (s *System) ShutdownContainer(shutdownCtx context.Context) error {
 
 		// Use the provided context without timeout
 		// Let overlay take as long as it needs to unmount properly
+		// This also unmounts checkpoints automatically
 		if err := s.OverlayManager.Unmount(shutdownCtx); err != nil {
 			s.logger.Error("Failed to unmount overlay", "error", err)
 			return fmt.Errorf("failed to unmount overlay: %w", err)

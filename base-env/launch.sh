@@ -211,12 +211,6 @@ CONFIG_JSON='{
       "options": ["nosuid", "strictatime", "mode=755", "size=65536k"]
     },
     {
-        "destination": "/data",
-        "type": "bind",
-        "source": "/dev/fly_vol/juicefs/data/active/fs",
-        "options": ["rbind"]
-    },
-    {
         "destination": "/tmp",
         "type": "tmpfs",
         "source": "tmpfs",
@@ -255,6 +249,12 @@ CONFIG_JSON='{
       "type": "bind",
       "source": "/tmp/sprite.sock",
       "options": ["ro", "bind"]
+    },
+    {
+      "destination": "/.sprite/checkpoints",
+      "type": "bind",
+      "source": "/.sprite/checkpoints",
+      "options": ["rbind", "rslave"]
     },
     {
       "destination": "/.sprite/logs",

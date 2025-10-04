@@ -24,11 +24,19 @@ USAGE:
   curl-sprite-api --help
 
 AVAILABLE ENDPOINTS:
-  GET    /v1/services           - List all services with their states
-  PUT    /v1/services/{name}    - Create a new service
-  GET    /v1/services/{name}    - Get a specific service's state
-  DELETE /v1/services/{name}    - Delete a service
-  POST   /v1/services/signal    - Send a signal to a service
+  Services:
+    GET    /v1/services           - List all services with their states
+    PUT    /v1/services/{name}    - Create a new service
+    GET    /v1/services/{name}    - Get a specific service's state
+    DELETE /v1/services/{name}    - Delete a service
+    POST   /v1/services/signal    - Send a signal to a service
+
+  Checkpoints (versioned as v0, v1, v2, etc.):
+    GET    /v1/checkpoints        - List all checkpoints
+    GET    /v1/checkpoints?history={version} - List checkpoints by history
+    GET    /v1/checkpoints/{id}   - Get checkpoint details (e.g., v1, v2)
+    POST   /v1/checkpoint         - Create a new checkpoint (auto-versioned)
+    POST   /v1/checkpoints/{id}/restore - Restore from a checkpoint version
 
 EXAMPLES:
   # List all services
@@ -58,8 +66,26 @@ EXAMPLES:
     "signal": "TERM"
   }'
 
+  # List all checkpoints
+  curl-sprite-api /v1/checkpoints
+
+  # List checkpoints by history version
+  curl-sprite-api '/v1/checkpoints?history=v1.2.3'
+
+  # Get checkpoint details (v0, v1, v2, etc.)
+  curl-sprite-api /v1/checkpoints/v2
+
+  # Create a new checkpoint (streams progress, auto-versioned as v0, v1, v2, etc.)
+  curl-sprite-api -X POST /v1/checkpoint
+
+  # Restore from a checkpoint version (returns immediately, restore happens async)
+  curl-sprite-api -X POST /v1/checkpoints/v1/restore
+
 NOTE: Service creation (PUT) streams logs in NDJSON format by default.
       Use the 'duration' query parameter to control monitoring time (default: 5s).
+      Checkpoint creation streams progress in NDJSON format.
+      Checkpoint restore returns immediately (HTTP 202) and triggers restore asynchronously,
+      since the restore operation will restart the environment.
 
 EOF
     exit 0

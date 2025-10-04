@@ -25,6 +25,8 @@ func requireDockerTest(t *testing.T) {
 func TestConfig(testDir string) *system.Config {
 	// Configure JuiceFS and overlay for tests to enable checkpoint manager
 	juiceBase, _ := os.MkdirTemp("", "sprite-juicefs-*")
+	// Create the data directory that JuiceFS will mount to
+	os.MkdirAll(filepath.Join(juiceBase, "data"), 0755)
 	lowerPath := filepath.Join(testDir, "lower")
 	os.MkdirAll(lowerPath, 0755)
 

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/superfly/sprite-env/pkg/checkpoint"
+	"github.com/superfly/sprite-env/pkg/overlay"
 )
 
 func TestPrepareCheckpoint(t *testing.T) {
@@ -64,9 +64,9 @@ func TestPreparePassesErrors(t *testing.T) {
 	}
 }
 
-func TestPrepareWithCheckpointNoOp(t *testing.T) {
-	// Integration test showing it works with checkpoint.NoopPrep
-	noop := checkpoint.NoopPrep()
+func TestPrepareWithOverlayNoOp(t *testing.T) {
+	// Integration test showing it works with overlay.NoopPrep
+	noop := overlay.NoopPrep()
 	wrapped := PrepareCheckpoint(noop)
 
 	resume, err := wrapped(context.Background())

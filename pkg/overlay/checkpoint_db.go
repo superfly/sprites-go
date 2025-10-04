@@ -1,4 +1,4 @@
-package checkpoint
+package overlay
 
 import (
 	"database/sql"
@@ -12,19 +12,19 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-type SQLiteDB struct {
+type checkpointDB struct {
 	db     *sql.DB
 	dbPath string
 	logger *slog.Logger
 }
 
-type SQLiteConfig struct {
+type checkpointDBConfig struct {
 	BaseDir string
 	DBPath  string
 	Logger  *slog.Logger
 }
 
-func NewSQLiteDB(cfg SQLiteConfig) (*SQLiteDB, error) {
+func newCheckpointDB(cfg checkpointDBConfig) (*checkpointDB, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
@@ -40,7 +40,7 @@ func NewSQLiteDB(cfg SQLiteConfig) (*SQLiteDB, error) {
 		db.Close()
 		return nil, err
 	}
-	s := &SQLiteDB{db: db, dbPath: dbPath, logger: cfg.Logger}
+	s := &checkpointDB{db: db, dbPath: dbPath, logger: cfg.Logger}
 	if err := s.initialize(); err != nil {
 		db.Close()
 		return nil, err
@@ -65,7 +65,7 @@ func configureSQLite(db *sql.DB) error {
 	return nil
 }
 
-func (s *SQLiteDB) initialize() error {
+func (s *checkpointDB) initialize() error {
 	createTable := `
 CREATE TABLE IF NOT EXISTS sprite_checkpoints (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS sprite_checkpoints (
 	return nil
 }
 
-func (s *SQLiteDB) Close() error { return s.db.Close() }
+func (s *checkpointDB) Close() error { return s.db.Close() }
 
 type dbRecord struct {
 	ID        int64
@@ -101,9 +101,14 @@ type dbRecord struct {
 	CreatedAt time.Time
 }
 
-// DB interface implementation
+// CheckpointRecord represents a checkpoint in the database
+type CheckpointRecord struct {
+	ID        int64
+	Path      string
+	CreatedAt time.Time
+}
 
-func (s *SQLiteDB) CreateCheckpoint(cloneFn func(src, dst string) error, renameFn func(src, dst string) error) (*Record, error) {
+func (s *checkpointDB) createCheckpoint(cloneFn func(src, dst string) error, renameFn func(src, dst string) error) (*CheckpointRecord, error) {
 	maxRetries := 3
 	baseDelay := 100 * time.Millisecond
 	for retry := 0; retry < maxRetries; retry++ {
@@ -116,7 +121,7 @@ func (s *SQLiteDB) CreateCheckpoint(cloneFn func(src, dst string) error, renameF
 		}
 		rec, tempPath, err := s.createCheckpointAttempt(cloneFn)
 		if err == nil && rec != nil {
-			prev, err := s.GetCheckpointByID(rec.ID - 1)
+			prev, err := s.getCheckpointByID(rec.ID - 1)
 			if err != nil {
 				return nil, fmt.Errorf("get prev: %w", err)
 			}
@@ -141,7 +146,7 @@ func (s *SQLiteDB) CreateCheckpoint(cloneFn func(src, dst string) error, renameF
 	return nil, fmt.Errorf("failed to create checkpoint after retries")
 }
 
-func (s *SQLiteDB) createCheckpointAttempt(cloneFn func(src, dst string) error) (*Record, string, error) {
+func (s *checkpointDB) createCheckpointAttempt(cloneFn func(src, dst string) error) (*CheckpointRecord, string, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, "", fmt.Errorf("begin: %w", err)
@@ -172,20 +177,20 @@ func (s *SQLiteDB) createCheckpointAttempt(cloneFn func(src, dst string) error) 
 	if err := tx.Commit(); err != nil {
 		return nil, tempPath, fmt.Errorf("commit: %w", err)
 	}
-	rec, err := s.GetCheckpointByID(newID)
+	rec, err := s.getCheckpointByID(newID)
 	return rec, tempPath, err
 }
 
-func (s *SQLiteDB) GetCheckpointByID(id int64) (*Record, error) {
+func (s *checkpointDB) getCheckpointByID(id int64) (*CheckpointRecord, error) {
 	var r dbRecord
 	row := s.db.QueryRow("SELECT id, path, parent_id, created_at FROM sprite_checkpoints WHERE id = ?", id)
 	if err := row.Scan(&r.ID, &r.Path, &r.ParentID, &r.CreatedAt); err != nil {
 		return nil, fmt.Errorf("get by id: %w", err)
 	}
-	return &Record{ID: r.ID, Path: r.Path, CreatedAt: r.CreatedAt}, nil
+	return &CheckpointRecord{ID: r.ID, Path: r.Path, CreatedAt: r.CreatedAt}, nil
 }
 
-func (s *SQLiteDB) FindCheckpointByPath(path string) (*Record, error) {
+func (s *checkpointDB) findCheckpointByPath(path string) (*CheckpointRecord, error) {
 	var r dbRecord
 	row := s.db.QueryRow("SELECT id, path, parent_id, created_at FROM sprite_checkpoints WHERE path = ?", path)
 	if err := row.Scan(&r.ID, &r.Path, &r.ParentID, &r.CreatedAt); err != nil {
@@ -194,31 +199,10 @@ func (s *SQLiteDB) FindCheckpointByPath(path string) (*Record, error) {
 		}
 		return nil, fmt.Errorf("find by path: %w", err)
 	}
-	return &Record{ID: r.ID, Path: r.Path, CreatedAt: r.CreatedAt}, nil
+	return &CheckpointRecord{ID: r.ID, Path: r.Path, CreatedAt: r.CreatedAt}, nil
 }
 
-// ListAllCheckpoints opens the DB from the provided config and returns the latest record
-// and all checkpoint records (excluding the active row), newest first.
-func ListAllCheckpoints(cfg SQLiteConfig) (*Record, []Record, error) {
-	db, err := NewSQLiteDB(cfg)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer db.Close()
-
-	latest, err := db.GetLatest()
-	if err != nil {
-		return nil, nil, err
-	}
-	records, err := db.ListAll()
-	if err != nil {
-		return nil, nil, err
-	}
-	return latest, records, nil
-}
-
-// ListAll returns all checkpoint records (excluding the active row), newest first
-func (s *SQLiteDB) ListAll() ([]Record, error) {
+func (s *checkpointDB) listAll() ([]CheckpointRecord, error) {
 	rows, err := s.db.Query(`
         SELECT id, path, parent_id, created_at
         FROM sprite_checkpoints
@@ -230,13 +214,13 @@ func (s *SQLiteDB) ListAll() ([]Record, error) {
 	}
 	defer rows.Close()
 
-	var out []Record
+	var out []CheckpointRecord
 	for rows.Next() {
 		var r dbRecord
 		if err := rows.Scan(&r.ID, &r.Path, &r.ParentID, &r.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
-		out = append(out, Record{ID: r.ID, Path: r.Path, CreatedAt: r.CreatedAt})
+		out = append(out, CheckpointRecord{ID: r.ID, Path: r.Path, CreatedAt: r.CreatedAt})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate: %w", err)
@@ -244,8 +228,7 @@ func (s *SQLiteDB) ListAll() ([]Record, error) {
 	return out, nil
 }
 
-// GetLatest returns the newest checkpoint record (the row with highest id)
-func (s *SQLiteDB) GetLatest() (*Record, error) {
+func (s *checkpointDB) getLatest() (*CheckpointRecord, error) {
 	var r dbRecord
 	row := s.db.QueryRow(`
         SELECT id, path, parent_id, created_at
@@ -256,5 +239,5 @@ func (s *SQLiteDB) GetLatest() (*Record, error) {
 	if err := row.Scan(&r.ID, &r.Path, &r.ParentID, &r.CreatedAt); err != nil {
 		return nil, fmt.Errorf("latest: %w", err)
 	}
-	return &Record{ID: r.ID, Path: r.Path, CreatedAt: r.CreatedAt}, nil
+	return &CheckpointRecord{ID: r.ID, Path: r.Path, CreatedAt: r.CreatedAt}, nil
 }

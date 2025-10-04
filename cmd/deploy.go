@@ -589,9 +589,9 @@ func main() {
 		// Use existing SPRITE_HTTP_API_TOKEN if available, otherwise check environment
 		spriteToken := existingSpriteToken
 		if spriteToken == "" {
-			spriteToken = os.Getenv("SPRITE_HTTP_API_TOKEN")
+			spriteToken = os.Getenv("SPRITE_TOKEN")
 			if spriteToken == "" {
-				log.Fatal("SPRITE_HTTP_API_TOKEN not found in existing machine config or environment variable")
+				log.Fatal("SPRITE_HTTP_API_TOKEN (or SPRITE_FLY_API_TOKEN) not found in existing machine config or environment variable")
 			}
 			log.Printf("Using SPRITE_HTTP_API_TOKEN from environment variable\n")
 		} else {

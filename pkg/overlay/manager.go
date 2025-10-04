@@ -5,11 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
-	"time"
 )
 
 // Manager manages the root overlay loopback mount
@@ -44,6 +41,22 @@ type Manager struct {
 
 	// Loop device path used for the root image when attached explicitly
 	loopDevice string
+
+	// Checkpoint infrastructure
+	checkpointBasePath     string                          // Path to checkpoints directory (e.g., /juicefs/mount/data/checkpoints)
+	checkpointMountPath    string                          // Base path for checkpoint mounts (/.sprite/checkpoints)
+	checkpointMounts       map[string]string               // Map of checkpoint name to mount path
+	checkpointLoopDevices  map[string]string               // Map of checkpoint name to loop device
+	checkpointMu           sync.Mutex                      // Protects checkpoint mount state
+	activeCheckpointMount  string                          // Path where active upper dir is mounted (/.sprite/checkpoints/active)
+	checkpointDB           *checkpointDB                   // Checkpoint database
+	checkpointFS           *filesystemOps                  // Filesystem operations for checkpoints
+	checkpointPrepare      PrepFunc                        // Prepare function for checkpoints
+	restorePrepare         PrepFunc                        // Prepare function for restores
+	onCheckpointCreated    func(ctx context.Context) error // Callback when checkpoint is created
+	juicefsBasePath        string                          // JuiceFS base path for checkpoint operations
+	restoreContainerPrep   func(ctx context.Context) error // Callback to shutdown container before restore
+	restoreContainerResume func(ctx context.Context) error // Callback to boot container after restore
 }
 
 // Config holds configuration for the overlay manager
@@ -76,16 +89,24 @@ func New(config Config) *Manager {
 	}
 
 	dataPath := filepath.Join(config.BaseDir, "data")
+	// Checkpoint mounts go on the host at /.sprite/checkpoints
+	checkpointMountBase := "/.sprite/checkpoints"
 	return &Manager{
-		baseDir:           config.BaseDir,
-		imagePath:         filepath.Join(dataPath, "active", "root-upper.img"),
-		mountPath:         config.MountPath,
-		imageSize:         config.ImageSize,
-		lowerPaths:        config.LowerPaths,
-		overlayTargetPath: config.OverlayTargetPath,
-		skipOverlayFS:     config.SkipOverlayFS,
-		logger:            config.Logger,
-		mountReady:        make(chan struct{}),
+		baseDir:               config.BaseDir,
+		imagePath:             filepath.Join(dataPath, "active", "root-upper.img"),
+		mountPath:             config.MountPath,
+		imageSize:             config.ImageSize,
+		lowerPaths:            config.LowerPaths,
+		overlayTargetPath:     config.OverlayTargetPath,
+		skipOverlayFS:         config.SkipOverlayFS,
+		logger:                config.Logger,
+		mountReady:            make(chan struct{}),
+		checkpointBasePath:    filepath.Join(dataPath, "checkpoints"),
+		checkpointMountPath:   checkpointMountBase,
+		checkpointMounts:      make(map[string]string),
+		checkpointLoopDevices: make(map[string]string),
+		activeCheckpointMount: filepath.Join(checkpointMountBase, "active"),
+		juicefsBasePath:       filepath.Join(config.BaseDir, "data"),
 	}
 }
 
@@ -114,575 +135,82 @@ func (m *Manager) GetOverlayTargetPath() string {
 	return m.overlayTargetPath
 }
 
+// SetRestoreContainerCallbacks sets callbacks for container shutdown/boot during restore
+func (m *Manager) SetRestoreContainerCallbacks(prep func(ctx context.Context) error, resume func(ctx context.Context) error) {
+	m.restoreContainerPrep = prep
+	m.restoreContainerResume = resume
+}
+
 // UpdateImagePath updates the image path after a restore operation
 func (m *Manager) UpdateImagePath() {
 	dataPath := filepath.Join(m.baseDir, "data")
 	m.imagePath = filepath.Join(dataPath, "active", "root-upper.img")
 }
 
-// EnsureImage creates the sparse image if it doesn't exist
-func (m *Manager) EnsureImage() error {
-	// Ensure the directory exists first (even if image exists, to prevent races)
-	imageDir := filepath.Dir(m.imagePath)
-	if err := os.MkdirAll(imageDir, 0755); err != nil {
-		return fmt.Errorf("failed to create image directory: %w", err)
-	}
-
-	// Check if image already exists
-	if info, err := os.Stat(m.imagePath); err == nil {
-		m.logger.Debug("Overlay image already exists", "path", m.imagePath, "size", info.Size())
-		return nil // Image already exists
-	}
-
-	m.logger.Info("Creating sparse image", "size", m.imageSize, "path", m.imagePath)
-
-	// Create sparse image using dd
-	cmd := exec.Command("dd", "if=/dev/zero", fmt.Sprintf("of=%s", m.imagePath),
-		"bs=1", "count=0", fmt.Sprintf("seek=%s", m.imageSize))
-	m.logger.Debug("Running dd command", "cmd", cmd.String())
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to create sparse image: %w, output: %s", err, string(output))
-	}
-
-	// Verify sparse file was created
-	if info, err := os.Stat(m.imagePath); err != nil {
-		return fmt.Errorf("failed to verify sparse image creation: %w", err)
-	} else {
-		m.logger.Debug("Sparse image created", "actualSize", info.Size())
-	}
-
-	// Format with ext4 (optimized for JuiceFS block/slice layouts)
-	m.logger.Info("Formatting image with ext4...")
-	cmd = exec.Command("mkfs.ext4",
-		"-F",         // Force formatting without prompts
-		"-b", "4096", // 4K blocks align with page size and JuiceFS
-		"-i", "16384", // One inode per 16K for overlayfs metadata files
-		"-m", "0", // No reserved blocks (it's a dedicated overlay)
-		"-E", "lazy_itable_init=1,lazy_journal_init=1,stride=1024,stripe-width=1024", // Optimize for 4MB blocks
-		"-O", "extent,huge_file,flex_bg,dir_nlink,extra_isize,sparse_super2", // Enable optimizations
-		"-J", "size=128", // 128MB journal for good performance
-		m.imagePath)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		// Clean up the image file if formatting fails
-		os.Remove(m.imagePath)
-		return fmt.Errorf("failed to format image: %w, output: %s", err, string(output))
-	}
-
-	m.logger.Info("Root overlay image created successfully", "path", m.imagePath)
-	return nil
-}
-
-// WhenReady waits until both the loopback mount and overlayfs are ready or returns when context is cancelled.
-// This uses a channel-based approach without polling.
-func (m *Manager) WhenReady(ctx context.Context) error {
-	select {
-	case <-m.mountReady:
-		// Check if there was an error during mount
-		m.mountErrorMu.RLock()
-		err := m.mountError
-		m.mountErrorMu.RUnlock()
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-// Mount mounts the overlay image
-func (m *Manager) Mount(ctx context.Context) error {
-	// Ensure mount directory exists
-	if err := os.MkdirAll(m.mountPath, 0755); err != nil {
-		return fmt.Errorf("failed to create mount directory: %w", err)
-	}
-
-	// Check if image exists and is accessible before trying to mount
-	if _, err := os.Stat(m.imagePath); err != nil {
-		if os.IsNotExist(err) {
-			m.logger.Warn("Overlay image does not exist, will create it", "path", m.imagePath)
-			if err := m.EnsureImage(); err != nil {
-				return fmt.Errorf("failed to create overlay image: %w", err)
-			}
-		} else {
-			// If we can't even stat the file, the underlying filesystem might not be ready
-			return fmt.Errorf("cannot access overlay image at %s: %w", m.imagePath, err)
-		}
-	}
-
-	// Check if already mounted
-	if m.isMounted() {
-		m.logger.Info("Root overlay already mounted", "path", m.mountPath)
-
-		// Skip overlayfs if configured
-		if m.skipOverlayFS {
-			// Signal mount is ready
-			m.signalMountReady(nil)
-			return nil
-		}
-
-		// Check if overlayfs is also mounted
-		if m.isOverlayFSMounted() {
-			m.logger.Info("OverlayFS already mounted", "path", m.overlayTargetPath)
-			// Signal mount is ready
-			m.signalMountReady(nil)
-			return nil
-		}
-
-		// Mount only the overlayfs if loopback is mounted but overlayfs isn't
-		err := m.mountOverlayFS(ctx)
-		// Signal mount is ready (with error if any)
-		m.signalMountReady(err)
-		return err
-	}
-
-	// Ensure image exists
-	if err := m.EnsureImage(); err != nil {
-		return fmt.Errorf("failed to ensure overlay image: %w", err)
-	}
-
-	// // Verify the image file is accessible
-	// if info, err := os.Stat(m.imagePath); err != nil {
-	// 	return fmt.Errorf("overlay image not accessible at %s: %w", m.imagePath, err)
-	// } else {
-	// 	m.logger.Debug("Overlay image verified", "path", m.imagePath, "size", info.Size())
-	// }
-
-	// Before mounting, probe the backing file inside JuiceFS to ensure FUSE is responsive
-	// Use short timeout and a few retries
-	// m.logger.Debug("Probing backing file readiness (stat + pread)", "path", m.imagePath)
-	// var probeErr error
-	// for i := 1; i <= 5; i++ {
-	// 	probeCtx, cancel := context.WithTimeout(ctx, 1*time.Second)
-	// 	probeErr = probeFileReadiness(probeCtx, m.imagePath, 1*time.Second)
-	// 	cancel()
-	// 	if probeErr == nil {
-	// 		break
-	// 	}
-	// 	m.logger.Warn("Backing file probe failed, will retry",
-	// 		"attempt", i,
-	// 		"maxAttempts", 5,
-	// 		"error", probeErr)
-	// 	time.Sleep(100 * time.Millisecond)
-	// }
-	// if probeErr != nil {
-	// 	return fmt.Errorf("backing file not ready: %w", probeErr)
-	// }
-
-	// Try to mount the image (no artificial timeout)
-	m.logger.Info("Mounting root overlay", "mountPath", m.mountPath)
-	m.logger.Debug("Source image", "path", m.imagePath)
-
-	// Prefer explicit loop device attach with discard, then mount with -o discard
-	m.logger.Debug("Mounting via loop device with discard", "image", m.imagePath, "target", m.mountPath)
-	// Create a short timeout for attach+mount to fail fast on IO errors
-	mountCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	loopDevice, err := attachLoopDevice(m.imagePath)
-	if err != nil {
-		return fmt.Errorf("failed to create loop device: %w", err)
-	}
-	m.loopDevice = loopDevice
-	m.logger.Debug("Created loop device", "device", m.loopDevice)
-
-	// Probe loop device with pread + BLKGETSIZE64 under timeout before mounting
-	m.logger.Debug("Probing loop device readiness", "device", m.loopDevice)
-	// var loopProbeErr error
-	// probeStart := time.Now()
-	// successAttempt := 0
-	// for i := 1; i <= 5; i++ {
-	// 	probeCtx, cancel := context.WithTimeout(ctx, 1*time.Second)
-	// 	loopProbeErr = probeLoopDeviceReadiness(probeCtx, m.loopDevice, 1*time.Second)
-	// 	cancel()
-	// 	if loopProbeErr == nil {
-	// 		successAttempt = i
-	// 		break
-	// 	}
-	// 	m.logger.Warn("Loop device probe failed, will retry",
-	// 		"attempt", i,
-	// 		"maxAttempts", 5,
-	// 		"error", loopProbeErr)
-	// 	time.Sleep(100 * time.Millisecond)
-	// }
-	// if loopProbeErr != nil {
-	// 	// Detach loop on failure
-	// 	_ = detachLoopDevice(m.loopDevice)
-	// 	m.loopDevice = ""
-	// 	return fmt.Errorf("loop device not ready: %w", loopProbeErr)
-	// }
-	// m.logger.Info("Loop device probe succeeded",
-	// 	"device", m.loopDevice,
-	// 	"attempt", successAttempt,
-	// 	"elapsed", time.Since(probeStart))
-
-	cmd := exec.CommandContext(mountCtx, "mount", "-o", "discard", m.loopDevice, m.mountPath)
-	mountStart := time.Now()
-	mountOutput, err := cmd.CombinedOutput()
-	mountDuration := time.Since(mountStart)
-
-	if mountCtx.Err() == context.DeadlineExceeded {
-		m.logger.Error("Mount command timed out after 10 seconds, likely due to I/O error", "duration", mountDuration)
-		err = fmt.Errorf("mount timeout")
-	}
-
-	// Check for I/O errors which indicate a corrupted image
-	if err != nil && (strings.Contains(string(mountOutput), "I/O error") ||
-		strings.Contains(string(mountOutput), "can't read superblock")) {
-		m.logger.Error("Mount failed with corruption indicators",
-			"error", err,
-			"duration", mountDuration,
-			"hasIOError", strings.Contains(string(mountOutput), "I/O error"),
-			"hasSuperblockError", strings.Contains(string(mountOutput), "can't read superblock"))
-		if len(mountOutput) > 0 {
-			m.logger.Debug("Mount output", "output", string(mountOutput))
-		}
-
-		// No explicit loop device to detach when using -o loop
-
-		// Backup the corrupted image instead of deleting it
-		timestamp := time.Now().Format("20060102-150405")
-		backupPath := fmt.Sprintf("%s.corrupt-%s.bak", strings.TrimSuffix(m.imagePath, ".img"), timestamp)
-		m.logger.Error("Corrupted overlay image detected; performing last-resort recovery by creating a new image", "from", m.imagePath, "backupPath", backupPath)
-		if backupErr := os.Rename(m.imagePath, backupPath); backupErr != nil {
-			m.logger.Warn("Failed to backup corrupted image, attempting removal", "error", backupErr)
-			if removeErr := os.Remove(m.imagePath); removeErr != nil {
-				m.logger.Error("Failed to remove corrupted image", "error", removeErr)
-			}
-		} else {
-			m.logger.Info("Corrupted image backed up successfully", "backupPath", backupPath)
-		}
-
-		// Recreate the image
-		m.logger.Error("Recreating overlay image as last-resort recovery...")
-		if createErr := m.EnsureImage(); createErr != nil {
-			return fmt.Errorf("failed to recreate overlay image after I/O error: %w", createErr)
-		}
-
-		// Try mounting again (no artificial timeout)
-		m.logger.Info("Retrying mount after recreating image...")
-		m.logger.Debug("Starting retry mount attempt")
-
-		// Mount the image directly (discard disabled)
-		cmd := exec.CommandContext(ctx, "mount", "-o", "loop", m.imagePath, m.mountPath)
-		mountOutput, err = cmd.CombinedOutput()
-	}
-
-	if err != nil {
-		// Detach loop on failure
-		if m.loopDevice != "" {
-			_ = detachLoopDevice(m.loopDevice)
-			m.loopDevice = ""
-		}
-		return fmt.Errorf("failed to mount overlay: %w, output: %s", err, string(mountOutput))
-	}
-
-	m.logger.Info("Root overlay mounted successfully", "path", m.mountPath)
-
-	// Skip overlayfs if configured
-	if m.skipOverlayFS {
-		// Signal mount is ready
-		m.signalMountReady(nil)
+// InitializeCheckpointManager creates the checkpoint manager after filesystem is mounted
+func (m *Manager) InitializeCheckpointManager(ctx context.Context, checkpointDBPath string) error {
+	if checkpointDBPath == "" {
+		m.logger.Debug("Checkpoint database path not configured, skipping checkpoint manager initialization")
 		return nil
 	}
 
-	// Now mount the overlayfs
-	err = m.mountOverlayFS(ctx)
+	m.logger.Info("Initializing checkpoint manager", "dbPath", checkpointDBPath, "fsBaseDir", m.juicefsBasePath)
 
-	// Signal mount is ready (with error if any)
-	m.signalMountReady(err)
-
-	return err
-}
-
-// mountOverlayFS creates and mounts the overlay filesystem
-func (m *Manager) mountOverlayFS(ctx context.Context) error {
-	// Check if all lower paths exist
-	for _, lowerPath := range m.lowerPaths {
-		if _, err := os.Stat(lowerPath); os.IsNotExist(err) {
-			return fmt.Errorf("lower path does not exist: %s", lowerPath)
-		}
-	}
-
-	// Create root-upper directory if it doesn't exist
-	rootUpperDir := filepath.Join(m.mountPath, "root-upper")
-	rootUpperCreated := false
-	if _, err := os.Stat(rootUpperDir); os.IsNotExist(err) {
-		m.logger.Info("Creating root-upper directory", "path", rootUpperDir)
-		if err := os.MkdirAll(rootUpperDir, 0755); err != nil {
-			return fmt.Errorf("failed to create root-upper directory: %w", err)
-		}
-		rootUpperCreated = true
-	}
-
-	// Check for migration: if root-upper was just created and old directories exist, move them
-	if rootUpperCreated {
-		oldUpperDir := filepath.Join(m.mountPath, "upper")
-		oldWorkDir := filepath.Join(m.mountPath, "work")
-
-		// Check if both old directories exist
-		upperExists := false
-		workExists := false
-		if _, err := os.Stat(oldUpperDir); err == nil {
-			upperExists = true
-		}
-		if _, err := os.Stat(oldWorkDir); err == nil {
-			workExists = true
-		}
-
-		// If both exist, migrate them
-		if upperExists && workExists {
-			m.logger.Info("Migrating existing upper and work directories to root-upper")
-
-			// Move upper directory
-			newUpperDir := filepath.Join(rootUpperDir, "upper")
-			if err := os.Rename(oldUpperDir, newUpperDir); err != nil {
-				return fmt.Errorf("failed to migrate upper directory: %w", err)
-			}
-			m.logger.Info("Migrated upper directory", "from", oldUpperDir, "to", newUpperDir)
-
-			// Move work directory
-			newWorkDir := filepath.Join(rootUpperDir, "work")
-			if err := os.Rename(oldWorkDir, newWorkDir); err != nil {
-				// Try to rollback upper directory move
-				os.Rename(newUpperDir, oldUpperDir)
-				return fmt.Errorf("failed to migrate work directory: %w", err)
-			}
-			m.logger.Info("Migrated work directory", "from", oldWorkDir, "to", newWorkDir)
-		}
-	}
-
-	// Create upper and work directories inside root-upper
-	upperDir := filepath.Join(rootUpperDir, "upper")
-	workDir := filepath.Join(rootUpperDir, "work")
-
-	if err := os.MkdirAll(upperDir, 0755); err != nil {
-		return fmt.Errorf("failed to create upper directory: %w", err)
-	}
-
-	if err := os.MkdirAll(workDir, 0755); err != nil {
-		return fmt.Errorf("failed to create work directory: %w", err)
-	}
-
-	// Create target mount point
-	if err := os.MkdirAll(m.overlayTargetPath, 0755); err != nil {
-		return fmt.Errorf("failed to create overlay target directory: %w", err)
-	}
-
-	// Mount the overlay
-	m.logger.Info("Mounting OverlayFS", "targetPath", m.overlayTargetPath)
-
-	// Join multiple lower paths with colon separator for overlayfs
-	lowerDirs := strings.Join(m.lowerPaths, ":")
-	m.logger.Debug("OverlayFS paths",
-		"lower", lowerDirs,
-		"upper", upperDir,
-		"work", workDir)
-
-	mountOptions := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s",
-		lowerDirs, upperDir, workDir)
-
-	cmd := exec.CommandContext(ctx, "mount", "-t", "overlay", "overlay",
-		"-o", mountOptions, m.overlayTargetPath)
-
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to mount overlayfs: %w, output: %s", err, string(output))
-	}
-
-	m.logger.Info("OverlayFS mounted successfully", "path", m.overlayTargetPath)
-	return nil
-}
-
-// Unmount unmounts the overlay
-func (m *Manager) Unmount(ctx context.Context) error {
-	// First unmount overlayfs if it's mounted
-	if m.isOverlayFSMounted() {
-		// Try normal unmount first
-		cmd := exec.Command("umount", m.overlayTargetPath)
-		if output, err := cmd.CombinedOutput(); err != nil {
-			// Try force unmount
-			cmd = exec.Command("umount", "-f", m.overlayTargetPath)
-			if output2, err2 := cmd.CombinedOutput(); err2 != nil {
-				return fmt.Errorf("failed to unmount overlayfs: %w, outputs: %s, %s", err2, string(output), string(output2))
-			}
-		}
-
-		// Verify overlayfs is actually unmounted
-		if m.isOverlayFSMounted() {
-			return fmt.Errorf("overlayfs still mounted after unmount command")
-		}
-	}
-
-	// Then unmount the loopback mount
-	if !m.isMounted() {
-		// Even if not mounted, ensure any associated loop device is detached
-		if m.loopDevice != "" {
-			if err := detachLoopDevice(m.loopDevice); err != nil {
-				return fmt.Errorf("failed to detach loop device %s: %w", m.loopDevice, err)
-			}
-			m.loopDevice = ""
-		}
-		return nil
-	}
-
-	m.logger.Info("Unmounting root overlay", "path", m.mountPath)
-
-	// Sync first
-	if err := m.sync(ctx); err != nil {
-		m.logger.Warn("Sync failed", "error", err)
-	}
-
-	// Try normal unmount first
-	cmd := exec.Command("umount", m.mountPath)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		// Try force unmount
-		cmd = exec.Command("umount", "-f", m.mountPath)
-		if output2, err2 := cmd.CombinedOutput(); err2 != nil {
-			return fmt.Errorf("failed to unmount overlay: %w, outputs: %s, %s", err2, string(output), string(output2))
-		}
-	}
-
-	// Verify loopback mount is actually unmounted
-	if m.isMounted() {
-		return fmt.Errorf("loopback mount still mounted after umount command")
-	}
-
-	// Detach loop device now that the mount is gone
-	if m.loopDevice != "" {
-		if err := detachLoopDevice(m.loopDevice); err != nil {
-			return fmt.Errorf("failed to detach loop device %s: %w", m.loopDevice, err)
-		}
-		m.loopDevice = ""
-	}
-
-	return nil
-}
-
-// PrepareForCheckpoint prepares the overlay for checkpointing by syncing and freezing
-func (m *Manager) PrepareForCheckpoint(ctx context.Context) error {
-	if m.isOverlayFSMounted() {
-
-		// 1) Sync the overlayfs filesystem (where actual writes occur)
-		m.logger.Info("Syncing OverlayFS filesystem", "path", m.overlayTargetPath)
-		syncCmd := exec.Command("sync", "-f", m.overlayTargetPath)
-		if output, err := syncCmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("failed to sync overlayfs: %w, output: %s", err, string(output))
-		}
-		m.logger.Info("OverlayFS sync completed")
-	}
-
-	// 2) Freeze the underlying ext4 filesystem to prevent new writes
-	m.logger.Info("Freezing underlying ext4 filesystem", "path", m.mountPath)
-	freezeCmd := exec.Command("fsfreeze", "--freeze", m.mountPath)
-	if output, err := freezeCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to freeze ext4 filesystem: %w, output: %s", err, string(output))
-	}
-	m.logger.Info("Filesystem frozen successfully")
-
-	// 3) Sync the loopback mount while frozen
-	m.logger.Info("Syncing loopback mount after freeze", "path", m.mountPath)
-	if err := m.sync(ctx); err != nil {
-		return fmt.Errorf("failed to sync loopback mount after freeze: %w", err)
-	}
-
-	f2, err := os.Open(m.imagePath)
-	if err != nil {
-		m.logger.Warn("Image open failed for fsync", "error", err, "path", m.imagePath)
-	}
-	if err == nil {
-		defer f2.Close()
-		if e := f2.Sync(); e != nil {
-			m.logger.Warn("Image fsync failed", "error", e, "path", m.imagePath)
-		}
-	}
-
-	return nil
-}
-
-// UnfreezeAfterCheckpoint unfreezes the overlay after checkpointing
-func (m *Manager) UnfreezeAfterCheckpoint(ctx context.Context) error {
-	if !m.isMounted() {
-		return nil // Not an error if not mounted
-	}
-
-	m.logger.Info("Unfreezing underlying ext4 filesystem", "path", m.mountPath)
-	unfreezeCmd := exec.Command("fsfreeze", "--unfreeze", m.mountPath)
-	if output, err := unfreezeCmd.CombinedOutput(); err != nil {
-		// Check if it's already unfrozen by trying to write to the underlying mount
-		testFile := filepath.Join(m.mountPath, ".freeze_test")
-		if testErr := os.WriteFile(testFile, []byte("test"), 0644); testErr == nil {
-			// Successfully wrote, so it's not frozen
-			os.Remove(testFile)
-			m.logger.Info("Filesystem was already unfrozen")
-			return nil
-		}
-		return fmt.Errorf("failed to unfreeze ext4 filesystem: %w, output: %s", err, string(output))
-	}
-	m.logger.Info("Filesystem unfrozen successfully")
-
-	return nil
-}
-
-// Helper methods
-
-func (m *Manager) IsMounted() bool {
-	// Check if the mount point exists and is actually mounted
-	mountsData, err := os.ReadFile("/proc/mounts")
-	if err != nil {
-		return false
-	}
-
-	mounts := string(mountsData)
-	// Look for a line that has our mount path as the mount point
-	expectedMount := fmt.Sprintf(" %s ", m.mountPath)
-	return strings.Contains(mounts, expectedMount)
-}
-
-func (m *Manager) IsOverlayFSMounted() bool {
-	// Check if overlayfs is mounted
-	mountsData, err := os.ReadFile("/proc/mounts")
-	if err != nil {
-		return false
-	}
-
-	mounts := string(mountsData)
-	// Look for a line like: overlay /mnt/newroot overlay ...
-	expectedMount := fmt.Sprintf("overlay %s overlay", m.overlayTargetPath)
-	return strings.Contains(mounts, expectedMount)
-}
-
-// Legacy private methods for backward compatibility
-func (m *Manager) isMounted() bool {
-	return m.IsMounted()
-}
-
-func (m *Manager) isOverlayFSMounted() bool {
-	return m.IsOverlayFSMounted()
-}
-
-func (m *Manager) sync(ctx context.Context) error {
-	// Don't use context for sync - let it complete fully
-	// This is critical for data integrity during shutdown
-	m.logger.Info("Starting filesystem sync", "path", m.mountPath)
-	syncStart := time.Now()
-
-	syncCmd := exec.Command("sync", "-f", m.mountPath)
-	if output, err := syncCmd.CombinedOutput(); err != nil {
-		if len(output) > 0 {
-			return fmt.Errorf("sync failed: %w, output: %s", err, string(output))
-		}
-		return fmt.Errorf("sync failed: %w", err)
-	}
-
-	m.logger.Info("Filesystem sync completed", "path", m.mountPath, "duration", time.Since(syncStart))
-	return nil
-}
-
-// signalMountReady signals that the mount is ready or stores an error
-func (m *Manager) signalMountReady(err error) {
-	m.mountOnce.Do(func() {
-		if err != nil {
-			m.mountErrorMu.Lock()
-			m.mountError = err
-			m.mountErrorMu.Unlock()
-		}
-		close(m.mountReady)
+	// Create the checkpoint database
+	db, err := newCheckpointDB(checkpointDBConfig{
+		DBPath: checkpointDBPath,
+		Logger: m.logger,
 	})
+	if err != nil {
+		return fmt.Errorf("init checkpoint db: %w", err)
+	}
+	m.checkpointDB = db
+
+	// Query existing checkpoints before initialization
+	existingCheckpoints, err := db.listAll()
+	if err != nil {
+		db.Close()
+		return fmt.Errorf("list existing checkpoints: %w", err)
+	}
+
+	m.logger.Info("Checkpoint database initialized", "existingCheckpoints", len(existingCheckpoints))
+
+	// Create v0 directory if it doesn't exist
+	v0Path := filepath.Join(m.juicefsBasePath, "checkpoints", "v0")
+	if _, err := os.Stat(v0Path); os.IsNotExist(err) {
+		if err := os.MkdirAll(v0Path, 0755); err != nil {
+			db.Close()
+			return fmt.Errorf("create v0 checkpoint directory: %w", err)
+		}
+		m.logger.Info("Created empty v0 checkpoint directory", "path", v0Path)
+	}
+
+	// Create filesystem ops
+	m.checkpointFS = newFilesystemOps(m.juicefsBasePath, []string{"juicefs", "clone"}, m.logger)
+
+	// Check for orphaned checkpoint directories on disk
+	if err := renameOrphanedCheckpoints(m.juicefsBasePath, existingCheckpoints, m.logger); err != nil {
+		m.logger.Warn("Failed to clean up orphaned checkpoints", "error", err)
+	}
+
+	// Compose checkpoint preparation chain: overlay freeze wraps noop
+	final := NoopPrep()
+	m.checkpointPrepare = prepareCheckpoint(m, final)
+
+	// Compose restore preparation chain: overlay unmount/mount
+	m.restorePrepare = prepareRestore(m, final)
+
+	// Set up callback to update overlay checkpoint mounts when new checkpoints are created
+	m.onCheckpointCreated = m.OnCheckpointCreated
+
+	m.logger.Info("Checkpoint manager initialized successfully")
+	return nil
+}
+
+// Close closes the checkpoint database
+func (m *Manager) Close() error {
+	if m.checkpointDB != nil {
+		return m.checkpointDB.Close()
+	}
+	return nil
 }

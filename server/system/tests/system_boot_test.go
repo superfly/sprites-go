@@ -99,10 +99,10 @@ func TestSystemBootSequence(t *testing.T) {
 			t.Error("Overlay manager should be initialized when enabled")
 		}
 
-		// Checkpoint manager might not be initialized without JuiceFS
-		// In the test config, JuiceFS is not configured
-		if config.JuiceFSDataPath != "" && sys.CheckpointManager == nil {
-			t.Error("Checkpoint manager should be initialized when JuiceFS is configured")
+		// Checkpoint manager is part of overlay manager
+		// In the test config, if JuiceFS is configured, checkpoint functionality should be available
+		if config.JuiceFSDataPath != "" && sys.OverlayManager == nil {
+			t.Error("Overlay manager should be initialized when JuiceFS is configured")
 		}
 	})
 

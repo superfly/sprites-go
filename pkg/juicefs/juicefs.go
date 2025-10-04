@@ -149,7 +149,7 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	dirs := []string{
 		cacheDir,
 		filepath.Dir(metaDB),
-		// Skip creating mountPath - let overlay package create it with proper timing
+		mountPath,
 	}
 
 	// Add local-mode specific directories
@@ -165,7 +165,7 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 			return fmt.Errorf("failed to create directory %s: %w", dir, err)
 		}
 	}
-	j.logger.Debug("Directory creation completed (excluding mountPath)", "duration", time.Since(stepStart).Seconds())
+	j.logger.Debug("Directory creation completed", "duration", time.Since(stepStart).Seconds())
 
 	// Litestream restore is handled by the DB manager; do not perform any restore here
 	// Ensure cache directory exists

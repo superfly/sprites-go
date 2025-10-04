@@ -15,7 +15,6 @@ import (
 
 	"github.com/superfly/sprite-env/server/api"
 
-	"github.com/superfly/sprite-env/pkg/checkpoint"
 	"github.com/superfly/sprite-env/pkg/db"
 	"github.com/superfly/sprite-env/pkg/juicefs"
 	"github.com/superfly/sprite-env/pkg/overlay"
@@ -33,10 +32,9 @@ type System struct {
 	logger *slog.Logger
 
 	// Storage modules
-	DBManager         *db.Manager
-	JuiceFS           *juicefs.JuiceFS
-	OverlayManager    *overlay.Manager
-	CheckpointManager *checkpoint.Manager
+	DBManager      *db.Manager
+	JuiceFS        *juicefs.JuiceFS
+	OverlayManager *overlay.Manager
 
 	// Process modules
 	ServicesManager *services.Manager
@@ -60,15 +58,16 @@ type System struct {
 	running bool
 
 	// Process management
-	processStarted     atomic.Bool // Atomic flag to prevent concurrent starts
-	processMu          sync.Mutex
-	processCmd         *exec.Cmd
-	processStartTime   time.Time
-	processWaitStarted bool
-	processRunningCh   chan struct{} // Closed when process is running
-	processStoppedCh   chan struct{} // Closed when process is stopped
-	processExitCode    int           // Exit code for WaitForExit
-	gracefulShutdown   bool
+	processStarted      atomic.Bool // Atomic flag to prevent concurrent starts
+	processMu           sync.Mutex
+	processCmd          *exec.Cmd
+	processStartTime    time.Time
+	processWaitStarted  bool
+	processRunningCh    chan struct{} // Closed when process is running
+	processStoppedCh    chan struct{} // Closed when process is stopped
+	processExitCode     int           // Exit code for WaitForExit
+	gracefulShutdown    bool
+	restoringInProgress atomic.Bool // Flag to prevent shutdown trigger during restore
 
 	// Shutdown channels
 	shutdownTriggeredCh      chan struct{} // Closed to START shutdown
@@ -182,6 +181,20 @@ func (s *System) monitorProcessLoop() {
 			s.logger.Debug("System already shutting down, process exit is expected")
 			return
 		default:
+		}
+
+		// Check if we're in the middle of a restore operation
+		if s.restoringInProgress.Load() {
+			s.logger.Debug("Process exit during restore operation, not triggering shutdown")
+			// Poll every 200ms for up to 1 second waiting for restore to complete
+			for i := 0; i < 5; i++ {
+				time.Sleep(200 * time.Millisecond)
+				if !s.restoringInProgress.Load() {
+					s.logger.Debug("Restore completed, resuming process monitoring")
+					break
+				}
+			}
+			continue
 		}
 
 		// Process exited - trigger shutdown sequence
@@ -322,6 +335,11 @@ func (s *System) initializeProcessManagement() error {
 	// The process-related fields are already initialized in New()
 	// This method exists for consistency with other initialization methods
 	return nil
+}
+
+// GetOverlayManager returns the overlay manager (may be nil)
+func (s *System) GetOverlayManager() *overlay.Manager {
+	return s.OverlayManager
 }
 
 // SyncOverlay syncs the overlay filesystem and returns an unfreeze function
