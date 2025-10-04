@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 )
 
@@ -104,19 +105,16 @@ func (s *System) Boot(ctx context.Context) error {
 	// Overlay manager (depends on JuiceFS)
 	if s.config.OverlayEnabled {
 		s.logger.Info("Starting overlay manager")
-		// Mount() should block until overlay is ready
-		if err := s.OverlayManager.Mount(s.ctx); err != nil {
-			return fmt.Errorf("failed to mount overlay: %w", err)
-		}
-		s.logger.Info("Overlay mounted")
 
-		// Initialize checkpoint infrastructure asynchronously (non-blocking)
-		go func() {
-			if err := s.initializeCheckpointInfrastructure(s.ctx); err != nil {
-				s.logger.Warn("Failed to initialize checkpoint infrastructure", "error", err)
-			}
-		}()
-		s.logger.Info("Checkpoint infrastructure initializing asynchronously")
+		// Determine checkpoint database path
+		checkpointDBDir := filepath.Join(s.config.WriteDir, "checkpoints")
+		checkpointDBPath := filepath.Join(checkpointDBDir, "checkpoints.db")
+
+		// Start overlay (mounts and initializes checkpoint manager synchronously)
+		if err := s.OverlayManager.Start(s.ctx, checkpointDBPath); err != nil {
+			return fmt.Errorf("failed to start overlay: %w", err)
+		}
+		s.logger.Info("Overlay started")
 	}
 
 	// Phase 4: Start process if configured

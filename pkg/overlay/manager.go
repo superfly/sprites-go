@@ -141,6 +141,34 @@ func (m *Manager) SetRestoreContainerCallbacks(prep func(ctx context.Context) er
 	m.restoreContainerResume = resume
 }
 
+// Start mounts the overlay and initializes checkpoint infrastructure
+// This is the main entry point for starting the overlay manager
+func (m *Manager) Start(ctx context.Context, checkpointDBPath string) error {
+	// Mount the overlay filesystem
+	if err := m.Mount(ctx); err != nil {
+		return fmt.Errorf("failed to mount overlay: %w", err)
+	}
+
+	// Set up checkpoint mount directory
+	if err := m.SetupCheckpointMountBase(ctx); err != nil {
+		m.logger.Warn("Failed to setup checkpoint mount base", "error", err)
+	}
+
+	// Initialize checkpoint manager (must be ready for checkpoint operations)
+	if err := m.InitializeCheckpointManager(ctx, checkpointDBPath); err != nil {
+		m.logger.Warn("Failed to initialize checkpoint manager", "error", err)
+	}
+
+	// Mount existing checkpoints asynchronously (non-blocking)
+	go func() {
+		if err := m.MountCheckpoints(ctx); err != nil {
+			m.logger.Warn("Failed to mount existing checkpoints", "error", err)
+		}
+	}()
+
+	return nil
+}
+
 // UpdateImagePath updates the image path after a restore operation
 func (m *Manager) UpdateImagePath() {
 	dataPath := filepath.Join(m.baseDir, "data")

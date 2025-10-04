@@ -563,6 +563,13 @@ func (s *System) StopProcess() error {
 				s.processMu.Lock()
 				s.processCmd = nil
 				s.processWaitStarted = false
+				// Ensure processStoppedCh is closed
+				select {
+				case <-s.processStoppedCh:
+					// Already closed
+				default:
+					close(s.processStoppedCh)
+				}
 				// Lock will be released by defer at function exit
 				return nil
 			}
@@ -592,6 +599,13 @@ func (s *System) StopProcess() error {
 		s.logger.Info("Process stopped gracefully")
 		s.processCmd = nil
 		s.processWaitStarted = false
+		// Ensure processStoppedCh is closed
+		select {
+		case <-s.processStoppedCh:
+			// Already closed
+		default:
+			close(s.processStoppedCh)
+		}
 		// Reset the atomic flag since process is stopped
 		s.processStarted.Store(false)
 		return nil
@@ -630,6 +644,13 @@ forceKill:
 				s.processMu.Lock()
 				s.processCmd = nil
 				s.processWaitStarted = false
+				// Ensure processStoppedCh is closed
+				select {
+				case <-s.processStoppedCh:
+					// Already closed
+				default:
+					close(s.processStoppedCh)
+				}
 				// Reset the atomic flag since process is stopped
 				s.processStarted.Store(false)
 				// Lock will be released by defer at function exit
@@ -670,6 +691,13 @@ forceKill:
 			s.logger.Info("Process killed successfully")
 			s.processCmd = nil
 			s.processWaitStarted = false
+			// Ensure processStoppedCh is closed
+			select {
+			case <-s.processStoppedCh:
+				// Already closed
+			default:
+				close(s.processStoppedCh)
+			}
 			// Reset the atomic flag since process is stopped
 			s.processStarted.Store(false)
 			return nil

@@ -60,7 +60,8 @@ func TestSystemGracefulShutdown(t *testing.T) {
 		defer cancel()
 
 		if err := sys.WhenProcessStopped(ctx); err != nil {
-			t.Errorf("Process did not stop within timeout: %v", err)
+			isRunning := sys.IsProcessRunning()
+			t.Errorf("Process did not stop within timeout: %v, IsProcessRunning=%v", err, isRunning)
 		}
 
 		// Reaper should be stopped
