@@ -77,7 +77,7 @@ type ExecOptions struct {
 // Checkpoint represents a checkpoint
 type Checkpoint struct {
 	ID         string    `json:"id"`
-	CreateTime time.Time `json:"created_at"`
+	CreateTime time.Time `json:"create_time"`
 	History    []string  `json:"history,omitempty"`
 }
 
