@@ -7,8 +7,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/superfly/sprite-env/server/system"
 )
 
 // TestSystemGracefulShutdown verifies clean shutdown of all subsystems
@@ -271,11 +269,11 @@ func TestSystemSignalTriggeredShutdown(t *testing.T) {
 
 	config := TestConfig(testDir)
 
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
-	RegisterSystemCleanup(t, sys)
 
 	// Start the system
 	StartSystemWithTimeout(t, sys, 10*time.Second)

@@ -6,8 +6,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/superfly/sprite-env/server/system"
 )
 
 // TestSystemShutdownBehavior verifies that the shutdown sequence works correctly
@@ -26,11 +24,11 @@ func TestSystemShutdownBehavior(t *testing.T) {
 	config := TestConfig(testDir)
 	config.ProcessCommand = []string{testScript}
 
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
-	RegisterSystemCleanup(t, sys)
 
 	// Start the system
 	StartSystemWithTimeout(t, sys, 30*time.Second)
@@ -91,7 +89,8 @@ exit 42
 	config.ProcessCommand = []string{shortRunScript}
 	config.KeepAliveOnError = false // Ensure shutdown is triggered on process exit
 
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
@@ -157,7 +156,8 @@ exit 1
 	config.ProcessCommand = []string{shortRunScript}
 	config.KeepAliveOnError = true // Keep server alive when process exits
 
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}

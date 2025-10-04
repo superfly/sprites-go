@@ -42,6 +42,9 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        token: ${{ secrets.GH_PAT || github.token }}
     
     - name: Set up Go
       uses: actions/setup-go@v5
@@ -142,6 +145,9 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        token: ${{ secrets.GH_PAT || github.token }}
     
     - name: Download all artifacts
       uses: actions/download-artifact@v4

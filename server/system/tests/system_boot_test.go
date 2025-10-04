@@ -5,8 +5,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/superfly/sprite-env/server/system"
 )
 
 // TestSystemBootSequence verifies the correct boot order of all subsystems
@@ -36,11 +34,11 @@ func TestSystemBootSequence(t *testing.T) {
 	t.Logf("Config APIToken before New: %s", config.APIToken)
 
 	// Create system
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
-	defer ShutdownSystemWithTimeout(t, sys, 30*time.Second)
 
 	// Start the system and verify boot sequence
 	t.Log("Starting system boot sequence...")
@@ -152,7 +150,8 @@ func TestSystemBootWithInvalidProcess(t *testing.T) {
 	config.ProcessCommand = []string{"/nonexistent/binary"}
 
 	// Create system
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
@@ -160,8 +159,6 @@ func TestSystemBootWithInvalidProcess(t *testing.T) {
 	// Boot should fail
 	err = sys.Start()
 	if err == nil {
-		// If it somehow started, shut it down
-		ShutdownSystemWithTimeout(t, sys, 5*time.Second)
 		t.Fatal("Expected boot to fail with invalid process")
 	}
 
@@ -194,7 +191,8 @@ func TestSystemBootWithStorageFailure(t *testing.T) {
 	config.ProcessCommand = []string{"/bin/sh", "-c", "echo test"}
 
 	// Create system - this might fail due to permissions
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Logf("System creation failed as expected: %v", err)
 		return
@@ -203,7 +201,6 @@ func TestSystemBootWithStorageFailure(t *testing.T) {
 	// If creation succeeded, boot should fail
 	err = sys.Start()
 	if err == nil {
-		ShutdownSystemWithTimeout(t, sys, 5*time.Second)
 		t.Fatal("Expected boot to fail with storage issues")
 	}
 
@@ -220,11 +217,11 @@ func TestSystemBootIdempotency(t *testing.T) {
 
 	config := TestConfig(testDir)
 
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
-	defer ShutdownSystemWithTimeout(t, sys, 30*time.Second)
 
 	// Start the system
 	StartSystemWithTimeout(t, sys, 10*time.Second)
@@ -256,11 +253,11 @@ func TestSystemBootWithCustomPorts(t *testing.T) {
 	config := TestConfig(testDir)
 	config.APIListenAddr = listenAddr
 
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
-	defer ShutdownSystemWithTimeout(t, sys, 30*time.Second)
 
 	// Start the system with longer timeout for JuiceFS format
 	StartSystemWithTimeout(t, sys, 30*time.Second)

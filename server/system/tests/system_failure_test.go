@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/superfly/sprite-env/server/system"
 )
 
 // TestShutdownAfterBootFailure verifies that Shutdown() can be called safely after Start() fails
@@ -24,7 +22,8 @@ func TestShutdownAfterBootFailure(t *testing.T) {
 	config := TestConfig(testDir)
 	config.ProcessCommand = []string{"/nonexistent/binary"}
 
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
@@ -33,7 +32,6 @@ func TestShutdownAfterBootFailure(t *testing.T) {
 	t.Log("Attempting to start system with invalid process...")
 	err = sys.Start()
 	if err == nil {
-		ShutdownSystemWithTimeout(t, sys, 5*time.Second)
 		t.Fatal("Expected Start() to fail with invalid process")
 	}
 	t.Logf("Start() failed as expected: %v", err)
@@ -81,7 +79,8 @@ func TestShutdownWithStorageErrors(t *testing.T) {
 
 	config := TestConfig(testDir)
 
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
@@ -145,7 +144,8 @@ done
 	config := TestConfig(testDir)
 	config.ProcessCommand = []string{slowStartScript}
 
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
@@ -188,7 +188,8 @@ func TestMultipleRapidShutdowns(t *testing.T) {
 
 	config := TestConfig(testDir)
 
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
@@ -243,7 +244,8 @@ func TestBootFailureCleanup(t *testing.T) {
 	config := TestConfig(testDir)
 	config.ProcessCommand = []string{"/nonexistent/binary"}
 
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
@@ -252,7 +254,6 @@ func TestBootFailureCleanup(t *testing.T) {
 	t.Log("Attempting boot with invalid config...")
 	err = sys.Start()
 	if err == nil {
-		ShutdownSystemWithTimeout(t, sys, 5*time.Second)
 		t.Fatal("Expected Start() to fail")
 	}
 
@@ -277,11 +278,11 @@ func TestBootFailureCleanup(t *testing.T) {
 	// This verifies we didn't leak resources or leave things in a bad state
 	t.Log("Creating new system to verify no resource leaks...")
 	config2 := TestConfig(testDir)
-	sys2, err := system.New(config2)
+	sys2, cleanup2, err := TestSystem(config2)
+	defer cleanup2()
 	if err != nil {
 		t.Fatalf("Failed to create second system: %v", err)
 	}
-	defer ShutdownSystemWithTimeout(t, sys2, 30*time.Second)
 
 	StartSystemWithTimeout(t, sys2, 30*time.Second)
 	VerifySystemRunning(t, sys2)

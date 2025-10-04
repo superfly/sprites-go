@@ -8,8 +8,6 @@ import (
 	"regexp"
 	"testing"
 	"time"
-
-	"github.com/superfly/sprite-env/server/system"
 )
 
 func logTS(t *testing.T, msg string) {
@@ -97,11 +95,11 @@ func TestOverlayMountLifecycle(t *testing.T) {
 		config.OverlayTargetPath = "/mnt/newroot"
 	}
 
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
-	defer ShutdownSystemWithTimeout(t, sys, 30*time.Second)
 
 	// Start and block until storage ready (Start should already block on mount)
 	StartSystemWithTimeout(t, sys, 30*time.Second)
@@ -159,7 +157,8 @@ func TestPartialShutdownAndBoot(t *testing.T) {
 		config.OverlayTargetPath = "/mnt/newroot"
 	}
 
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}

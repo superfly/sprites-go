@@ -21,6 +21,7 @@ jobs:
     with:
       tag_suffix: ${{ github.ref_name }}
       tag_latest: ${{ !contains(github.ref_name, '-') }}
+    secrets: inherit
 
   release-client:
     name: Release Client

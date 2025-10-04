@@ -313,6 +313,13 @@ func (m *Manager) mountOverlayFS(ctx context.Context) error {
 		"-o", mountOptions, m.overlayTargetPath)
 
 	if output, err := cmd.CombinedOutput(); err != nil {
+		m.logger.Error("OverlayFS mount failed",
+			"error", err,
+			"output", string(output),
+			"lowerdir", lowerDirs,
+			"upperdir", upperDir,
+			"workdir", workDir,
+			"target", m.overlayTargetPath)
 		return fmt.Errorf("failed to mount overlayfs: %w, output: %s", err, string(output))
 	}
 

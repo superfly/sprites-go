@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/superfly/sprite-env/server/system"
 )
 
 // logMountDiagnostics logs current mount and loop device information for debugging
@@ -50,11 +48,11 @@ func TestSystemRestoreWithoutShutdownTrigger(t *testing.T) {
 	config := TestConfig(testDir)
 	config.ProcessCommand = []string{testScript}
 
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
-	RegisterSystemCleanup(t, sys)
 
 	// Start the system
 	StartSystemWithTimeout(t, sys, 10*time.Second)
@@ -194,11 +192,11 @@ done
 	config := TestConfig(testDir)
 	config.ProcessCommand = []string{testScript}
 
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
-	RegisterSystemCleanup(t, sys)
 
 	// Start the system
 	StartSystemWithTimeout(t, sys, 10*time.Second)
@@ -299,11 +297,11 @@ func TestSystemRestoreMultipleOperations(t *testing.T) {
 
 	config := TestConfig(testDir)
 
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
-	RegisterSystemCleanup(t, sys)
 
 	// Start the system
 	StartSystemWithTimeout(t, sys, 10*time.Second)
@@ -401,11 +399,11 @@ exit 0
 	// Important: Keep system alive even if process exits
 	config.KeepAliveOnError = true
 
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
-	RegisterSystemCleanup(t, sys)
 
 	// Start the system
 	StartSystemWithTimeout(t, sys, 10*time.Second)
@@ -488,11 +486,11 @@ func TestSystemRestoreContainerShutdownDoesNotTriggerSystemShutdown(t *testing.T
 
 	config := TestConfig(testDir)
 
-	sys, err := system.New(config)
+	sys, cleanup, err := TestSystem(config)
+	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
 	}
-	RegisterSystemCleanup(t, sys)
 
 	// Start the system
 	StartSystemWithTimeout(t, sys, 10*time.Second)

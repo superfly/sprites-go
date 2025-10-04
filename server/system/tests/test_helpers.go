@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -63,14 +65,38 @@ func TestSystem(config *system.Config) (*system.System, func(), error) {
 		// Stop each component individually, swallowing errors
 		// Components are responsible for cleaning up their own resources
 
-		// Stop overlay manager (unmounts overlayfs and loop devices)
+		// Force kill process if running (no graceful shutdown in cleanup)
+		if sys.IsProcessRunning() {
+			pid := sys.ProcessPID()
+			if pid > 0 {
+				// Send SIGKILL to process group
+				_ = syscall.Kill(-pid, syscall.SIGKILL)
+				// Give it a moment to die
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+
+		// Stop services manager
+		if sys.ServicesManager != nil {
+			_ = sys.ServicesManager.StopForUnmount()
+		}
+
+		// Stop overlay manager (unmounts overlayfs, checkpoint mounts, and loop devices)
 		if sys.OverlayManager != nil {
 			_ = sys.OverlayManager.Unmount(ctx)
 		}
 
-		// Stop JuiceFS (unmounts and stops litestream)
-		if sys.JuiceFS != nil {
-			_ = sys.JuiceFS.Stop(ctx)
+		// Force kill JuiceFS process if still running
+		if sys.JuiceFS != nil && sys.JuiceFS.IsMounted() {
+			// Try graceful stop first with short timeout
+			stopCtx, stopCancel := context.WithTimeout(ctx, 5*time.Second)
+			stopErr := sys.JuiceFS.Stop(stopCtx)
+			stopCancel()
+
+			// If still mounted after attempted stop, force unmount
+			if stopErr != nil && sys.JuiceFS.IsMounted() {
+				_ = exec.Command("umount", "-f", "-l", filepath.Join(config.JuiceFSDataPath, "data")).Run()
+			}
 		}
 
 		// Stop database manager (stops litestream for metadata DB)
@@ -238,6 +264,19 @@ func StartSystemWithTimeout(t *testing.T, sys *system.System, timeout time.Durat
 	select {
 	case err := <-done:
 		if err != nil {
+			// Print diagnostics on failure
+			t.Log("=== System start failed, dumping diagnostics ===")
+			if mountCmd := exec.Command("mount"); mountCmd != nil {
+				if output, mountErr := mountCmd.Output(); mountErr == nil {
+					t.Logf("mount output:\n%s", string(output))
+				}
+			}
+			if losetupCmd := exec.Command("losetup", "-a"); losetupCmd != nil {
+				if output, losetupErr := losetupCmd.Output(); losetupErr == nil {
+					t.Logf("losetup -a output:\n%s", string(output))
+				}
+			}
+			t.Log("=== End diagnostics ===")
 			t.Fatalf("Failed to start system: %v", err)
 		}
 	case <-time.After(timeout):

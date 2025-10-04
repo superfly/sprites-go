@@ -42,6 +42,8 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
+        submodules: recursive
+        token: ${{ secrets.GH_PAT || github.token }}
         fetch-depth: 0  # Fetch all history for tags
     
     - name: Generate short SHA
@@ -83,6 +85,8 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
+        submodules: recursive
+        token: ${{ secrets.GH_PAT || github.token }}
         fetch-depth: 0  # Fetch all history for comparison
     
     - name: Check for changes in ubuntu-devtools
@@ -137,6 +141,7 @@ jobs:
       cache_tag: 25.04-latest
       latest_tag: 25.04-latest
       tag_latest: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && (inputs.tag_latest == true || inputs.tag_latest == null) }}
+    secrets: inherit
 
   retag-base:
     needs: [generate-tag, check-ubuntu-changes]
@@ -182,6 +187,7 @@ jobs:
       cache_tag: 25.04-languages-latest
       latest_tag: 25.04-languages-latest
       tag_latest: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && (inputs.tag_latest == true || inputs.tag_latest == null) }}
+    secrets: inherit
 
   retag-languages:
     needs: [generate-tag, check-ubuntu-changes, build-or-retag-base, retag-base]
@@ -225,3 +231,4 @@ jobs:
       cache_tag: latest
       latest_tag: latest
       tag_latest: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && (inputs.tag_latest == true || inputs.tag_latest == null) }}
+    secrets: inherit
