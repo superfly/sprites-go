@@ -1,18 +1,6 @@
 name: Tests
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - '.github/workflows/test.yml'
-      - 'go.*'
-      - 'Dockerfile'
-      - 'tests/**'
-      - 'server/**'
-      - 'lib/**'
-      - 'packages/**'
-      - 'client/**'
   pull_request:
     paths:
       - '.github/workflows/test.yml'
@@ -29,6 +17,7 @@ jobs:
   test-lib:
     name: "Tests"
     runs-on: ubuntu-latest
+    if: "!contains(github.event.pull_request.title, '[skip ci]') && !contains(github.event.pull_request.title, '[ci skip]')"
 
     steps:
     - name: Checkout repo
