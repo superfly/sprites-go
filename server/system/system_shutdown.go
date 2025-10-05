@@ -51,10 +51,9 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 	// Phase 1: Prepare container for shutdown (stop services and process)
 	if err := s.PrepareContainerForShutdown(shutdownCtx); err != nil {
 		s.logger.Error("Phase 1 failed: container shutdown", "error", err)
-		// Continue with system shutdown even if container prep fails
-	} else {
-		s.logger.Info("Phase 1 complete: Container stopped")
+		return fmt.Errorf("phase 1 (container shutdown) failed: %w", err)
 	}
+	s.logger.Info("Phase 1 complete: Container stopped")
 
 	// Phase 2: Unmount overlay filesystem (MUST happen BEFORE JuiceFS stops)
 	// The overlay image file lives on JuiceFS, so overlay must be unmounted first
@@ -62,10 +61,9 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 	if s.config.OverlayEnabled && s.OverlayManager != nil {
 		if err := s.UnmountOverlayWithVerification(shutdownCtx); err != nil {
 			s.logger.Error("Phase 2 failed: overlay unmount", "error", err)
-			// Continue with shutdown even if overlay unmount fails
-		} else {
-			s.logger.Info("Phase 2 complete: Overlay unmounted")
+			return fmt.Errorf("phase 2 (overlay unmount) failed: %w", err)
 		}
+		s.logger.Info("Phase 2 complete: Overlay unmounted")
 	}
 
 	// Phase 3: Stop JuiceFS (now safe because overlay is fully unmounted)
@@ -73,9 +71,9 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 	if s.JuiceFS != nil {
 		if err := s.JuiceFS.Stop(shutdownCtx); err != nil {
 			s.logger.Error("Phase 3 failed: JuiceFS shutdown", "error", err)
-		} else {
-			s.logger.Info("Phase 3 complete: JuiceFS stopped", "duration", time.Since(juicefsStart))
+			return fmt.Errorf("phase 3 (JuiceFS shutdown) failed: %w", err)
 		}
+		s.logger.Info("Phase 3 complete: JuiceFS stopped", "duration", time.Since(juicefsStart))
 	}
 
 	// Phase 4: Stop database manager (final litestream sync for metadata DB)
@@ -83,9 +81,9 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 	if s.DBManager != nil {
 		if err := s.DBManager.Stop(shutdownCtx); err != nil {
 			s.logger.Error("Phase 4 failed: database manager shutdown", "error", err)
-		} else {
-			s.logger.Info("Phase 4 complete: Database manager stopped", "duration", time.Since(dbStart))
+			return fmt.Errorf("phase 4 (database manager shutdown) failed: %w", err)
 		}
+		s.logger.Info("Phase 4 complete: Database manager stopped", "duration", time.Since(dbStart))
 	}
 
 	// Phase 5: Stop network services
