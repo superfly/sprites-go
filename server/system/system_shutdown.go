@@ -47,6 +47,10 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 	// Phase 4: Stop database manager (final litestream sync for metadata DB)
 	// Phase 5: Stop network services
 	// Phase 6: Stop utilities
+	//
+	// CRITICAL: Phases 2, 3, and 4 are NOT cancelable via context.
+	// They must complete for data integrity, or explicitly error when wedged.
+	// The shutdownCtx is only used for informational purposes and phase 1.
 
 	// Phase 1: Prepare container for shutdown (stop services and process)
 	if err := s.PrepareContainerForShutdown(shutdownCtx); err != nil {
@@ -58,8 +62,9 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 	// Phase 2: Unmount overlay filesystem (MUST happen BEFORE JuiceFS stops)
 	// The overlay image file lives on JuiceFS, so overlay must be unmounted first
 	// Controlled unmount handles sync properly, no need for separate freeze/sync step
+	// Use Background context - this MUST complete for data integrity
 	if s.config.OverlayEnabled && s.OverlayManager != nil {
-		if err := s.UnmountOverlayWithVerification(shutdownCtx); err != nil {
+		if err := s.UnmountOverlayWithVerification(context.Background()); err != nil {
 			s.logger.Error("Phase 2 failed: overlay unmount", "error", err)
 			return fmt.Errorf("phase 2 (overlay unmount) failed: %w", err)
 		}
@@ -67,9 +72,11 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 	}
 
 	// Phase 3: Stop JuiceFS (now safe because overlay is fully unmounted)
+	// Use Background context - this MUST complete for data integrity
+	// JuiceFS unmount can take up to 5 minutes to flush data to S3
 	juicefsStart := time.Now()
 	if s.JuiceFS != nil {
-		if err := s.JuiceFS.Stop(shutdownCtx); err != nil {
+		if err := s.JuiceFS.Stop(context.Background()); err != nil {
 			s.logger.Error("Phase 3 failed: JuiceFS shutdown", "error", err)
 			return fmt.Errorf("phase 3 (JuiceFS shutdown) failed: %w", err)
 		}
@@ -77,9 +84,11 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 	}
 
 	// Phase 4: Stop database manager (final litestream sync for metadata DB)
+	// Use Background context - this MUST complete for data integrity
+	// Litestream can take up to 1 minute to flush data
 	dbStart := time.Now()
 	if s.DBManager != nil {
-		if err := s.DBManager.Stop(shutdownCtx); err != nil {
+		if err := s.DBManager.Stop(context.Background()); err != nil {
 			s.logger.Error("Phase 4 failed: database manager shutdown", "error", err)
 			return fmt.Errorf("phase 4 (database manager shutdown) failed: %w", err)
 		}
@@ -236,10 +245,10 @@ func (s *System) ShutdownContainer(shutdownCtx context.Context) error {
 		s.logger.Info("Phase 3: Unmounting overlay filesystem")
 		overlayStart := time.Now()
 
-		// Use the provided context without timeout
-		// Let overlay take as long as it needs to unmount properly
+		// Use Background context - overlay unmount MUST complete for data integrity
+		// It is NOT cancelable - must either succeed or explicitly error when wedged
 		// This also unmounts checkpoints automatically
-		if err := s.OverlayManager.Unmount(shutdownCtx); err != nil {
+		if err := s.OverlayManager.Unmount(context.Background()); err != nil {
 			s.logger.Error("Failed to unmount overlay", "error", err)
 			return fmt.Errorf("failed to unmount overlay: %w", err)
 		}

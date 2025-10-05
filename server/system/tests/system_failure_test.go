@@ -39,7 +39,8 @@ func TestShutdownAfterBootFailure(t *testing.T) {
 	// Now verify we can safely shutdown even though Start() failed
 	// This is what main.go should do
 	t.Log("Calling Shutdown() after failed Start()...")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Shutdown is not cancelable - allow 6 minutes for JuiceFS flush
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
 
 	startTime := time.Now()
@@ -93,7 +94,8 @@ func TestShutdownWithStorageErrors(t *testing.T) {
 	// Now shutdown - even if storage has issues, shutdown should complete
 	// (In a real scenario, storage might be corrupted or unmount might fail)
 	t.Log("Shutting down system...")
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	// Shutdown is not cancelable - allow 6 minutes for JuiceFS flush
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
 
 	startTime := time.Now()
@@ -161,7 +163,8 @@ done
 
 	// Immediately trigger shutdown while it's still starting
 	t.Log("Triggering shutdown while system is starting...")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Shutdown is not cancelable - allow 6 minutes for JuiceFS flush
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
 
 	err = sys.Shutdown(ctx)
@@ -204,7 +207,8 @@ func TestMultipleRapidShutdowns(t *testing.T) {
 	done := make(chan error, 5)
 	for i := 0; i < 5; i++ {
 		go func(id int) {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			// Shutdown is not cancelable - allow 6 minutes for JuiceFS flush
+			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 			defer cancel()
 			err := sys.Shutdown(ctx)
 			t.Logf("Shutdown call %d completed: %v", id, err)
@@ -217,7 +221,7 @@ func TestMultipleRapidShutdowns(t *testing.T) {
 		select {
 		case <-done:
 			// OK
-		case <-time.After(45 * time.Second):
+		case <-time.After(7 * time.Minute):
 			t.Fatal("Timeout waiting for concurrent shutdowns")
 		}
 	}
@@ -261,7 +265,8 @@ func TestBootFailureCleanup(t *testing.T) {
 
 	// Even though boot failed, subsystems that DID start should be cleaned up
 	// Call Shutdown() to ensure cleanup
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Shutdown is not cancelable - allow 6 minutes for JuiceFS flush
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
 
 	err = sys.Shutdown(ctx)

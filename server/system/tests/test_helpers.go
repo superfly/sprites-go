@@ -131,10 +131,15 @@ func TestSystem(config *system.Config) (*system.System, func(), error) {
 			_ = sys.OverlayManager.Unmount(ctx)
 		}
 
-		// Now unmount ANY remaining mounts that might be using loop devices
+		// Now unmount ANY remaining test mounts that might be using loop devices
 		// This is critical - we need to unmount everything before detaching loops
-		fmt.Printf("INFO: Running aggressive unmount of all overlay/loop mounts\n")
-		aggressiveUnmountAll()
+		fmt.Printf("INFO: Running aggressive unmount of test overlay/loop mounts\n")
+		if err := aggressiveUnmountAll(); err != nil {
+			fmt.Printf("CRITICAL: %v\n", err)
+			fmt.Printf("CRITICAL: Cannot proceed with cleanup - mounts are still busy\n")
+			// Don't continue to loopback cleanup if mounts failed
+			return
+		}
 
 		elapsed := time.Since(phaseStart)
 		if elapsed > 2*time.Second {
@@ -159,13 +164,17 @@ func TestSystem(config *system.Config) (*system.System, func(), error) {
 			if loopList != "" {
 				fmt.Printf("WARNING: Loopback devices still present after cleanup, running second round\n")
 				// Try unmounting and cleanup again
-				aggressiveUnmountAll()
-				time.Sleep(500 * time.Millisecond)
-				aggressiveLoopbackCleanup()
+				if err := aggressiveUnmountAll(); err != nil {
+					fmt.Printf("CRITICAL: %v\n", err)
+					fmt.Printf("WARNING: Second unmount round failed, some loop devices may remain attached\n")
+				} else {
+					time.Sleep(500 * time.Millisecond)
+					aggressiveLoopbackCleanup()
 
-				// Final check
-				if output, err := exec.Command("losetup", "-a").Output(); err == nil && string(output) != "" {
-					fmt.Printf("ERROR: Loopback devices STILL present after second cleanup round:\n%s\n", string(output))
+					// Final check
+					if output, err := exec.Command("losetup", "-a").Output(); err == nil && string(output) != "" {
+						fmt.Printf("ERROR: Loopback devices STILL present after second cleanup round:\n%s\n", string(output))
+					}
 				}
 			}
 		}
@@ -242,18 +251,19 @@ func TestSystem(config *system.Config) (*system.System, func(), error) {
 
 // aggressiveUnmountAll unmounts all mounts that might be using loop devices
 // This MUST be called before detaching loop devices
-func aggressiveUnmountAll() {
+// Returns error if any critical mounts fail to unmount
+func aggressiveUnmountAll() error {
 	startTime := time.Now()
 
 	// Get all mounts
 	output, err := exec.Command("mount").Output()
 	if err != nil {
-		return
+		return nil
 	}
 
 	lines := string(output)
 	if lines == "" {
-		return
+		return nil
 	}
 
 	// Find all overlay and loop-based mounts
@@ -280,13 +290,22 @@ func aggressiveUnmountAll() {
 			}
 
 			mountPoint := line[onIdx+4 : typeIdx]
+
+			// NEVER unmount the root filesystem - that's the container's root
+			// Also skip other system mounts like /usr/sbin/docker-init
+			if mountPoint == "/" || containsStr(mountPoint, "docker-init") {
+				continue
+			}
+
 			mountsToUnmount = append(mountsToUnmount, mountPoint)
 		}
 	}
 
 	if len(mountsToUnmount) > 0 {
-		fmt.Printf("WARNING: Found %d overlay/loop mounts to clean up: %v\n", len(mountsToUnmount), mountsToUnmount)
+		fmt.Printf("INFO: Found %d test overlay/loop mounts to clean up: %v\n", len(mountsToUnmount), mountsToUnmount)
 	}
+
+	var failedMounts []string
 
 	// Unmount in reverse order
 	for i := len(mountsToUnmount) - 1; i >= 0; i-- {
@@ -305,6 +324,7 @@ func aggressiveUnmountAll() {
 			// Final check
 			if isMounted(mountPoint) {
 				fmt.Printf("ERROR: Mount %s STILL present after multiple unmount attempts\n", mountPoint)
+				failedMounts = append(failedMounts, mountPoint)
 			}
 		}
 	}
@@ -316,6 +336,13 @@ func aggressiveUnmountAll() {
 	if elapsed > 500*time.Millisecond {
 		fmt.Printf("WARNING: aggressiveUnmountAll took %v (longer than 500ms)\n", elapsed)
 	}
+
+	// Fail fast if we couldn't unmount critical mounts
+	if len(failedMounts) > 0 {
+		return fmt.Errorf("CRITICAL: Failed to unmount %d mounts: %v - cannot proceed with loopback cleanup", len(failedMounts), failedMounts)
+	}
+
+	return nil
 }
 
 // aggressiveLoopbackCleanup detaches ALL loopback devices, even orphaned ones
@@ -482,9 +509,13 @@ func RegisterSystemCleanup(t *testing.T, sys *system.System) {
 			}
 		}
 
-		// Unmount ALL mounts before detaching loop devices
-		t.Logf("Cleanup: Unmounting all overlay and loop-based mounts")
-		aggressiveUnmountAll()
+		// Unmount ALL test mounts before detaching loop devices
+		t.Logf("Cleanup: Unmounting all test overlay and loop-based mounts")
+		if err := aggressiveUnmountAll(); err != nil {
+			t.Logf("Cleanup ERROR: %v", err)
+			t.Logf("Cleanup: Cannot proceed with loopback cleanup - mounts still busy")
+			return
+		}
 
 		// Aggressively clean up ALL loopback devices
 		t.Logf("Cleanup: Detaching all loopback devices")
@@ -495,9 +526,12 @@ func RegisterSystemCleanup(t *testing.T, sys *system.System) {
 			loopList := string(output)
 			if loopList != "" {
 				t.Logf("Cleanup: Loopback devices still present after cleanup, trying again:\n%s", loopList)
-				aggressiveUnmountAll()
-				time.Sleep(500 * time.Millisecond)
-				aggressiveLoopbackCleanup()
+				if err := aggressiveUnmountAll(); err != nil {
+					t.Logf("Cleanup ERROR: %v", err)
+				} else {
+					time.Sleep(500 * time.Millisecond)
+					aggressiveLoopbackCleanup()
+				}
 			}
 		}
 

@@ -40,7 +40,9 @@ func TestSystemGracefulShutdown(t *testing.T) {
 	t.Log("Starting graceful shutdown...")
 	startTime := time.Now()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Shutdown is not cancelable - context is informational only
+	// Allow 6 minutes for JuiceFS flush (5 min max + 1 min buffer)
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
 
 	err = sys.Shutdown(ctx)
@@ -110,7 +112,8 @@ done
 	StartSystemWithTimeout(t, sys, 10*time.Second)
 
 	// Shutdown with generous timeout to allow for JuiceFS cleanup under load
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Shutdown is not cancelable - allow 6 minutes for JuiceFS flush
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
 
 	startTime := time.Now()
@@ -159,16 +162,19 @@ func TestSystemShutdownIdempotency(t *testing.T) {
 	StartSystemWithTimeout(t, sys, 10*time.Second)
 
 	// First shutdown
-	ctx1, cancel1 := context.WithTimeout(context.Background(), 10*time.Second)
+	// NOTE: Shutdown is NOT cancelable - the context is only informational
+	// We pass a long timeout here but shutdown will take as long as needed
+	// JuiceFS can take up to 5 minutes, so we allow 6 minutes total
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel1()
 
 	err = sys.Shutdown(ctx1)
 	if err != nil {
-		t.Errorf("First shutdown failed: %v", err)
+		t.Fatalf("First shutdown failed: %v", err)
 	}
 
-	// Second shutdown - should be safe
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	// Second shutdown - should be safe and return quickly since already stopped
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel2()
 
 	err = sys.Shutdown(ctx2)
@@ -201,7 +207,8 @@ func TestSystemShutdownWithActiveConnections(t *testing.T) {
 	// This would require actually making HTTP/WebSocket connections
 
 	// Shutdown should handle active connections gracefully
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Shutdown is not cancelable - allow 6 minutes for JuiceFS flush
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
 
 	err = sys.Shutdown(ctx)
@@ -334,7 +341,8 @@ func TestSystemShutdownOrder(t *testing.T) {
 	// This would require instrumentation in the actual shutdown code
 	// For now, just verify shutdown completes
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Shutdown is not cancelable - allow 6 minutes for JuiceFS flush
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
 
 	err = sys.Shutdown(ctx)

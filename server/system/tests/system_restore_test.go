@@ -100,7 +100,8 @@ func TestSystemRestoreWithoutShutdownTrigger(t *testing.T) {
 
 	// Perform restore operation
 	t.Log("Starting restore operation...")
-	restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Restore calls ShutdownContainer internally - allow 6 minutes for JuiceFS
+	restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 7*time.Minute)
 	defer restoreCancel()
 
 	// Track if system shutdown is triggered
@@ -160,11 +161,12 @@ func TestSystemRestoreWithoutShutdownTrigger(t *testing.T) {
 	}
 
 	// Clean shutdown at the end
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Shutdown is not cancelable - allow 6 minutes for JuiceFS flush
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer shutdownCancel()
 
 	if err := sys.Shutdown(shutdownCtx); err != nil {
-		t.Errorf("Final shutdown failed: %v", err)
+		t.Fatalf("Final shutdown failed: %v", err)
 	}
 }
 
@@ -235,7 +237,8 @@ done
 
 	// Perform restore
 	t.Log("Performing restore...")
-	restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Restore calls ShutdownContainer internally - allow 6 minutes for JuiceFS
+	restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 7*time.Minute)
 	defer restoreCancel()
 
 	err = sys.RestoreWithStream(restoreCtx, checkpointID, nil)
@@ -278,11 +281,12 @@ done
 	// Note: Could be more if checkpoint itself restarts the process
 
 	// Clean shutdown
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Shutdown is not cancelable - allow 6 minutes for JuiceFS flush
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer shutdownCancel()
 
 	if err := sys.Shutdown(shutdownCtx); err != nil {
-		t.Errorf("Shutdown failed: %v", err)
+		t.Fatalf("Shutdown failed: %v", err)
 	}
 }
 
@@ -311,7 +315,8 @@ func TestSystemRestoreMultipleOperations(t *testing.T) {
 
 	for i := 1; i <= 3; i++ {
 		t.Logf("Creating checkpoint %d", i)
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		// Checkpoint freezes filesystem - may take time if busy
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 
 		if err := sys.CheckpointWithStream(ctx, "", nil); err != nil {
@@ -345,7 +350,8 @@ func TestSystemRestoreMultipleOperations(t *testing.T) {
 		id := checkpointIDs[i]
 		t.Logf("Restoring to checkpoint %d: %s", i+1, id)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		// Restore calls ShutdownContainer internally - allow 6 minutes for JuiceFS
+		ctx, cancel := context.WithTimeout(context.Background(), 7*time.Minute)
 		defer cancel()
 
 		err = sys.RestoreWithStream(ctx, id, nil)
@@ -365,11 +371,12 @@ func TestSystemRestoreMultipleOperations(t *testing.T) {
 	t.Log("All restore operations completed successfully")
 
 	// Clean shutdown
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Shutdown is not cancelable - allow 6 minutes for JuiceFS flush
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
 
 	if err := sys.Shutdown(shutdownCtx); err != nil {
-		t.Errorf("Shutdown failed: %v", err)
+		t.Fatalf("Shutdown failed: %v", err)
 	}
 }
 
@@ -446,7 +453,8 @@ exit 0
 
 	// Perform restore - should restart the process
 	t.Log("Performing restore to restart process...")
-	restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Restore calls ShutdownContainer internally - allow 6 minutes for JuiceFS
+	restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 7*time.Minute)
 	defer restoreCancel()
 
 	err = sys.RestoreWithStream(restoreCtx, checkpointID, nil)
@@ -465,11 +473,12 @@ exit 0
 	}
 
 	// Clean shutdown
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Shutdown is not cancelable - allow 6 minutes for JuiceFS flush
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer shutdownCancel()
 
 	if err := sys.Shutdown(shutdownCtx); err != nil {
-		t.Errorf("Shutdown failed: %v", err)
+		t.Fatalf("Shutdown failed: %v", err)
 	}
 }
 
@@ -530,7 +539,8 @@ func TestSystemRestoreContainerShutdownDoesNotTriggerSystemShutdown(t *testing.T
 
 	// Perform restore
 	t.Log("Starting restore operation...")
-	restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Restore calls ShutdownContainer internally - allow 6 minutes for JuiceFS
+	restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 7*time.Minute)
 	defer restoreCancel()
 
 	restoreDone := make(chan error, 1)
@@ -571,11 +581,12 @@ func TestSystemRestoreContainerShutdownDoesNotTriggerSystemShutdown(t *testing.T
 
 	// Perform clean shutdown
 	t.Log("Performing clean shutdown...")
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Shutdown is not cancelable - allow 6 minutes for JuiceFS flush
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer shutdownCancel()
 
 	if err := sys.Shutdown(shutdownCtx); err != nil {
-		t.Errorf("Clean shutdown failed: %v", err)
+		t.Fatalf("Clean shutdown failed: %v", err)
 	}
 
 	// Now shutdown should be detected
