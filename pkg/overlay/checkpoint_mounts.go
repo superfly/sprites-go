@@ -293,6 +293,7 @@ func (m *Manager) OnCheckpointCreated(ctx context.Context) error {
 }
 
 // SetupCheckpointMountBase creates and configures the checkpoint mount directory with shared propagation
+// Uses tmpfs to avoid inheriting the container's root overlay mount
 func (m *Manager) SetupCheckpointMountBase(ctx context.Context) error {
 	// Ensure the directory exists
 	if err := os.MkdirAll(m.checkpointMountPath, 0755); err != nil {
@@ -306,21 +307,24 @@ func (m *Manager) SetupCheckpointMountBase(ctx context.Context) error {
 		return nil
 	}
 
-	// Make it a bind mount to itself first (required for changing propagation)
-	bindCmd := exec.CommandContext(ctx, "mount", "--bind", m.checkpointMountPath, m.checkpointMountPath)
-	if output, err := bindCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to bind mount checkpoint base: %w, output: %s", err, string(output))
+	// Mount as tmpfs to create an isolated filesystem
+	// This prevents the Docker container's root overlay from appearing as a child mount
+	mountCmd := exec.CommandContext(ctx, "mount", "-t", "tmpfs", "tmpfs", m.checkpointMountPath)
+	if output, err := mountCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to mount checkpoint base as tmpfs: %w, output: %s", err, string(output))
 	}
 
-	// Make it a shared mount so submounts propagate
+	// Make it a shared mount so submounts (checkpoints) propagate to containers
+	// Since tmpfs creates a new filesystem (not inside the overlay), this won't
+	// cause the container's root overlay to propagate into this directory
 	shareCmd := exec.CommandContext(ctx, "mount", "--make-shared", m.checkpointMountPath)
 	if output, err := shareCmd.CombinedOutput(); err != nil {
-		// Try to cleanup the bind mount
+		// Try to cleanup the tmpfs mount
 		exec.Command("umount", m.checkpointMountPath).Run()
 		return fmt.Errorf("failed to make checkpoint base shared: %w, output: %s", err, string(output))
 	}
 
-	m.logger.Info("Checkpoint mount base configured with shared propagation", "path", m.checkpointMountPath)
+	m.logger.Info("Checkpoint mount base configured as tmpfs with shared propagation", "path", m.checkpointMountPath)
 	return nil
 }
 

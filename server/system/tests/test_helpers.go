@@ -266,7 +266,7 @@ func aggressiveUnmountAll() error {
 		return nil
 	}
 
-	// Find all overlay and loop-based mounts
+	// Find all overlay and loop-based mounts that we deliberately created
 	// We'll unmount in reverse order (last mounted first)
 	var mountsToUnmount []string
 
@@ -291,13 +291,33 @@ func aggressiveUnmountAll() error {
 
 			mountPoint := line[onIdx+4 : typeIdx]
 
-			// NEVER unmount the root filesystem - that's the container's root
-			// Also skip other system mounts like /usr/sbin/docker-init
-			if mountPoint == "/" || containsStr(mountPoint, "docker-init") {
+			// NEVER unmount the root filesystem - that's the container's root overlay
+			if mountPoint == "/" {
 				continue
 			}
 
-			mountsToUnmount = append(mountsToUnmount, mountPoint)
+			// Skip system mounts
+			if containsStr(mountPoint, "docker-init") {
+				continue
+			}
+
+			// Only unmount mounts that we deliberately created for the system:
+			// 1. Mounts under /mnt/ (like /mnt/newroot, /mnt/user-data)
+			// 2. Checkpoint subdirectory mounts (like /.sprite/checkpoints/v1, /.sprite/checkpoints/active)
+			//    but NOT the base /.sprite/checkpoints itself (which is a tmpfs with shared propagation)
+			isTestMount := false
+			if len(mountPoint) >= 5 && mountPoint[:5] == "/mnt/" {
+				// Mounts under /mnt/ are test mounts
+				isTestMount = true
+			} else if len(mountPoint) > len("/.sprite/checkpoints/") &&
+				mountPoint[:len("/.sprite/checkpoints/")] == "/.sprite/checkpoints/" {
+				// Subdirectories of /.sprite/checkpoints are checkpoint mounts
+				isTestMount = true
+			}
+
+			if isTestMount {
+				mountsToUnmount = append(mountsToUnmount, mountPoint)
+			}
 		}
 	}
 
