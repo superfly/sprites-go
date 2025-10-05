@@ -281,6 +281,16 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 				m.suspend(time.Since(m.lastActivity))
 				idleTimer = nil
 				idleTimerCh = nil
+
+				// Check if we need to restart timer after suspend returns
+				// This is a safety net in case the ActivityEnded("suspend") event gets dropped
+				currentCount = atomic.LoadInt64(&m.activeCount)
+				if currentCount == 0 {
+					m.lastActivity = time.Now()
+					idleTimer = time.NewTimer(m.idleAfter)
+					idleTimerCh = idleTimer.C
+					m.logger.Debug("Restarted idle timer after suspend", "duration", m.idleAfter)
+				}
 			} else {
 				idleTimer = nil
 				idleTimerCh = nil
@@ -295,6 +305,10 @@ func (m *ActivityMonitor) suspend(inactive time.Duration) {
 
 	// Store the timestamp when suspension started
 	m.suspendedAt = time.Now()
+
+	// Register the suspend/resume process as an activity
+	// This ensures the idle timer will be restarted after resume completes
+	m.ActivityStarted("suspend")
 
 	if m.admin != nil {
 		m.admin.SendActivityEvent("suspend", map[string]interface{}{
@@ -356,6 +370,10 @@ func (m *ActivityMonitor) suspend(inactive time.Duration) {
 				}
 			})
 		}
+
+		// End the suspend activity after all resume work completes
+		// This allows the idle timer to restart for subsequent suspend attempts
+		m.ActivityEnded("suspend")
 	}()
 
 	// Skip the actual suspend API call and wait loop if prevented
