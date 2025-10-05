@@ -1,6 +1,19 @@
 name: Tests
 
 on:
+  push:
+    branches:
+      - main
+      - 'test/**'
+    paths:
+      - '.github/workflows/test.yml'
+      - 'go.*'
+      - 'Dockerfile'
+      - 'tests/**'
+      - 'server/**'
+      - 'lib/**'
+      - 'packages/**'
+      - 'client/**'
   pull_request:
     paths:
       - '.github/workflows/test.yml'
