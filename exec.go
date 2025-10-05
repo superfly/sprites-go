@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
-	"syscall"
 )
 
 // ErrNotStarted is returned when Wait is called before Start.
@@ -515,13 +514,6 @@ type ExitError struct {
 
 func (e *ExitError) Error() string {
 	return fmt.Sprintf("exit status %d", e.Code)
-}
-
-// Sys returns the system-specific exit information.
-// On Unix, this is a syscall.WaitStatus.
-func (e *ExitError) Sys() interface{} {
-	// Create a WaitStatus that indicates the process exited with e.Code
-	return syscall.WaitStatus(e.Code << 8)
 }
 
 // ExitCode returns the exit code of the exited process.
