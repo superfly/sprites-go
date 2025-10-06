@@ -1,5 +1,9 @@
 # Default fish configuration for sprite
 
+# Set terminal title to show current directory
+function fish_title
+    prompt_pwd
+end
 
 # Enable colors
 set -g fish_color_normal normal

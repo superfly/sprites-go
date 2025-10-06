@@ -90,6 +90,10 @@ fi
 # Get the appropriate login flag for the chosen shell
 LOGIN_FLAG=$(get_login_flag "$CHOSEN_SHELL")
 
+# Set terminal title to show the actual shell command before exec
+# This will be picked up by the client's OSC filter and prefixed with sprite name
+printf '\033]0;%s %s\007' "$CHOSEN_SHELL" "$LOGIN_FLAG"
+
 # Execute the chosen shell with login flag
 exec "$CHOSEN_SHELL" "$LOGIN_FLAG"
 

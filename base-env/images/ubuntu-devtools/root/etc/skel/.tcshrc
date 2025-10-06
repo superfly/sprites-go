@@ -1,5 +1,8 @@
 # Default tcsh configuration for sprite
 
+# Set terminal title to show current directory
+alias precmd 'echo -n "\033]0;${cwd}\007"'
+
 # Set a simple prompt
 set prompt = "%n@%m:%~%# "
 

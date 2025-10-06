@@ -4,6 +4,18 @@
 # Enable command completion
 autoload -Uz compinit && compinit
 
+# Set terminal title to show current directory (just the path)
+precmd() {
+    print -Pn "\e]0;%~\a"
+}
+
+# Set terminal title to show running command (just the command)
+preexec() {
+    # Extract just the command, not the full line
+    local cmd="${1[(wr)^(*=*|sudo|exec|ssh|-*)]}"
+    print -Pn "\e]0;${cmd}\a"
+}
+
 # Set a simple but nice prompt with colors
 PROMPT='%F{green}%n@%m%f:%F{blue}%~%f%# '
 
