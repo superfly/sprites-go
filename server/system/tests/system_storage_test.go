@@ -95,7 +95,7 @@ func TestOverlayMountLifecycle(t *testing.T) {
 		config.OverlayTargetPath = "/mnt/newroot"
 	}
 
-	sys, cleanup, err := TestSystem(config)
+	sys, cleanup, err := TestSystem(t, config)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
@@ -157,7 +157,7 @@ func TestPartialShutdownAndBoot(t *testing.T) {
 		config.OverlayTargetPath = "/mnt/newroot"
 	}
 
-	sys, cleanup, err := TestSystem(config)
+	sys, cleanup, err := TestSystem(t, config)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)

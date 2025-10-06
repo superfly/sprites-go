@@ -55,6 +55,8 @@ func TestManagerLinuxOnly(t *testing.T) {
 	}
 
 	// If we're root, test basic mount/unmount
+	defer CleanupTestOverlays(t, m)
+	
 	t.Run("Mount", func(t *testing.T) {
 		if err := m.Mount(ctx); err != nil {
 			t.Fatalf("failed to mount: %v", err)
@@ -88,12 +90,12 @@ func TestPrepareCheckpointLinuxOnly(t *testing.T) {
 		SkipOverlayFS: true,
 	}
 	m := New(cfg)
+	defer CleanupTestOverlays(t, m)
 
 	// Mount first
 	if err := m.Mount(ctx); err != nil {
 		t.Fatalf("failed to mount: %v", err)
 	}
-	defer m.Unmount(ctx)
 
 	// Test freeze/unfreeze
 	if err := m.PrepareForCheckpoint(ctx); err != nil {

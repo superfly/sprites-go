@@ -24,7 +24,7 @@ func TestSystemShutdownBehavior(t *testing.T) {
 	config := TestConfig(testDir)
 	config.ProcessCommand = []string{testScript}
 
-	sys, cleanup, err := TestSystem(config)
+	sys, cleanup, err := TestSystem(t, config)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
@@ -89,7 +89,7 @@ exit 42
 	config.ProcessCommand = []string{shortRunScript}
 	config.KeepAliveOnError = false // Ensure shutdown is triggered on process exit
 
-	sys, cleanup, err := TestSystem(config)
+	sys, cleanup, err := TestSystem(t, config)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
@@ -156,7 +156,7 @@ exit 1
 	config.ProcessCommand = []string{shortRunScript}
 	config.KeepAliveOnError = true // Keep server alive when process exits
 
-	sys, cleanup, err := TestSystem(config)
+	sys, cleanup, err := TestSystem(t, config)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)

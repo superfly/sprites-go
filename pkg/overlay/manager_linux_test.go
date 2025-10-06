@@ -27,6 +27,13 @@ func TestOverlayFullLifecycle(t *testing.T) {
 	ctx := context.Background()
 	baseDir := t.TempDir()
 
+	var m *Manager
+	defer func() {
+		if m != nil {
+			CleanupTestOverlays(t, m)
+		}
+	}()
+
 	// Create test directories
 	lowerDir := filepath.Join(baseDir, "lower")
 	if err := os.MkdirAll(lowerDir, 0755); err != nil {
@@ -50,7 +57,7 @@ func TestOverlayFullLifecycle(t *testing.T) {
 		OverlayTargetPath: targetDir,
 		ImageSize:         "1G", // Small for testing
 	}
-	m := New(cfg)
+	m = New(cfg)
 
 	// Test Mount
 	t.Run("Mount", func(t *testing.T) {
@@ -162,6 +169,13 @@ func TestOverlayWithMultipleLowers(t *testing.T) {
 	ctx := context.Background()
 	baseDir := t.TempDir()
 
+	var m *Manager
+	defer func() {
+		if m != nil {
+			CleanupTestOverlays(t, m)
+		}
+	}()
+
 	// Create multiple lower directories
 	lower1 := filepath.Join(baseDir, "lower1")
 	lower2 := filepath.Join(baseDir, "lower2")
@@ -197,13 +211,12 @@ func TestOverlayWithMultipleLowers(t *testing.T) {
 		OverlayTargetPath: targetDir,
 		ImageSize:         "1G",
 	}
-	m := New(cfg)
+	m = New(cfg)
 
 	// Mount
 	if err := m.Mount(ctx); err != nil {
 		t.Fatalf("failed to mount: %v", err)
 	}
-	defer m.Unmount(ctx)
 
 	// Verify both files are visible
 	for _, test := range []struct {
@@ -240,6 +253,7 @@ func TestOverlayErrorHandling(t *testing.T) {
 			BaseDir: baseDir,
 		}
 		m := New(cfg)
+		defer CleanupTestOverlays(t, m)
 
 		// Remove the image file if it was created
 		os.Remove(m.GetImagePath())
@@ -248,6 +262,8 @@ func TestOverlayErrorHandling(t *testing.T) {
 		if err := m.Mount(ctx); err == nil {
 			t.Fatal("expected mount to fail without image")
 		}
+		// Note: Even if mount fails, partial resources (like loop devices)
+		// may have been created and need cleanup
 	})
 
 	t.Run("DoubleMountShouldSucceed", func(t *testing.T) {
@@ -281,6 +297,7 @@ func TestOverlayErrorHandling(t *testing.T) {
 			BaseDir: baseDir,
 		}
 		m := New(cfg)
+		defer CleanupTestOverlays(t, m)
 
 		// Should succeed (idempotent)
 		if err := m.Unmount(ctx); err != nil {
@@ -298,6 +315,13 @@ func TestOverlayConcurrentOperations(t *testing.T) {
 	ctx := context.Background()
 	baseDir := t.TempDir()
 
+	var m *Manager
+	defer func() {
+		if m != nil {
+			CleanupTestOverlays(t, m)
+		}
+	}()
+
 	lowerDir := filepath.Join(baseDir, "lower")
 	if err := os.MkdirAll(lowerDir, 0755); err != nil {
 		t.Fatal(err)
@@ -308,13 +332,12 @@ func TestOverlayConcurrentOperations(t *testing.T) {
 		ImageSize:  "1G",
 		LowerPaths: []string{lowerDir},
 	}
-	m := New(cfg)
+	m = New(cfg)
 
 	// Mount first
 	if err := m.Mount(ctx); err != nil {
 		t.Fatal(err)
 	}
-	defer m.Unmount(ctx)
 
 	targetDir := m.overlayTargetPath
 
@@ -359,6 +382,13 @@ func TestOverlayImageGrowth(t *testing.T) {
 	ctx := context.Background()
 	baseDir := t.TempDir()
 
+	var m *Manager
+	defer func() {
+		if m != nil {
+			CleanupTestOverlays(t, m)
+		}
+	}()
+
 	lowerDir := filepath.Join(baseDir, "lower")
 	if err := os.MkdirAll(lowerDir, 0755); err != nil {
 		t.Fatal(err)
@@ -369,13 +399,12 @@ func TestOverlayImageGrowth(t *testing.T) {
 		ImageSize:  "500M", // Small initial size
 		LowerPaths: []string{lowerDir},
 	}
-	m := New(cfg)
+	m = New(cfg)
 
 	// Mount
 	if err := m.Mount(ctx); err != nil {
 		t.Fatal(err)
 	}
-	defer m.Unmount(ctx)
 
 	// Write a moderate amount of data
 	targetDir := m.overlayTargetPath
@@ -410,6 +439,13 @@ func TestFreezeUnfreezeStress(t *testing.T) {
 	ctx := context.Background()
 	baseDir := t.TempDir()
 
+	var m *Manager
+	defer func() {
+		if m != nil {
+			CleanupTestOverlays(t, m)
+		}
+	}()
+
 	lowerDir := filepath.Join(baseDir, "lower")
 	if err := os.MkdirAll(lowerDir, 0755); err != nil {
 		t.Fatal(err)
@@ -420,13 +456,12 @@ func TestFreezeUnfreezeStress(t *testing.T) {
 		ImageSize:  "1G",
 		LowerPaths: []string{lowerDir},
 	}
-	m := New(cfg)
+	m = New(cfg)
 
 	// Mount
 	if err := m.Mount(ctx); err != nil {
 		t.Fatal(err)
 	}
-	defer m.Unmount(ctx)
 
 	// Run multiple freeze/unfreeze cycles
 	for i := 0; i < 5; i++ {

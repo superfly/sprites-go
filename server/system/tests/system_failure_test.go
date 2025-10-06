@@ -22,7 +22,7 @@ func TestShutdownAfterBootFailure(t *testing.T) {
 	config := TestConfig(testDir)
 	config.ProcessCommand = []string{"/nonexistent/binary"}
 
-	sys, cleanup, err := TestSystem(config)
+	sys, cleanup, err := TestSystem(t, config)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
@@ -80,7 +80,7 @@ func TestShutdownWithStorageErrors(t *testing.T) {
 
 	config := TestConfig(testDir)
 
-	sys, cleanup, err := TestSystem(config)
+	sys, cleanup, err := TestSystem(t, config)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
@@ -146,7 +146,7 @@ done
 	config := TestConfig(testDir)
 	config.ProcessCommand = []string{slowStartScript}
 
-	sys, cleanup, err := TestSystem(config)
+	sys, cleanup, err := TestSystem(t, config)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
@@ -191,7 +191,7 @@ func TestMultipleRapidShutdowns(t *testing.T) {
 
 	config := TestConfig(testDir)
 
-	sys, cleanup, err := TestSystem(config)
+	sys, cleanup, err := TestSystem(t, config)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
@@ -248,7 +248,7 @@ func TestBootFailureCleanup(t *testing.T) {
 	config := TestConfig(testDir)
 	config.ProcessCommand = []string{"/nonexistent/binary"}
 
-	sys, cleanup, err := TestSystem(config)
+	sys, cleanup, err := TestSystem(t, config)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
@@ -283,7 +283,7 @@ func TestBootFailureCleanup(t *testing.T) {
 	// This verifies we didn't leak resources or leave things in a bad state
 	t.Log("Creating new system to verify no resource leaks...")
 	config2 := TestConfig(testDir)
-	sys2, cleanup2, err := TestSystem(config2)
+	sys2, cleanup2, err := TestSystem(t, config2)
 	defer cleanup2()
 	if err != nil {
 		t.Fatalf("Failed to create second system: %v", err)

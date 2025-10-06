@@ -34,7 +34,7 @@ func TestSystemBootSequence(t *testing.T) {
 	t.Logf("Config APIToken before New: %s", config.APIToken)
 
 	// Create system
-	sys, cleanup, err := TestSystem(config)
+	sys, cleanup, err := TestSystem(t, config)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
@@ -136,6 +136,7 @@ func TestSystemBootSequence(t *testing.T) {
 
 	// Verify system is fully operational
 	VerifySystemRunning(t, sys)
+	// Cleanup (including shutdown and mount verification) handled by deferred TestSystem cleanup
 }
 
 // TestSystemBootWithInvalidProcess verifies boot fails gracefully with invalid process
@@ -150,7 +151,7 @@ func TestSystemBootWithInvalidProcess(t *testing.T) {
 	config.ProcessCommand = []string{"/nonexistent/binary"}
 
 	// Create system
-	sys, cleanup, err := TestSystem(config)
+	sys, cleanup, err := TestSystem(t, config)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
@@ -191,7 +192,7 @@ func TestSystemBootWithStorageFailure(t *testing.T) {
 	config.ProcessCommand = []string{"/bin/sh", "-c", "echo test"}
 
 	// Create system - this might fail due to permissions
-	sys, cleanup, err := TestSystem(config)
+	sys, cleanup, err := TestSystem(t, config)
 	defer cleanup()
 	if err != nil {
 		t.Logf("System creation failed as expected: %v", err)
@@ -217,7 +218,7 @@ func TestSystemBootIdempotency(t *testing.T) {
 
 	config := TestConfig(testDir)
 
-	sys, cleanup, err := TestSystem(config)
+	sys, cleanup, err := TestSystem(t, config)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
@@ -253,7 +254,7 @@ func TestSystemBootWithCustomPorts(t *testing.T) {
 	config := TestConfig(testDir)
 	config.APIListenAddr = listenAddr
 
-	sys, cleanup, err := TestSystem(config)
+	sys, cleanup, err := TestSystem(t, config)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)

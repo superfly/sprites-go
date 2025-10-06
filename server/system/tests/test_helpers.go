@@ -8,10 +8,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/superfly/sprite-env/pkg/juicefs"
+	"github.com/superfly/sprite-env/pkg/overlay"
 	"github.com/superfly/sprite-env/server/system"
 )
 
@@ -20,6 +23,66 @@ func requireDockerTest(t *testing.T) {
 	t.Helper()
 	if os.Getenv("SPRITE_TEST_DOCKER") != "1" {
 		t.Skip("This test requires Docker test container (run via 'make test')")
+	}
+}
+
+// VerifyNoLeftoverMounts checks that no test-related storage mounts remain after test cleanup
+// This is automatically called by TestSystem's cleanup function.
+// Tests should NOT call this directly - it's handled automatically.
+func VerifyNoLeftoverMounts(t *testing.T) {
+	t.Helper()
+
+	var failures []string
+
+	// Check for mount output
+	output, err := exec.Command("mount").Output()
+	if err != nil {
+		t.Logf("Warning: Could not check mounts: %v", err)
+		return
+	}
+	mountOutput := string(output)
+
+	// Check for /mnt/newroot mount
+	if containsStr(mountOutput, " on /mnt/newroot type ") {
+		failures = append(failures, "/mnt/newroot is still mounted")
+	}
+
+	// Check for /mnt/user-data mount
+	if containsStr(mountOutput, " on /mnt/user-data type ") {
+		failures = append(failures, "/mnt/user-data is still mounted")
+	}
+
+	// Check for any SpriteFS/JuiceFS mounts
+	if containsStr(mountOutput, "SpriteFS on") || containsStr(mountOutput, "type fuse.juicefs") {
+		failures = append(failures, "JuiceFS/SpriteFS mounts are still present")
+	}
+
+	// Check for checkpoint mounts under /.sprite/checkpoints/
+	for _, line := range splitLines(mountOutput) {
+		if containsStr(line, " on /.sprite/checkpoints/") &&
+			!containsStr(line, " on /.sprite/checkpoints type ") { // Allow the base tmpfs mount
+			failures = append(failures, "Checkpoint mount still present: "+line)
+		}
+	}
+
+	// Check for loopback devices
+	loopOutput, err := exec.Command("losetup", "-a").Output()
+	if err == nil {
+		loopList := strings.TrimSpace(string(loopOutput))
+		if loopList != "" {
+			failures = append(failures, fmt.Sprintf("Loopback devices still attached:\n%s", loopList))
+		}
+	}
+
+	// Fail the test if any issues found
+	if len(failures) > 0 {
+		t.Errorf("Storage cleanup verification FAILED - leftover mounts/devices detected:")
+		for _, failure := range failures {
+			t.Errorf("  - %s", failure)
+		}
+
+		// Print full mount output for debugging
+		t.Logf("Full mount output:\n%s", mountOutput)
 	}
 }
 
@@ -51,8 +114,11 @@ func TestConfig(testDir string) *system.Config {
 }
 
 // TestSystem creates a new system and returns a cleanup function
-// Usage: sys, cleanup, err := TestSystem(config); defer cleanup()
-func TestSystem(config *system.Config) (*system.System, func(), error) {
+// Usage: sys, cleanup, err := TestSystem(t, config); defer cleanup()
+// Cleanup automatically calls Shutdown() and verifies no leftover mounts/devices
+func TestSystem(t *testing.T, config *system.Config) (*system.System, func(), error) {
+	t.Helper()
+
 	// ALWAYS require running in Docker test container
 	if os.Getenv("SPRITE_TEST_DOCKER") != "1" {
 		return nil, func() {}, fmt.Errorf("FATAL: System tests MUST run in Docker container. Use 'make test' to run tests properly. Direct test execution is not supported")
@@ -69,6 +135,50 @@ func TestSystem(config *system.Config) (*system.System, func(), error) {
 		// Give ourselves a massive timeout for aggressive cleanup
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
+
+		// CRITICAL: Hard timeout to prevent cleanup from hanging the entire test suite
+		// If cleanup takes more than 60 seconds, forcefully kill the entire test process
+		cleanupDone := make(chan struct{})
+		go func() {
+			select {
+			case <-cleanupDone:
+				// Cleanup completed successfully
+				return
+			case <-time.After(60 * time.Second):
+				fmt.Printf("\n")
+				fmt.Printf("FATAL: Cleanup exceeded 60 second timeout - forcefully terminating test process\n")
+				fmt.Printf("FATAL: This prevents the test runner from hanging indefinitely\n")
+				fmt.Printf("FATAL: Check for wedged filesystems or stuck unmount operations\n")
+				fmt.Printf("\n")
+				os.Exit(99) // Exit with distinctive code to indicate timeout kill
+			}
+		}()
+		defer close(cleanupDone)
+
+		// PHASE 0: Verify no leftover mounts after cleanup completes
+		// This runs last (LIFO defer order)
+		defer func() {
+			// Use package-specific helpers for detailed verification
+			if sys.OverlayManager != nil {
+				overlay.VerifyNoTestOverlays(t, sys.OverlayManager)
+			}
+			if sys.JuiceFS != nil {
+				juicefs.VerifyNoTestJuiceFS(t, sys.JuiceFS)
+			}
+			// Also run general verification for any other mounts
+			VerifyNoLeftoverMounts(t)
+		}()
+
+		// PHASE 0.5: Try graceful shutdown first if system was started
+		// Only do this if the system appears to be running
+		if sys.IsProcessRunning() || sys.APIServer != nil {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 6*time.Minute)
+			shutdownErr := sys.Shutdown(shutdownCtx)
+			shutdownCancel()
+			if shutdownErr != nil {
+				fmt.Printf("WARNING: Graceful shutdown failed, will proceed with aggressive cleanup: %v\n", shutdownErr)
+			}
+		}
 
 		// PHASE 1: AGGRESSIVELY KILL THE PROCESS
 		// Kill the process and verify it's actually dead
@@ -124,60 +234,60 @@ func TestSystem(config *system.Config) (*system.System, func(), error) {
 
 		// PHASE 2: AGGRESSIVELY UNMOUNT OVERLAYFS AND ALL MOUNTS
 		// We must unmount everything BEFORE detaching loop devices
-		phaseStart := time.Now()
+		//phaseStart := time.Now()
 
 		// Try normal overlay unmount first
 		if sys.OverlayManager != nil {
 			_ = sys.OverlayManager.Unmount(ctx)
 		}
 
-		// Now unmount ANY remaining test mounts that might be using loop devices
-		// This is critical - we need to unmount everything before detaching loops
-		fmt.Printf("INFO: Running aggressive unmount of test overlay/loop mounts\n")
-		if err := aggressiveUnmountAll(); err != nil {
-			fmt.Printf("CRITICAL: %v\n", err)
-			fmt.Printf("CRITICAL: Cannot proceed with cleanup - mounts are still busy\n")
-			// Don't continue to loopback cleanup if mounts failed
-			return
-		}
+		// // Now unmount ANY remaining test mounts that might be using loop devices
+		// // This is critical - we need to unmount everything before detaching loops
+		// fmt.Printf("INFO: Running aggressive unmount of test overlay/loop mounts\n")
+		// if err := aggressiveUnmountAll(); err != nil {
+		// 	fmt.Printf("CRITICAL: %v\n", err)
+		// 	fmt.Printf("CRITICAL: Cannot proceed with cleanup - mounts are still busy\n")
+		// 	// Don't continue to loopback cleanup if mounts failed
+		// 	return
+		// }
 
-		elapsed := time.Since(phaseStart)
-		if elapsed > 2*time.Second {
-			fmt.Printf("WARNING: Unmount phase took %v\n", elapsed)
-		}
+		// elapsed := time.Since(phaseStart)
+		// if elapsed > 2*time.Second {
+		// 	fmt.Printf("WARNING: Unmount phase took %v\n", elapsed)
+		// }
 
-		// PHASE 3: AGGRESSIVELY CLEAN UP ALL LOOPBACK DEVICES
-		// Now that everything is unmounted, detach ALL loop devices
-		phaseStart = time.Now()
-		fmt.Printf("INFO: Running aggressive loopback device cleanup\n")
-		aggressiveLoopbackCleanup()
+		// // PHASE 3: AGGRESSIVELY CLEAN UP ALL LOOPBACK DEVICES
+		// // Now that everything is unmounted, detach ALL loop devices
+		// phaseStart = time.Now()
+		// fmt.Printf("INFO: Running aggressive loopback device cleanup\n")
+		// aggressiveLoopbackCleanup()
 
-		elapsed = time.Since(phaseStart)
-		if elapsed > 2*time.Second {
-			fmt.Printf("WARNING: Loopback cleanup phase took %v\n", elapsed)
-		}
+		// elapsed = time.Since(phaseStart)
+		// if elapsed > 2*time.Second {
+		// 	fmt.Printf("WARNING: Loopback cleanup phase took %v\n", elapsed)
+		// }
 
-		// PHASE 4: Verify all loopback devices are gone
-		// Check that no test-related loop devices remain
-		if output, err := exec.Command("losetup", "-a").Output(); err == nil {
-			loopList := string(output)
-			if loopList != "" {
-				fmt.Printf("WARNING: Loopback devices still present after cleanup, running second round\n")
-				// Try unmounting and cleanup again
-				if err := aggressiveUnmountAll(); err != nil {
-					fmt.Printf("CRITICAL: %v\n", err)
-					fmt.Printf("WARNING: Second unmount round failed, some loop devices may remain attached\n")
-				} else {
-					time.Sleep(500 * time.Millisecond)
-					aggressiveLoopbackCleanup()
+		// // PHASE 4: Verify all loopback devices are gone
+		// // Check that no test-related loop devices remain
+		// if output, err := exec.Command("losetup", "-a").Output(); err == nil {
+		// 	loopList := string(output)
+		// 	if loopList != "" {
+		// 		fmt.Printf("WARNING: Loopback devices still present after cleanup, running second round\n")
+		// 		// Try unmounting and cleanup again
+		// 		if err := aggressiveUnmountAll(); err != nil {
+		// 			fmt.Printf("CRITICAL: %v\n", err)
+		// 			fmt.Printf("WARNING: Second unmount round failed, some loop devices may remain attached\n")
+		// 		} else {
+		// 			time.Sleep(500 * time.Millisecond)
+		// 			aggressiveLoopbackCleanup()
 
-					// Final check
-					if output, err := exec.Command("losetup", "-a").Output(); err == nil && string(output) != "" {
-						fmt.Printf("ERROR: Loopback devices STILL present after second cleanup round:\n%s\n", string(output))
-					}
-				}
-			}
-		}
+		// 			// Final check
+		// 			if output, err := exec.Command("losetup", "-a").Output(); err == nil && string(output) != "" {
+		// 				fmt.Printf("ERROR: Loopback devices STILL present after second cleanup round:\n%s\n", string(output))
+		// 			}
+		// 		}
+		// 	}
+		// }
 
 		// Force stop JuiceFS process if still running
 		if sys.JuiceFS != nil && sys.JuiceFS.IsMounted() {
@@ -236,6 +346,15 @@ func TestSystem(config *system.Config) (*system.System, func(), error) {
 		}
 		if sys.Reaper != nil {
 			_ = sys.Reaper.Stop(time.Second)
+		}
+
+		// Clean up the temporary JuiceFS directory to prevent leftover loop devices
+		// from affecting subsequent tests
+		if config.JuiceFSDataPath != "" {
+			fmt.Printf("INFO: Removing temporary JuiceFS directory: %s\n", config.JuiceFSDataPath)
+			if err := os.RemoveAll(config.JuiceFSDataPath); err != nil {
+				fmt.Printf("WARNING: Failed to remove JuiceFS temp directory %s: %v\n", config.JuiceFSDataPath, err)
+			}
 		}
 
 		totalElapsed := time.Since(cleanupStart)

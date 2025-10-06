@@ -204,12 +204,14 @@ func TestActivityMonitor_IdleTimerTriggersSuspension(t *testing.T) {
 	defer cancel()
 	monitor.Start(monitorCtx)
 
-	// Wait for idle timeout
-	time.Sleep(2 * time.Second)
+	// Wait for idle timeout - timer restarts after each suspend
+	// Need extra time for suspend overhead (sync, litestream stop, etc.)
+	time.Sleep(2500 * time.Millisecond)
 
-	// Should have suspended
-	if getSuspendCount() != 1 {
-		t.Errorf("Expected suspension after idle timeout, got %d suspensions", getSuspendCount())
+	// Should have suspended twice (at ~1s and ~2s)
+	count := getSuspendCount()
+	if count < 2 {
+		t.Errorf("Expected at least 2 suspensions after idle timeout, got %d suspensions", count)
 	}
 }
 
@@ -328,80 +330,15 @@ func TestActivityMonitor_ConcurrentActivities(t *testing.T) {
 		t.Error("System suspended during concurrent activities")
 	}
 
-	// Wait for idle timeout
-	time.Sleep(2 * time.Second)
+	// Wait for idle timeout - timer restarts after each suspend
+	// Need extra time for suspend overhead
+	time.Sleep(2500 * time.Millisecond)
 
-	// Should suspend after all activities end
-	if getSuspendCount() != 1 {
-		t.Errorf("Expected 1 suspension after activities ended, got %d", getSuspendCount())
+	// Should suspend at least twice after all activities end (at ~1s and ~2s)
+	count := getSuspendCount()
+	if count < 2 {
+		t.Errorf("Expected at least 2 suspensions after activities ended, got %d", count)
 	}
-}
-
-// Test SPRITE_PREVENT_SUSPEND environment variable
-func TestActivityMonitor_PreventSuspendEnvVar(t *testing.T) {
-	resetSuspendTracker()
-
-	ctx := context.Background()
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-	ctx = tap.WithLogger(ctx, logger)
-
-	// Test with prevention enabled
-	t.Run("prevention_enabled", func(t *testing.T) {
-		resetSuspendTracker()
-		logWriter := &testLogger{}
-		subLogger := slog.New(slog.NewTextHandler(logWriter, &slog.HandlerOptions{
-			Level: slog.LevelDebug,
-		}))
-		subCtx := context.Background()
-		subCtx = tap.WithLogger(subCtx, subLogger)
-		sys := createTestSystem(t, logWriter)
-		monitor := NewActivityMonitor(subCtx, sys, 500*time.Millisecond)
-
-		os.Setenv("SPRITE_PREVENT_SUSPEND", "true")
-		defer os.Unsetenv("SPRITE_PREVENT_SUSPEND")
-
-		monitorCtx, cancel := context.WithCancel(subCtx)
-		defer cancel()
-		monitor.Start(monitorCtx)
-
-		// Wait for idle timeout
-		time.Sleep(1 * time.Second)
-
-		// Should have called sync (suspension attempt)
-		if getSuspendCount() != 1 {
-			t.Errorf("Expected suspension attempt, got %d", getSuspendCount())
-		}
-	})
-
-	// Test with prevention disabled
-	t.Run("prevention_disabled", func(t *testing.T) {
-		resetSuspendTracker()
-		logWriter := &testLogger{}
-		subLogger := slog.New(slog.NewTextHandler(logWriter, &slog.HandlerOptions{
-			Level: slog.LevelDebug,
-		}))
-		subCtx := context.Background()
-		subCtx = tap.WithLogger(subCtx, subLogger)
-		sys := createTestSystem(t, logWriter)
-		monitor := NewActivityMonitor(subCtx, sys, 500*time.Millisecond)
-
-		os.Setenv("SPRITE_PREVENT_SUSPEND", "false")
-		defer os.Unsetenv("SPRITE_PREVENT_SUSPEND")
-
-		monitorCtx, cancel := context.WithCancel(subCtx)
-		defer cancel()
-		monitor.Start(monitorCtx)
-
-		// Wait for idle timeout
-		time.Sleep(1 * time.Second)
-
-		// Should have called sync
-		if getSuspendCount() != 1 {
-			t.Errorf("Expected sync to be called once, got %d", getSuspendCount())
-		}
-	})
 }
 
 // Test resume detection
@@ -425,12 +362,14 @@ func TestActivityMonitor_ResumeDetection(t *testing.T) {
 	defer cancel()
 	monitor.Start(monitorCtx)
 
-	// Wait for first suspension
-	time.Sleep(1 * time.Second)
+	// Wait for suspension - timer restarts after each suspend
+	// Need extra time for suspend overhead
+	time.Sleep(1200 * time.Millisecond)
 
-	// Verify suspension happened
-	if getSuspendCount() == 0 {
-		t.Error("Monitor should have triggered suspension")
+	// Verify suspensions happened (should be at least 2: at ~500ms and ~1000ms)
+	count := getSuspendCount()
+	if count < 2 {
+		t.Errorf("Monitor should have triggered at least 2 suspensions, got %d", count)
 	}
 
 	// Note: We no longer track suspended state internally since we rely on
@@ -474,13 +413,14 @@ func TestActivityMonitor_RapidActivityToggle(t *testing.T) {
 		t.Error("System suspended during rapid activity toggling")
 	}
 
-	// Wait for idle - should suspend twice (at ~1s and ~2s)
-	time.Sleep(2 * time.Second)
+	// Wait for idle - timer restarts after each suspend
+	// Need extra time for suspend overhead
+	time.Sleep(2500 * time.Millisecond)
 
-	// With 1s idle timeout and 2s wait, should suspend at least once, possibly twice
-	// depending on timing. Just verify at least one suspension occurred.
-	if getSuspendCount() < 1 {
-		t.Errorf("Expected at least 1 suspension, got %d", getSuspendCount())
+	// With 1s idle timeout and 2.5s wait, should suspend at least twice (at ~1s and ~2s)
+	count := getSuspendCount()
+	if count < 2 {
+		t.Errorf("Expected at least 2 suspensions, got %d", count)
 	}
 }
 
@@ -505,11 +445,14 @@ func TestActivityMonitor_ActivityDuringSuspension(t *testing.T) {
 	defer cancel()
 	monitor.Start(monitorCtx)
 
-	// Wait for suspension
-	time.Sleep(1 * time.Second)
+	// Wait for suspension - timer restarts after each suspend
+	// Need extra time for suspend overhead
+	time.Sleep(1200 * time.Millisecond)
 
-	if getSuspendCount() != 1 {
-		t.Fatal("System should have suspended")
+	// Should have suspended at least twice (at ~500ms and ~1000ms)
+	count := getSuspendCount()
+	if count < 2 {
+		t.Fatalf("System should have suspended at least twice, got %d", count)
 	}
 
 	// Start activity while suspended

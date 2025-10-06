@@ -36,6 +36,40 @@ if ! docker volume inspect sprite-go-mod >/dev/null 2>&1; then
     docker volume create sprite-go-mod
 fi
 
+# Clean up loopback devices from previous test runs
+# Loopback devices persist at the host kernel level across container invocations
+cleanup_loopback_devices() {
+    echo "Cleaning up loopback devices from previous test runs..."
+    docker run \
+        --rm \
+        --privileged \
+        -v "$(pwd)":/workspace \
+        "$IMAGE_NAME" \
+        bash -c '
+            # Detach all loopback devices, even if files dont exist
+            for dev in /dev/loop*[0-9]; do
+                [ -b "$dev" ] && losetup -d "$dev" 2>/dev/null || true
+            done
+            # Final cleanup of any remaining
+            losetup -D 2>/dev/null || true
+            
+            # Verify cleanup
+            REMAINING=$(losetup -a 2>/dev/null || true)
+            if [ -n "$REMAINING" ]; then
+                echo "WARNING: Some loopback devices could not be detached:"
+                echo "$REMAINING"
+            else
+                echo "All loopback devices cleaned up successfully"
+            fi
+        '
+    echo "Loopback cleanup complete"
+}
+
+# Clean up loopback devices before starting tests
+# This is necessary because loopback devices persist at the host kernel level
+# even across container restarts
+cleanup_loopback_devices
+
 EXTRA_ARGS="$*"
 
 # Run a single container with the provided go test command
@@ -82,7 +116,11 @@ build_default_args() {
         defaults+=" -failfast"
     fi
     if ! echo " $user_args " | grep -qE '(^|[[:space:]])-timeout(=|[[:space:]]|$)'; then
-        defaults+=" -timeout=5m"
+        defaults+=" -timeout=15m"
+    fi
+    # Force serial package execution to prevent resource conflicts (loop devices, mounts)
+    if ! echo " $user_args " | grep -qE '(^|[[:space:]])-p(=|[[:space:]]|$)'; then
+        defaults+=" -p=1"
     fi
     echo "$defaults"
 }
@@ -142,8 +180,30 @@ fi
 SERVER_CMD="go test$DEFAULT_ARGS $EXTRA_ARGS ./server/..."
 if run_in_container "server" "$SERVER_CMD"; then
     echo "PASS server"
-    echo "All tests passed."
 else
     echo "FAIL server"
     exit 1
 fi
+
+# Final verification: Check for leftover loopback devices
+echo ""
+echo "Verifying no loopback devices remain after test suite..."
+REMAINING_LOOPS=$(docker run \
+    --rm \
+    --privileged \
+    -v "$(pwd)":/workspace \
+    "$IMAGE_NAME" \
+    bash -c "losetup -a 2>/dev/null || true")
+
+if [ -n "$REMAINING_LOOPS" ]; then
+    echo "ERROR: Loopback devices still attached after all tests completed:"
+    echo "$REMAINING_LOOPS"
+    echo ""
+    echo "This indicates tests did not clean up properly."
+    echo "Each test should ensure all storage is unmounted and loop devices are detached."
+    exit 1
+fi
+
+echo "All loopback devices cleaned up successfully."
+echo ""
+echo "All tests passed."

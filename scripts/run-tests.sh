@@ -43,8 +43,9 @@ run_test() {
 
  
 # Run streamlined module-wide tests
-run_test "pkg tests" "go test -v -failfast ./pkg/..."
-run_test "server tests" "go test -v -failfast ./server/..."
+# Use -p=1 to prevent parallel package execution since tests share system resources (loop devices, mounts)
+run_test "pkg tests" "go test -v -failfast -p=1 ./pkg/..."
+run_test "server tests" "go test -v -failfast -p=1 ./server/..."
 
 # All tests passed if we reach here
 echo

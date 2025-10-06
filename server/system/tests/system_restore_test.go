@@ -48,7 +48,7 @@ func TestSystemRestoreWithoutShutdownTrigger(t *testing.T) {
 	config := TestConfig(testDir)
 	config.ProcessCommand = []string{testScript}
 
-	sys, cleanup, err := TestSystem(config)
+	sys, cleanup, err := TestSystem(t, config)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
@@ -194,7 +194,7 @@ done
 	config := TestConfig(testDir)
 	config.ProcessCommand = []string{testScript}
 
-	sys, cleanup, err := TestSystem(config)
+	sys, cleanup, err := TestSystem(t, config)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
@@ -301,7 +301,7 @@ func TestSystemRestoreMultipleOperations(t *testing.T) {
 
 	config := TestConfig(testDir)
 
-	sys, cleanup, err := TestSystem(config)
+	sys, cleanup, err := TestSystem(t, config)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
@@ -406,7 +406,7 @@ exit 0
 	// Important: Keep system alive even if process exits
 	config.KeepAliveOnError = true
 
-	sys, cleanup, err := TestSystem(config)
+	sys, cleanup, err := TestSystem(t, config)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
@@ -495,7 +495,7 @@ func TestSystemRestoreContainerShutdownDoesNotTriggerSystemShutdown(t *testing.T
 
 	config := TestConfig(testDir)
 
-	sys, cleanup, err := TestSystem(config)
+	sys, cleanup, err := TestSystem(t, config)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("Failed to create system: %v", err)
