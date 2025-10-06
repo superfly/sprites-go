@@ -327,6 +327,9 @@ func AuthenticateWithFly(cfg *config.Manager, orgOverride string, aliasOverride 
 	}
 	fmt.Println(format.Success("✓ Ready to work with Sprites!") + "\n")
 
+	// Print the token that was received
+	fmt.Printf("Sprite token: %s\n", spriteToken)
+
 	// Return the newly added org
 	orgs := cfg.GetOrgs()
 	return orgs[selectedOrg.Slug], nil
