@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/superfly/sprite-env/pkg/leaser"
 )
@@ -31,7 +32,14 @@ type Manager struct {
 	litestream *Litestream
 	mu         sync.Mutex
 	started    bool
-	errCh      chan error // Reports panics from goroutines
+	stopCh     chan struct{} // Signals shutdown request
+	stoppedCh  chan struct{} // Closed when shutdown complete
+	errCh      chan error    // Reports panics from goroutines
+
+	// Verifiers for external resources
+	// These check actual system state, not internal Go values
+	setupVerifiers   []func(context.Context) error // verify resources exist
+	cleanupVerifiers []func(context.Context) error // verify resources cleaned up
 }
 
 // New creates a new database manager
@@ -41,9 +49,11 @@ func New(config Config) (*Manager, error) {
 	}
 
 	m := &Manager{
-		config: config,
-		logger: config.Logger,
-		errCh:  make(chan error, 1), // Buffered to avoid blocking on panic
+		config:    config,
+		logger:    config.Logger,
+		stopCh:    make(chan struct{}),
+		stoppedCh: make(chan struct{}),
+		errCh:     make(chan error, 1), // Buffered to avoid blocking on panic
 	}
 
 	// Create leaser for S3 mode if configured
@@ -83,18 +93,39 @@ func New(config Config) (*Manager, error) {
 }
 
 // Start starts the database manager (leasing and litestream)
+// Returns error if already started (NOT idempotent)
 func (m *Manager) Start(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.started {
-		return nil
+		return fmt.Errorf("db manager already started")
 	}
+
+	// Clear verifiers from any previous run
+	m.setupVerifiers = nil
+	m.cleanupVerifiers = nil
+
+	// Recreate channels if they were closed by a previous Stop()
+	// This enables restart after Stop()
+	select {
+	case <-m.stopCh:
+		m.stopCh = make(chan struct{})
+	default:
+	}
+	select {
+	case <-m.stoppedCh:
+		m.stoppedCh = make(chan struct{})
+	default:
+	}
+
+	// CRITICAL: Acquire lease FIRST, then start litestream
+	// This order must be preserved for data integrity
 
 	// Wait for lease if configured
 	if m.leaser != nil {
-		m.logger.Info("Waiting for database lease...")
-		if err := m.leaser.Wait(ctx); err != nil {
+		m.logger.Info("Acquiring database lease...")
+		if err := m.leaser.Start(ctx); err != nil {
 			return fmt.Errorf("failed to acquire lease: %w", err)
 		}
 		m.logger.Info("Database lease acquired")
@@ -106,7 +137,9 @@ func (m *Manager) Start(ctx context.Context) error {
 		if err := m.litestream.Start(ctx); err != nil {
 			// If litestream fails, stop the lease
 			if m.leaser != nil {
-				m.leaser.Stop()
+				stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				m.leaser.Stop(stopCtx)
 			}
 			return fmt.Errorf("failed to start litestream: %w", err)
 		}
@@ -118,16 +151,32 @@ func (m *Manager) Start(ctx context.Context) error {
 }
 
 // Stop stops the database manager
+// Can be called multiple times safely (idempotent)
 func (m *Manager) Stop(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Signal shutdown
+	select {
+	case <-m.stopCh:
+		// Already stopping
+	default:
+		close(m.stopCh)
+	}
+
 	if !m.started {
+		// Not started, but make sure stoppedCh is closed
+		select {
+		case <-m.stoppedCh:
+		default:
+			close(m.stoppedCh)
+		}
 		return nil
 	}
 
 	var firstErr error
 
+	// CRITICAL: Stop in REVERSE ORDER of startup
 	// Stop litestream first
 	if m.litestream != nil {
 		m.logger.Info("Stopping litestream...")
@@ -140,16 +189,35 @@ func (m *Manager) Stop(ctx context.Context) error {
 	// Then stop the lease
 	if m.leaser != nil {
 		m.logger.Info("Stopping lease...")
-		m.leaser.Stop()
+		if err := m.leaser.Stop(ctx); err != nil {
+			m.logger.Error("Failed to stop lease", "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
 	}
 
+	// Close stoppedCh to signal completion
+	select {
+	case <-m.stoppedCh:
+		// Already closed
+	default:
+		close(m.stoppedCh)
+	}
+
+	// Mark as not started so it can be restarted
 	m.started = false
 	return firstErr
 }
 
-// GetLeaser returns the lease manager (for compatibility)
+// GetLeaser returns the lease manager (for tests to verify leaser resources)
 func (m *Manager) GetLeaser() *leaser.Leaser {
 	return m.leaser
+}
+
+// GetLitestream returns the litestream manager (for tests to verify litestream resources)
+func (m *Manager) GetLitestream() *Litestream {
+	return m.litestream
 }
 
 // AddDatabase adds a database path to be managed by litestream
@@ -208,10 +276,22 @@ func (m *Manager) StartLitestream(ctx context.Context) error {
 
 // Wait blocks until Stop completes or a panic occurs in any goroutine
 func (m *Manager) Wait() error {
-	// If litestream is active, wait on it (it has the only goroutine)
-	if m.litestream != nil {
-		return m.litestream.Wait()
+	select {
+	case <-m.stoppedCh:
+		return nil
+	case err := <-m.errCh:
+		return err
 	}
-	// No goroutines, just block on error channel
-	return <-m.errCh
+}
+
+// SetupVerifiers returns functions that verify resources are set up correctly
+// Each function checks actual system state (files, processes, etc.)
+func (m *Manager) SetupVerifiers() []func(context.Context) error {
+	return m.setupVerifiers
+}
+
+// CleanupVerifiers returns functions that verify resources are cleaned up
+// Each function checks actual system state (files, processes, etc.)
+func (m *Manager) CleanupVerifiers() []func(context.Context) error {
+	return m.cleanupVerifiers
 }

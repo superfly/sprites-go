@@ -136,7 +136,7 @@ func TestLeaser_SuccessfulAcquisition(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := leaser.Wait(ctx)
+	err := leaser.Start(ctx)
 	if err != nil {
 		t.Fatalf("Expected successful lease acquisition, got error: %v", err)
 	}
@@ -145,7 +145,9 @@ func TestLeaser_SuccessfulAcquisition(t *testing.T) {
 		t.Errorf("Expected attempt count 1, got %d", leaser.LeaseAttemptCount())
 	}
 
-	leaser.Stop()
+	if err := leaser.Stop(ctx); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
 }
 
 func TestLeaser_AcquisitionWithExistingETag(t *testing.T) {
@@ -175,12 +177,14 @@ func TestLeaser_AcquisitionWithExistingETag(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err = leaser.Wait(ctx)
+	err = leaser.Start(ctx)
 	if err != nil {
 		t.Fatalf("Expected successful lease acquisition, got error: %v", err)
 	}
 
-	leaser.Stop()
+	if err := leaser.Stop(ctx); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
 }
 
 func TestLeaser_ConflictWithExpiredLease(t *testing.T) {
@@ -203,12 +207,14 @@ func TestLeaser_ConflictWithExpiredLease(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := leaser.Wait(ctx)
+	err := leaser.Start(ctx)
 	if err != nil {
 		t.Fatalf("Expected successful lease acquisition with expired lease, got error: %v", err)
 	}
 
-	leaser.Stop()
+	if err := leaser.Stop(ctx); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
 }
 
 func TestLeaser_ConflictWithSameMachine(t *testing.T) {
@@ -231,12 +237,14 @@ func TestLeaser_ConflictWithSameMachine(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := leaser.Wait(ctx)
+	err := leaser.Start(ctx)
 	if err != nil {
 		t.Fatalf("Expected successful lease acquisition with same machine, got error: %v", err)
 	}
 
-	leaser.Stop()
+	if err := leaser.Stop(ctx); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
 }
 
 func TestLeaser_TakeOverExpiredLeaseFromDifferentMachine(t *testing.T) {
@@ -259,7 +267,7 @@ func TestLeaser_TakeOverExpiredLeaseFromDifferentMachine(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
-	err := leaser.Wait(ctx)
+	err := leaser.Start(ctx)
 	if err != nil {
 		t.Fatalf("Expected successful lease acquisition from expired lease, got error: %v", err)
 	}
@@ -270,7 +278,9 @@ func TestLeaser_TakeOverExpiredLeaseFromDifferentMachine(t *testing.T) {
 		t.Errorf("Expected 2 attempts, got %d", leaser.LeaseAttemptCount())
 	}
 
-	leaser.Stop()
+	if err := leaser.Stop(ctx); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
 }
 
 func TestLeaser_TimeoutWaitingForLease(t *testing.T) {
@@ -293,7 +303,7 @@ func TestLeaser_TimeoutWaitingForLease(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	err := leaser.Wait(ctx)
+	err := leaser.Start(ctx)
 	if err == nil {
 		t.Fatalf("Expected timeout error, but lease acquisition succeeded")
 	}
@@ -302,7 +312,10 @@ func TestLeaser_TimeoutWaitingForLease(t *testing.T) {
 		t.Errorf("Expected context deadline exceeded error, got: %v", err)
 	}
 
-	leaser.Stop()
+	stopCtx := context.Background()
+	if err := leaser.Stop(stopCtx); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
 }
 
 func TestLeaser_S3Errors(t *testing.T) {
@@ -319,7 +332,7 @@ func TestLeaser_S3Errors(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
-	err := leaser.Wait(ctx)
+	err := leaser.Start(ctx)
 	if err == nil {
 		t.Fatalf("Expected error from S3 failure, but got success")
 	}
@@ -328,7 +341,10 @@ func TestLeaser_S3Errors(t *testing.T) {
 		t.Errorf("Expected lease acquisition error, got: %v", err)
 	}
 
-	leaser.Stop()
+	stopCtx := context.Background()
+	if err := leaser.Stop(stopCtx); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
 }
 
 func TestLeaser_StopBeforeAcquisition(t *testing.T) {
@@ -351,15 +367,19 @@ func TestLeaser_StopBeforeAcquisition(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	stopCtx := context.Background()
+
 	// Stop the leaser immediately
 	go func() {
 		time.Sleep(50 * time.Millisecond)
-		leaser.Stop()
+		if err := leaser.Stop(stopCtx); err != nil {
+			t.Logf("Stop error: %v", err)
+		}
 	}()
 
 	// This should eventually fail due to context cancellation
 	// when waiting for the lease
-	err := leaser.Wait(ctx)
+	err := leaser.Start(ctx)
 
 	// We expect either a timeout or successful acquisition depending on timing
 	// The key is that Stop() should work cleanly
@@ -374,7 +394,7 @@ func TestLeaser_ETagFileHandling(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := leaser.Wait(ctx)
+	err := leaser.Start(ctx)
 	if err != nil {
 		t.Fatalf("Expected successful lease acquisition, got error: %v", err)
 	}
@@ -394,7 +414,9 @@ func TestLeaser_ETagFileHandling(t *testing.T) {
 		t.Errorf("Expected etag file to contain data")
 	}
 
-	leaser.Stop()
+	if err := leaser.Stop(ctx); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
 }
 
 func TestLeaser_MultipleStopCalls(t *testing.T) {
@@ -403,15 +425,21 @@ func TestLeaser_MultipleStopCalls(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := leaser.Wait(ctx)
+	err := leaser.Start(ctx)
 	if err != nil {
 		t.Fatalf("Expected successful lease acquisition, got error: %v", err)
 	}
 
 	// Call Stop multiple times - should not panic or cause issues
-	leaser.Stop()
-	leaser.Stop()
-	leaser.Stop()
+	if err := leaser.Stop(ctx); err != nil {
+		t.Fatalf("First Stop failed: %v", err)
+	}
+	if err := leaser.Stop(ctx); err != nil {
+		t.Fatalf("Second Stop failed: %v", err)
+	}
+	if err := leaser.Stop(ctx); err != nil {
+		t.Fatalf("Third Stop failed: %v", err)
+	}
 }
 
 func TestLeaser_RefreshLease(t *testing.T) {
@@ -420,7 +448,7 @@ func TestLeaser_RefreshLease(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := leaser.Wait(ctx)
+	err := leaser.Start(ctx)
 	if err != nil {
 		t.Fatalf("Expected successful lease acquisition, got error: %v", err)
 	}
@@ -446,7 +474,236 @@ func TestLeaser_RefreshLease(t *testing.T) {
 		t.Errorf("Expected lease to be valid, but it's expired")
 	}
 
-	leaser.Stop()
+	if err := leaser.Stop(ctx); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+}
+
+// Phase 1 Tests: Idempotency and Restartability
+
+func TestLeaser_MultipleStartCalls(t *testing.T) {
+	leaser, _, _ := setupTestLeaser(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// First Start should succeed
+	err := leaser.Start(ctx)
+	if err != nil {
+		t.Fatalf("First Start failed: %v", err)
+	}
+
+	// Second Start should error (already started)
+	err = leaser.Start(ctx)
+	if err == nil {
+		t.Fatal("Second Start should have failed with 'already started' error")
+	}
+	if !strings.Contains(err.Error(), "already started") {
+		t.Errorf("Expected 'already started' error, got: %v", err)
+	}
+
+	// Third Start should also error
+	err = leaser.Start(ctx)
+	if err == nil {
+		t.Fatal("Third Start should have failed with 'already started' error")
+	}
+
+	// Should only have attempted once
+	if leaser.LeaseAttemptCount() != 1 {
+		t.Errorf("Expected 1 attempt, got %d", leaser.LeaseAttemptCount())
+	}
+
+	if err := leaser.Stop(ctx); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+}
+
+func TestLeaser_RestartCycle(t *testing.T) {
+	leaser, _, _ := setupTestLeaser(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// First cycle: Start → Stop
+	err := leaser.Start(ctx)
+	if err != nil {
+		t.Fatalf("First Start failed: %v", err)
+	}
+
+	if err := leaser.Stop(ctx); err != nil {
+		t.Fatalf("First Stop failed: %v", err)
+	}
+
+	// Second cycle: Start → Stop (should work after restart)
+	err = leaser.Start(ctx)
+	if err != nil {
+		t.Fatalf("Second Start (after restart) failed: %v", err)
+	}
+
+	if err := leaser.Stop(ctx); err != nil {
+		t.Fatalf("Second Stop failed: %v", err)
+	}
+
+	// Third cycle to be sure
+	err = leaser.Start(ctx)
+	if err != nil {
+		t.Fatalf("Third Start (after restart) failed: %v", err)
+	}
+
+	if err := leaser.Stop(ctx); err != nil {
+		t.Fatalf("Third Stop failed: %v", err)
+	}
+}
+
+func TestLeaser_WaitMethod(t *testing.T) {
+	leaser, _, _ := setupTestLeaser(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Start the leaser
+	err := leaser.Start(ctx)
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// Stop it in a goroutine
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		if err := leaser.Stop(ctx); err != nil {
+			t.Logf("Stop error: %v", err)
+		}
+	}()
+
+	// Wait() should block until Stop() completes
+	err = leaser.Wait()
+	if err != nil {
+		t.Fatalf("Wait returned error: %v", err)
+	}
+}
+
+// Phase 2 Tests: Verification
+
+func TestLeaser_VerifySetup(t *testing.T) {
+	leaser, _, _ := setupTestLeaser(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Should have no verifiers before Start
+	if len(leaser.SetupVerifiers()) != 0 {
+		t.Error("Should have no verifiers before Start()")
+	}
+
+	// Start the leaser
+	if err := leaser.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// Should have setup verifiers and they should pass
+	verifiers := leaser.SetupVerifiers()
+	if len(verifiers) == 0 {
+		t.Fatal("Expected setup verifiers after Start, got none")
+	}
+
+	for i, verify := range verifiers {
+		if err := verify(ctx); err != nil {
+			t.Errorf("Setup verifier %d failed: %v", i, err)
+		}
+	}
+
+	// Cleanup
+	if err := leaser.Stop(ctx); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+}
+
+func TestLeaser_VerifyCleanup(t *testing.T) {
+	leaser, _, _ := setupTestLeaser(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Start and stop
+	if err := leaser.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	if err := leaser.Stop(ctx); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+
+	// Run all cleanup verifiers
+	verifiers := leaser.CleanupVerifiers()
+	for i, verify := range verifiers {
+		if err := verify(ctx); err != nil {
+			t.Errorf("Cleanup verifier %d failed: %v", i, err)
+		}
+	}
+}
+
+func TestLeaser_Verifiers(t *testing.T) {
+	leaser, _, _ := setupTestLeaser(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Before Start, should have no verifiers
+	if len(leaser.SetupVerifiers()) != 0 {
+		t.Errorf("Expected 0 setup verifiers before Start, got %d", len(leaser.SetupVerifiers()))
+	}
+	if len(leaser.CleanupVerifiers()) != 0 {
+		t.Errorf("Expected 0 cleanup verifiers before Start, got %d", len(leaser.CleanupVerifiers()))
+	}
+
+	// Start the leaser
+	if err := leaser.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// After Start, should have verifiers
+	setupVerifiers := leaser.SetupVerifiers()
+	cleanupVerifiers := leaser.CleanupVerifiers()
+	if len(setupVerifiers) == 0 {
+		t.Error("Expected setup verifiers after Start, got none")
+	}
+	if len(cleanupVerifiers) == 0 {
+		t.Error("Expected cleanup verifiers after Start, got none")
+	}
+
+	// Run setup verifiers - should pass
+	for i, verify := range setupVerifiers {
+		if err := verify(ctx); err != nil {
+			t.Errorf("Setup verifier %d failed: %v", i, err)
+		}
+	}
+
+	// Cleanup
+	if err := leaser.Stop(ctx); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+
+	// Run cleanup verifiers - should pass
+	for i, verify := range cleanupVerifiers {
+		if err := verify(ctx); err != nil {
+			t.Errorf("Cleanup verifier %d failed: %v", i, err)
+		}
+	}
+}
+
+func TestLeaser_TestHelpers(t *testing.T) {
+	leaser, _, _ := setupTestLeaser(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Start the leaser
+	if err := leaser.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// Use test helper to cleanup
+	CleanupTestLeaser(t, leaser)
 }
 
 func TestMapFlyRegionToTigris(t *testing.T) {
