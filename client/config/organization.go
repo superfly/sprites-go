@@ -157,6 +157,44 @@ func (m *Manager) RemoveOrg(name string) error {
 	return nil
 }
 
+// FindOrgAtURL finds an organization by name under a specific API URL
+// Returns the organization or an error if not found
+func (m *Manager) FindOrgAtURL(url, orgName string) (*Organization, error) {
+    urlConfig, exists := m.config.URLs[url]
+    if !exists {
+        return nil, fmt.Errorf("URL %s not found in config", url)
+    }
+
+    orgConfig, exists := urlConfig.Orgs[orgName]
+    if !exists {
+        return nil, fmt.Errorf("organization %s not found under URL %s", orgName, url)
+    }
+
+    org := &Organization{
+        Name:        orgConfig.Name,
+        URL:         url,
+        UseKeyring:  orgConfig.UseKeyring,
+        manager:     m,
+        keychainKey: orgConfig.KeychainKey,
+    }
+
+    // Pre-populate token if not using keyring
+    if !orgConfig.UseKeyring && orgConfig.Token != "" {
+        org.Token = orgConfig.Token
+    }
+
+    return org, nil
+}
+
+// SetCurrentSelection sets the current selection precisely to the given URL and org
+func (m *Manager) SetCurrentSelection(url, org string) error {
+    m.config.CurrentSelection = &v1.CurrentSelection{
+        URL: url,
+        Org: org,
+    }
+    return m.Save()
+}
+
 // AddOrgMetadataOnly adds an organization to config without touching any existing token in keyring
 // This is used during org discovery to add orgs that have tokens in keyring but not in config
 func (m *Manager) AddOrgMetadataOnly(name, url string) error {

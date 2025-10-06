@@ -423,7 +423,7 @@ func aggressiveUnmountAll() error {
 			// Only unmount mounts that we deliberately created for the system:
 			// 1. Mounts under /mnt/ (like /mnt/newroot, /mnt/user-data)
 			// 2. Checkpoint subdirectory mounts (like /.sprite/checkpoints/v1, /.sprite/checkpoints/active)
-			//    but NOT the base /.sprite/checkpoints itself (which is a tmpfs with shared propagation)
+			//    but NOT the base /.sprite/checkpoints itself (which is now a tmpfs)
 			isTestMount := false
 			if len(mountPoint) >= 5 && mountPoint[:5] == "/mnt/" {
 				// Mounts under /mnt/ are test mounts
