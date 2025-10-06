@@ -44,8 +44,14 @@ type JuiceFS struct {
 	logger       *slog.Logger
 	mounted      bool         // Track if mount completed successfully
 	mountedMu    sync.RWMutex // Protect mounted flag
+	started      bool         // Track if Start() has been called
 	// Checkpoint database (used by legacy JuiceFS checkpoint APIs in tests)
 	checkpointDB *CheckpointDB
+
+	// Verifiers for external resources
+	// These check actual system state, not internal Go values
+	setupVerifiers   []func(context.Context) error // verify resources exist
+	cleanupVerifiers []func(context.Context) error // verify resources cleaned up
 }
 
 // Config holds the configuration for JuiceFS
@@ -130,7 +136,35 @@ func New(config Config) (*JuiceFS, error) {
 // AddWarmupPaths removed: warmup functionality is no longer supported
 
 // Start initializes and starts JuiceFS with Litestream replication
+// Returns error if already started (NOT idempotent)
 func (j *JuiceFS) Start(ctx context.Context) error {
+	if j.started {
+		return fmt.Errorf("juicefs already started")
+	}
+	j.started = true
+
+	// Clear verifiers from any previous run
+	j.setupVerifiers = nil
+	j.cleanupVerifiers = nil
+
+	// Recreate channels if they were closed by a previous Stop()
+	// This enables restart after Stop()
+	select {
+	case <-j.stopCh:
+		j.stopCh = make(chan struct{})
+	default:
+	}
+	select {
+	case <-j.stoppedCh:
+		j.stoppedCh = make(chan struct{})
+	default:
+	}
+	select {
+	case <-j.mountReady:
+		j.mountReady = make(chan struct{})
+	default:
+	}
+
 	startTime := time.Now()
 	j.logger.Debug("JuiceFS Start beginning", "startTime", startTime.Format(time.RFC3339))
 
@@ -347,6 +381,7 @@ func (j *JuiceFS) Wait() error {
 }
 
 // Stop cleanly shuts down JuiceFS and Litestream
+// Can be called multiple times safely (idempotent)
 // This method will wait as long as necessary for JuiceFS to flush all cached
 // writes to the backend storage. The context should only be cancelled if you
 // need to force an immediate shutdown (which may result in data loss).
@@ -373,6 +408,8 @@ func (j *JuiceFS) Stop(ctx context.Context) error {
 	select {
 	case <-j.stoppedCh:
 		j.logger.Info("JuiceFS shutdown completed", "duration", time.Since(startTime))
+		// Mark as not started so it can be restarted
+		j.started = false
 		return nil
 	case <-ctx.Done():
 		// Only return error if context was cancelled
@@ -380,6 +417,8 @@ func (j *JuiceFS) Stop(ctx context.Context) error {
 		j.logger.Error("JuiceFS shutdown interrupted by context cancellation",
 			"duration", time.Since(startTime),
 			"contextErr", ctx.Err())
+		// Still mark as not started even on interruption
+		j.started = false
 		return fmt.Errorf("JuiceFS shutdown interrupted after %v: %w", time.Since(startTime), ctx.Err())
 	}
 }
@@ -1138,4 +1177,17 @@ func (j *JuiceFS) findAndUnmountDependentMounts(juicefsMountPath string) error {
 	}
 
 	return nil
+}
+
+
+// SetupVerifiers returns functions that verify resources are set up correctly
+// Each function checks actual system state (mounts, processes, etc.)
+func (j *JuiceFS) SetupVerifiers() []func(context.Context) error {
+	return j.setupVerifiers
+}
+
+// CleanupVerifiers returns functions that verify resources are cleaned up
+// Each function checks actual system state (mounts, processes, etc.)
+func (j *JuiceFS) CleanupVerifiers() []func(context.Context) error {
+	return j.cleanupVerifiers
 }

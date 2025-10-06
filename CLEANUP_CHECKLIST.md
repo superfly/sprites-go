@@ -47,19 +47,19 @@
 - [x] Add tests verifying: multiple Start(), multiple Stop(), restart cycle
 - [x] Add tests verifying no behavior change (all 11 tests passing)
 
-### pkg/juicefs
-- [ ] Verify New() does NO setup work (should be correct already)
-- [ ] Verify Start() follows strict order: dirs, format, mount, wait, post-setup
-- [ ] Verify stopCh, stoppedCh, errCh present (already are)
-- [ ] Make Start() idempotent - check if already mounted
-- [ ] Make Stop() idempotent - check if already stopped
-- [ ] Make Stop() reset state for restartability
-- [ ] Verify Wait() can be called multiple times (should be correct)
-- [ ] Add GetResources() stub → return []ExternalResource{}
-- [ ] Add VerifySetup() stub → return nil
-- [ ] Add VerifyCleanup() stub → return nil
-- [ ] Add tests verifying: multiple Start(), multiple Stop(), restart cycle
-- [ ] Add tests verifying no behavior change
+### pkg/juicefs ✅ PHASE 1 COMPLETE
+- [x] Verify New() does NO setup work (confirmed correct)
+- [x] Verify Start() follows strict order: dirs, format, mount, wait, post-setup (confirmed correct)
+- [x] Verify stopCh, stoppedCh, errCh present (already are)
+- [x] Add started bool flag
+- [x] Make Start() ERROR if already started (not idempotent - returns error)
+- [x] Make Stop() idempotent (confirmed correct)
+- [x] Make Stop() reset started flag for restartability
+- [x] Recreate channels in Start() for restartability
+- [x] Verify Wait() can be called multiple times (confirmed correct)
+- [x] Add setupVerifiers and cleanupVerifiers slices
+- [x] Add SetupVerifiers() and CleanupVerifiers() getter methods
+- [x] Add lifecycle_test.go with Phase 1 tests (4 tests passing)
 
 ### pkg/overlay
 - [ ] Verify New() does NO setup work (should be correct already)
