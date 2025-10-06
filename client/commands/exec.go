@@ -114,11 +114,12 @@ func ExecCommand(ctx *GlobalContext, args []string) int {
 		}
 	}
 
-	// Build command string for display
-	cmdStr := strings.Join(remainingArgs, " ")
-	if len(cmdStr) > 50 {
-		cmdStr = cmdStr[:47] + "..."
-	}
+    // Build command string for display and title
+    fullCmdStr := strings.Join(remainingArgs, " ")
+    cmdStr := fullCmdStr
+    if len(cmdStr) > 50 {
+        cmdStr = cmdStr[:47] + "..."
+    }
 
 	// Print connection info if not in TTY mode (in TTY mode, output should be clean)
 	if !*tty {
@@ -151,7 +152,7 @@ func ExecCommand(ctx *GlobalContext, args []string) int {
 	}
 
 	// Configure TTY mode
-	if *tty {
+    if *tty {
 		spriteCmd.SetTTY(true)
 
 		// Get terminal size if available
@@ -164,12 +165,18 @@ func ExecCommand(ctx *GlobalContext, args []string) int {
 
 		// Set up stdin/stdout/stderr for TTY mode
 		spriteCmd.Stdin = os.Stdin
-		browserHandler := makeBrowserOSCHandler()
-		oscMonitor := terminal.NewOSCMonitor(browserHandler)
-		spriteCmd.Stdout = io.MultiWriter(os.Stdout, oscMonitor)
+        browserHandler := makeBrowserOSCHandler()
+        oscMonitor := terminal.NewOSCMonitor(browserHandler)
+        // Filter remote OSC title updates so our local title stays consistent
+        titleWriter := newOSCTitleFilterWriter(os.Stdout, buildTitle(sprite.Name(), "", ""))
+        spriteCmd.Stdout = io.MultiWriter(titleWriter, oscMonitor)
 		spriteCmd.Stderr = os.Stderr
 
-		// Handle terminal resize events
+        // Set terminal/tab title for TTY sessions
+        // No session ID yet; if detachable, the server will create one and attach path will set it
+        setTerminalTitle(buildTitle(sprite.Name(), "", fullCmdStr))
+
+        // Handle terminal resize events
 		go handleSpriteTerminalResize(spriteCmd)
 	} else {
 		// Non-TTY mode - standard I/O
@@ -434,7 +441,21 @@ func attachToSession(ctx *GlobalContext, sprite *sprites.Sprite, sessionID strin
 		format.Command(sessionID),
 		format.Sprite(sprite.Name()))
 
-	// Create attach command using sprite instance
+    // Best-effort: lookup command for this session for the tab title
+    var cmdForTitle string
+    {
+        sessionsCtx := context.Background()
+        if sessions, err := sprite.Client().ListSessions(sessionsCtx, sprite.Name()); err == nil {
+            for _, s := range sessions {
+                if s.ID == sessionID {
+                    cmdForTitle = s.Command
+                    break
+                }
+            }
+        }
+    }
+
+    // Create attach command using sprite instance
 	execCtx := context.Background()
 	attachCmd := sprite.AttachSessionContext(execCtx, sessionID)
 
@@ -450,11 +471,16 @@ func attachToSession(ctx *GlobalContext, sprite *sprites.Sprite, sessionID strin
 		attachCmd.Env = envList
 	}
 
-	attachCmd.Stdin = os.Stdin
-	browserHandler := makeBrowserOSCHandler()
-	oscMonitor := terminal.NewOSCMonitor(browserHandler)
-	attachCmd.Stdout = io.MultiWriter(os.Stdout, oscMonitor)
+    attachCmd.Stdin = os.Stdin
+    browserHandler := makeBrowserOSCHandler()
+    oscMonitor := terminal.NewOSCMonitor(browserHandler)
+    // Filter remote OSC title updates so our local title stays consistent
+    titleWriter := newOSCTitleFilterWriter(os.Stdout, buildTitle(sprite.Name(), sessionID, cmdForTitle))
+    attachCmd.Stdout = io.MultiWriter(titleWriter, oscMonitor)
 	attachCmd.Stderr = os.Stderr
+    // Update terminal/tab title with sprite name, session id, and command (if known)
+    setTerminalTitle(buildTitle(sprite.Name(), sessionID, cmdForTitle))
+
 
 	// Handle port notifications and auto-proxy. Ensure cleanup on exit.
 	cleanupProxies := setPortNotificationHandler(attachCmd, sprite)
