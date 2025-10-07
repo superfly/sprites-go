@@ -75,24 +75,27 @@ func TestCheckpointDB(t *testing.T) {
 		t.Error("Rename function was not executed")
 	}
 
-	// Verify the new checkpoint
-	if newCheckpoint.ID != 3 {
-		t.Errorf("Expected new checkpoint ID to be 3, got %d", newCheckpoint.ID)
+	// Verify the new checkpoint - it should be the record that was updated to become the checkpoint
+	if newCheckpoint.ID != 2 {
+		t.Errorf("Expected new checkpoint ID to be 2, got %d", newCheckpoint.ID)
 	}
-	if newCheckpoint.Path != "active/" {
-		t.Errorf("Expected new checkpoint path to be 'active/', got %s", newCheckpoint.Path)
+	if newCheckpoint.Path != "checkpoints/v1" {
+		t.Errorf("Expected new checkpoint path to be 'checkpoints/v1', got %s", newCheckpoint.Path)
 	}
-	if !newCheckpoint.ParentID.Valid || newCheckpoint.ParentID.Int64 != 2 {
-		t.Errorf("Expected new checkpoint parent ID to be 2, got %v", newCheckpoint.ParentID)
+	if !newCheckpoint.ParentID.Valid || newCheckpoint.ParentID.Int64 != 1 {
+		t.Errorf("Expected new checkpoint parent ID to be 1, got %v", newCheckpoint.ParentID)
 	}
 
-	// Test 3: Verify the previous checkpoint was updated
-	prevCheckpoint, err := db.GetCheckpointByID(2)
+	// Test 3: Verify the new active record was created
+	activeRecord, err := db.GetCheckpointByID(3)
 	if err != nil {
-		t.Fatalf("Failed to get checkpoint by ID: %v", err)
+		t.Fatalf("Failed to get active record by ID: %v", err)
 	}
-	if prevCheckpoint.Path != "checkpoints/v1" {
-		t.Errorf("Expected previous checkpoint path to be updated to 'checkpoints/v1', got %s", prevCheckpoint.Path)
+	if activeRecord.Path != "active/" {
+		t.Errorf("Expected new active record path to be 'active/', got %s", activeRecord.Path)
+	}
+	if !activeRecord.ParentID.Valid || activeRecord.ParentID.Int64 != 2 {
+		t.Errorf("Expected new active record parent ID to be 2, got %v", activeRecord.ParentID)
 	}
 
 	// Test 4: Find checkpoint by path
@@ -122,10 +125,11 @@ func TestCheckpointDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create second checkpoint: %v", err)
 	}
-	if newCheckpoint2.ID != 4 {
-		t.Errorf("Expected second new checkpoint ID to be 4, got %d", newCheckpoint2.ID)
+	// The second checkpoint should be the record that was updated (ID=3)
+	if newCheckpoint2.ID != 3 {
+		t.Errorf("Expected second new checkpoint ID to be 3, got %d", newCheckpoint2.ID)
 	}
-	if !newCheckpoint2.ParentID.Valid || newCheckpoint2.ParentID.Int64 != 3 {
-		t.Errorf("Expected second new checkpoint parent ID to be 3, got %v", newCheckpoint2.ParentID)
+	if !newCheckpoint2.ParentID.Valid || newCheckpoint2.ParentID.Int64 != 2 {
+		t.Errorf("Expected second new checkpoint parent ID to be 2, got %v", newCheckpoint2.ParentID)
 	}
 }

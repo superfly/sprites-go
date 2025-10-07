@@ -121,11 +121,7 @@ func (s *checkpointDB) createCheckpoint(cloneFn func(src, dst string) error, ren
 		}
 		rec, tempPath, err := s.createCheckpointAttempt(cloneFn)
 		if err == nil && rec != nil {
-			prev, err := s.getCheckpointByID(rec.ID - 1)
-			if err != nil {
-				return nil, fmt.Errorf("get prev: %w", err)
-			}
-			if err := renameFn(tempPath, prev.Path); err != nil {
+			if err := renameFn(tempPath, rec.Path); err != nil {
 				return nil, fmt.Errorf("finalize rename: %w", err)
 			}
 			return rec, nil
@@ -166,18 +162,15 @@ func (s *checkpointDB) createCheckpointAttempt(cloneFn func(src, dst string) err
 	if _, err := tx.Exec("UPDATE sprite_checkpoints SET path = ? WHERE id = ?", cpPath, currentID); err != nil {
 		return nil, tempPath, fmt.Errorf("update path: %w", err)
 	}
-	res, err := tx.Exec("INSERT INTO sprite_checkpoints (path, parent_id) VALUES (?, ?)", "active/", currentID)
+	_, err = tx.Exec("INSERT INTO sprite_checkpoints (path, parent_id) VALUES (?, ?)", "active/", currentID)
 	if err != nil {
 		return nil, tempPath, fmt.Errorf("insert: %w", err)
-	}
-	newID, err := res.LastInsertId()
-	if err != nil {
-		return nil, tempPath, fmt.Errorf("lastInsertId: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, tempPath, fmt.Errorf("commit: %w", err)
 	}
-	rec, err := s.getCheckpointByID(newID)
+	// Return the checkpoint record (currentID), not the new active record (newID)
+	rec, err := s.getCheckpointByID(currentID)
 	return rec, tempPath, err
 }
 

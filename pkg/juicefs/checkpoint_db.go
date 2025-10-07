@@ -191,16 +191,9 @@ func (c *CheckpointDB) CreateCheckpoint(cloneFn func(src, dst string) error, ren
 		record, tempPath, err := c.createCheckpointAttempt(cloneFn)
 		if err == nil && record != nil {
 			// Transaction succeeded, now rename the temporary directory to final location
-			// The final path is the path of the PREVIOUS record (which now contains the checkpoint)
-			// We need to get the checkpoint path that was stored in the database
-			prevRecord, err := c.GetCheckpointByID(record.ID - 1)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get previous checkpoint record: %w", err)
-			}
-			finalPath := prevRecord.Path
-
-			if err := renameFn(tempPath, finalPath); err != nil {
-				return nil, fmt.Errorf("failed to rename checkpoint directory from %s to %s: %w", tempPath, finalPath, err)
+			// The final path is the path of the record we just updated (which now contains the checkpoint)
+			if err := renameFn(tempPath, record.Path); err != nil {
+				return nil, fmt.Errorf("failed to rename checkpoint directory from %s to %s: %w", tempPath, record.Path, err)
 			}
 			return record, nil
 		}
@@ -266,14 +259,9 @@ func (c *CheckpointDB) createCheckpointAttempt(cloneFn func(src, dst string) err
 	}
 
 	// Insert new checkpoint record pointing to active/ with parent_id of the previous checkpoint
-	result, err := tx.Exec("INSERT INTO sprite_checkpoints (path, parent_id) VALUES (?, ?)", "active/", currentID)
+	_, err = tx.Exec("INSERT INTO sprite_checkpoints (path, parent_id) VALUES (?, ?)", "active/", currentID)
 	if err != nil {
 		return nil, tempPath, fmt.Errorf("failed to insert new checkpoint: %w", err)
-	}
-
-	newID, err := result.LastInsertId()
-	if err != nil {
-		return nil, tempPath, fmt.Errorf("failed to get new checkpoint ID: %w", err)
 	}
 
 	// Commit the transaction
@@ -281,9 +269,8 @@ func (c *CheckpointDB) createCheckpointAttempt(cloneFn func(src, dst string) err
 		return nil, tempPath, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	// Return the new checkpoint record and the paths for the rename operation
-	record, err := c.GetCheckpointByID(newID)
-	// Return both the temp path and final path so the caller can rename
+	// Return the checkpoint record (currentID), not the new active record (newID)
+	record, err := c.GetCheckpointByID(currentID)
 	return record, tempPath, err
 }
 

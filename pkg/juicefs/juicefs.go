@@ -343,6 +343,10 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	j.mounted = true
 	j.mountedMu.Unlock()
 
+	// Add verifiers for external resources now that setup is complete
+	// These check ONLY system state, not internal Go values
+	j.addResourceVerifiers(mountPath)
+
 	j.logger.Debug("JuiceFS mount ready", "duration", time.Since(waitStart).Seconds())
 	j.logger.Debug("Total JuiceFS Start completed", "duration", time.Since(startTime).Seconds())
 	return nil
@@ -507,6 +511,24 @@ func (j *JuiceFS) monitorProcess() {
 
 		if lastErr != nil {
 			j.logger.Error("juicefs umount failed after all retries", "error", lastErr, "attempts", maxRetries, "duration", time.Since(shutdownStart))
+		}
+
+		// Wait for the mount process to fully exit
+		// The umount command tells JuiceFS to unmount, but the process may take
+		// a moment to clean up and exit
+		j.logger.Info("Waiting for JuiceFS mount process to exit...")
+		processExitStart := time.Now()
+		select {
+		case err := <-processDone:
+			if err != nil {
+				j.logger.Warn("JuiceFS mount process exited with error", "error", err, "duration", time.Since(processExitStart))
+			} else {
+				j.logger.Info("JuiceFS mount process exited cleanly", "duration", time.Since(processExitStart))
+			}
+		case <-time.After(10 * time.Second):
+			// If process doesn't exit within 10 seconds after successful umount, log but continue
+			// This shouldn't happen in normal operation
+			j.logger.Warn("JuiceFS mount process did not exit within 10 seconds after umount", "duration", time.Since(processExitStart))
 		}
 
 		// Litestream replication is now managed by the DB manager; nothing to stop here
@@ -1179,6 +1201,65 @@ func (j *JuiceFS) findAndUnmountDependentMounts(juicefsMountPath string) error {
 	return nil
 }
 
+// addResourceVerifiers populates the setup and cleanup verifiers
+// Called at the end of Start() after all resources are acquired
+func (j *JuiceFS) addResourceVerifiers(mountPath string) {
+	// Setup verifier: Check mount exists in /proc/mounts
+	j.setupVerifiers = append(j.setupVerifiers, func(ctx context.Context) error {
+		mountsData, err := os.ReadFile("/proc/mounts")
+		if err != nil {
+			return fmt.Errorf("failed to read /proc/mounts: %w", err)
+		}
+
+		if !strings.Contains(string(mountsData), mountPath) {
+			return fmt.Errorf("JuiceFS mount not found in /proc/mounts: %s", mountPath)
+		}
+		return nil
+	})
+
+	// Setup verifier: Check JuiceFS process is running
+	j.setupVerifiers = append(j.setupVerifiers, func(ctx context.Context) error {
+		if j.mountCmd == nil || j.mountCmd.Process == nil {
+			return fmt.Errorf("JuiceFS mount process not found")
+		}
+
+		// Check if process is still running
+		pid := j.mountCmd.Process.Pid
+		if err := syscall.Kill(pid, 0); err != nil {
+			return fmt.Errorf("JuiceFS mount process (PID %d) is not running: %w", pid, err)
+		}
+		return nil
+	})
+
+	// Cleanup verifier: Check mount is gone from /proc/mounts
+	j.cleanupVerifiers = append(j.cleanupVerifiers, func(ctx context.Context) error {
+		mountsData, err := os.ReadFile("/proc/mounts")
+		if err != nil {
+			// If we can't read /proc/mounts, we can't verify
+			return nil
+		}
+
+		if strings.Contains(string(mountsData), mountPath) {
+			return fmt.Errorf("JuiceFS mount still present in /proc/mounts: %s (hint: check 'mount | grep %s')", mountPath, mountPath)
+		}
+		return nil
+	})
+
+	// Cleanup verifier: Check process has exited
+	j.cleanupVerifiers = append(j.cleanupVerifiers, func(ctx context.Context) error {
+		if j.mountCmd == nil || j.mountCmd.Process == nil {
+			// No process was started, nothing to verify
+			return nil
+		}
+
+		// Check if process is still running
+		pid := j.mountCmd.Process.Pid
+		if err := syscall.Kill(pid, 0); err == nil {
+			return fmt.Errorf("JuiceFS mount process (PID %d) is still running (hint: check 'ps -p %d')", pid, pid)
+		}
+		return nil
+	})
+}
 
 // SetupVerifiers returns functions that verify resources are set up correctly
 // Each function checks actual system state (mounts, processes, etc.)

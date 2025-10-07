@@ -3,7 +3,6 @@ package juicefs
 import (
 	"context"
 	"testing"
-	"time"
 )
 
 // Phase 1 Tests: Lifecycle behavior
@@ -40,9 +39,6 @@ func TestStartErrorsIfAlreadyStarted(t *testing.T) {
 }
 
 func TestStopIsIdempotent(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
 	cfg := Config{
 		BaseDir:    t.TempDir(),
 		LocalMode:  true,
@@ -54,17 +50,12 @@ func TestStopIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Start in background (will fail without juicefs binary, but that's OK)
-	startDone := make(chan struct{})
-	go func() {
-		jfs.Start(ctx)
-		close(startDone)
-	}()
+	ctx := context.Background()
 
-	// Wait a moment for Start() to actually begin
-	time.Sleep(50 * time.Millisecond)
+	// Start in background
+	go jfs.Start(ctx)
 
-	// Multiple Stops should all succeed (idempotent)
+	// Multiple Stops should all succeed
 	if err := jfs.Stop(ctx); err != nil {
 		t.Fatalf("first Stop failed: %v", err)
 	}
@@ -75,14 +66,6 @@ func TestStopIsIdempotent(t *testing.T) {
 
 	if err := jfs.Stop(ctx); err != nil {
 		t.Fatalf("third Stop failed: %v", err)
-	}
-
-	// Wait for Start goroutine to finish
-	select {
-	case <-startDone:
-		// Good
-	case <-time.After(1 * time.Second):
-		t.Log("Start() goroutine did not finish within 1 second")
 	}
 }
 

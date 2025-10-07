@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // MountCheckpoints mounts the last 5 checkpoints readonly at /.sprite/checkpoints/
@@ -49,15 +51,56 @@ func (m *Manager) MountCheckpoints(ctx context.Context) error {
 
 	m.logger.Info("Mounting checkpoints", "count", len(checkpoints), "path", m.checkpointMountPath)
 
-	// Mount each checkpoint
+	// Release the lock for parallel mounting operations
+	m.checkpointMu.Unlock()
+
+	// Mount results to collect from parallel operations
+	type mountResult struct {
+		cpName     string
+		mountPath  string
+		loopDevice string
+		err        error
+	}
+
+	// Use background context for mounting - these operations should complete
+	// even if the caller's context is canceled
+	g, gctx := errgroup.WithContext(context.Background())
+	results := make(chan mountResult, len(checkpoints))
+
 	for _, cpName := range checkpoints {
-		if err := m.mountSingleCheckpoint(ctx, cpName); err != nil {
-			m.logger.Warn("Failed to mount checkpoint", "checkpoint", cpName, "error", err)
-			// Continue with other checkpoints
+		cpName := cpName // Capture for goroutine
+		g.Go(func() error {
+			loopDevice, mountPath, err := m.doMountSingleCheckpoint(gctx, cpName)
+			results <- mountResult{
+				cpName:     cpName,
+				mountPath:  mountPath,
+				loopDevice: loopDevice,
+				err:        err,
+			}
+			return err
+		})
+	}
+
+	// Wait for all parallel mounts to complete
+	mountErr := g.Wait()
+	close(results)
+
+	// Reacquire the lock to update maps
+	m.checkpointMu.Lock()
+
+	// Process all results and update maps
+	for res := range results {
+		if res.err != nil {
+			m.logger.Warn("Failed to mount checkpoint", "checkpoint", res.cpName, "error", res.err)
+		} else {
+			m.checkpointMounts[res.cpName] = res.mountPath
+			if res.loopDevice != "" {
+				m.checkpointLoopDevices[res.cpName] = res.loopDevice
+			}
 		}
 	}
 
-	return nil
+	return mountErr
 }
 
 // listCheckpoints returns a list of checkpoint directory names, sorted newest first
@@ -117,33 +160,28 @@ func (m *Manager) listCheckpoints() ([]string, error) {
 	return result, nil
 }
 
-// mountSingleCheckpoint mounts a single checkpoint readonly
-func (m *Manager) mountSingleCheckpoint(ctx context.Context, cpName string) error {
+// doMountSingleCheckpoint mounts a single checkpoint readonly and returns mount info
+// Returns (loopDevice, mountPath, error). Maps are not updated - caller should update them.
+func (m *Manager) doMountSingleCheckpoint(ctx context.Context, cpName string) (string, string, error) {
 	cpDir := filepath.Join(m.checkpointBasePath, cpName)
 	imgPath := filepath.Join(cpDir, "root-upper.img")
 	mountPath := filepath.Join(m.checkpointMountPath, cpName)
-
-	// Check if already mounted
-	if m.isCheckpointMounted(cpName) {
-		m.logger.Debug("Checkpoint already mounted", "checkpoint", cpName)
-		return nil
-	}
 
 	// Check if image file exists
 	if _, err := os.Stat(imgPath); err != nil {
 		if os.IsNotExist(err) {
 			// No image file - skip mounting this checkpoint
 			m.logger.Info("Checkpoint has no disk image, skipping mount", "checkpoint", cpName)
-			return nil
+			return "", "", nil // Not an error, just skip
 		}
 		// Other error (I/O, permission, etc.) - skip this checkpoint
 		m.logger.Warn("Cannot access checkpoint disk image, skipping mount", "checkpoint", cpName, "error", err)
-		return nil
+		return "", "", nil // Not fatal, just skip
 	}
 
 	// Ensure mount point exists
 	if err := os.MkdirAll(mountPath, 0755); err != nil {
-		return fmt.Errorf("failed to create mount point: %w", err)
+		return "", "", fmt.Errorf("failed to create mount point: %w", err)
 	}
 
 	// Mount the image file
@@ -153,25 +191,22 @@ func (m *Manager) mountSingleCheckpoint(ctx context.Context, cpName string) erro
 	losetupCmd := exec.CommandContext(ctx, "losetup", "-f", "--show", "-r", imgPath)
 	output, err := losetupCmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("losetup failed: %w, output: %s", err, string(output))
+		return "", "", fmt.Errorf("losetup failed: %w, output: %s", err, string(output))
 	}
 
 	loopDevice := strings.TrimSpace(string(output))
-	m.checkpointLoopDevices[cpName] = loopDevice
 
 	// Mount readonly
 	mountCmd := exec.CommandContext(ctx, "mount", "-o", "ro", loopDevice, mountPath)
 	if output, err := mountCmd.CombinedOutput(); err != nil {
 		// Cleanup loop device
 		exec.Command("losetup", "-d", loopDevice).Run()
-		delete(m.checkpointLoopDevices, cpName)
-		return fmt.Errorf("mount failed: %w, output: %s", err, string(output))
+		return "", "", fmt.Errorf("mount failed: %w, output: %s", err, string(output))
 	}
 
-	m.checkpointMounts[cpName] = mountPath
 	m.logger.Info("Checkpoint mounted successfully", "checkpoint", cpName, "path", mountPath)
 
-	return nil
+	return loopDevice, mountPath, nil
 }
 
 // isCheckpointMounted checks if a checkpoint is currently mounted
@@ -282,9 +317,16 @@ func (m *Manager) OnCheckpointCreated(ctx context.Context) error {
 	// Mount any new checkpoints that aren't already mounted
 	for _, cpName := range keep {
 		if !m.isCheckpointMounted(cpName) {
-			if err := m.mountSingleCheckpoint(ctx, cpName); err != nil {
+			loopDevice, mountPath, err := m.doMountSingleCheckpoint(ctx, cpName)
+			if err != nil {
 				m.logger.Warn("Failed to mount new checkpoint", "checkpoint", cpName, "error", err)
 				// Continue with other checkpoints
+			} else if mountPath != "" {
+				// Update maps with successful mount
+				m.checkpointMounts[cpName] = mountPath
+				if loopDevice != "" {
+					m.checkpointLoopDevices[cpName] = loopDevice
+				}
 			}
 		}
 	}

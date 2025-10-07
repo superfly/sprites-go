@@ -11,6 +11,9 @@ import (
 // TestSystemShutdownBehavior verifies that the shutdown sequence works correctly
 // This is a simpler test that focuses on the shutdown behavior without complex startup scenarios
 func TestSystemShutdownBehavior(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+	
 	requireDockerTest(t)
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -66,6 +69,9 @@ func TestSystemShutdownBehavior(t *testing.T) {
 
 // TestSystemShutdownOnProcessExit verifies that shutdown sequence runs when process exits unexpectedly
 func TestSystemShutdownOnProcessExit(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+	
 	requireDockerTest(t)
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -133,6 +139,9 @@ exit 42
 
 // TestSystemKeepAliveOnError verifies that KeepAliveOnError prevents shutdown on process exit
 func TestSystemKeepAliveOnError(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+	
 	requireDockerTest(t)
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")

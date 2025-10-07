@@ -11,6 +11,9 @@ import (
 // TestShutdownAfterBootFailure verifies that Shutdown() can be called safely after Start() fails
 // This simulates what main.go should do when Boot() fails
 func TestShutdownAfterBootFailure(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
 	requireDockerTest(t)
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -71,6 +74,9 @@ func TestShutdownAfterBootFailure(t *testing.T) {
 // TestShutdownWithStorageErrors verifies shutdown handles storage unmount failures gracefully
 // We boot successfully, then shutdown and verify it completes even if storage has issues
 func TestShutdownWithStorageErrors(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
 	requireDockerTest(t)
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -121,6 +127,9 @@ func TestShutdownWithStorageErrors(t *testing.T) {
 
 // TestShutdownDuringProcessStart verifies shutdown works if triggered while process is starting
 func TestShutdownDuringProcessStart(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
 	requireDockerTest(t)
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -182,6 +191,9 @@ done
 
 // TestMultipleRapidShutdowns verifies concurrent Shutdown() calls don't cause issues
 func TestMultipleRapidShutdowns(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
 	requireDockerTest(t)
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -237,6 +249,9 @@ func TestMultipleRapidShutdowns(t *testing.T) {
 // TestBootFailureCleanup verifies that when Boot() fails, all partially-initialized
 // subsystems are cleaned up properly and we don't leak resources
 func TestBootFailureCleanup(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
 	requireDockerTest(t)
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -292,5 +307,12 @@ func TestBootFailureCleanup(t *testing.T) {
 	StartSystemWithTimeout(t, sys2, 30*time.Second)
 	VerifySystemRunning(t, sys2)
 
-	t.Log("Second system started successfully - no resource leaks")
+	// Shut down the second system properly before test ends
+	shutdownCtx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel2()
+	if err := sys2.Shutdown(shutdownCtx2); err != nil {
+		t.Fatalf("Failed to shutdown second system: %v", err)
+	}
+
+	t.Log("Second system started and shut down successfully - no resource leaks")
 }

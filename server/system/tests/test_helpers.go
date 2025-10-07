@@ -26,6 +26,44 @@ func requireDockerTest(t *testing.T) {
 	}
 }
 
+// SetTestDeadline sets a hard 30-second deadline for the test to prevent hangs
+// This should be called at the start of every integration test
+func SetTestDeadline(t *testing.T) (context.Context, context.CancelFunc) {
+	t.Helper()
+
+	// Default to 30 seconds as requested
+	deadline := time.Now().Add(30 * time.Second)
+
+	// If test already has a deadline set via -timeout flag, use that instead
+	if d, ok := t.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+
+	// Start a goroutine to fail the test if deadline is reached
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			if ctx.Err() == context.DeadlineExceeded {
+				t.Error("TEST DEADLINE EXCEEDED - test took longer than 30 seconds, likely hanging")
+			}
+		case <-done:
+			// Test completed normally
+		}
+	}()
+
+	// Return a cancel that closes done channel
+	originalCancel := cancel
+	newCancel := func() {
+		close(done)
+		originalCancel()
+	}
+
+	return ctx, newCancel
+}
+
 // VerifyNoLeftoverMounts checks that no test-related storage mounts remain after test cleanup
 // This is automatically called by TestSystem's cleanup function.
 // Tests should NOT call this directly - it's handled automatically.
@@ -129,35 +167,24 @@ func TestSystem(t *testing.T, config *system.Config) (*system.System, func(), er
 		return nil, func() {}, err
 	}
 
+	// Add test name to logger context for easier debugging
+	// This makes all logs from this system include the test name
+	sys.WithLogger(sys.Logger().With("test", t.Name()))
+
 	cleanup := func() {
-		cleanupStart := time.Now()
+		// Always try to stop the system, even if test already called Shutdown
+		// Stop() is safe to call multiple times (returns nil if already stopped)
+		// If it returns an error, that's a real problem that should fail the test
+		if err := sys.Stop(); err != nil {
+			t.Fatalf("Cleanup: Stop() failed: %v", err)
+		}
 
-		// Give ourselves a massive timeout for aggressive cleanup
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-
-		// CRITICAL: Hard timeout to prevent cleanup from hanging the entire test suite
-		// If cleanup takes more than 60 seconds, forcefully kill the entire test process
-		cleanupDone := make(chan struct{})
-		go func() {
-			select {
-			case <-cleanupDone:
-				// Cleanup completed successfully
-				return
-			case <-time.After(60 * time.Second):
-				fmt.Printf("\n")
-				fmt.Printf("FATAL: Cleanup exceeded 60 second timeout - forcefully terminating test process\n")
-				fmt.Printf("FATAL: This prevents the test runner from hanging indefinitely\n")
-				fmt.Printf("FATAL: Check for wedged filesystems or stuck unmount operations\n")
-				fmt.Printf("\n")
-				os.Exit(99) // Exit with distinctive code to indicate timeout kill
-			}
-		}()
-		defer close(cleanupDone)
-
-		// PHASE 0: Verify no leftover mounts after cleanup completes
-		// This runs last (LIFO defer order)
+		// Run cleanup verifiers to detect resource leaks
+		// Verifiers will fail the test if resources are not cleaned up properly
 		defer func() {
+			// Verify all components cleaned up properly
+			VerifyComponentCleanup(t, sys)
+
 			// Use package-specific helpers for detailed verification
 			if sys.OverlayManager != nil {
 				overlay.VerifyNoTestOverlays(t, sys.OverlayManager)
@@ -168,201 +195,6 @@ func TestSystem(t *testing.T, config *system.Config) (*system.System, func(), er
 			// Also run general verification for any other mounts
 			VerifyNoLeftoverMounts(t)
 		}()
-
-		// PHASE 0.5: Try graceful shutdown first if system was started
-		// Only do this if the system appears to be running
-		if sys.IsProcessRunning() || sys.APIServer != nil {
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 6*time.Minute)
-			shutdownErr := sys.Shutdown(shutdownCtx)
-			shutdownCancel()
-			if shutdownErr != nil {
-				fmt.Printf("WARNING: Graceful shutdown failed, will proceed with aggressive cleanup: %v\n", shutdownErr)
-			}
-		}
-
-		// PHASE 1: AGGRESSIVELY KILL THE PROCESS
-		// Kill the process and verify it's actually dead
-		if sys.IsProcessRunning() {
-			pid := sys.ProcessPID()
-			if pid > 0 {
-				phaseStart := time.Now()
-				fmt.Printf("WARNING: Process still running (PID %d), aggressively killing\n", pid)
-
-				// Send SIGKILL to entire process group
-				_ = syscall.Kill(-pid, syscall.SIGKILL)
-
-				// Wait up to 10 seconds for process to die, checking repeatedly
-				deadline := time.Now().Add(10 * time.Second)
-				retries := 0
-				for time.Now().Before(deadline) {
-					if !sys.IsProcessRunning() {
-						break
-					}
-					time.Sleep(100 * time.Millisecond)
-					retries++
-					// Try killing again in case it didn't work the first time
-					_ = syscall.Kill(-pid, syscall.SIGKILL)
-				}
-
-				if retries > 0 {
-					fmt.Printf("WARNING: Had to retry SIGKILL %d times for PID %d\n", retries, pid)
-				}
-
-				// Final verification
-				if sys.IsProcessRunning() {
-					fmt.Printf("ERROR: Process STILL running after multiple SIGKILL attempts, trying direct PID kill\n")
-					// Last ditch effort: kill by PID directly (not just process group)
-					_ = syscall.Kill(pid, syscall.SIGKILL)
-					time.Sleep(500 * time.Millisecond)
-
-					if sys.IsProcessRunning() {
-						fmt.Printf("CRITICAL: Process STILL running after all kill attempts\n")
-					}
-				}
-
-				elapsed := time.Since(phaseStart)
-				if elapsed > time.Second {
-					fmt.Printf("WARNING: Process kill took %v\n", elapsed)
-				}
-			}
-		}
-
-		// Stop services manager
-		if sys.ServicesManager != nil {
-			_ = sys.ServicesManager.StopForUnmount()
-		}
-
-		// PHASE 2: AGGRESSIVELY UNMOUNT OVERLAYFS AND ALL MOUNTS
-		// We must unmount everything BEFORE detaching loop devices
-		//phaseStart := time.Now()
-
-		// Try normal overlay unmount first
-		if sys.OverlayManager != nil {
-			_ = sys.OverlayManager.Unmount(ctx)
-		}
-
-		// // Now unmount ANY remaining test mounts that might be using loop devices
-		// // This is critical - we need to unmount everything before detaching loops
-		// fmt.Printf("INFO: Running aggressive unmount of test overlay/loop mounts\n")
-		// if err := aggressiveUnmountAll(); err != nil {
-		// 	fmt.Printf("CRITICAL: %v\n", err)
-		// 	fmt.Printf("CRITICAL: Cannot proceed with cleanup - mounts are still busy\n")
-		// 	// Don't continue to loopback cleanup if mounts failed
-		// 	return
-		// }
-
-		// elapsed := time.Since(phaseStart)
-		// if elapsed > 2*time.Second {
-		// 	fmt.Printf("WARNING: Unmount phase took %v\n", elapsed)
-		// }
-
-		// // PHASE 3: AGGRESSIVELY CLEAN UP ALL LOOPBACK DEVICES
-		// // Now that everything is unmounted, detach ALL loop devices
-		// phaseStart = time.Now()
-		// fmt.Printf("INFO: Running aggressive loopback device cleanup\n")
-		// aggressiveLoopbackCleanup()
-
-		// elapsed = time.Since(phaseStart)
-		// if elapsed > 2*time.Second {
-		// 	fmt.Printf("WARNING: Loopback cleanup phase took %v\n", elapsed)
-		// }
-
-		// // PHASE 4: Verify all loopback devices are gone
-		// // Check that no test-related loop devices remain
-		// if output, err := exec.Command("losetup", "-a").Output(); err == nil {
-		// 	loopList := string(output)
-		// 	if loopList != "" {
-		// 		fmt.Printf("WARNING: Loopback devices still present after cleanup, running second round\n")
-		// 		// Try unmounting and cleanup again
-		// 		if err := aggressiveUnmountAll(); err != nil {
-		// 			fmt.Printf("CRITICAL: %v\n", err)
-		// 			fmt.Printf("WARNING: Second unmount round failed, some loop devices may remain attached\n")
-		// 		} else {
-		// 			time.Sleep(500 * time.Millisecond)
-		// 			aggressiveLoopbackCleanup()
-
-		// 			// Final check
-		// 			if output, err := exec.Command("losetup", "-a").Output(); err == nil && string(output) != "" {
-		// 				fmt.Printf("ERROR: Loopback devices STILL present after second cleanup round:\n%s\n", string(output))
-		// 			}
-		// 		}
-		// 	}
-		// }
-
-		// Force stop JuiceFS process if still running
-		if sys.JuiceFS != nil && sys.JuiceFS.IsMounted() {
-			phaseStart := time.Now()
-			fmt.Printf("WARNING: JuiceFS still mounted, attempting to stop\n")
-
-			// Try graceful stop first with timeout
-			stopCtx, stopCancel := context.WithTimeout(ctx, 10*time.Second)
-			stopErr := sys.JuiceFS.Stop(stopCtx)
-			stopCancel()
-
-			// If still mounted after attempted stop, force unmount
-			if stopErr != nil && sys.JuiceFS.IsMounted() {
-				fmt.Printf("WARNING: JuiceFS graceful stop failed, forcing unmount\n")
-				mountPath := filepath.Join(config.JuiceFSDataPath, "data")
-				_ = exec.Command("umount", "-f", mountPath).Run()
-				time.Sleep(500 * time.Millisecond)
-
-				// Verify it's actually unmounted
-				if sys.JuiceFS.IsMounted() {
-					fmt.Printf("WARNING: JuiceFS STILL mounted after force unmount, killing processes\n")
-					// Kill any juicefs processes
-					_ = exec.Command("pkill", "-9", "juicefs").Run()
-					time.Sleep(200 * time.Millisecond)
-					_ = exec.Command("umount", "-f", mountPath).Run()
-					time.Sleep(500 * time.Millisecond)
-
-					if sys.JuiceFS.IsMounted() {
-						fmt.Printf("ERROR: JuiceFS STILL mounted after all unmount attempts\n")
-					}
-				}
-			}
-
-			elapsed := time.Since(phaseStart)
-			if elapsed > 15*time.Second {
-				fmt.Printf("WARNING: JuiceFS cleanup took %v\n", elapsed)
-			}
-		}
-
-		// Stop database manager (stops litestream for metadata DB)
-		if sys.DBManager != nil {
-			_ = sys.DBManager.Stop(ctx)
-		}
-
-		// Stop network services
-		if sys.APIServer != nil {
-			_ = sys.APIServer.Stop(ctx)
-		}
-		if sys.SocketServer != nil {
-			_ = sys.SocketServer.Stop()
-		}
-
-		// Stop utilities
-		if sys.AdminChannel != nil {
-			_ = sys.AdminChannel.Stop()
-		}
-		if sys.Reaper != nil {
-			_ = sys.Reaper.Stop(time.Second)
-		}
-
-		// Clean up the temporary JuiceFS directory to prevent leftover loop devices
-		// from affecting subsequent tests
-		if config.JuiceFSDataPath != "" {
-			fmt.Printf("INFO: Removing temporary JuiceFS directory: %s\n", config.JuiceFSDataPath)
-			if err := os.RemoveAll(config.JuiceFSDataPath); err != nil {
-				fmt.Printf("WARNING: Failed to remove JuiceFS temp directory %s: %v\n", config.JuiceFSDataPath, err)
-			}
-		}
-
-		totalElapsed := time.Since(cleanupStart)
-		if totalElapsed > 30*time.Second {
-			fmt.Printf("WARNING: Total cleanup took %v (longer than 30s)\n", totalElapsed)
-		} else if totalElapsed > 10*time.Second {
-			fmt.Printf("INFO: Total cleanup took %v\n", totalElapsed)
-		}
 	}
 
 	return sys, cleanup, nil
@@ -866,6 +698,69 @@ func VerifySystemStopped(t *testing.T, sys *system.System) {
 	// Process should not be running
 	if sys.IsProcessRunning() {
 		t.Error("Process should not be running")
+	}
+}
+
+// VerifyComponentCleanup runs cleanup verifiers for all system components
+// This validates that all external resources have been properly cleaned up
+func VerifyComponentCleanup(t *testing.T, sys *system.System) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Track failures
+	var failures []string
+
+	// Verify DBManager cleanup (coordinator - checks sub-components)
+	if sys.DBManager != nil {
+		// DBManager is a coordinator with no direct resources
+		// Verify its sub-components instead
+		if leaser := sys.DBManager.GetLeaser(); leaser != nil {
+			for i, verify := range leaser.CleanupVerifiers() {
+				if err := verify(ctx); err != nil {
+					failures = append(failures, fmt.Sprintf("DBManager.Leaser cleanup verifier %d failed: %v", i, err))
+				}
+			}
+		}
+		// Note: Litestream verifiers would go here when implemented
+	}
+
+	// Verify JuiceFS cleanup
+	if sys.JuiceFS != nil {
+		for i, verify := range sys.JuiceFS.CleanupVerifiers() {
+			if err := verify(ctx); err != nil {
+				failures = append(failures, fmt.Sprintf("JuiceFS cleanup verifier %d failed: %v", i, err))
+			}
+		}
+	}
+
+	// Verify OverlayManager cleanup
+	if sys.OverlayManager != nil {
+		for i, verify := range sys.OverlayManager.CleanupVerifiers() {
+			if err := verify(ctx); err != nil {
+				failures = append(failures, fmt.Sprintf("OverlayManager cleanup verifier %d failed: %v", i, err))
+			}
+		}
+	}
+
+	// Verify ServicesManager cleanup
+	if sys.ServicesManager != nil {
+		for i, verify := range sys.ServicesManager.CleanupVerifiers() {
+			if err := verify(ctx); err != nil {
+				failures = append(failures, fmt.Sprintf("ServicesManager cleanup verifier %d failed: %v", i, err))
+			}
+		}
+	}
+
+	// Report all failures and FAIL the test immediately
+	// This prevents subsequent tests from inheriting leaked resources
+	if len(failures) > 0 {
+		t.Errorf("Component cleanup verification FAILED:")
+		for _, failure := range failures {
+			t.Errorf("  - %s", failure)
+		}
+		t.Fatalf("Test failed cleanup verification - %d resource(s) leaked", len(failures))
 	}
 }
 

@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -39,6 +41,12 @@ type Manager struct {
 	mountErrorMu sync.RWMutex  // Protect mountError
 	mountOnce    sync.Once     // Ensure mount ready is only signaled once
 
+	// Lifecycle channels
+	stopCh    chan struct{} // Signals shutdown request
+	stoppedCh chan struct{} // Closed when shutdown complete
+	errCh     chan error    // Reports panics from goroutines
+	started   bool          // Track if Start() has been called
+
 	// Loop device path used for the root image when attached explicitly
 	loopDevice string
 
@@ -57,6 +65,11 @@ type Manager struct {
 	juicefsBasePath        string                          // JuiceFS base path for checkpoint operations
 	restoreContainerPrep   func(ctx context.Context) error // Callback to shutdown container before restore
 	restoreContainerResume func(ctx context.Context) error // Callback to boot container after restore
+
+	// Verifiers for external resources
+	// These check actual system state, not internal Go values
+	setupVerifiers   []func(context.Context) error // verify resources exist
+	cleanupVerifiers []func(context.Context) error // verify resources cleaned up
 }
 
 // Config holds configuration for the overlay manager
@@ -101,6 +114,9 @@ func New(config Config) *Manager {
 		skipOverlayFS:         config.SkipOverlayFS,
 		logger:                config.Logger,
 		mountReady:            make(chan struct{}),
+		stopCh:                make(chan struct{}),
+		stoppedCh:             make(chan struct{}),
+		errCh:                 make(chan error, 1),
 		checkpointBasePath:    filepath.Join(dataPath, "checkpoints"),
 		checkpointMountPath:   checkpointMountBase,
 		checkpointMounts:      make(map[string]string),
@@ -144,8 +160,49 @@ func (m *Manager) SetRestoreContainerCallbacks(prep func(ctx context.Context) er
 // Start mounts the overlay and initializes checkpoint infrastructure
 // This is the main entry point for starting the overlay manager
 func (m *Manager) Start(ctx context.Context, checkpointDBPath string) error {
+	if m.started {
+		return fmt.Errorf("overlay manager already started")
+	}
+	m.started = true
+
+	// Clear verifiers from any previous run
+	m.setupVerifiers = nil
+	m.cleanupVerifiers = nil
+
+	// Recreate channels if they were closed by a previous Unmount()
+	// This enables restart after Unmount()
+	select {
+	case <-m.stopCh:
+		m.stopCh = make(chan struct{})
+	default:
+	}
+	select {
+	case <-m.stoppedCh:
+		m.stoppedCh = make(chan struct{})
+	default:
+	}
+	select {
+	case <-m.mountReady:
+		m.mountReady = make(chan struct{})
+	default:
+	}
+
 	// Mount the overlay filesystem
 	if err := m.Mount(ctx); err != nil {
+		// Cleanup on failure: close channels to signal completion
+		// Keep started=true to prevent double-start attempts
+		select {
+		case <-m.stopCh:
+			// Already closed
+		default:
+			close(m.stopCh)
+		}
+		select {
+		case <-m.stoppedCh:
+			// Already closed
+		default:
+			close(m.stoppedCh)
+		}
 		return fmt.Errorf("failed to mount overlay: %w", err)
 	}
 
@@ -159,14 +216,34 @@ func (m *Manager) Start(ctx context.Context, checkpointDBPath string) error {
 		m.logger.Warn("Failed to initialize checkpoint manager", "error", err)
 	}
 
-	// Mount existing checkpoints asynchronously (non-blocking)
-	go func() {
-		if err := m.MountCheckpoints(ctx); err != nil {
-			m.logger.Warn("Failed to mount existing checkpoints", "error", err)
+	// Mount existing checkpoints - this blocks until all parallel mounts complete
+	// Individual checkpoint mounts run in parallel internally
+	if err := m.MountCheckpoints(ctx); err != nil {
+		m.logger.Error("Failed to mount checkpoints", "error", err)
+		// Cleanup: unmount the overlay we just mounted
+		m.logger.Info("Cleaning up overlay mount after checkpoint mount failure")
+		cleanupCtx := context.Background()
+		if unmountErr := m.Unmount(cleanupCtx); unmountErr != nil {
+			m.logger.Error("Failed to cleanup overlay after checkpoint mount failure", "error", unmountErr)
 		}
-	}()
+		return fmt.Errorf("failed to mount checkpoints: %w", err)
+	}
+
+	// Add verifiers for external resources now that setup is complete
+	// These check ONLY system state, not internal Go values
+	m.addResourceVerifiers()
 
 	return nil
+}
+
+// Wait blocks until Unmount completes or a panic occurs in any goroutine
+func (m *Manager) Wait() error {
+	select {
+	case <-m.stoppedCh:
+		return nil
+	case err := <-m.errCh:
+		return err
+	}
 }
 
 // UpdateImagePath updates the image path after a restore operation
@@ -233,6 +310,121 @@ func (m *Manager) InitializeCheckpointManager(ctx context.Context, checkpointDBP
 
 	m.logger.Info("Checkpoint manager initialized successfully")
 	return nil
+}
+
+// addResourceVerifiers populates the setup and cleanup verifiers
+// Called at the end of Start() after all resources are acquired
+func (m *Manager) addResourceVerifiers() {
+	// Setup verifier: Check loop device is attached
+	m.setupVerifiers = append(m.setupVerifiers, func(ctx context.Context) error {
+		if m.loopDevice == "" {
+			// No loop device was attached (might be using direct mount)
+			return nil
+		}
+
+		// Check if loop device exists using losetup -a
+		cmd := exec.Command("losetup", "-a")
+		output, err := cmd.Output()
+		if err != nil {
+			return fmt.Errorf("failed to run losetup -a: %w", err)
+		}
+
+		if !strings.Contains(string(output), m.loopDevice) {
+			return fmt.Errorf("loop device not found: %s (hint: check 'losetup -a')", m.loopDevice)
+		}
+		return nil
+	})
+
+	// Setup verifier: Check loopback mount exists in /proc/mounts
+	m.setupVerifiers = append(m.setupVerifiers, func(ctx context.Context) error {
+		mountsData, err := os.ReadFile("/proc/mounts")
+		if err != nil {
+			return fmt.Errorf("failed to read /proc/mounts: %w", err)
+		}
+
+		if !strings.Contains(string(mountsData), m.mountPath) {
+			return fmt.Errorf("loopback mount not found in /proc/mounts: %s", m.mountPath)
+		}
+		return nil
+	})
+
+	// Setup verifier: Check overlayfs mount exists in /proc/mounts (if not skipped)
+	if !m.skipOverlayFS {
+		m.setupVerifiers = append(m.setupVerifiers, func(ctx context.Context) error {
+			mountsData, err := os.ReadFile("/proc/mounts")
+			if err != nil {
+				return fmt.Errorf("failed to read /proc/mounts: %w", err)
+			}
+
+			if !strings.Contains(string(mountsData), m.overlayTargetPath) {
+				return fmt.Errorf("overlayfs mount not found in /proc/mounts: %s", m.overlayTargetPath)
+			}
+			return nil
+		})
+	}
+
+	// Cleanup verifier: Check loop device is detached
+	m.cleanupVerifiers = append(m.cleanupVerifiers, func(ctx context.Context) error {
+		if m.loopDevice == "" {
+			// No loop device was used
+			return nil
+		}
+
+		// Check if loop device still exists using losetup -a
+		cmd := exec.Command("losetup", "-a")
+		output, err := cmd.Output()
+		if err != nil {
+			// If losetup fails, we can't verify but that's OK
+			return nil
+		}
+
+		if strings.Contains(string(output), m.loopDevice) {
+			return fmt.Errorf("loop device still attached: %s (hint: check 'losetup -a')", m.loopDevice)
+		}
+		return nil
+	})
+
+	// Cleanup verifier: Check loopback mount is gone from /proc/mounts
+	m.cleanupVerifiers = append(m.cleanupVerifiers, func(ctx context.Context) error {
+		mountsData, err := os.ReadFile("/proc/mounts")
+		if err != nil {
+			// If we can't read /proc/mounts, we can't verify
+			return nil
+		}
+
+		if strings.Contains(string(mountsData), m.mountPath) {
+			return fmt.Errorf("loopback mount still present in /proc/mounts: %s (hint: check 'mount | grep %s')", m.mountPath, m.mountPath)
+		}
+		return nil
+	})
+
+	// Cleanup verifier: Check overlayfs mount is gone from /proc/mounts
+	if !m.skipOverlayFS {
+		m.cleanupVerifiers = append(m.cleanupVerifiers, func(ctx context.Context) error {
+			mountsData, err := os.ReadFile("/proc/mounts")
+			if err != nil {
+				// If we can't read /proc/mounts, we can't verify
+				return nil
+			}
+
+			if strings.Contains(string(mountsData), m.overlayTargetPath) {
+				return fmt.Errorf("overlayfs mount still present in /proc/mounts: %s (hint: check 'mount | grep %s')", m.overlayTargetPath, m.overlayTargetPath)
+			}
+			return nil
+		})
+	}
+}
+
+// SetupVerifiers returns functions that verify resources are set up correctly
+// Each function checks actual system state (loop devices, mounts, etc.)
+func (m *Manager) SetupVerifiers() []func(context.Context) error {
+	return m.setupVerifiers
+}
+
+// CleanupVerifiers returns functions that verify resources are cleaned up
+// Each function checks actual system state (loop devices, mounts, etc.)
+func (m *Manager) CleanupVerifiers() []func(context.Context) error {
+	return m.cleanupVerifiers
 }
 
 // Close closes the checkpoint database

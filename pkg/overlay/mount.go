@@ -330,6 +330,15 @@ func (m *Manager) mountOverlayFS(ctx context.Context) error {
 
 // Unmount unmounts the overlay
 func (m *Manager) Unmount(ctx context.Context) error {
+	// Signal shutdown
+	select {
+	case <-m.stopCh:
+		// Already stopping
+	default:
+		close(m.stopCh)
+	}
+
+	// Perform cleanup in reverse order of Start()
 	// First unmount checkpoint mounts
 	if err := m.UnmountCheckpoints(ctx); err != nil {
 		m.logger.Warn("Failed to unmount checkpoints during overlay unmount", "error", err)
@@ -363,6 +372,15 @@ func (m *Manager) Unmount(ctx context.Context) error {
 			}
 			m.loopDevice = ""
 		}
+
+		// Close stoppedCh and reset started flag
+		select {
+		case <-m.stoppedCh:
+			// Already closed
+		default:
+			close(m.stoppedCh)
+		}
+		m.started = false
 		return nil
 	}
 
@@ -395,6 +413,15 @@ func (m *Manager) Unmount(ctx context.Context) error {
 		}
 		m.loopDevice = ""
 	}
+
+	// Close stoppedCh and reset started flag
+	select {
+	case <-m.stoppedCh:
+		// Already closed
+	default:
+		close(m.stoppedCh)
+	}
+	m.started = false
 
 	return nil
 }

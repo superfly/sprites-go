@@ -211,8 +211,18 @@ func (s *System) setupTmuxActivityMonitoring() {
 // BootContainer starts the container-specific components after JuiceFS is ready
 // This is used during restore operations to boot the container environment
 // It includes: overlay mount, process start, and services manager start
+// PREREQUISITE: SystemBoot must be running (JuiceFS, DBManager) - call Start() first
 func (s *System) BootContainer(ctx context.Context) error {
 	s.logger.Info("Starting container boot sequence")
+
+	// Validate that SystemBoot is running
+	// BootContainer expects SystemBoot (JuiceFS, DBManager) to be already initialized
+	if s.JuiceFS != nil && !s.JuiceFS.IsMounted() {
+		return fmt.Errorf("cannot boot container: JuiceFS is not mounted (call Start() first to initialize SystemBoot)")
+	}
+	if s.DBManager == nil {
+		return fmt.Errorf("cannot boot container: DBManager is not initialized (call Start() first to initialize SystemBoot)")
+	}
 
 	// Phase 1: Mount overlay filesystem (depends on JuiceFS)
 	// Note: JuiceFS is already verified ready during initial Start()
@@ -227,13 +237,11 @@ func (s *System) BootContainer(ctx context.Context) error {
 		}
 		s.logger.Info("Overlay mounted successfully")
 
-		// Mount checkpoints asynchronously (non-blocking)
-		go func() {
-			if err := s.OverlayManager.MountCheckpoints(ctx); err != nil {
-				s.logger.Warn("Failed to mount checkpoints after restore", "error", err)
-			}
-		}()
-		s.logger.Info("Checkpoint mounts initializing asynchronously")
+		// Mount checkpoints - blocks until all parallel mounts complete
+		if err := s.OverlayManager.MountCheckpoints(ctx); err != nil {
+			return fmt.Errorf("failed to mount checkpoints: %w", err)
+		}
+		s.logger.Info("Checkpoints mounted successfully")
 	}
 
 	// Phase 2: Start process if configured

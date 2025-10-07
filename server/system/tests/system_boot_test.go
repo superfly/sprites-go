@@ -1,14 +1,20 @@
+//go:build linux
+
 package tests
 
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
 
 // TestSystemBootSequence verifies the correct boot order of all subsystems
 func TestSystemBootSequence(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -141,6 +147,9 @@ func TestSystemBootSequence(t *testing.T) {
 
 // TestSystemBootWithInvalidProcess verifies boot fails gracefully with invalid process
 func TestSystemBootWithInvalidProcess(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -168,27 +177,48 @@ func TestSystemBootWithInvalidProcess(t *testing.T) {
 
 // TestSystemBootWithStorageFailure tests boot behavior when storage initialization fails
 func TestSystemBootWithStorageFailure(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
+	requireDockerTest(t)
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	testDir := SetupTestEnvironment(t)
+	// Create source and target directories for read-only bind mount
+	sourceDir := t.TempDir()
+	targetDir := t.TempDir()
 
-	// Make the write directory read-only to cause storage failures
-	if err := os.Chmod(testDir, 0444); err != nil {
-		t.Skip("Cannot make directory read-only")
+	// Create required subdirectories in source
+	if err := os.MkdirAll(filepath.Join(sourceDir, "logs"), 0755); err != nil {
+		t.Fatalf("Failed to create logs directory: %v", err)
 	}
-	defer os.Chmod(testDir, 0755) // Restore permissions
+
+	// Create a read-only bind mount (works even as root)
+	// First mount: MS_BIND
+	if err := syscall.Mount(sourceDir, targetDir, "", syscall.MS_BIND, ""); err != nil {
+		t.Skipf("Cannot create bind mount: %v (requires CAP_SYS_ADMIN)", err)
+	}
+
+	// Remount as read-only: MS_REMOUNT | MS_RDONLY | MS_BIND
+	if err := syscall.Mount("", targetDir, "", syscall.MS_REMOUNT|syscall.MS_RDONLY|syscall.MS_BIND, ""); err != nil {
+		syscall.Unmount(targetDir, 0)
+		t.Skipf("Cannot remount as read-only: %v", err)
+	}
+
+	defer func() {
+		// Unmount in cleanup
+		syscall.Unmount(targetDir, 0)
+	}()
 
 	// Verify the directory is actually read-only by trying to create a file
-	testFile := filepath.Join(testDir, "test-write")
+	testFile := filepath.Join(targetDir, "test-write")
 	if err := os.WriteFile(testFile, []byte("test"), 0644); err == nil {
 		os.Remove(testFile)
-		os.Chmod(testDir, 0755)
-		t.Skip("Directory is not actually read-only (possibly running as root)")
+		t.Skip("Bind mount is not actually read-only")
 	}
 
-	config := TestConfig(testDir)
+	config := TestConfig(targetDir)
 	config.ProcessCommand = []string{"/bin/sh", "-c", "echo test"}
 
 	// Create system - this might fail due to permissions
@@ -210,6 +240,9 @@ func TestSystemBootWithStorageFailure(t *testing.T) {
 
 // TestSystemBootIdempotency verifies system cannot be started twice
 func TestSystemBootIdempotency(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -241,6 +274,9 @@ func TestSystemBootIdempotency(t *testing.T) {
 
 // TestSystemBootWithCustomPorts tests boot with specific port configurations
 func TestSystemBootWithCustomPorts(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

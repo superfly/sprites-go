@@ -24,6 +24,9 @@ import (
 
 // TestProxyHandlerDirect tests the proxy handler directly
 func TestProxyHandlerDirect(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+	
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -75,6 +78,9 @@ func TestProxyHandlerDirect(t *testing.T) {
 /*
 // TestProxyWithAuthentication tests proxy with authentication middleware
 func TestProxyWithAuthentication(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+	
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -169,6 +175,9 @@ func TestProxyWithAuthentication(t *testing.T) {
 /*
 // TestProxyPortParsing tests various port parsing scenarios
 func TestProxyPortParsing(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+	
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)

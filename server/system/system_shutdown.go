@@ -131,7 +131,7 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 func (s *System) PrepareContainerForShutdown(shutdownCtx context.Context) error {
 	// Stop services manager first (must stop before container)
 	if s.ServicesManager != nil {
-		if err := s.ServicesManager.StopForUnmount(); err != nil {
+		if err := s.ServicesManager.Stop(shutdownCtx); err != nil {
 			s.logger.Error("Failed to stop services manager", "error", err)
 			// Continue with shutdown even if some services fail to stop
 		}
@@ -148,6 +148,7 @@ func (s *System) PrepareContainerForShutdown(shutdownCtx context.Context) error 
 	if s.IsProcessRunning() {
 		if err := s.StopProcess(); err != nil {
 			s.logger.Error("Failed to stop process", "error", err)
+			return fmt.Errorf("failed to stop process: %w", err)
 		}
 
 		// Wait for process to be completely done
@@ -161,6 +162,7 @@ func (s *System) PrepareContainerForShutdown(shutdownCtx context.Context) error 
 
 		if s.IsProcessRunning() {
 			s.logger.Warn("Container process did not stop within timeout")
+			return fmt.Errorf("process did not stop within timeout")
 		}
 	}
 
@@ -198,8 +200,8 @@ func (s *System) ShutdownContainer(shutdownCtx context.Context) error {
 	// Phase 1: Stop services manager first (must stop before container)
 	s.logger.Info("Phase 1: Stopping services manager")
 	if s.ServicesManager != nil {
-		if err := s.ServicesManager.StopForUnmount(); err != nil {
-			s.logger.Error("Failed to shutdown services manager", "error", err)
+		if err := s.ServicesManager.Stop(shutdownCtx); err != nil {
+			s.logger.Error("Failed to stop services manager", "error", err)
 			// Continue with shutdown even if some services fail to stop
 		} else {
 			s.logger.Info("Services manager stopped")
@@ -210,8 +212,6 @@ func (s *System) ShutdownContainer(shutdownCtx context.Context) error {
 			default:
 				close(s.servicesManagerStoppedCh)
 			}
-
-			// Do not close ServicesManager context here to allow restart without reinitialization
 		}
 	}
 
@@ -220,21 +220,9 @@ func (s *System) ShutdownContainer(shutdownCtx context.Context) error {
 	if s.IsProcessRunning() {
 		if err := s.StopProcess(); err != nil {
 			s.logger.Error("Failed to stop process", "error", err)
+			return fmt.Errorf("failed to stop container process: %w", err)
 		}
-
-		// Wait for process to be completely done
-		// This ensures process is no longer using the filesystem
-		for i := 0; i < 50; i++ { // Check for up to 5 seconds
-			if !s.IsProcessRunning() {
-				s.logger.Info("Container process fully stopped")
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-
-		if s.IsProcessRunning() {
-			s.logger.Warn("Container process did not stop within timeout")
-		}
+		s.logger.Info("Container process fully stopped")
 	} else {
 		s.logger.Info("No process running to stop")
 	}

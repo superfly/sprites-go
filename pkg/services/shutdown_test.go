@@ -246,10 +246,6 @@ func TestShutdownEmptyManager(t *testing.T) {
 	if err := manager.Start(); err != nil {
 		t.Fatal(err)
 	}
-	// Start the manager first
-	if err := manager.Start(); err != nil {
-		t.Fatal(err)
-	}
 
 	// Shutdown with no services
 	if err := manager.Shutdown(); err != nil {
