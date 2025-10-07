@@ -338,12 +338,16 @@ func main() {
 	var updateBase bool
 	var updateLanguages bool
 	var imageURL string
+	var baseImageURL string
+	var languagesImageURL string
 	flag.StringVar(&appName, "a", "", "Fly app name")
 	flag.BoolVar(&skipBuild, "skip-build", false, "Skip docker build step and just push the image")
 	flag.BoolVar(&replaceConfig, "replace-config", false, "Replace entire machine config instead of just updating the image")
 	flag.BoolVar(&updateBase, "update-base", false, "Build and push base Ubuntu image")
 	flag.BoolVar(&updateLanguages, "update-languages", false, "Build and push languages image")
 	flag.StringVar(&imageURL, "image", "", "Use specified Docker image URL instead of building")
+	flag.StringVar(&baseImageURL, "base-image", "", "Use specified base Ubuntu image URL instead of building")
+	flag.StringVar(&languagesImageURL, "languages-image", "", "Use specified languages image URL instead of building")
 	flag.Parse()
 
 	// Check for app name from flag or env var
@@ -381,15 +385,21 @@ func main() {
 
 	// Prepare image refs for base images
 	var ubuntuImageRef, languagesImageRef string
-	if updateBase {
+	if baseImageURL != "" {
+		ubuntuImageRef = baseImageURL
+		log.Printf("Using provided base image: %s\n", ubuntuImageRef)
+	} else if updateBase {
 		ubuntuImageRef = fmt.Sprintf("registry.fly.io/%s:%s-ubuntu", appName, label)
 	}
-	if updateLanguages {
+	if languagesImageURL != "" {
+		languagesImageRef = languagesImageURL
+		log.Printf("Using provided languages image: %s\n", languagesImageRef)
+	} else if updateLanguages {
 		languagesImageRef = fmt.Sprintf("registry.fly.io/%s:%s-languages", appName, label)
 	}
 
 	// Build all images in parallel
-	if !skipBuild || updateBase || updateLanguages {
+	if !skipBuild || (updateBase && baseImageURL == "") || (updateLanguages && languagesImageURL == "") {
 		var wg sync.WaitGroup
 		errChan := make(chan error, 3) // Buffer for up to 3 errors
 
@@ -398,10 +408,10 @@ func main() {
 		if !skipBuild {
 			buildCount++
 		}
-		if updateBase {
+		if updateBase && baseImageURL == "" {
 			buildCount++
 		}
-		if updateLanguages {
+		if updateLanguages && languagesImageURL == "" {
 			buildCount++
 		}
 
@@ -432,8 +442,8 @@ func main() {
 			}
 		}
 
-		// Build Ubuntu base image if requested
-		if updateBase {
+		// Build Ubuntu base image if requested and no URL provided
+		if updateBase && baseImageURL == "" {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -447,8 +457,8 @@ func main() {
 			}()
 		}
 
-		// Build languages image if requested
-		if updateLanguages {
+		// Build languages image if requested and no URL provided
+		if updateLanguages && languagesImageURL == "" {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -609,8 +619,8 @@ func main() {
 			log.Fatal("Failed to parse machine config: ", err)
 		}
 
-		// Update volume images if base images were built
-		if updateBase || updateLanguages {
+		// Update volume images if base images were built or provided
+		if (updateBase || baseImageURL != "") || (updateLanguages || languagesImageURL != "") {
 			updateVolumeImages(&machineConfig, ubuntuImageRef, languagesImageRef)
 		}
 
@@ -722,8 +732,8 @@ func main() {
 			// Update only the image references
 			updateMachineImageOnly(currentConfig, imageRef)
 
-			// Update volume images if base images were built
-			if updateBase || updateLanguages {
+			// Update volume images if base images were built or provided
+			if (updateBase || baseImageURL != "") || (updateLanguages || languagesImageURL != "") {
 				updateVolumeImages(currentConfig, ubuntuImageRef, languagesImageRef)
 			}
 
