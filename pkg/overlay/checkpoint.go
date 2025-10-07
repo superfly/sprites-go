@@ -219,31 +219,41 @@ func (m *Manager) Restore(ctx context.Context, checkpointID string) error {
 	if checkpointID == "" {
 		return fmt.Errorf("checkpoint ID is required")
 	}
+	
+	// Step 1: Prepare for restore (shutdown container, unmount overlay)
 	var resume func() error
-	var err error
 	if m.restorePrepare != nil {
+		var err error
 		resume, err = m.restorePrepare(ctx)
 		if err != nil {
 			return fmt.Errorf("prepare for restore failed: %w", err)
 		}
-		defer func() { _ = resume() }()
 	}
 
-	// Resolve the checkpoint record
+	// Step 2: Resolve the checkpoint record
 	rec, path, err := m.resolveCheckpoint(checkpointID)
 	if err != nil {
 		return err
 	}
 
-	// Backup current active directory if present
+	// Step 3: Backup current active directory if present
 	backupRel := fmt.Sprintf("checkpoints/pre-restore-v%d-%d", rec.ID, timeNow())
 	// Best-effort backup: ignore error if active/ doesn't exist
 	_ = m.checkpointFS.Rename(ctx, "active", backupRel)
 
-	// Restore by cloning checkpoint to active/
+	// Step 4: Restore by cloning checkpoint to active/
 	if err := m.checkpointFS.Clone(ctx, path, "active"); err != nil {
 		return fmt.Errorf("restore clone failed: %w", err)
 	}
+	
+	// Step 5: Resume after restore (mount overlay, boot container)
+	if resume != nil {
+		if err := resume(); err != nil {
+			m.logger.Error("Failed to resume after restore", "error", err)
+			return fmt.Errorf("resume after restore failed: %w", err)
+		}
+	}
+	
 	return nil
 }
 
