@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"syscall"
 	"time"
 
 	"github.com/superfly/sprite-env/pkg/tap"
@@ -21,6 +22,18 @@ type Manager struct {
 	stateRequests chan stateRequest
 	ctx           context.Context
 	cancel        context.CancelFunc
+
+	// Lifecycle channels
+	stopCh    chan struct{} // closed to request shutdown
+	stoppedCh chan struct{} // closed when shutdown complete
+	errCh     chan error    // buffered, reports panics
+
+	// State (plain bool, no mutex needed for simple flag)
+	started bool
+
+	// Verifiers for external resources (check actual system state)
+	setupVerifiers   []func(context.Context) error // verify resources exist
+	cleanupVerifiers []func(context.Context) error // verify resources cleaned up
 }
 
 // command represents an operation on the manager
@@ -45,6 +58,7 @@ const (
 	opSignal
 	opStartAll
 	opGetProcessHandle
+	opGetAllStates
 )
 
 type stateRequest struct {
@@ -72,6 +86,9 @@ func NewManager(dataDir string, opts ...Option) (*Manager, error) {
 		stateRequests: make(chan stateRequest),
 		ctx:           ctx,
 		cancel:        cancel,
+		stopCh:        make(chan struct{}),
+		stoppedCh:     make(chan struct{}),
+		errCh:         make(chan error, 1),
 	}
 
 	// Apply options
@@ -79,15 +96,7 @@ func NewManager(dataDir string, opts ...Option) (*Manager, error) {
 		opt(m)
 	}
 
-	// Set up log directory if configured
-	if m.logDir != "" {
-		logDir := fmt.Sprintf("%s/services", m.logDir)
-		if err := os.MkdirAll(logDir, 0755); err != nil {
-			return nil, fmt.Errorf("failed to create log directory: %w", err)
-		}
-	}
-
-	// Start the manager loop
+	// Start the manager loop (this is OK - just starts the event loop)
 	go m.run()
 
 	return m, nil
@@ -100,17 +109,64 @@ func (m *Manager) SetCmdPrefix(prefix []string) {
 }
 
 // Start initializes the database and prepares the manager
+// Returns error if already started (NOT idempotent)
 func (m *Manager) Start() error {
-	if m.db != nil {
-		return nil // Already started
+	if m.started {
+		return fmt.Errorf("services manager already started")
+	}
+	m.started = true
+
+	// Recreate channels for restartability (in case this is a restart after Stop)
+	select {
+	case <-m.stoppedCh:
+		// Channels were closed, recreate them
+		m.stopCh = make(chan struct{})
+		m.stoppedCh = make(chan struct{})
+		m.errCh = make(chan error, 1)
+		// Recreate context
+		m.ctx, m.cancel = context.WithCancel(context.Background())
+		// Restart the run loop
+		go m.run()
+	default:
+		// Channels are still open, first start
 	}
 
+	// Clear verifiers from any previous run
+	m.setupVerifiers = nil
+	m.cleanupVerifiers = nil
+
+	// CRITICAL: Create log directory FIRST, before DB
+	// Services need log directory to exist before they start
+	if m.logDir != "" {
+		logDir := fmt.Sprintf("%s/services", m.logDir)
+		if err := os.MkdirAll(logDir, 0755); err != nil {
+			return fmt.Errorf("failed to create log directory: %w", err)
+		}
+		// Add setup verifier for log directory
+		m.setupVerifiers = append(m.setupVerifiers, func(ctx context.Context) error {
+			if _, err := os.Stat(logDir); os.IsNotExist(err) {
+				return fmt.Errorf("log directory does not exist: %s", logDir)
+			}
+			return nil
+		})
+	}
+
+	// THEN: Open database
 	fmt.Printf("Starting services manager, initializing database in %s\n", m.dataDir)
 	db, err := NewDB(m.dataDir)
 	if err != nil {
 		return fmt.Errorf("failed to create database: %w", err)
 	}
 	m.db = db
+
+	// Add setup verifier for database file
+	dbPath := fmt.Sprintf("%s/services.db", m.dataDir)
+	m.setupVerifiers = append(m.setupVerifiers, func(ctx context.Context) error {
+		if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+			return fmt.Errorf("database file does not exist: %s", dbPath)
+		}
+		return nil
+	})
 
 	tap.Logger(m.ctx).Info("Services manager started", "dataDir", m.dataDir)
 	return nil
@@ -124,19 +180,111 @@ func (m *Manager) ensureDB() error {
 	return nil
 }
 
-// Close shuts down the manager
-func (m *Manager) Close() error {
-	// First shutdown all services
+// Wait blocks until Stop() completes or a panic occurs
+// Can be called multiple times safely
+func (m *Manager) Wait() error {
+	select {
+	case <-m.stoppedCh:
+		return nil
+	case err := <-m.errCh:
+		return err
+	}
+}
+
+// getAllStates returns all service states (internal helper for Stop)
+func (m *Manager) getAllStates() map[string]*ServiceState {
+	result := make(chan interface{})
+	select {
+	case m.commands <- command{
+		op:     opGetAllStates,
+		result: result,
+	}:
+		resp := <-result
+		if states, ok := resp.(map[string]*ServiceState); ok {
+			return states
+		}
+		return nil
+	case <-m.ctx.Done():
+		return nil
+	}
+}
+
+// Stop initiates shutdown then waits for completion
+// Can be called multiple times safely (idempotent)
+func (m *Manager) Stop(ctx context.Context) error {
+	// Check if already stopped
+	select {
+	case <-m.stoppedCh:
+		// Already stopped
+		return nil
+	default:
+	}
+
+	// Signal shutdown request
+	select {
+	case <-m.stopCh:
+		// Already signaled
+	default:
+		close(m.stopCh)
+	}
+
+	// Capture running service PIDs BEFORE shutdown for verification
+	var runningPIDs []int
+	states := m.getAllStates()
+	for _, state := range states {
+		if state.Status == StatusRunning && state.PID > 0 {
+			runningPIDs = append(runningPIDs, state.PID)
+		}
+	}
+
+	// Shutdown services BEFORE cancelling context (so run loop can process the command)
 	if err := m.Shutdown(); err != nil {
 		tap.Logger(m.ctx).Error("error during shutdown", "error", err)
 	}
 
-	// Then cancel the context and close DB
-	m.cancel()
-	if m.db != nil {
-		return m.db.Close()
+	// Add cleanup verifiers for each process that was running
+	for _, pid := range runningPIDs {
+		capturedPID := pid // Capture for closure
+		m.cleanupVerifiers = append(m.cleanupVerifiers, func(ctx context.Context) error {
+			if processExists(capturedPID) {
+				return fmt.Errorf("service process still running: PID %d (check: ps -p %d)", capturedPID, capturedPID)
+			}
+			return nil
+		})
 	}
+
+	// Close DB to release handles
+	if m.db != nil {
+		if err := m.db.Close(); err != nil {
+			tap.Logger(m.ctx).Error("error closing database", "error", err)
+		}
+		m.db = nil
+	}
+
+	// Cancel the context to stop the run loop
+	m.cancel()
+
+	// Wait for run loop to complete (with timeout from ctx)
+	select {
+	case <-m.stoppedCh:
+		// Run loop completed
+	case <-ctx.Done():
+		return fmt.Errorf("timeout waiting for services manager to stop")
+	}
+
+	// Mark as not started so it can be restarted
+	m.started = false
+
 	return nil
+}
+
+// Close shuts down the manager
+// Deprecated: Use Stop() instead
+func (m *Manager) Close() error {
+	// Create a context with reasonable timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return m.Stop(ctx)
 }
 
 // run is the main event loop
@@ -146,6 +294,16 @@ func (m *Manager) run() {
 	processes := make(map[string]*ProcessHandle)
 
 	// Don't load services at startup - wait for commands that need the database
+
+	defer func() {
+		// Signal that run loop has exited
+		select {
+		case <-m.stoppedCh:
+			// Already closed
+		default:
+			close(m.stoppedCh)
+		}
+	}()
 
 	for {
 		select {
@@ -220,6 +378,15 @@ func (m *Manager) run() {
 				} else {
 					cmd.result <- handle
 				}
+
+			case opGetAllStates:
+				// Get all service states
+				allStates := make(map[string]*ServiceState)
+				for name, state := range states {
+					stateCopy := *state
+					allStates[name] = &stateCopy
+				}
+				cmd.result <- allStates
 			}
 
 		case req := <-m.stateRequests:
@@ -324,24 +491,6 @@ func (m *Manager) Shutdown() error {
 		return nil
 	}
 	return resp.(error)
-}
-
-// StopForUnmount stops services and closes the database so underlying file
-// handles under the mount point are released. It does NOT cancel the manager
-// context, allowing a subsequent Start() to reopen the database.
-func (m *Manager) StopForUnmount() error {
-	// Stop services first
-	if err := m.Shutdown(); err != nil {
-		return err
-	}
-	// Close DB to release handles, but keep context for future restarts
-	if m.db != nil {
-		if err := m.db.Close(); err != nil {
-			return err
-		}
-		m.db = nil
-	}
-	return nil
 }
 
 // StartService starts a single service by name
@@ -500,4 +649,28 @@ func (m *Manager) WaitForService(name string, timeout time.Duration) (int, error
 		return 0, err
 	}
 	return handle.Wait(timeout)
+}
+
+// SetupVerifiers returns functions that verify resources are set up correctly
+// Each function checks actual system state (files, processes, etc.)
+func (m *Manager) SetupVerifiers() []func(context.Context) error {
+	return m.setupVerifiers
+}
+
+// CleanupVerifiers returns functions that verify resources are cleaned up
+// Each function checks actual system state (files, processes, etc.)
+func (m *Manager) CleanupVerifiers() []func(context.Context) error {
+	return m.cleanupVerifiers
+}
+
+// processExists checks if a process with the given PID is still running
+func processExists(pid int) bool {
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	// On Unix, FindProcess always succeeds, so we need to send signal 0 to check
+	// Signal 0 doesn't actually send a signal, just checks if process exists
+	err = process.Signal(syscall.Signal(0))
+	return err == nil
 }

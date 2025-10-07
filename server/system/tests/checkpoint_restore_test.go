@@ -52,6 +52,9 @@ func (p *mockManagedProcess) sendEvent(event adapters.ProcessEventType) {
 
 // TestCheckpointRestoreWithIDs tests that checkpoint IDs are properly passed through the state hierarchy
 func TestCheckpointRestoreWithIDs(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+	
 	tests := []struct {
 		name         string
 		checkpointID string
@@ -240,6 +243,9 @@ func (c *checkpointTrackingComponent) sendEvent(event adapters.ComponentEventTyp
 
 // TestComponentCheckpointRestore tests checkpoint/restore at the component level
 func TestComponentCheckpointRestore(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+	
 	// Create a test component
 	component := &checkpointTrackingComponent{
 		eventsCh:            make(chan adapters.ComponentEventType, 10),

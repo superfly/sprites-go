@@ -8,6 +8,9 @@ import (
 
 // IsProcessRunning returns true if the process is currently running
 func (s *System) IsProcessRunning() bool {
+	s.processMu.Lock()
+	defer s.processMu.Unlock()
+
 	if s.processCmd == nil || s.processCmd.Process == nil {
 		return false
 	}
@@ -20,6 +23,9 @@ func (s *System) IsProcessRunning() bool {
 
 // ProcessPID returns the PID of the running process, or 0 if no process is running
 func (s *System) ProcessPID() int {
+	s.processMu.Lock()
+	defer s.processMu.Unlock()
+
 	if s.processCmd == nil || s.processCmd.Process == nil {
 		return 0
 	}

@@ -542,74 +542,36 @@ func (s *System) StopProcess() error {
 		gracePeriod = 30 * time.Second
 	}
 
-	// Declare done channel outside of conditional blocks
-	var done chan struct{}
+	// Declare channel variable that will be used in both graceful and force-kill paths
+	var stoppedCh chan struct{}
 
-	// If Wait() has already been called, we need to wait for the process to be marked as not running
-	if s.processWaitStarted {
-		// Release the lock while waiting so monitorProcess can update the channels
-		s.processMu.Unlock()
+	// Save the channel before releasing the lock
+	// Note: If processWaitStarted is FALSE, then monitorProcess() IS running
+	// and will signal via processStoppedCh when the process exits.
+	// If processWaitStarted is TRUE, then Wait() was called inline (PID file case)
+	// and a specific monitoring goroutine is handling the Wait().
+	// Either way, we wait on processStoppedCh.
+	stoppedCh = s.processStoppedCh
 
-		// Give the monitoring goroutine a moment to process if the process just exited
-		time.Sleep(50 * time.Millisecond)
+	// Release the lock while waiting so monitoring goroutine can update the channels
+	s.processMu.Unlock()
 
-		timer := time.NewTimer(gracePeriod)
-		defer timer.Stop()
-
-		for {
-			if !s.IsProcessRunning() {
-				s.logger.Info("Process stopped gracefully")
-				// Reacquire lock to update state
-				s.processMu.Lock()
-				s.processCmd = nil
-				s.processWaitStarted = false
-				// Ensure processStoppedCh is closed
-				select {
-				case <-s.processStoppedCh:
-					// Already closed
-				default:
-					close(s.processStoppedCh)
-				}
-				// Lock will be released by defer at function exit
-				return nil
-			}
-
-			select {
-			case <-timer.C:
-				// Grace period expired, continue to force kill
-				s.logger.Warn("Process did not stop within grace period, sending SIGKILL")
-				// Reacquire lock before goto
-				s.processMu.Lock()
-				goto forceKill
-			case <-time.After(100 * time.Millisecond):
-				// Check again
-			}
-		}
-	}
-
-	// Normal path - Wait() hasn't been called yet
-	done = make(chan struct{})
-	go func() {
-		s.processCmd.Wait()
-		close(done)
-	}()
+	timer := time.NewTimer(gracePeriod)
+	defer timer.Stop()
 
 	select {
-	case <-done:
+	case <-stoppedCh:
+		// Monitoring goroutine has reaped the process and updated state
 		s.logger.Info("Process stopped gracefully")
-		s.processCmd = nil
-		s.processWaitStarted = false
-		// Ensure processStoppedCh is closed
-		select {
-		case <-s.processStoppedCh:
-			// Already closed
-		default:
-			close(s.processStoppedCh)
-		}
-		// Reset the atomic flag since process is stopped
-		s.processStarted.Store(false)
+		// Reacquire lock just to satisfy the defer unlock at function exit
+		s.processMu.Lock()
 		return nil
-	case <-time.After(gracePeriod):
+	case <-timer.C:
+		// Grace period expired, continue to force kill
+		s.logger.Warn("Process did not stop within grace period, sending SIGKILL")
+		// Reacquire lock before goto
+		s.processMu.Lock()
+		goto forceKill
 	}
 
 forceKill:
@@ -623,100 +585,44 @@ forceKill:
 		}
 	}
 
-	// If Wait() has already been called, we need to wait for the monitoring goroutine
-	// to update the channels. The monitoring goroutine will acquire the lock, so we
-	// release it temporarily to let it proceed.
-	if s.processWaitStarted {
-		// Release lock while waiting so monitorProcess can update the channels
-		s.processMu.Unlock()
+	// Wait for the monitoring goroutine to signal completion via processStoppedCh.
+	// A monitoring goroutine is ALWAYS running (either monitorProcess or the PID file watcher goroutine).
+	// Save the channel before releasing the lock.
+	stoppedCh = s.processStoppedCh
 
-		// Give the monitoring goroutine a moment to process if the process just exited
-		time.Sleep(50 * time.Millisecond)
+	// Release lock while waiting so monitoring goroutine can update the channels
+	s.processMu.Unlock()
 
-		// Wait() already running, check if process becomes not running
-		waitTimer := time.NewTimer(5 * time.Second)
-		defer waitTimer.Stop()
+	// Wait for monitoring goroutine to signal process stopped
+	waitTimer := time.NewTimer(5 * time.Second)
+	defer waitTimer.Stop()
 
-		for {
-			if !s.IsProcessRunning() {
-				s.logger.Info("Process killed successfully")
-				// Reacquire lock to update state
-				s.processMu.Lock()
-				s.processCmd = nil
-				s.processWaitStarted = false
-				// Ensure processStoppedCh is closed
-				select {
-				case <-s.processStoppedCh:
-					// Already closed
-				default:
-					close(s.processStoppedCh)
-				}
-				// Reset the atomic flag since process is stopped
-				s.processStarted.Store(false)
-				// Lock will be released by defer at function exit
-				return nil
-			}
-
-			select {
-			case <-waitTimer.C:
-				// Even on timeout, reset the flag since we're treating process as stopped
-				s.logger.Warn("Process did not exit after SIGKILL, forcing state update")
-				// Reacquire lock to update state
-				s.processMu.Lock()
-				s.processStarted.Store(false)
-				// Update channels to reflect process is considered stopped
-				// Check if channel is already closed to prevent panic
-				select {
-				case <-s.processStoppedCh:
-					// Already closed
-				default:
-					close(s.processStoppedCh) // Signal stopped
-				}
-				s.processRunningCh = make(chan struct{}) // Open = not running
-				s.processCmd = nil
-				s.processWaitStarted = false
-				// Lock will be released by defer at function exit
-				return fmt.Errorf("process did not exit after SIGKILL")
-			case <-time.After(100 * time.Millisecond):
-				// Check again
-			}
-		}
-	} else {
-		// Normal path - wait for done channel
-		// Give a moment for the process to die before starting the wait
-		time.Sleep(50 * time.Millisecond)
-
+	select {
+	case <-stoppedCh:
+		// Monitoring goroutine has reaped the process and updated state
+		s.logger.Info("Process killed successfully")
+		// Reacquire lock just to satisfy the defer unlock at function exit
+		s.processMu.Lock()
+		return nil
+	case <-waitTimer.C:
+		// Even on timeout, reset the flag since we're treating process as stopped
+		s.logger.Warn("Process did not exit after SIGKILL, forcing state update")
+		// Reacquire lock to update state
+		s.processMu.Lock()
+		s.processStarted.Store(false)
+		// Update channels to reflect process is considered stopped
+		// Check if channel is already closed to prevent panic
 		select {
-		case <-done:
-			s.logger.Info("Process killed successfully")
-			s.processCmd = nil
-			s.processWaitStarted = false
-			// Ensure processStoppedCh is closed
-			select {
-			case <-s.processStoppedCh:
-				// Already closed
-			default:
-				close(s.processStoppedCh)
-			}
-			// Reset the atomic flag since process is stopped
-			s.processStarted.Store(false)
-			return nil
-		case <-time.After(5 * time.Second):
-			// Even on timeout, reset the flag since we're treating process as stopped
-			s.processStarted.Store(false)
-			// Update channels to reflect process is considered stopped
-			// Check if channel is already closed to prevent panic
-			select {
-			case <-s.processStoppedCh:
-				// Already closed
-			default:
-				close(s.processStoppedCh) // Signal stopped
-			}
-			s.processRunningCh = make(chan struct{}) // Open = not running
-			s.processCmd = nil
-			s.processWaitStarted = false
-			return fmt.Errorf("process did not exit after SIGKILL")
+		case <-s.processStoppedCh:
+			// Already closed
+		default:
+			close(s.processStoppedCh) // Signal stopped
 		}
+		s.processRunningCh = make(chan struct{}) // Open = not running
+		s.processCmd = nil
+		s.processWaitStarted = false
+		// Lock will be released by defer at function exit
+		return fmt.Errorf("process did not exit after SIGKILL")
 	}
 }
 

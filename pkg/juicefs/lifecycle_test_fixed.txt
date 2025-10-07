@@ -1,0 +1,14 @@
+Summary of changes needed for lifecycle_test.go:
+
+1. Add "time" import
+2. Add 30-second deadline to each test
+3. Fix TestStopIsIdempotent to avoid race condition:
+   - Add startDone channel
+   - Wait 50ms for Start() to begin
+   - Wait for Start() goroutine to complete
+
+Key fix for TestStopIsIdempotent:
+- The test was starting jfs.Start() in a goroutine without synchronization
+- Then immediately calling Stop() which created a race condition
+- Solution: Add channel to track Start() completion and wait briefly for it to begin
+

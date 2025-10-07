@@ -109,19 +109,16 @@ run_in_container() {
 build_default_args() {
     local user_args="$1"
     local defaults=""
-    if ! echo " $user_args " | grep -qE '(^|[[:space:]])-v($|[[:space:]])'; then
-        defaults+=" -v"
-    fi
     if ! echo " $user_args " | grep -qE '(^|[[:space:]])-failfast($|[[:space:]])'; then
         defaults+=" -failfast"
     fi
     if ! echo " $user_args " | grep -qE '(^|[[:space:]])-timeout(=|[[:space:]]|$)'; then
         defaults+=" -timeout=15m"
     fi
-    # Force serial package execution to prevent resource conflicts (loop devices, mounts)
-    if ! echo " $user_args " | grep -qE '(^|[[:space:]])-p(=|[[:space:]]|$)'; then
-        defaults+=" -p=1"
-    fi
+    # # Force serial package execution to prevent resource conflicts (loop devices, mounts)
+    # if ! echo " $user_args " | grep -qE '(^|[[:space:]])-p(=|[[:space:]]|$)'; then
+    #     defaults+=" -p=1"
+    # fi
     echo "$defaults"
 }
 

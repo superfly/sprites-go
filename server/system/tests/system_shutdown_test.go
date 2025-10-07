@@ -11,6 +11,9 @@ import (
 
 // TestSystemGracefulShutdown verifies clean shutdown of all subsystems
 func TestSystemGracefulShutdown(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -79,6 +82,9 @@ func TestSystemGracefulShutdown(t *testing.T) {
 
 // TestSystemShutdownTimeout verifies shutdown timeout handling
 func TestSystemShutdownTimeout(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -144,6 +150,9 @@ done
 
 // TestSystemShutdownIdempotency verifies multiple shutdown calls are safe
 func TestSystemShutdownIdempotency(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -186,6 +195,9 @@ func TestSystemShutdownIdempotency(t *testing.T) {
 
 // TestSystemShutdownWithActiveConnections tests shutdown with active API connections
 func TestSystemShutdownWithActiveConnections(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -219,6 +231,9 @@ func TestSystemShutdownWithActiveConnections(t *testing.T) {
 
 // TestSystemCrashDuringShutdown tests recovery from crashes during shutdown
 func TestSystemCrashDuringShutdown(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -268,6 +283,9 @@ done
 
 // TestSystemSignalTriggeredShutdown tests shutdown via signals (SIGTERM, SIGINT)
 func TestSystemSignalTriggeredShutdown(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -320,6 +338,9 @@ func TestSystemSignalTriggeredShutdown(t *testing.T) {
 
 // TestSystemShutdownOrder verifies subsystems shut down in correct order
 func TestSystemShutdownOrder(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -358,4 +379,166 @@ func TestSystemShutdownOrder(t *testing.T) {
 	// 5. Stop utilities (reaper, monitors)
 
 	t.Log("Shutdown completed in expected order")
+}
+
+// TestSystemComponentCleanupVerification verifies that all component cleanup verifiers pass after shutdown
+// This test validates Phase 5 integration of the cleanup refactoring
+func TestSystemComponentCleanupVerification(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	testDir := SetupTestEnvironment(t)
+
+	config := TestConfig(testDir)
+
+	sys, cleanup, err := TestSystem(t, config)
+	defer cleanup()
+	if err != nil {
+		t.Fatalf("Failed to create system: %v", err)
+	}
+
+	// Start the system
+	StartSystemWithTimeout(t, sys, 30*time.Second)
+
+	// Verify system is running
+	VerifySystemRunning(t, sys)
+
+	// Perform graceful shutdown
+	t.Log("Starting graceful shutdown...")
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
+
+	err = sys.Shutdown(ctx)
+	if err != nil {
+		t.Fatalf("Shutdown failed: %v", err)
+	}
+
+	t.Log("Shutdown completed, verifying component cleanup...")
+
+	// Explicitly verify all component cleanup verifiers pass
+	// This validates that the Phase 1 & 2 verifier patterns are working correctly
+	VerifyComponentCleanup(t, sys)
+
+	t.Log("All component cleanup verifiers passed")
+}
+
+// TestUserEnvironmentRestart verifies that the UserEnvironment (Overlay + Container + Services)
+// can be restarted while SystemBoot (DB + JuiceFS) remains stable
+// This validates the two-phase architecture benefit: UserEnvironment is restartable
+func TestUserEnvironmentRestart(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	testDir := SetupTestEnvironment(t)
+
+	config := TestConfig(testDir)
+
+	sys, cleanup, err := TestSystem(t, config)
+	defer cleanup()
+	if err != nil {
+		t.Fatalf("Failed to create system: %v", err)
+	}
+
+	// Start the full system (both SystemBoot and UserEnvironment)
+	t.Log("Starting full system...")
+	StartSystemWithTimeout(t, sys, 30*time.Second)
+
+	// Verify system is running
+	VerifySystemRunning(t, sys)
+
+	// Verify JuiceFS is mounted (part of SystemBoot - should stay up)
+	if sys.JuiceFS != nil && !sys.JuiceFS.IsMounted() {
+		t.Fatal("JuiceFS should be mounted after system start")
+	}
+
+	t.Log("System fully started. Now testing UserEnvironment restart cycle...")
+
+	// Phase 1: Shutdown UserEnvironment (Container + Overlay + Services)
+	// This simulates a checkpoint or migration scenario
+	t.Log("Phase 1: Shutting down UserEnvironment (keeping SystemBoot running)...")
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 2*time.Minute)
+	err = sys.ShutdownContainer(ctx1)
+	cancel1()
+	if err != nil {
+		t.Fatalf("Failed to shutdown UserEnvironment: %v", err)
+	}
+
+	// Verify UserEnvironment components are stopped
+	if sys.IsProcessRunning() {
+		t.Error("Container process should be stopped after ShutdownContainer")
+	}
+	if sys.OverlayManager != nil && sys.OverlayManager.IsOverlayFSMounted() {
+		t.Error("Overlay should be unmounted after ShutdownContainer")
+	}
+
+	// Verify SystemBoot components are still running
+	if sys.JuiceFS != nil && !sys.JuiceFS.IsMounted() {
+		t.Error("JuiceFS should still be mounted (part of stable SystemBoot)")
+	}
+	if sys.DBManager == nil {
+		t.Error("DBManager should still be initialized (part of stable SystemBoot)")
+	}
+
+	// Verify UserEnvironment cleanup
+	t.Log("Verifying UserEnvironment cleanup after shutdown...")
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel2()
+
+	// Check OverlayManager cleanup verifiers
+	if sys.OverlayManager != nil {
+		for i, verify := range sys.OverlayManager.CleanupVerifiers() {
+			if err := verify(ctx2); err != nil {
+				t.Errorf("OverlayManager cleanup verifier %d failed: %v", i, err)
+			}
+		}
+	}
+
+	// Check ServicesManager cleanup verifiers
+	if sys.ServicesManager != nil {
+		for i, verify := range sys.ServicesManager.CleanupVerifiers() {
+			if err := verify(ctx2); err != nil {
+				t.Errorf("ServicesManager cleanup verifier %d failed: %v", i, err)
+			}
+		}
+	}
+
+	t.Log("UserEnvironment cleanup verified. Now restarting UserEnvironment...")
+
+	// Phase 2: Restart UserEnvironment (while SystemBoot stays up)
+	t.Log("Phase 2: Restarting UserEnvironment (BootContainer)...")
+	ctx3, cancel3 := context.WithTimeout(context.Background(), 2*time.Minute)
+	err = sys.BootContainer(ctx3)
+	cancel3()
+	if err != nil {
+		t.Fatalf("Failed to restart UserEnvironment: %v", err)
+	}
+
+	// Verify UserEnvironment is running again
+	WaitForCondition(t, 10*time.Second, 100*time.Millisecond,
+		sys.IsProcessRunning,
+		"container process to restart")
+
+	if !sys.IsProcessRunning() {
+		t.Error("Container process should be running after BootContainer")
+	}
+
+	if sys.OverlayManager != nil && !sys.OverlayManager.IsOverlayFSMounted() {
+		t.Error("Overlay should be mounted after BootContainer")
+	}
+
+	// Verify SystemBoot components still running (never touched)
+	if sys.JuiceFS != nil && !sys.JuiceFS.IsMounted() {
+		t.Error("JuiceFS should still be mounted (remained stable during UserEnvironment restart)")
+	}
+
+	t.Log("UserEnvironment restart cycle completed successfully")
+	t.Log("Two-phase architecture validated: UserEnvironment restartable while SystemBoot remains stable")
 }

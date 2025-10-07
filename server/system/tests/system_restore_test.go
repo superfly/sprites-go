@@ -35,6 +35,9 @@ func logMountDiagnostics(t *testing.T, label string) {
 // This is the critical test for the bug fix where stopping the container during restore
 // was incorrectly triggering a parallel system shutdown
 func TestSystemRestoreWithoutShutdownTrigger(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
 	requireDockerTest(t)
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -172,6 +175,9 @@ func TestSystemRestoreWithoutShutdownTrigger(t *testing.T) {
 
 // TestSystemRestoreProcessLifecycle verifies process lifecycle during restore
 func TestSystemRestoreProcessLifecycle(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
 	requireDockerTest(t)
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -292,6 +298,9 @@ done
 
 // TestSystemRestoreMultipleOperations verifies multiple restore operations in sequence
 func TestSystemRestoreMultipleOperations(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
 	requireDockerTest(t)
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -364,6 +373,15 @@ func TestSystemRestoreMultipleOperations(t *testing.T) {
 			t.Fatalf("Process should be running after restore to %s", id)
 		}
 
+		// Verify ServicesManager is in good state (should be started after restore)
+		if sys.ServicesManager != nil {
+			// Try to list services - this will fail if manager isn't started properly
+			_, listErr := sys.ServicesManager.ListServices()
+			if listErr != nil {
+				t.Errorf("ServicesManager in bad state after restore to %s: %v", id, listErr)
+			}
+		}
+
 		// Give time to stabilize
 		time.Sleep(1 * time.Second)
 	}
@@ -382,6 +400,9 @@ func TestSystemRestoreMultipleOperations(t *testing.T) {
 
 // TestSystemRestoreWithProcessCrash verifies restore handles crashed processes correctly
 func TestSystemRestoreWithProcessCrash(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
 	requireDockerTest(t)
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -486,6 +507,9 @@ exit 0
 // for the bug fix - explicitly verifies that ShutdownContainer during restore
 // does not trigger the process monitor to initiate full system shutdown
 func TestSystemRestoreContainerShutdownDoesNotTriggerSystemShutdown(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
 	requireDockerTest(t)
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")

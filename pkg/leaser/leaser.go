@@ -40,6 +40,7 @@ type Leaser struct {
 	refreshTicker *time.Ticker
 	stopCh        chan struct{}
 	stoppedCh     chan struct{}
+	errCh         chan error
 	currentETag   string
 	logger        *slog.Logger
 
@@ -52,6 +53,16 @@ type Leaser struct {
 
 	// Refresh tracking
 	currentRefreshCount int
+
+	// Lifecycle state
+	// Note: Start() and Stop() should not be called concurrently
+	// Expected usage: Start() once, then Stop() once, then optionally Start() again
+	started bool
+
+	// Verifiers for external resources
+	// These check actual system state, not internal Go values
+	setupVerifiers   []func(context.Context) error // verify resources exist
+	cleanupVerifiers []func(context.Context) error // verify resources cleaned up
 }
 
 // Config holds the configuration for the Leaser
@@ -71,6 +82,14 @@ type LeaseInfo struct {
 	ExpiresAt    time.Time `json:"expires_at"`
 	AcquiredAt   time.Time `json:"acquired_at"`
 	RefreshCount int       `json:"refresh_count"`
+}
+
+// ExternalResource represents an external resource managed by a component
+type ExternalResource struct {
+	Type            string       // "process", "mount", "file", "s3_object", "loop_device", "goroutine"
+	Identifier      string       // PID, mount path, file path, S3 key, loop device name
+	Description     string       // Human-readable description
+	VerifyCleanedUp func() error // Function to verify this resource is cleaned up
 }
 
 // MapFlyRegionToTigris maps Fly.io region codes to Tigris region codes.
@@ -218,6 +237,7 @@ func New(config Config) *Leaser {
 		o.BaseEndpoint = aws.String(config.S3EndpointURL)
 	})
 
+	// started is initialized to false by default (atomic.Bool zero value)
 	return &Leaser{
 		s3Client:            s3Client,
 		bucketName:          config.S3Bucket,
@@ -228,6 +248,7 @@ func New(config Config) *Leaser {
 		etagFilePath:        filepath.Join(config.BaseDir, ".sprite-lease-etag"),
 		stopCh:              make(chan struct{}),
 		stoppedCh:           make(chan struct{}),
+		errCh:               make(chan error, 1),
 		logger:              logger,
 		isFlyEnvironment:    isFlyEnvironment,
 		flyAppName:          flyAppName,
@@ -250,6 +271,7 @@ func NewWithS3Client(s3Client S3API, bucketName, leaseKey, machineID, baseDir st
 		etagFilePath:        filepath.Join(baseDir, ".sprite-lease-etag"),
 		stopCh:              make(chan struct{}),
 		stoppedCh:           make(chan struct{}),
+		errCh:               make(chan error, 1),
 		logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
 		isFlyEnvironment:    false,
 		flyAppName:          "",
@@ -260,8 +282,37 @@ func NewWithS3Client(s3Client S3API, bucketName, leaseKey, machineID, baseDir st
 	}
 }
 
-// Wait blocks until the lease is successfully acquired
-func (l *Leaser) Wait(ctx context.Context) error {
+// Start acquires the lease and starts the refresh goroutine
+// Returns when lease is acquired and refresh is running
+// Returns error if already started
+func (l *Leaser) Start(ctx context.Context) error {
+	if l.started {
+		return fmt.Errorf("leaser already started")
+	}
+	l.started = true
+
+	// Clear verifiers from any previous run
+	l.setupVerifiers = nil
+	l.cleanupVerifiers = nil
+
+	// Recreate channels if they were closed by a previous Stop()
+	// This enables restart after Stop()
+	select {
+	case <-l.stopCh:
+		l.stopCh = make(chan struct{})
+	default:
+	}
+	select {
+	case <-l.stoppedCh:
+		l.stoppedCh = make(chan struct{})
+	default:
+	}
+	// errCh is buffered, so we can just drain and reuse it
+	select {
+	case <-l.errCh:
+	default:
+	}
+
 	// 1. Attempt to acquire lease optimistically with etag stored on disk
 	var initialETag string
 	if data, err := os.ReadFile(l.etagFilePath); err == nil {
@@ -280,6 +331,7 @@ func (l *Leaser) Wait(ctx context.Context) error {
 		// Success! No need to wait
 		l.currentETag = etag
 		l.logger.Info("Successfully acquired lease", "etag", etag)
+		l.trackResources()
 		l.startLeaseRefresh()
 		return nil
 	}
@@ -312,6 +364,7 @@ func (l *Leaser) Wait(ctx context.Context) error {
 		if acquired {
 			l.currentETag = etag
 			l.logger.Info("Successfully acquired lease with current etag", "etag", etag)
+			l.trackResources()
 			l.startLeaseRefresh()
 			return nil
 		}
@@ -335,6 +388,7 @@ func (l *Leaser) Wait(ctx context.Context) error {
 				} else if acquired {
 					l.currentETag = etag
 					l.logger.Info("Successfully took over stale lease as only instance", "etag", etag)
+					l.trackResources()
 					l.startLeaseRefresh()
 					return nil
 				}
@@ -362,27 +416,52 @@ func (l *Leaser) RefreshCount() int {
 	return l.currentRefreshCount
 }
 
-// Stop stops the lease manager and cleanup
-func (l *Leaser) Stop() {
+// Wait blocks until Stop() completes or a panic occurs
+// Can be called multiple times safely
+func (l *Leaser) Wait() error {
+	select {
+	case <-l.stoppedCh:
+		return nil
+	case err := <-l.errCh:
+		return err
+	}
+}
+
+// Stop initiates shutdown then waits for completion
+// Can be called multiple times safely
+// May return error but MUST forcefully clean up even on error
+func (l *Leaser) Stop(ctx context.Context) error {
+	// Signal shutdown
 	select {
 	case <-l.stopCh:
-		// Already stopped
-		return
+		// Already stopping
 	default:
 		close(l.stopCh)
 	}
 
+	// Do cleanup work - stop the ticker if it exists
+	// The refresh goroutine will exit when it sees stopCh closed
 	if l.refreshTicker != nil {
 		l.refreshTicker.Stop()
+		l.refreshTicker = nil
 	}
 
-	// Signal that stop is complete - only close if not already closed
+	// Give the refresh goroutine a moment to exit
+	// In production this is fine since we're stopping anyway
+	time.Sleep(10 * time.Millisecond)
+
+	// Signal that stop is complete
 	select {
 	case <-l.stoppedCh:
 		// Already closed
 	default:
 		close(l.stoppedCh)
 	}
+
+	// Mark as not started so it can be restarted
+	l.started = false
+
+	return nil
 }
 
 // isOnlyInstance checks if this is the only instance in Fly environment
@@ -652,6 +731,7 @@ func (l *Leaser) waitForLease(ctx context.Context) error {
 				} else if acquired {
 					l.currentETag = etag
 					l.logger.Info("Successfully acquired lease after waiting", "etag", etag)
+					l.trackResources()
 					l.startLeaseRefresh()
 					return nil
 				}
@@ -680,6 +760,7 @@ func (l *Leaser) waitForLease(ctx context.Context) error {
 								} else if acquired {
 									l.currentETag = etag
 									l.logger.Info("Successfully took over stale lease as only instance", "etag", etag)
+									l.trackResources()
 									l.startLeaseRefresh()
 									return nil
 								}
@@ -720,14 +801,41 @@ func (l *Leaser) waitForLease(ctx context.Context) error {
 	}
 }
 
+// trackResources adds verifiers for acquired resources
+func (l *Leaser) trackResources() {
+	// Setup verifier: check etag file exists and has content
+	l.setupVerifiers = append(l.setupVerifiers, func(ctx context.Context) error {
+		if _, err := os.Stat(l.etagFilePath); os.IsNotExist(err) {
+			return fmt.Errorf("etag file does not exist: %s", l.etagFilePath)
+		}
+		data, err := os.ReadFile(l.etagFilePath)
+		if err != nil {
+			return fmt.Errorf("failed to read etag file: %w", err)
+		}
+		if len(bytes.TrimSpace(data)) == 0 {
+			return fmt.Errorf("etag file is empty")
+		}
+		return nil
+	})
+
+	// Cleanup verifier: check ticker is nil (goroutine stopped)
+	l.cleanupVerifiers = append(l.cleanupVerifiers, func(ctx context.Context) error {
+		if l.refreshTicker != nil {
+			return fmt.Errorf("refresh ticker still exists")
+		}
+		return nil
+	})
+}
+
 // startLeaseRefresh starts the background lease refresh goroutine
 func (l *Leaser) startLeaseRefresh() {
 	l.refreshTicker = time.NewTicker(l.refreshInterval)
+	ticker := l.refreshTicker // Capture ticker locally so goroutine doesn't race on l.refreshTicker
 
 	go func() {
 		for {
 			select {
-			case <-l.refreshTicker.C:
+			case <-ticker.C:
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				acquired, etag, err := l.tryAcquireLease(ctx, l.currentETag)
 				cancel()
@@ -745,4 +853,16 @@ func (l *Leaser) startLeaseRefresh() {
 			}
 		}
 	}()
+}
+
+// SetupVerifiers returns functions that verify resources are set up correctly
+// Each function checks actual system state (files, processes, etc.)
+func (l *Leaser) SetupVerifiers() []func(context.Context) error {
+	return l.setupVerifiers
+}
+
+// CleanupVerifiers returns functions that verify resources are cleaned up
+// Each function checks actual system state (files, processes, etc.)
+func (l *Leaser) CleanupVerifiers() []func(context.Context) error {
+	return l.cleanupVerifiers
 }

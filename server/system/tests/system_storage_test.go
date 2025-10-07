@@ -62,6 +62,9 @@ func assertNotMounted(t *testing.T, mountPoint string) {
 // and Shutdown returns only after overlay unmounts. It validates using the
 // system's mount table, not internal state.
 func TestOverlayMountLifecycle(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -133,6 +136,9 @@ func TestOverlayMountLifecycle(t *testing.T) {
 
 // TestPartialShutdownAndBoot validates we can stop container components and start them again
 func TestPartialShutdownAndBoot(t *testing.T) {
+	_, cancel := SetTestDeadline(t)
+	defer cancel()
+
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -163,35 +169,33 @@ func TestPartialShutdownAndBoot(t *testing.T) {
 		t.Fatalf("Failed to create system: %v", err)
 	}
 
-	// Boot container components only (15s)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	logTS(t, "BootContainer: starting")
-	if err := sys.BootContainer(ctx); err != nil {
-		t.Fatalf("BootContainer error: %v", err)
-	}
-	logTS(t, "BootContainer: done")
+	// First, boot the full system (SystemBoot + UserEnvironment)
+	t.Log("Starting full system (SystemBoot + UserEnvironment)...")
+	StartSystemWithTimeout(t, sys, 30*time.Second)
 
-	// Validate mounts present
+	// Verify system is fully running
 	assertMounted(t, "/mnt/user-data")
 	if !config.OverlaySkipOverlayFS {
 		assertMounted(t, config.OverlayTargetPath)
 	}
+	if !sys.IsProcessRunning() {
+		t.Fatal("Process should be running after Start()")
+	}
 
-	// Now stop container components (15s)
-	ctxStop, cancelStop := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancelStop()
+	// Now shutdown UserEnvironment to test the restart cycle
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
 	logTS(t, "ShutdownContainer: starting")
-	if err := sys.ShutdownContainer(ctxStop); err != nil {
+	if err := sys.ShutdownContainer(ctx); err != nil {
 		t.Fatalf("ShutdownContainer error: %v", err)
 	}
 	logTS(t, "ShutdownContainer: done")
 
-	// Inspect system state before second boot
+	// Inspect system state after shutdown
 	dumpCmd(t, "mount")
 	dumpCmd(t, "losetup", "-a")
 
-	// Validate unmounted
+	// Validate UserEnvironment is unmounted (SystemBoot still running)
 	assertNotMounted(t, "/mnt/user-data")
 	if !config.OverlaySkipOverlayFS {
 		assertNotMounted(t, config.OverlayTargetPath)

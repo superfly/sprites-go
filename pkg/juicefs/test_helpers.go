@@ -2,9 +2,6 @@ package juicefs
 
 import (
 	"context"
-	"fmt"
-	"os/exec"
-	"strings"
 	"testing"
 	"time"
 )
@@ -21,55 +18,50 @@ func CleanupTestJuiceFS(t *testing.T, jfs *JuiceFS) {
 	// Try to stop JuiceFS
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	_ = jfs.Stop(ctx)
 
-	// Verify cleanup
-	VerifyNoTestJuiceFS(t, jfs)
+	if err := jfs.Stop(ctx); err != nil {
+		t.Logf("Stop error (may be expected): %v", err)
+	}
+
+	// Verify cleanup using the component's verifiers
+	VerifyTestJuiceFSCleanup(t, jfs, ctx)
 }
 
-// VerifyNoTestJuiceFS checks that no test-related JuiceFS mounts remain
-// This should be called after cleanup to ensure no resources leaked
-func VerifyNoTestJuiceFS(t *testing.T, jfs *JuiceFS) {
+// VerifyTestJuiceFSCleanup verifies all resources are cleaned up using the component's verifiers
+// This should be called after Stop() to ensure no resources leaked
+func VerifyTestJuiceFSCleanup(t *testing.T, jfs *JuiceFS, ctx context.Context) {
 	t.Helper()
 
 	if jfs == nil {
 		return
 	}
 
-	var failures []string
-
-	// Check if JuiceFS is still mounted using the manager's method
-	if jfs.IsMounted() {
-		failures = append(failures, "JuiceFS reports it is still mounted")
+	// Check channels are closed
+	select {
+	case <-jfs.stopCh:
+	default:
+		t.Errorf("CLEANUP FAILED: stopCh not closed")
+	}
+	select {
+	case <-jfs.stoppedCh:
+	default:
+		t.Errorf("CLEANUP FAILED: stoppedCh not closed")
 	}
 
-	// Get the mount path and check system mounts
-	mountPath := jfs.GetMountPath()
-	if mountPath == "" {
-		// Can't verify without knowing the mount path
-		return
-	}
-
-	// Check mount table for our JuiceFS mount
-	if output, err := exec.Command("mount").Output(); err == nil {
-		mountOutput := string(output)
-		for _, line := range strings.Split(mountOutput, "\n") {
-			if line == "" {
-				continue
-			}
-			// Check for JuiceFS/SpriteFS mounts at our mount path
-			if strings.Contains(line, " on "+mountPath+" ") &&
-				(strings.Contains(line, "type fuse.juicefs") || strings.Contains(line, "SpriteFS on")) {
-				failures = append(failures, fmt.Sprintf("JuiceFS mount still present: %s", line))
-			}
+	// Run all cleanup verifiers
+	verifiers := jfs.CleanupVerifiers()
+	for i, verify := range verifiers {
+		if err := verify(ctx); err != nil {
+			t.Errorf("CLEANUP VERIFICATION FAILED (verifier %d): %v", i, err)
 		}
 	}
+}
 
-	// Fail the test if any issues found
-	if len(failures) > 0 {
-		t.Errorf("JuiceFS cleanup verification FAILED:")
-		for _, failure := range failures {
-			t.Errorf("  - %s", failure)
-		}
-	}
+// VerifyNoTestJuiceFS is deprecated - use VerifyTestJuiceFSCleanup instead
+// Kept for backward compatibility with existing tests
+func VerifyNoTestJuiceFS(t *testing.T, jfs *JuiceFS) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	VerifyTestJuiceFSCleanup(t, jfs, ctx)
 }

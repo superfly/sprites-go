@@ -312,6 +312,19 @@ func (s *System) Stop() error {
 	return s.Shutdown(ctx)
 }
 
+// Logger returns the system's logger
+func (s *System) Logger() *slog.Logger {
+	return s.logger
+}
+
+// WithLogger sets a new logger for the system
+// This is useful for adding context attributes in tests
+func (s *System) WithLogger(logger *slog.Logger) {
+	s.logger = logger
+	// Update context with new logger
+	s.ctx = tap.WithLogger(s.ctx, logger)
+}
+
 // initializeModules creates all system modules
 func (s *System) initializeModules() error {
 	// Create modules in groups
