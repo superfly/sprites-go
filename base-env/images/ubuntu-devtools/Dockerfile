@@ -88,7 +88,7 @@ COPY --chown=$UID:$UID --from=languages-split /.sprite/etc/profile.d /.sprite/et
 # need to assemble overlay at runtime
 ####################################################
 FROM base
-ARG USER UID
+ARG USER UID VERSION="v0.0.1-dev" GIT_SHA=""
 
 # Create sprite scripts directory and languages directory
 RUN mkdir -p /.sprite/languages /.sprite/bin /.sprite/etc/profile.d
@@ -123,6 +123,9 @@ ENV BROWSER="/.sprite/bin/sprite-browser" \
 # Node.js is installed in the languages layer and available via PATH shims
 
 WORKDIR /home/sprite
+
+# Record version into the sprite layer for tooling to inspect
+RUN echo "${VERSION}${GIT_SHA}" | sudo tee /.sprite/version.txt >/dev/null && sudo chown $UID:$UID /.sprite/version.txt
 
 ENTRYPOINT ["/.sprite/entrypoint.sh"]
 CMD ["tail", "-f", "/dev/null"]

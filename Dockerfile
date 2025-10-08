@@ -1,6 +1,10 @@
 # syntax=docker/dockerfile:1
 
 # Build stage for AMD64
+# Global build arguments for versioning (can be overridden at build time)
+ARG VERSION="v0.0.1-dev"
+ARG GIT_SHA=""
+
 FROM golang:1.24-bookworm AS builder
 ENV CGO_ENABLED=1
 
@@ -26,7 +30,7 @@ COPY . .
 
 FROM builder AS builder-server
 
-ARG VERSION=dev
+ARG VERSION
 RUN cd server && \
     CGO_ENABLED=1 GOOS=linux go build \
     -ldflags="-w -s -X main.version=${VERSION} -extldflags '-static'" \
@@ -36,7 +40,7 @@ RUN cd server && \
 
 FROM builder AS builder-client
 
-ARG VERSION=dev
+ARG VERSION
 # Also build the client
 RUN cd client && \
     CGO_ENABLED=0 GOOS=linux go build \
@@ -138,8 +142,11 @@ COPY --from=juicefs /usr/local/bin/juicefs /usr/local/bin/juicefs
 COPY --from=assemble-system /system /system
 
 # Define environment variables for paths
+ARG VERSION
+ARG GIT_SHA
 ENV SPRITE_WRITE_DIR=/dev/fly_vol \
-    SPRITE_HOME=/home/sprite
+    SPRITE_HOME=/home/sprite \
+    SPRITE_VERSION=${VERSION}${GIT_SHA}
 
 # Copy the appropriate binaries based on target platform
 COPY --from=builder-server /build/spritectl /usr/local/bin/spritectl

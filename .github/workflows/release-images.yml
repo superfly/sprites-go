@@ -138,6 +138,8 @@ jobs:
       dockerfile: base-env/images/ubuntu-devtools/Dockerfile
       tag: ${{ needs.generate-tag.outputs.ubuntu_tag }}
       image_name: superfly/sprite-ubuntu
+        version: ${{ needs.generate-tag.outputs.is_version_tag == 'true' && github.ref_name || 'v0.0.1-dev' }}
+        git_sha: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && steps.short-sha.outputs.short-sha || '' }}
       cache_tag: 25.04-latest
       latest_tag: 25.04-latest
       tag_latest: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && (inputs.tag_latest == true || inputs.tag_latest == null) }}
@@ -187,6 +189,8 @@ jobs:
       cache_tag: 25.04-languages-latest
       latest_tag: 25.04-languages-latest
       tag_latest: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && (inputs.tag_latest == true || inputs.tag_latest == null) }}
+        version: ${{ needs.generate-tag.outputs.is_version_tag == 'true' && github.ref_name || 'v0.0.1-dev' }}
+        git_sha: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && steps.short-sha.outputs.short-sha || '' }}
     secrets: inherit
 
   retag-languages:
@@ -231,4 +235,6 @@ jobs:
       cache_tag: latest
       latest_tag: latest
       tag_latest: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && (inputs.tag_latest == true || inputs.tag_latest == null) }}
+        version: ${{ needs.generate-tag.outputs.is_version_tag == 'true' && github.ref_name || 'v0.0.1-dev' }}
+        git_sha: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && steps.short-sha.outputs.short-sha || '' }}
     secrets: inherit

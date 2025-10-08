@@ -36,6 +36,14 @@ on:
         description: 'Tag to use for cache-from (e.g., "latest", "25.04-latest")'
         required: true
         type: string
+      version:
+        description: 'Version string to embed (passed as build-arg VERSION)'
+        required: false
+        type: string
+      git_sha:
+        description: 'Short git sha to embed for dev builds (build-arg GIT_SHA)'
+        required: false
+        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -73,6 +81,9 @@ jobs:
         platforms: linux/amd64
         push: true
         tags: ${{ env.REGISTRY }}/${{ inputs.image_name }}:${{ inputs.tag }}-amd64
+        build-args: |
+          ${{ inputs.version != '' && format('VERSION={0}', inputs.version) || '' }}
+          ${{ inputs.git_sha != '' && format('GIT_SHA={0}', inputs.git_sha) || '' }}
         cache-from: | 
           type=registry,ref=${{ env.REGISTRY }}/${{ inputs.image_name }}:${{ inputs.cache_tag }}
           type=gha,scope=amd64
@@ -110,6 +121,9 @@ jobs:
         platforms: linux/arm64
         push: true
         tags: ${{ env.REGISTRY }}/${{ inputs.image_name }}:${{ inputs.tag }}-arm64
+        build-args: |
+          ${{ inputs.version != '' && format('VERSION={0}', inputs.version) || '' }}
+          ${{ inputs.git_sha != '' && format('GIT_SHA={0}', inputs.git_sha) || '' }}
         cache-from: | 
           type=registry,ref=${{ env.REGISTRY }}/${{ inputs.image_name }}:${{ inputs.cache_tag }}
           type=gha,scope=arm64
