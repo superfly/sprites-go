@@ -48,24 +48,14 @@ get_login_flag() {
     esac
 }
 
-# Determine which shell to use based on environment variables
+# Determine which shell to use based on SHELL environment variable
+# Note: We use SHELL instead of checking *_VERSION variables because this script
+# runs in bash (#!/bin/bash), which means BASH_VERSION is always set by the
+# script's interpreter, not the user's preferred shell.
 CHOSEN_SHELL=""
 
-# Priority 1: Check shell-specific version variables
-if [ -n "$BASH_VERSION" ] && command_exists bash; then
-    CHOSEN_SHELL="bash"
-elif [ -n "$ZSH_VERSION" ] && command_exists zsh; then
-    CHOSEN_SHELL="zsh"
-elif [ -n "$FISH_VERSION" ] && command_exists fish; then
-    CHOSEN_SHELL="fish"
-elif [ -n "$KSH_VERSION" ] && command_exists ksh; then
-    CHOSEN_SHELL="ksh"
-elif [ -n "$TCSH" ] && command_exists tcsh; then
-    CHOSEN_SHELL="tcsh"
-fi
-
-# Priority 2: Check SHELL environment variable
-if [ -z "$CHOSEN_SHELL" ] && [ -n "$SHELL" ]; then
+# Priority 1: Check SHELL environment variable
+if [ -n "$SHELL" ]; then
     # Extract just the shell name from the path
     SHELL_NAME=$(basename "$SHELL")
     if command_exists "$SHELL_NAME"; then
@@ -73,7 +63,7 @@ if [ -z "$CHOSEN_SHELL" ] && [ -n "$SHELL" ]; then
     fi
 fi
 
-# Priority 3: Fall back to bash
+# Priority 2: Fall back to bash
 if [ -z "$CHOSEN_SHELL" ] || ! command_exists "$CHOSEN_SHELL"; then
     if command_exists bash; then
         CHOSEN_SHELL="bash"
