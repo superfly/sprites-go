@@ -37,7 +37,7 @@ These instructions assume you have Fly CLI installed and can deploy Fly apps.
 1. Clone the repository and enter the directory:
 
    ```bash
-   git clone https://github.com/superfly/sprite-env.git
+   git clone --recurse-submodules https://github.com/superfly/sprite-env.git
    cd sprite-env
    ```
 
