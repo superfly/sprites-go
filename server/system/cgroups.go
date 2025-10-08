@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -87,6 +88,106 @@ func SetupCgroups() error {
 		}
 	}
 
+	// Create juicefs cgroup
+	juicefsCgroupPath := "/sys/fs/cgroup/juicefs"
+	if err := os.MkdirAll(juicefsCgroupPath, 0755); err != nil {
+		return fmt.Errorf("failed to create juicefs cgroup: %w", err)
+	}
+
+	// Create litestream cgroup
+	litestreamCgroupPath := "/sys/fs/cgroup/litestream"
+	if err := os.MkdirAll(litestreamCgroupPath, 0755); err != nil {
+		return fmt.Errorf("failed to create litestream cgroup: %w", err)
+	}
+
 	fmt.Println("Cgroup setup completed successfully")
 	return nil
+}
+
+// MovePid moves a process and all its descendants to the specified cgroup
+func MovePid(pid int, cgroupName string) error {
+	cgroupPath := fmt.Sprintf("/sys/fs/cgroup/%s", cgroupName)
+
+	// Check if cgroup exists
+	if _, err := os.Stat(cgroupPath); os.IsNotExist(err) {
+		return fmt.Errorf("cgroup %s does not exist", cgroupName)
+	}
+
+	// Move the main process to the cgroup
+	procsFile := fmt.Sprintf("%s/cgroup.procs", cgroupPath)
+	if err := os.WriteFile(procsFile, []byte(fmt.Sprintf("%d", pid)), 0644); err != nil {
+		return fmt.Errorf("failed to move pid %d to cgroup %s: %w", pid, cgroupName, err)
+	}
+
+	fmt.Printf("Moved PID %d to cgroup %s\n", pid, cgroupName)
+
+	// Find and move all descendant processes
+	descendants, err := getDescendantPids(pid)
+	if err != nil {
+		// Non-fatal - log and continue
+		fmt.Printf("Warning: failed to get descendants of PID %d: %v\n", pid, err)
+		return nil
+	}
+
+	for _, descendant := range descendants {
+		if err := os.WriteFile(procsFile, []byte(fmt.Sprintf("%d", descendant)), 0644); err != nil {
+			// Non-fatal - process may have exited
+			fmt.Printf("Warning: failed to move descendant PID %d to cgroup %s: %v\n", descendant, cgroupName, err)
+			continue
+		}
+		fmt.Printf("Moved descendant PID %d to cgroup %s\n", descendant, cgroupName)
+	}
+
+	return nil
+}
+
+// getDescendantPids returns all descendant PIDs of the given PID
+func getDescendantPids(pid int) ([]int, error) {
+	descendants := make([]int, 0)
+	visited := make(map[int]bool)
+
+	var findDescendants func(int) error
+	findDescendants = func(parentPid int) error {
+		if visited[parentPid] {
+			return nil
+		}
+		visited[parentPid] = true
+
+		// Read the children file for this PID
+		childrenFile := fmt.Sprintf("/proc/%d/task/%d/children", parentPid, parentPid)
+		data, err := os.ReadFile(childrenFile)
+		if err != nil {
+			// Process may have exited or file doesn't exist
+			return nil
+		}
+
+		// Parse PIDs from the children file
+		childPids := strings.Fields(string(data))
+		for _, pidStr := range childPids {
+			if pidStr == "" {
+				continue
+			}
+			childPid, err := strconv.Atoi(pidStr)
+			if err != nil {
+				continue
+			}
+			// Check if we've already visited this child to prevent infinite recursion
+			if visited[childPid] {
+				continue
+			}
+			descendants = append(descendants, childPid)
+			// Recursively find descendants of this child
+			if err := findDescendants(childPid); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}
+
+	if err := findDescendants(pid); err != nil {
+		return nil, err
+	}
+
+	return descendants, nil
 }

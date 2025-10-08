@@ -2,6 +2,7 @@ package system
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -171,6 +172,60 @@ func (ac *AdminChannel) Stop() error {
 	return nil
 }
 
+// Push sends a message to the admin channel with automatic nil checking and payload conversion.
+// It accepts any payload type and will convert it to map[string]interface{} via JSON marshaling if needed.
+// This is safe to call even if the admin channel is nil or not connected.
+func (ac *AdminChannel) Push(eventType string, payload interface{}) {
+	if ac == nil {
+		// Silently return if admin channel is not configured
+		return
+	}
+
+	if ac.channel == nil {
+		// Silently return if channel is not connected
+		return
+	}
+
+	// Convert payload to map[string]interface{} if needed
+	var mapPayload map[string]interface{}
+
+	if payload == nil {
+		mapPayload = make(map[string]interface{})
+	} else if m, ok := payload.(map[string]interface{}); ok {
+		// Already a map, use it directly
+		mapPayload = m
+	} else {
+		// Convert via JSON marshaling
+		data, err := json.Marshal(payload)
+		if err != nil {
+			if ac.logger != nil {
+				ac.logger.Error("Failed to marshal payload for admin channel",
+					"event_type", eventType,
+					"error", err)
+			}
+			return
+		}
+
+		if err := json.Unmarshal(data, &mapPayload); err != nil {
+			if ac.logger != nil {
+				ac.logger.Error("Failed to unmarshal payload for admin channel",
+					"event_type", eventType,
+					"error", err)
+			}
+			return
+		}
+	}
+
+	// Send the event - Phoenix library will queue if not joined and flush when joined
+	_, err := ac.channel.Push(eventType, mapPayload)
+
+	if err != nil && ac.logger != nil {
+		ac.logger.Error("Failed to push admin channel event",
+			"event_type", eventType,
+			"error", err)
+	}
+}
+
 // SendActivityEvent sends a simple activity event with a type and payload
 func (ac *AdminChannel) SendActivityEvent(eventType string, payload map[string]interface{}) {
 	if ac == nil {
@@ -195,17 +250,8 @@ func (ac *AdminChannel) SendActivityEvent(eventType string, payload map[string]i
 		"channel_joining", ac.channel.IsJoining(),
 		"socket_connected", ac.socket != nil && ac.socket.IsConnected())
 
-	// Send the event - Phoenix library will queue if not joined and flush when joined
-	_, err := ac.channel.Push(eventType, payload)
-
-	if err != nil {
-		ac.logger.Error("Failed to push admin channel event",
-			"event_type", eventType,
-			"error", err)
-		return
-	}
-
-	// These are fire-and-forget events, no need to handle responses or timeouts
+	// Use the new Push method
+	ac.Push(eventType, payload)
 }
 
 // EnrichContext adds the admin channel to the context

@@ -321,6 +321,11 @@ func (m *ActivityMonitor) suspend(inactive time.Duration) {
 		m.logger.Info("ActivityMonitor: suspending", "idle_s", inactive.Seconds())
 	}
 
+	// Flush cgroup metrics before suspend
+	if m.system.ResourceMonitor != nil {
+		m.system.ResourceMonitor.PreSuspend()
+	}
+
 	// Sync filesystem and get unfreeze function
 	start := time.Now()
 	unfreezeFunc, err := m.system.SyncOverlay(ctx)
@@ -365,6 +370,11 @@ func (m *ActivityMonitor) suspend(inactive time.Duration) {
 					m.logger.Info("Litestream restarted", "duration_s", time.Since(restartStart).Seconds())
 				}
 			})
+		}
+
+		// Reset CPU bank and flush metrics after resume
+		if m.system.ResourceMonitor != nil {
+			m.system.ResourceMonitor.PostResume()
 		}
 	}()
 

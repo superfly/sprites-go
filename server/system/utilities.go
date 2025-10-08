@@ -29,8 +29,7 @@ func (s *System) initializeUtilities() error {
 	// Initialize reaper - always create, but it will be no-op if not PID 1
 	s.Reaper = NewReaper(s.ctx)
 
-	// Initialize resource monitor - always create (no-op on non-Linux)
-	s.ResourceMonitor = NewResourceMonitor(s.ctx)
+	// Note: ResourceMonitor is initialized in services.go after AdminChannel is available
 
 	return nil
 }

@@ -295,3 +295,14 @@ func (m *Manager) SetupVerifiers() []func(context.Context) error {
 func (m *Manager) CleanupVerifiers() []func(context.Context) error {
 	return m.cleanupVerifiers
 }
+
+// GetLitestreamPid returns the PID of the litestream process, or 0 if not running
+func (m *Manager) GetLitestreamPid() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.litestream != nil {
+		return m.litestream.GetPid()
+	}
+	return 0
+}

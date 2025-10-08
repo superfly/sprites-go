@@ -66,4 +66,29 @@ func (s *System) initializeActivityMonitor() {
 	// Always create activity monitor with 30 second idle timeout
 	s.ActivityMonitor = NewActivityMonitor(s.ctx, s, 30*time.Second)
 	s.ActivityMonitor.SetAdminChannel(s.AdminChannel)
+
+	// Initialize resource monitor on Linux (no-op on other platforms)
+	s.initializeResourceMonitor()
+}
+
+// initializeResourceMonitor creates the resource monitor (Linux only)
+func (s *System) initializeResourceMonitor() {
+	// Create a callback that safely forwards metrics to the admin channel
+	// The admin channel may not be connected yet, but will be during Boot()
+	metricsCallback := func(metrics interface{}) {
+		// The new Push method handles nil checking and payload conversion
+		s.AdminChannel.Push("metrics", metrics)
+	}
+
+	// This will only compile on Linux due to build tags in resource_monitor files
+	resourceMonitor, err := NewResourceMonitor(s.ctx, metricsCallback)
+	if err != nil {
+		s.logger.Warn("Failed to initialize resource monitor", "error", err)
+		// Create a no-op resource monitor to prevent nil pointer dereferences
+		// This ensures all ResourceMonitor methods can be called safely
+		s.ResourceMonitor = &ResourceMonitor{}
+		return
+	}
+	s.ResourceMonitor = resourceMonitor
+	s.logger.Info("Resource monitor initialized")
 }

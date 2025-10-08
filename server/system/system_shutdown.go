@@ -111,13 +111,16 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 	adminErr := s.AdminChannel.Stop()
 	reaperErr := s.Reaper.Stop(time.Second)
 
+	// Stop resource monitor
+	if s.ResourceMonitor != nil {
+		s.ResourceMonitor.Stop()
+	}
+
 	if adminErr != nil || reaperErr != nil {
 		s.logger.Warn("Phase 6 failed: utilities shutdown", "adminError", adminErr, "reaperError", reaperErr)
 	} else {
 		s.logger.Info("Phase 6 complete: Utilities stopped")
 	}
-
-	// Resource monitor stops automatically when context is cancelled
 
 	// Signal shutdown is complete
 	close(s.shutdownCompleteCh)

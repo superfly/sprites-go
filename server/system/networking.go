@@ -38,6 +38,7 @@ func (s *System) initializeAdminChannel() error {
 	}
 
 	// Always create admin channel struct, even if not configured
+	// This ensures AdminChannel is never nil and can safely receive Push calls
 	s.AdminChannel = &AdminChannel{
 		url:    channelURL,
 		token:  s.config.APIToken,
@@ -45,7 +46,7 @@ func (s *System) initializeAdminChannel() error {
 	}
 
 	if s.config.APIToken == "" {
-		s.logger.Info("Admin channel disabled (no API token)")
+		s.logger.Info("Admin channel disabled (no API token) - messages will be discarded")
 	}
 
 	return nil

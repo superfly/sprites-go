@@ -838,6 +838,14 @@ func (j *JuiceFS) GetMountPath() string {
 	return filepath.Join(j.config.BaseDir, "data")
 }
 
+// GetPid returns the PID of the JuiceFS mount process, or 0 if not running
+func (j *JuiceFS) GetPid() int {
+	if j.mountCmd != nil && j.mountCmd.Process != nil {
+		return j.mountCmd.Process.Pid
+	}
+	return 0
+}
+
 // WhenReady waits until JuiceFS is mounted and ready or returns when context is cancelled.
 // This uses a channel-based approach without polling.
 func (j *JuiceFS) WhenReady(ctx context.Context) error {

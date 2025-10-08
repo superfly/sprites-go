@@ -30,6 +30,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Setup cgroups hierarchy BEFORE anything else
+	// This must run first so containers can be placed in the proper cgroups
+	if err := system.SetupCgroups(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to setup cgroups: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Ensure /dev/fly_vol exists BEFORE creating system
 	// Temporary: just create directory instead of mounting
 	if err := os.MkdirAll("/dev/fly_vol", 0755); err != nil {

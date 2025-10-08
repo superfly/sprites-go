@@ -35,9 +35,6 @@ func (s *System) Boot(ctx context.Context) error {
 		s.logger.Info("Admin channel started")
 	}
 
-	s.ResourceMonitor.Start(s.ctx)
-	s.logger.Info("Resource monitor started")
-
 	// Phase 2: Start network services early (can accept connections while rest boots)
 	s.logger.Info("Phase 2: Starting network services")
 
@@ -82,6 +79,15 @@ func (s *System) Boot(ctx context.Context) error {
 	}
 	s.logger.Info("Database manager started")
 
+	// Move litestream process to its cgroup
+	if litestreamPid := s.DBManager.GetLitestreamPid(); litestreamPid > 0 {
+		if err := MovePid(litestreamPid, "litestream"); err != nil {
+			s.logger.Warn("Failed to move litestream process to cgroup", "error", err, "pid", litestreamPid)
+		} else {
+			s.logger.Info("Moved litestream process to cgroup", "pid", litestreamPid)
+		}
+	}
+
 	// JuiceFS (depends on DB)
 	if s.config.JuiceFSDataPath != "" {
 		s.logger.Info("Starting JuiceFS", "juiceFS_ptr", fmt.Sprintf("%p", s.JuiceFS))
@@ -90,6 +96,15 @@ func (s *System) Boot(ctx context.Context) error {
 			return fmt.Errorf("failed to start JuiceFS: %w", err)
 		}
 		s.logger.Info("JuiceFS started and verified ready")
+
+		// Move juicefs process to its cgroup
+		if juicefsPid := s.JuiceFS.GetPid(); juicefsPid > 0 {
+			if err := MovePid(juicefsPid, "juicefs"); err != nil {
+				s.logger.Warn("Failed to move juicefs process to cgroup", "error", err, "pid", juicefsPid)
+			} else {
+				s.logger.Info("Moved juicefs process to cgroup", "pid", juicefsPid)
+			}
+		}
 
 		// Special wait point after JuiceFS is ready
 		if os.Getenv("WAIT_FOR_JUICEFS_READY") == "true" {

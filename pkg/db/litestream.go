@@ -284,6 +284,17 @@ func (ls *Litestream) Wait() error {
 	}
 }
 
+// GetPid returns the PID of the litestream process, or 0 if not running
+func (ls *Litestream) GetPid() int {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+
+	if ls.cmd != nil && ls.cmd.Process != nil {
+		return ls.cmd.Process.Pid
+	}
+	return 0
+}
+
 // litestreamLogger adapts litestream output to slog
 type litestreamLogger struct {
 	logger *slog.Logger
