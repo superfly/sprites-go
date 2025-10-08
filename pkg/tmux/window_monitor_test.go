@@ -3,7 +3,6 @@ package tmux
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -67,10 +66,8 @@ func TestWindowMonitorBasic(t *testing.T) {
 
 	// Don't override PATH - let the system find tmux naturally
 
-	// Create test logger
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
+	// Use discard logger to suppress output
+	logger := tap.NewDiscardLogger()
 
 	// Create monitor session
 	createTmuxSession(t, socketPath, "test-monitor")
@@ -176,9 +173,8 @@ func TestWindowMonitorMultipleSessions(t *testing.T) {
 	socketPath := createTestSocket(t)
 	defer killTmuxServer(socketPath)
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
+	// Use discard logger to suppress output
+	logger := tap.NewDiscardLogger()
 
 	// Create multiple sprite-exec sessions (monitor will create its own session)
 	sessions := []string{
@@ -250,9 +246,8 @@ func TestWindowMonitorNewWindowDetection(t *testing.T) {
 	socketPath := createTestSocket(t)
 	defer killTmuxServer(socketPath)
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
+	// Use discard logger to suppress output
+	logger := tap.NewDiscardLogger()
 
 	// Create monitor session
 	createTmuxSession(t, socketPath, "test-monitor")
@@ -309,9 +304,8 @@ func TestWindowMonitorWindowClose(t *testing.T) {
 	socketPath := createTestSocket(t)
 	defer killTmuxServer(socketPath)
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
+	// Use discard logger to suppress output
+	logger := tap.NewDiscardLogger()
 
 	// Create sessions
 	createTmuxSession(t, socketPath, "test-monitor")

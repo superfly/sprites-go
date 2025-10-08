@@ -4,28 +4,11 @@
 package overlay
 
 import (
-	"context"
 	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
 )
-
-// CleanupTestOverlays unmounts any test overlay mounts and detaches loop devices
-// Call this in a defer at the start of tests that manage mounts
-func CleanupTestOverlays(t *testing.T, m *Manager) {
-	t.Helper()
-
-	if m == nil {
-		return
-	}
-
-	// Try to unmount if mounted
-	_ = m.Unmount(context.Background())
-
-	// Verify cleanup
-	VerifyNoTestOverlays(t, m)
-}
 
 // VerifyNoTestOverlays checks that no test-related overlays or loop devices remain
 // This should be called after cleanup to ensure no resources leaked

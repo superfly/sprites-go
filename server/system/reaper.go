@@ -12,6 +12,13 @@ import (
 	"github.com/superfly/sprite-env/pkg/tap"
 )
 
+var (
+	// Global singleton reaper - only one per process
+	globalReaper     *Reaper
+	globalReaperOnce sync.Once
+	globalReaperMu   sync.Mutex
+)
+
 // Reaper handles reaping of zombie processes
 // When running as PID 1, it reaps all orphaned processes in the system
 // When not PID 1, it reaps direct children to prevent zombies
@@ -31,17 +38,26 @@ type Reaper struct {
 	startOnce sync.Once
 }
 
-// NewReaper creates a new Reaper instance
+// NewReaper returns the global singleton Reaper instance
+// Only one Reaper exists per process to avoid SIGCHLD handler conflicts
 func NewReaper(ctx context.Context) *Reaper {
-	ctx, cancel := context.WithCancel(ctx)
-	return &Reaper{
-		logger:    tap.Logger(ctx),
-		ctx:       ctx,
-		cancel:    cancel,
-		done:      make(chan struct{}),
-		events:    make(map[int]time.Time),
-		listeners: make([]chan int, 0),
-	}
+	globalReaperMu.Lock()
+	defer globalReaperMu.Unlock()
+
+	// Create global reaper once
+	globalReaperOnce.Do(func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		globalReaper = &Reaper{
+			logger:    tap.Logger(ctx),
+			ctx:       ctx,
+			cancel:    cancel,
+			done:      make(chan struct{}),
+			events:    make(map[int]time.Time),
+			listeners: make([]chan int, 0),
+		}
+	})
+
+	return globalReaper
 }
 
 // Start starts the zombie reaper
@@ -53,6 +69,7 @@ func NewReaper(ctx context.Context) *Reaper {
 // - The goroutine listens for context cancellation and exits cleanly
 // - Signal handler is properly cleaned up with signal.Stop()
 // - Can only be started once to prevent channel panics
+// - Uses global singleton so only one SIGCHLD handler exists per process
 func (r *Reaper) Start() {
 	r.startOnce.Do(func() {
 		isPID1 := os.Getpid() == 1

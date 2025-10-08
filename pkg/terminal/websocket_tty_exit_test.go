@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -35,11 +36,9 @@ func (r *blockingStdinReader) Read(p []byte) (int, error) {
 	r.mu.Unlock()
 
 	// Block until we get data or are unblocked
-	select {
-	case data := <-r.ch:
-		n := copy(p, data)
-		return n, nil
-	}
+	data := <-r.ch
+	n := copy(p, data)
+	return n, nil
 }
 
 func (r *blockingStdinReader) unblock() {
@@ -53,8 +52,58 @@ func (r *blockingStdinReader) unblock() {
 // even when stdin is attached and blocking. This test would hang indefinitely
 // without the adapter.Close() fix.
 func TestWebSocketTTYExitWithBlockingStdin(t *testing.T) {
-	// Skip this test for now - it's having issues in the test environment
-	t.Skip("Skipping blocking stdin test - environment issues")
+	// Create a quick-exiting command so we don't actually need input
+	session := NewSession(
+		WithCommand("echo", "test complete"),
+		WithTTY(true),
+	)
+
+	handler := NewWebSocketHandler(session)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := handler.Handle(w, r); err != nil {
+			t.Logf("handler error (may be normal): %v", err)
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	req, err := http.NewRequest("GET", wsURL, nil)
+	require.NoError(t, err)
+
+	cmd := Command(req, "tty-blocking-stdin")
+
+	// Create a blocking stdin reader that will never provide data
+	blockingReader := newBlockingStdinReader()
+	defer blockingReader.unblock() // Ensure cleanup
+
+	cmd.Stdin = blockingReader
+	cmd.Tty = true
+
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+
+	// Run with timeout to catch hangs
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Run()
+	}()
+
+	select {
+	case err := <-done:
+		// The test passes if we complete without hanging
+		// The command should exit normally even though stdin is blocking
+		if err != nil {
+			t.Logf("Command completed with error (may be normal for websocket close): %v", err)
+		}
+		// Verify we got output
+		output := stdout.String()
+		if !strings.Contains(output, "test complete") {
+			t.Errorf("Expected 'test complete' in output, got: %q", output)
+		}
+		t.Log("Successfully completed without hanging on blocking stdin")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Test hung - stdin goroutine blocked and adapter.Close() did not unblock it")
+	}
 }
 
 // TestWebSocketTTYInteractiveExit tests a more realistic scenario where

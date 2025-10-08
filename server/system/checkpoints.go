@@ -175,38 +175,6 @@ func (s *System) RestoreWithStream(ctx context.Context, checkpointID string, str
 	s.restoringInProgress.Store(true)
 	defer s.restoringInProgress.Store(false)
 
-	// Shutdown container components
-	sendStream(streamCh, api.StreamMessage{
-		Type: "info",
-		Data: "Shutting down container components...",
-		Time: time.Now(),
-	})
-	if err := s.ShutdownContainer(ctx); err != nil {
-		s.logger.Error("Failed to shutdown container for restore", "error", err)
-		sendStream(streamCh, api.StreamMessage{
-			Type: "warning",
-			Data: fmt.Sprintf("Failed to shutdown container components: %v", err),
-			Time: time.Now(),
-		})
-		// Continue with restore even if container shutdown fails
-	} else {
-		sendStream(streamCh, api.StreamMessage{
-			Type: "info",
-			Data: "Container components stopped successfully",
-			Time: time.Now(),
-		})
-	}
-
-	// Send notification to admin channel that restore is starting
-	if s.AdminChannel != nil {
-		s.AdminChannel.SendActivityEvent("restore_started", map[string]interface{}{
-			"timestamp":     time.Now().Unix(),
-			"checkpoint_id": checkpointID,
-		})
-	}
-
-	// Perform Restore via CheckpointManager with streaming notifications
-	sendStream(streamCh, api.StreamMessage{Type: "info", Data: "Shutting down container...", Time: time.Now()})
 	sendStream(streamCh, api.StreamMessage{Type: "info", Data: fmt.Sprintf("Restoring from checkpoint %s...", checkpointID), Time: time.Now()})
 	s.logger.Info("Restoring from checkpoint", "checkpointID", checkpointID)
 

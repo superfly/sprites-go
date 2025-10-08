@@ -50,6 +50,7 @@ type Config struct {
 	OverlayLowerPath     string   // Path to lower directory (read-only base layer) - deprecated
 	OverlayLowerPaths    []string // Paths to lower directories (read-only base layers)
 	OverlayTargetPath    string   // Where to mount the final overlay
+	CheckpointMountPath  string   // Where to mount checkpoints (default: "/.sprite/checkpoints")
 	OverlaySkipOverlayFS bool     // Skip overlayfs, only mount loopback
 
 	// Proxy configuration
@@ -221,6 +222,7 @@ func loadConfigFile(filename string, config *Config) error {
 		OverlayLowerPath     string   `json:"overlay_lower_path"`
 		OverlayLowerPaths    []string `json:"overlay_lower_paths"`
 		OverlayTargetPath    string   `json:"overlay_target_path"`
+		CheckpointMountPath  string   `json:"checkpoint_mount_path"`
 		OverlaySkipOverlayFS bool     `json:"overlay_skip_overlayfs"`
 
 		// Proxy configuration
@@ -267,6 +269,7 @@ func loadConfigFile(filename string, config *Config) error {
 	config.OverlayLowerPath = fileConfig.OverlayLowerPath
 	config.OverlayLowerPaths = fileConfig.OverlayLowerPaths
 	config.OverlayTargetPath = fileConfig.OverlayTargetPath
+	config.CheckpointMountPath = fileConfig.CheckpointMountPath
 	config.OverlaySkipOverlayFS = fileConfig.OverlaySkipOverlayFS
 
 	config.ProxyLocalhostIPv4 = fileConfig.ProxyLocalhostIPv4
@@ -328,6 +331,9 @@ func applyEnvironmentVariables(config *Config) {
 	}
 	if overlayTarget := os.Getenv("SPRITE_OVERLAY_TARGET_PATH"); overlayTarget != "" {
 		config.OverlayTargetPath = overlayTarget
+	}
+	if checkpointMountPath := os.Getenv("SPRITE_CHECKPOINT_MOUNT_PATH"); checkpointMountPath != "" {
+		config.CheckpointMountPath = checkpointMountPath
 	}
 	if skipOverlayFS := os.Getenv("SPRITE_OVERLAY_SKIP_OVERLAYFS"); skipOverlayFS == "true" {
 		config.OverlaySkipOverlayFS = true

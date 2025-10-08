@@ -246,7 +246,7 @@ func TestRealPTYCommand(t *testing.T) {
 	// Test with a real PTY
 	ptmx, tty, err := creackpty.Open()
 	if err != nil {
-		t.Skip("PTY not supported on this system")
+		t.Fatal("PTY failed to open - test environment is misconfigured: " + err.Error())
 	}
 	defer ptmx.Close()
 
@@ -279,7 +279,7 @@ func TestInteractivePTYCommand(t *testing.T) {
 	// Test interactive PTY command
 	ptmx, tty, err := creackpty.Open()
 	if err != nil {
-		t.Skip("PTY not supported on this system")
+		t.Fatal("PTY failed to open - test environment is misconfigured: " + err.Error())
 	}
 	defer ptmx.Close()
 
@@ -323,7 +323,7 @@ func TestPTYExitCodeZero(t *testing.T) {
 	// Test PTY command with exit code 0
 	ptmx, tty, err := creackpty.Open()
 	if err != nil {
-		t.Skip("PTY not supported on this system")
+		t.Fatal("PTY failed to open - test environment is misconfigured: " + err.Error())
 	}
 	defer ptmx.Close()
 
@@ -355,7 +355,7 @@ func TestPTYExitCodeNonZero(t *testing.T) {
 	// Test PTY command with non-zero exit code
 	ptmx, tty, err := creackpty.Open()
 	if err != nil {
-		t.Skip("PTY not supported on this system")
+		t.Fatal("PTY failed to open - test environment is misconfigured: " + err.Error())
 	}
 	defer ptmx.Close()
 
@@ -388,7 +388,7 @@ func TestPTYExitCodeWithStderr(t *testing.T) {
 	// Test PTY command that writes to stderr and exits with non-zero code
 	ptmx, tty, err := creackpty.Open()
 	if err != nil {
-		t.Skip("PTY not supported on this system")
+		t.Fatal("PTY failed to open - test environment is misconfigured: " + err.Error())
 	}
 	defer ptmx.Close()
 

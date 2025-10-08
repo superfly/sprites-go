@@ -2,7 +2,6 @@ package terminal
 
 import (
 	"context"
-	"log/slog"
 	"strconv"
 	"strings"
 	"testing"
@@ -12,7 +11,7 @@ import (
 
 func TestTMUXManager_CreateSession(t *testing.T) {
 	ctx := context.Background()
-	ctx = tap.WithLogger(ctx, slog.Default())
+	ctx = tap.WithLogger(ctx, tap.NewDiscardLogger())
 	tm := NewTMUXManager(ctx)
 
 	// Test creating a new session
@@ -51,7 +50,7 @@ func TestTMUXManager_CreateSession(t *testing.T) {
 
 func TestTMUXManager_AttachSession(t *testing.T) {
 	ctx := context.Background()
-	ctx = tap.WithLogger(ctx, slog.Default())
+	ctx = tap.WithLogger(ctx, tap.NewDiscardLogger())
 	tm := NewTMUXManager(ctx)
 
 	// Test attaching to a session
@@ -79,7 +78,7 @@ func TestTMUXManager_AttachSession(t *testing.T) {
 
 func TestTMUXManager_SessionExists(t *testing.T) {
 	ctx := context.Background()
-	ctx = tap.WithLogger(ctx, slog.Default())
+	ctx = tap.WithLogger(ctx, tap.NewDiscardLogger())
 	tm := NewTMUXManager(ctx)
 
 	// Test checking for a non-existent session
@@ -92,7 +91,7 @@ func TestTMUXManager_SessionExists(t *testing.T) {
 
 func TestTMUXManager_ListSessions(t *testing.T) {
 	ctx := context.Background()
-	ctx = tap.WithLogger(ctx, slog.Default())
+	ctx = tap.WithLogger(ctx, tap.NewDiscardLogger())
 	tm := NewTMUXManager(ctx)
 
 	// This test just verifies the function doesn't panic
@@ -109,7 +108,7 @@ func TestTMUXManager_ListSessions(t *testing.T) {
 
 func TestTMUXManager_CreateSessionWithControlMode(t *testing.T) {
 	ctx := context.Background()
-	ctx = tap.WithLogger(ctx, slog.Default())
+	ctx = tap.WithLogger(ctx, tap.NewDiscardLogger())
 	tm := NewTMUXManager(ctx)
 
 	// Test creating a session with control mode
@@ -139,7 +138,7 @@ func TestTMUXManager_CreateSessionWithControlMode(t *testing.T) {
 
 func TestTMUXManager_AttachSessionWithControlMode(t *testing.T) {
 	ctx := context.Background()
-	ctx = tap.WithLogger(ctx, slog.Default())
+	ctx = tap.WithLogger(ctx, tap.NewDiscardLogger())
 	tm := NewTMUXManager(ctx)
 
 	// Test attaching with control mode

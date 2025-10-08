@@ -77,7 +77,63 @@ func (m *Manager) WhenReady(ctx context.Context) error {
 	}
 }
 
+// PrepareAndMount ensures the image exists, mounts it, and handles corruption recovery
+// This is the high-level function that should be called by system code
+func (m *Manager) PrepareAndMount(ctx context.Context) error {
+	// Ensure image exists
+	if _, err := os.Stat(m.imagePath); os.IsNotExist(err) {
+		m.logger.Warn("Overlay image does not exist, creating it", "path", m.imagePath)
+		if err := m.EnsureImage(); err != nil {
+			return fmt.Errorf("failed to create overlay image: %w", err)
+		}
+	}
+
+	// Try to mount
+	err := m.Mount(ctx)
+	if err == nil {
+		return nil
+	}
+
+	// Check if it's a corruption error
+	errStr := err.Error()
+	if strings.Contains(errStr, "I/O error") || strings.Contains(errStr, "can't read superblock") {
+		m.logger.Error("Mount failed with corruption indicators, attempting recovery", "error", err)
+
+		// Backup the corrupted image
+		timestamp := time.Now().Format("20060102-150405")
+		backupPath := fmt.Sprintf("%s.corrupt-%s.bak", strings.TrimSuffix(m.imagePath, ".img"), timestamp)
+		m.logger.Warn("Backing up corrupted image", "from", m.imagePath, "to", backupPath)
+
+		if backupErr := os.Rename(m.imagePath, backupPath); backupErr != nil {
+			m.logger.Warn("Failed to backup corrupted image, attempting removal", "error", backupErr)
+			if removeErr := os.Remove(m.imagePath); removeErr != nil {
+				return fmt.Errorf("failed to remove corrupted image: %w", removeErr)
+			}
+		} else {
+			m.logger.Info("Corrupted image backed up successfully", "backupPath", backupPath)
+		}
+
+		// Recreate the image
+		m.logger.Info("Recreating overlay image after corruption")
+		if createErr := m.EnsureImage(); createErr != nil {
+			return fmt.Errorf("failed to recreate overlay image after corruption: %w", createErr)
+		}
+
+		// Retry mount
+		m.logger.Info("Retrying mount after recreating image")
+		if retryErr := m.Mount(ctx); retryErr != nil {
+			return fmt.Errorf("mount failed after recreation: %w", retryErr)
+		}
+
+		return nil
+	}
+
+	// Not a corruption error, return original error
+	return err
+}
+
 // Mount mounts the overlay image
+// The image must already exist - call PrepareAndMount() or EnsureImage() first
 func (m *Manager) Mount(ctx context.Context) error {
 	// Ensure mount directory exists
 	if err := os.MkdirAll(m.mountPath, 0755); err != nil {
@@ -86,15 +142,7 @@ func (m *Manager) Mount(ctx context.Context) error {
 
 	// Check if image exists and is accessible before trying to mount
 	if _, err := os.Stat(m.imagePath); err != nil {
-		if os.IsNotExist(err) {
-			m.logger.Warn("Overlay image does not exist, will create it", "path", m.imagePath)
-			if err := m.EnsureImage(); err != nil {
-				return fmt.Errorf("failed to create overlay image: %w", err)
-			}
-		} else {
-			// If we can't even stat the file, the underlying filesystem might not be ready
-			return fmt.Errorf("cannot access overlay image at %s: %w", m.imagePath, err)
-		}
+		return fmt.Errorf("overlay image does not exist at %s: %w (call EnsureImage() first)", m.imagePath, err)
 	}
 
 	// Check if already mounted
@@ -123,11 +171,6 @@ func (m *Manager) Mount(ctx context.Context) error {
 		return err
 	}
 
-	// Ensure image exists
-	if err := m.EnsureImage(); err != nil {
-		return fmt.Errorf("failed to ensure overlay image: %w", err)
-	}
-
 	// Try to mount the image (no artificial timeout)
 	m.logger.Info("Mounting root overlay", "mountPath", m.mountPath)
 	m.logger.Debug("Source image", "path", m.imagePath)
@@ -145,54 +188,24 @@ func (m *Manager) Mount(ctx context.Context) error {
 	m.loopDevice = loopDevice
 	m.logger.Debug("Created loop device", "device", m.loopDevice)
 
+	m.logger.Info("Mounting loop device to overlay mount path", "device", m.loopDevice, "target", m.mountPath, "options", "discard")
 	cmd := exec.CommandContext(mountCtx, "mount", "-o", "discard", m.loopDevice, m.mountPath)
 	mountStart := time.Now()
 	mountOutput, err := cmd.CombinedOutput()
 	mountDuration := time.Since(mountStart)
 
 	if mountCtx.Err() == context.DeadlineExceeded {
-		m.logger.Error("Mount command timed out after 10 seconds, likely due to I/O error", "duration", mountDuration)
+		m.logger.Error("Loop device mount command timed out after 10 seconds, likely due to I/O error", "duration", mountDuration, "device", m.loopDevice, "target", m.mountPath)
 		err = fmt.Errorf("mount timeout")
 	}
 
-	// Check for I/O errors which indicate a corrupted image
-	if err != nil && (strings.Contains(string(mountOutput), "I/O error") ||
-		strings.Contains(string(mountOutput), "can't read superblock")) {
-		m.logger.Error("Mount failed with corruption indicators",
-			"error", err,
-			"duration", mountDuration,
-			"hasIOError", strings.Contains(string(mountOutput), "I/O error"),
-			"hasSuperblockError", strings.Contains(string(mountOutput), "can't read superblock"))
-		if len(mountOutput) > 0 {
-			m.logger.Debug("Mount output", "output", string(mountOutput))
+	if err != nil {
+		m.logger.Error("Loop device mount failed", "error", err, "output", string(mountOutput), "duration", mountDuration, "device", m.loopDevice, "target", m.mountPath)
+		// Probe to see if mount actually succeeded despite error
+		if m.isMounted() {
+			m.logger.Warn("Loop device mount reported error but mount is present in /proc/mounts - treating as success", "device", m.loopDevice, "target", m.mountPath)
+			err = nil
 		}
-
-		// Backup the corrupted image instead of deleting it
-		timestamp := time.Now().Format("20060102-150405")
-		backupPath := fmt.Sprintf("%s.corrupt-%s.bak", strings.TrimSuffix(m.imagePath, ".img"), timestamp)
-		m.logger.Error("Corrupted overlay image detected; performing last-resort recovery by creating a new image", "from", m.imagePath, "backupPath", backupPath)
-		if backupErr := os.Rename(m.imagePath, backupPath); backupErr != nil {
-			m.logger.Warn("Failed to backup corrupted image, attempting removal", "error", backupErr)
-			if removeErr := os.Remove(m.imagePath); removeErr != nil {
-				m.logger.Error("Failed to remove corrupted image", "error", removeErr)
-			}
-		} else {
-			m.logger.Info("Corrupted image backed up successfully", "backupPath", backupPath)
-		}
-
-		// Recreate the image
-		m.logger.Error("Recreating overlay image as last-resort recovery...")
-		if createErr := m.EnsureImage(); createErr != nil {
-			return fmt.Errorf("failed to recreate overlay image after I/O error: %w", createErr)
-		}
-
-		// Try mounting again (no artificial timeout)
-		m.logger.Info("Retrying mount after recreating image...")
-		m.logger.Debug("Starting retry mount attempt")
-
-		// Mount the image directly (discard disabled)
-		cmd := exec.CommandContext(ctx, "mount", "-o", "loop", m.imagePath, m.mountPath)
-		mountOutput, err = cmd.CombinedOutput()
 	}
 
 	if err != nil {
@@ -215,11 +228,21 @@ func (m *Manager) Mount(ctx context.Context) error {
 
 	// Now mount the overlayfs
 	err = m.mountOverlayFS(ctx)
+	if err != nil {
+		// Cleanup on failure: unmount the loop device
+		m.logger.Error("OverlayFS mount failed, cleaning up loop device mount", "error", err)
+		if unmountErr := m.Unmount(ctx); unmountErr != nil {
+			m.logger.Error("Failed to cleanup after overlayfs mount failure", "error", unmountErr)
+		}
+		// Signal mount failed
+		m.signalMountReady(err)
+		return fmt.Errorf("failed to mount overlayfs: %w", err)
+	}
 
-	// Signal mount is ready (with error if any)
-	m.signalMountReady(err)
+	// Signal mount is ready
+	m.signalMountReady(nil)
 
-	return err
+	return nil
 }
 
 // mountOverlayFS creates and mounts the overlay filesystem
@@ -306,21 +329,32 @@ func (m *Manager) mountOverlayFS(ctx context.Context) error {
 		"upper", upperDir,
 		"work", workDir)
 
-	mountOptions := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s",
-		lowerDirs, upperDir, workDir)
+	m.logger.Info("Mounting overlayfs using syscall", "target", m.overlayTargetPath, "lowerdir", lowerDirs, "upperdir", upperDir, "workdir", workDir)
 
-	cmd := exec.CommandContext(ctx, "mount", "-t", "overlay", "overlay",
-		"-o", mountOptions, m.overlayTargetPath)
+	mountStart := time.Now()
+	err := mountOverlayFS(m.overlayTargetPath, lowerDirs, upperDir, workDir)
+	mountDuration := time.Since(mountStart)
 
-	if output, err := cmd.CombinedOutput(); err != nil {
-		m.logger.Error("OverlayFS mount failed",
+	if err != nil {
+		m.logger.Error("OverlayFS mount syscall failed",
 			"error", err,
-			"output", string(output),
+			"duration", mountDuration,
 			"lowerdir", lowerDirs,
 			"upperdir", upperDir,
 			"workdir", workDir,
 			"target", m.overlayTargetPath)
-		return fmt.Errorf("failed to mount overlayfs: %w, output: %s", err, string(output))
+
+		// Probe to see if mount actually succeeded despite error
+		if m.isOverlayFSMounted() {
+			m.logger.Warn("OverlayFS mount reported error but mount is present - treating as success", "target", m.overlayTargetPath)
+			err = nil
+		} else {
+			// Mount truly failed - check if directories are still accessible
+			m.probeOverlayFSPaths(lowerDirs, upperDir, workDir)
+			return fmt.Errorf("failed to mount overlayfs: %w", err)
+		}
+	} else {
+		m.logger.Info("OverlayFS mount syscall completed successfully", "duration", mountDuration)
 	}
 
 	m.logger.Info("OverlayFS mounted successfully", "path", m.overlayTargetPath)
@@ -407,6 +441,7 @@ func (m *Manager) Unmount(ctx context.Context) error {
 	}
 
 	// Detach loop device now that the mount is gone
+	// The detachLoopDevice function will wait for the kernel to release all references
 	if m.loopDevice != "" {
 		if err := detachLoopDevice(m.loopDevice); err != nil {
 			return fmt.Errorf("failed to detach loop device %s: %w", m.loopDevice, err)
@@ -544,6 +579,48 @@ func (m *Manager) sync(ctx context.Context) error {
 
 	m.logger.Info("Filesystem sync completed", "path", m.mountPath, "duration", time.Since(syncStart))
 	return nil
+}
+
+// probeOverlayFSPaths checks if overlay paths are accessible after mount failure
+func (m *Manager) probeOverlayFSPaths(lowerDirs, upperDir, workDir string) {
+	m.logger.Info("Probing overlayFS paths after mount failure")
+
+	// Check each lower directory
+	for i, lowerPath := range strings.Split(lowerDirs, ":") {
+		if info, err := os.Stat(lowerPath); err != nil {
+			m.logger.Error("Lower directory probe failed", "index", i, "path", lowerPath, "error", err)
+		} else {
+			m.logger.Info("Lower directory accessible", "index", i, "path", lowerPath, "isDir", info.IsDir())
+		}
+	}
+
+	// Check upper directory
+	if info, err := os.Stat(upperDir); err != nil {
+		m.logger.Error("Upper directory probe failed", "path", upperDir, "error", err)
+	} else {
+		m.logger.Info("Upper directory accessible", "path", upperDir, "isDir", info.IsDir())
+	}
+
+	// Check work directory
+	if info, err := os.Stat(workDir); err != nil {
+		m.logger.Error("Work directory probe failed", "path", workDir, "error", err)
+	} else {
+		m.logger.Info("Work directory accessible", "path", workDir, "isDir", info.IsDir())
+	}
+
+	// Check target directory
+	if info, err := os.Stat(m.overlayTargetPath); err != nil {
+		m.logger.Error("Target directory probe failed", "path", m.overlayTargetPath, "error", err)
+	} else {
+		m.logger.Info("Target directory accessible", "path", m.overlayTargetPath, "isDir", info.IsDir())
+	}
+
+	// Check /proc/mounts to see what is mounted
+	if mountsData, err := os.ReadFile("/proc/mounts"); err != nil {
+		m.logger.Error("Failed to read /proc/mounts", "error", err)
+	} else {
+		m.logger.Info("Current /proc/mounts content", "mounts", string(mountsData))
+	}
 }
 
 // signalMountReady signals that the mount is ready or stores an error

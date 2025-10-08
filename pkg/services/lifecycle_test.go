@@ -3,7 +3,6 @@ package services
 import (
 	"context"
 	"os"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -131,13 +130,10 @@ func TestStopServiceReal(t *testing.T) {
 }
 
 func TestForceKillReal(t *testing.T) {
-	// Skip in Docker environment as signal handling is unreliable
+	// This test requires specific signal handling that may not work in all environments
+	// Skip in Docker where signal handling is unreliable for this specific test
 	if _, err := os.Stat("/.dockerenv"); err == nil {
 		t.Skip("Skipping force kill test in Docker environment - signal handling is unreliable")
-	}
-	// Skip on Darwin as signal handling behaves differently
-	if runtime.GOOS == "darwin" {
-		t.Skip("Skipping force kill test on Darwin due to signal handling differences")
 	}
 	// Create temporary directory for test database
 	tmpDir, err := os.MkdirTemp("", "services-lifecycle-test-*")

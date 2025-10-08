@@ -3,7 +3,6 @@ package terminal
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -17,7 +16,7 @@ import (
 func TestGetSessionPanePIDs(t *testing.T) {
 	// Create a test context with logger
 	ctx := context.Background()
-	ctx = tap.WithLogger(ctx, slog.Default())
+	ctx = tap.WithLogger(ctx, tap.NewDiscardLogger())
 	tm := NewTMUXManager(ctx)
 
 	// Test with non-existent session - this should fail when trying to run tmux command
@@ -45,28 +44,34 @@ func TestGetSessionPanePIDs(t *testing.T) {
 
 // TestGetSessionPanePIDsIntegration tests the GetSessionPanePIDs method with real tmux
 func TestGetSessionPanePIDsIntegration(t *testing.T) {
-	// Skip if tmux is not available
+	// In Docker test environment, tmux must be available
 	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not found in PATH")
+		t.Fatal("tmux not found in PATH - test environment is misconfigured")
 	}
 
-	// Skip if we're not in an environment that supports the full tmux setup
+	// In Docker test environment, sprite tmux must be set up
 	if _, err := os.Stat("/.sprite/bin/tmux"); err != nil {
-		t.Skip("Sprite tmux environment not available - skipping integration test")
+		t.Fatal("Sprite tmux environment not available - test environment is misconfigured")
 	}
 
 	// Create a test context with logger
 	ctx := context.Background()
-	ctx = tap.WithLogger(ctx, slog.Default())
+	ctx = tap.WithLogger(ctx, tap.NewDiscardLogger())
 	tm := NewTMUXManager(ctx)
 
-	// Create a test session
-	sessionID, cmd, args := tm.CreateSession("/bin/sh", []string{"-c", "sleep 300"}, false)
+	// Get a session ID and create a detached session directly
+	// We can't use CreateSession because it creates an attached session
+	sessionID := "test-pane-0"
+	sessionName := fmt.Sprintf("sprite-exec-%s", sessionID)
 
-	// Start the tmux session
-	tmuxCmd := exec.Command(cmd, args...)
-	if err := tmuxCmd.Start(); err != nil {
-		t.Fatalf("Failed to start tmux session: %v", err)
+	// Create detached session using tmux directly
+	tmuxCmd := exec.Command("/.sprite/bin/tmux",
+		"-f", "/.sprite/etc/tmux.conf",
+		"-S", "/.sprite/tmp/exec-tmux",
+		"new-session", "-d", "-s", sessionName,
+		"/bin/sh", "-c", "sleep 300")
+	if err := tmuxCmd.Run(); err != nil {
+		t.Fatalf("Failed to create detached tmux session: %v", err)
 	}
 	defer func() {
 		// Clean up: kill the session
@@ -76,9 +81,24 @@ func TestGetSessionPanePIDsIntegration(t *testing.T) {
 	// Give tmux time to initialize
 	time.Sleep(200 * time.Millisecond)
 
+	// Verify the session exists before trying to get pane PIDs
+	if !tm.SessionExists(sessionID) {
+		t.Fatalf("Session %s does not exist after creation", sessionID)
+	}
+
 	t.Run("SinglePane", func(t *testing.T) {
 		pids, err := tm.GetSessionPanePIDs(sessionID)
 		if err != nil {
+			// Try to get more info about what went wrong
+			sessionName := fmt.Sprintf("sprite-exec-%s", sessionID)
+			listCmd := exec.Command("/.sprite/bin/tmux", "-S", "/.sprite/tmp/exec-tmux", "list-sessions")
+			listOut, _ := listCmd.CombinedOutput()
+			t.Logf("Sessions: %s", string(listOut))
+
+			panesCmd := exec.Command("/.sprite/bin/tmux", "-S", "/.sprite/tmp/exec-tmux", "list-panes", "-t", sessionName)
+			panesOut, panesErr := panesCmd.CombinedOutput()
+			t.Logf("Panes command error: %v, output: %s", panesErr, string(panesOut))
+
 			t.Fatalf("Failed to get pane PIDs: %v", err)
 		}
 		if len(pids) != 1 {
@@ -94,13 +114,13 @@ func TestGetSessionPanePIDsIntegration(t *testing.T) {
 
 // TestGetSessionPanePIDsEdgeCases tests edge cases and error handling
 func TestGetSessionPanePIDsEdgeCases(t *testing.T) {
-	// Skip if tmux is not available
+	// In Docker test environment, tmux must be available
 	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not found in PATH")
+		t.Fatal("tmux not found in PATH - test environment is misconfigured")
 	}
 
 	ctx := context.Background()
-	ctx = tap.WithLogger(ctx, slog.Default())
+	ctx = tap.WithLogger(ctx, tap.NewDiscardLogger())
 	tm := NewTMUXManager(ctx)
 
 	t.Run("EmptySessionID", func(t *testing.T) {
@@ -131,13 +151,13 @@ func TestGetSessionPanePIDsEdgeCases(t *testing.T) {
 // TestGetSessionPanePIDsWithCommandPrefix tests when TMUXManager has a command prefix
 func TestGetSessionPanePIDsWithCommandPrefix(t *testing.T) {
 	// This test simulates the server-side usage where commands might be prefixed
-	// Skip if tmux is not available
+	// In Docker test environment, tmux must be available
 	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not found in PATH")
+		t.Fatal("tmux not found in PATH - test environment is misconfigured")
 	}
 
 	ctx := context.Background()
-	ctx = tap.WithLogger(ctx, slog.Default())
+	ctx = tap.WithLogger(ctx, tap.NewDiscardLogger())
 	tm := NewTMUXManager(ctx)
 
 	// Set a command prefix (simulating container execution)
@@ -159,9 +179,9 @@ func TestGetSessionPanePIDsWithCommandPrefix(t *testing.T) {
 // TestPanePIDsProcessTreeIntegration verifies that pane PIDs share the tmux server as ancestor
 // This is an integration test that requires tmux to be installed
 func TestPanePIDsProcessTreeIntegration(t *testing.T) {
-	// Skip if tmux is not available
+	// In Docker test environment, tmux must be available
 	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not found in PATH")
+		t.Fatal("tmux not found in PATH - test environment is misconfigured")
 	}
 
 	// This test demonstrates that all pane PIDs in a session

@@ -2,10 +2,11 @@ package tmux
 
 import (
 	"fmt"
-	"log/slog"
 	"os"
 	"os/exec"
 	"testing"
+
+	"github.com/superfly/sprite-env/pkg/tap"
 )
 
 // startTestTmuxSession creates a new tmux session for testing
@@ -30,10 +31,8 @@ func startTestTmuxSession(t *testing.T, sessionName string) (socketName string, 
 func createTestParser(t *testing.T, socketName, sessionName string) *TmuxControlModeParser {
 	cmd := exec.Command("tmux", "-L", socketName, "-C", "attach-session", "-t", sessionName)
 
-	// Create a test logger
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
+	// Use discard logger to suppress output
+	logger := tap.NewDiscardLogger()
 
 	parser, err := NewTmuxControlModeParser(cmd, logger)
 	if err != nil {

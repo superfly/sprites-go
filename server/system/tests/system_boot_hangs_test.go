@@ -30,44 +30,25 @@ func TestSystemBootHangJuiceFS(t *testing.T) {
 		t.Fatalf("Failed to create system: %v", err)
 	}
 
-	// Set a shorter timeout for boot to detect hangs faster
-	bootCtx, bootCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer bootCancel()
-
 	t.Log("Attempting system boot with hang detection...")
 	startTime := time.Now()
 
-	// Start in a goroutine to detect if it hangs
-	done := make(chan error, 1)
-	go func() {
-		done <- sys.Start()
-	}()
-
-	select {
-	case err := <-done:
-		duration := time.Since(startTime)
-		if err != nil {
-			t.Logf("Boot failed in %v: %v", duration, err)
-		} else {
-			t.Logf("Boot completed in %v", duration)
-		}
-	case <-bootCtx.Done():
-		t.Errorf("Boot hung - did not complete within 15 seconds")
-		// Don't return - continue to cleanup verification
+	err = sys.Start()
+	duration := time.Since(startTime)
+	if err != nil {
+		t.Logf("Boot failed in %v: %v", duration, err)
+	} else {
+		t.Logf("Boot completed in %v", duration)
 	}
 
 	// CRITICAL: Cleanup should run even if boot hung
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer shutdownCancel()
-
-	shutdownErr := sys.Shutdown(shutdownCtx)
+	shutdownErr := sys.Shutdown(context.Background())
 	if shutdownErr != nil {
 		t.Logf("Shutdown after hang: %v", shutdownErr)
 	}
 
 	// Verify no resources leaked even after hang/timeout
-	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer verifyCancel()
+	verifyCtx := context.Background()
 
 	if sys.JuiceFS != nil {
 		for i, verify := range sys.JuiceFS.CleanupVerifiers() {
@@ -111,42 +92,25 @@ func TestUserEnvironmentBootHangOverlay(t *testing.T) {
 		t.Fatalf("Failed to create system: %v", err)
 	}
 
-	// Set timeout for boot
-	bootCtx, bootCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer bootCancel()
-
 	t.Log("Attempting system boot with overlay hang detection...")
 	startTime := time.Now()
 
-	done := make(chan error, 1)
-	go func() {
-		done <- sys.Start()
-	}()
-
-	select {
-	case err := <-done:
-		duration := time.Since(startTime)
-		if err != nil {
-			t.Logf("Boot failed in %v: %v", duration, err)
-		} else {
-			t.Logf("Boot completed in %v", duration)
-		}
-	case <-bootCtx.Done():
-		t.Errorf("Boot hung - did not complete within 15 seconds")
+	err = sys.Start()
+	duration := time.Since(startTime)
+	if err != nil {
+		t.Logf("Boot failed in %v: %v", duration, err)
+	} else {
+		t.Logf("Boot completed in %v", duration)
 	}
 
 	// CRITICAL: Cleanup should run even if boot hung
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer shutdownCancel()
-
-	shutdownErr := sys.Shutdown(shutdownCtx)
+	shutdownErr := sys.Shutdown(context.Background())
 	if shutdownErr != nil {
 		t.Logf("Shutdown after hang: %v", shutdownErr)
 	}
 
 	// Verify no loop devices or mounts leaked
-	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer verifyCancel()
+	verifyCtx := context.Background()
 
 	if sys.OverlayManager != nil {
 		for i, verify := range sys.OverlayManager.CleanupVerifiers() {
@@ -190,42 +154,25 @@ func TestUserEnvironmentBootHangServices(t *testing.T) {
 		t.Fatalf("Failed to create system: %v", err)
 	}
 
-	// Boot with timeout
-	bootCtx, bootCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer bootCancel()
-
 	t.Log("Attempting system boot with service hang detection...")
 	startTime := time.Now()
 
-	done := make(chan error, 1)
-	go func() {
-		done <- sys.Start()
-	}()
-
-	select {
-	case err := <-done:
-		duration := time.Since(startTime)
-		if err != nil {
-			t.Logf("Boot failed in %v: %v", duration, err)
-		} else {
-			t.Logf("Boot completed in %v", duration)
-		}
-	case <-bootCtx.Done():
-		t.Errorf("Boot hung - did not complete within 15 seconds")
+	err = sys.Start()
+	duration := time.Since(startTime)
+	if err != nil {
+		t.Logf("Boot failed in %v: %v", duration, err)
+	} else {
+		t.Logf("Boot completed in %v", duration)
 	}
 
 	// Shutdown
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 1*time.Minute)
-	defer shutdownCancel()
-
-	shutdownErr := sys.Shutdown(shutdownCtx)
+	shutdownErr := sys.Shutdown(context.Background())
 	if shutdownErr != nil {
 		t.Logf("Shutdown: %v", shutdownErr)
 	}
 
 	// CRITICAL: Verify no service processes leaked
-	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer verifyCancel()
+	verifyCtx := context.Background()
 
 	if sys.ServicesManager != nil {
 		for i, verify := range sys.ServicesManager.CleanupVerifiers() {

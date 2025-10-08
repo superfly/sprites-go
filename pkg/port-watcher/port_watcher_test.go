@@ -115,10 +115,7 @@ func TestNamespaceMonitorParsing(t *testing.T) {
 }
 
 func TestGetParentPID(t *testing.T) {
-	// Skip on non-Linux systems
-	if _, err := os.Stat("/proc/self/stat"); err != nil {
-		t.Skip("Skipping test on non-Linux system")
-	}
+	// This test always runs in Linux Docker environment
 
 	// Test with current process (should have a parent)
 	ppid := getParentPID(os.Getpid())
@@ -151,30 +148,22 @@ func TestPortWatcherIntegration(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	// Skip on non-Linux systems
-	if _, err := os.Stat("/proc/self/ns/net"); err != nil {
-		t.Skip("Skipping test on non-Linux system")
-	}
-	
-	// Check if we're running as root
-	if os.Getuid() != 0 {
-		t.Skip("Integration test requires root privileges")
-	}
-	
+	// This test always runs as root in Linux Docker environment
+
 	// Set up the test namespace
 	os.MkdirAll("/var/run/netns", 0755)
 	exec.Command("ip", "netns", "delete", "sprite").Run()
-	
+
 	cmd := exec.Command("ip", "netns", "add", "sprite")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("Failed to create sprite namespace: %v\nOutput: %s", err, output)
 	}
-	
+
 	cmd = exec.Command("ip", "netns", "exec", "sprite", "ip", "link", "set", "lo", "up")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("Failed to bring up loopback in sprite namespace: %v\nOutput: %s", err, output)
 	}
-	
+
 	t.Cleanup(func() {
 		exec.Command("ip", "netns", "delete", "sprite").Run()
 	})
@@ -183,28 +172,28 @@ func TestPortWatcherIntegration(t *testing.T) {
 	// Use a fixed port for simplicity since we control the namespace
 	expectedPort := 12346
 	cmd = exec.Command("ip", "netns", "exec", "sprite", "nc", "-l", "127.0.0.1", fmt.Sprintf("%d", expectedPort))
-	
+
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("Failed to start listener in namespace: %v", err)
 	}
 	defer cmd.Process.Kill()
-	
+
 	// The actual process inside the namespace is nc, not the ip command
 	// We need to find the PID of nc inside the namespace
 	time.Sleep(100 * time.Millisecond) // Give nc time to start
-	
+
 	// Find the nc process
 	findCmd := exec.Command("ip", "netns", "exec", "sprite", "pidof", "nc")
 	output, err := findCmd.Output()
 	if err != nil {
 		t.Fatalf("Failed to find nc process: %v", err)
 	}
-	
+
 	var pid int
 	if _, err := fmt.Sscanf(strings.TrimSpace(string(output)), "%d", &pid); err != nil {
 		t.Fatalf("Failed to parse nc PID: %v", err)
 	}
-	
+
 	t.Logf("Started listener in sprite namespace on port %d (PID: %d)", expectedPort, pid)
 
 	// Create a channel to receive port notifications

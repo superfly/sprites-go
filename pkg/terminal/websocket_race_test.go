@@ -1113,9 +1113,7 @@ func TestWebSocketDetailedDebug(t *testing.T) {
 
 // TestWebSocketTTYUnderCPULoad tests TTY mode under high CPU load
 func TestWebSocketTTYUnderCPULoad(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("PTY not supported on Windows")
-	}
+	// This test always runs in Linux Docker environment
 
 	// Start CPU-intensive goroutines to consume available CPU
 	numCPU := runtime.NumCPU()

@@ -45,8 +45,6 @@ type JuiceFS struct {
 	mounted      bool         // Track if mount completed successfully
 	mountedMu    sync.RWMutex // Protect mounted flag
 	started      bool         // Track if Start() has been called
-	// Checkpoint database (used by legacy JuiceFS checkpoint APIs in tests)
-	checkpointDB *CheckpointDB
 
 	// Verifiers for external resources
 	// These check actual system state, not internal Go values
@@ -450,12 +448,35 @@ func (j *JuiceFS) monitorProcess() {
 
 	select {
 	case <-j.stopCh:
-		// Stop requested, unmount dependent mounts
-		j.logger.Info("Looking for dependent mounts to unmount...")
-		if err := j.findAndUnmountDependentMounts(mountPath); err != nil {
-			j.logger.Warn("Error finding/unmounting dependent mounts", "error", err)
+		// Stop requested, check for dependent mounts
+		j.logger.Info("Checking for dependent mounts...")
+		dependentMounts, err := j.findDependentMounts(mountPath)
+		if err != nil {
+			j.logger.Warn("Error checking for dependent mounts", "error", err)
+		} else if len(dependentMounts) > 0 {
+			// Cannot stop JuiceFS while dependent mounts exist
+			mountList := make([]string, len(dependentMounts))
+			for i, mount := range dependentMounts {
+				mountList[i] = fmt.Sprintf("%s (type: %s, device: %s)", mount.mountPoint, mount.fsType, mount.device)
+			}
+			err := fmt.Errorf("cannot stop JuiceFS, there are %d mount(s) relying on it:\n  - %s",
+				len(dependentMounts), strings.Join(mountList, "\n  - "))
+			j.logger.Error("Cannot stop JuiceFS with dependent mounts", "error", err, "mounts", mountList)
+
+			// Set mount error and signal failure
+			j.mountErrorMu.Lock()
+			j.mountError = err
+			j.mountErrorMu.Unlock()
+
+			// Signal error through errCh
+			select {
+			case j.errCh <- err:
+			default:
+			}
+
+			return
 		} else {
-			j.logger.Info("All dependent mounts unmounted successfully")
+			j.logger.Info("No dependent mounts found")
 		}
 
 		// Sync the JuiceFS filesystem to flush pending writes
@@ -655,38 +676,6 @@ func (j *JuiceFS) getJuiceFSFormatInfo(metaDB string) (bucketName string, isForm
 		return parts[len(parts)-1], true, nil
 	}
 	return bucketURL, true, nil
-}
-
-// createLitestreamConfig is only used in tests to verify config content generation.
-// The production system no longer uses this, but we keep a minimal implementation
-// for backward-compatible tests.
-func (j *JuiceFS) createLitestreamConfig(configPath string, metaDB string, checkpointDB string) error {
-	builder := &strings.Builder{}
-	// Minimal deterministic content used by tests
-	builder.WriteString("logging:\n")
-	builder.WriteString("  level: warn\n")
-	// Include placeholders checked by tests
-	if j.config.LocalMode {
-		// local mode writes absolute paths
-		fmt.Fprintf(builder, "path: %s\n", metaDB)
-		fmt.Fprintf(builder, "path: %s\n", checkpointDB)
-		fmt.Fprintf(builder, "type: file\n")
-		fmt.Fprintf(builder, "path: %s\n", filepath.Join(j.config.BaseDir, "litestream"))
-		builder.WriteString("retention: 24h\n")
-		builder.WriteString("snapshot-interval: 1h\n")
-		builder.WriteString("sync-interval: 1m\n")
-	} else {
-		builder.WriteString("path: ${JUICEFS_META_DB}\n")
-		builder.WriteString("path: ${CHECKPOINT_DB}\n")
-		builder.WriteString("type: s3\n")
-		builder.WriteString("endpoint: ${SPRITE_S3_ENDPOINT_URL}\n")
-		builder.WriteString("bucket: ${SPRITE_S3_BUCKET}\n")
-		builder.WriteString("path: juicefs-metadata\n")
-		builder.WriteString("path: checkpoints\n")
-		builder.WriteString("snapshot-interval: 1h\n")
-		builder.WriteString("sync-interval: 1m\n")
-	}
-	return os.WriteFile(configPath, []byte(builder.String()), 0644)
 }
 
 // getExistingBucket removed: no longer used
@@ -959,23 +948,8 @@ func (j *JuiceFS) isMountReady(mountPath string) bool {
 
 // performPostMountSetup handles the tasks that need to be done after mount is ready
 func (j *JuiceFS) performPostMountSetup(mountPath string, startTime time.Time) error {
-	// Create the checkpoints directory first
-	stepStart := time.Now()
-	checkpointsDir := filepath.Join(mountPath, "checkpoints")
-	if err := os.MkdirAll(checkpointsDir, 0755); err != nil {
-		return fmt.Errorf("failed to create checkpoints directory: %w", err)
-	}
-
-	// Create empty v0 directory in checkpoints/ if it doesn't exist
-	v0Dir := filepath.Join(checkpointsDir, "v0")
-	if _, err := os.Stat(v0Dir); os.IsNotExist(err) {
-		if err := os.MkdirAll(v0Dir, 0755); err != nil {
-			return fmt.Errorf("failed to create v0 checkpoint directory: %w", err)
-		}
-		j.logger.Info("Created empty v0 checkpoint directory", "path", v0Dir)
-	}
-
 	// Create the active directory
+	stepStart := time.Now()
 	activeDir := filepath.Join(mountPath, "active", "fs")
 	if err := os.MkdirAll(activeDir, 0755); err != nil {
 		return fmt.Errorf("failed to create active directory: %w", err)
@@ -1053,22 +1027,22 @@ func (j *JuiceFS) applyActiveFsQuota() {
 // handleSignals removed - signal handling is now done at the System level
 // to avoid conflicts between multiple signal handlers
 
-// findAndUnmountDependentMounts finds and unmounts all mounts that depend on the JuiceFS mount
-func (j *JuiceFS) findAndUnmountDependentMounts(juicefsMountPath string) error {
+type mountInfo struct {
+	device     string
+	mountPoint string
+	fsType     string
+	options    string
+}
+
+// findDependentMounts finds all mounts that depend on the JuiceFS mount but does not unmount them
+func (j *JuiceFS) findDependentMounts(juicefsMountPath string) ([]mountInfo, error) {
 	// Read /proc/mounts to find all current mounts
 	mountsData, err := os.ReadFile("/proc/mounts")
 	if err != nil {
-		return fmt.Errorf("failed to read /proc/mounts: %w", err)
+		return nil, fmt.Errorf("failed to read /proc/mounts: %w", err)
 	}
 
-	type mountInfo struct {
-		device     string
-		mountPoint string
-		fsType     string
-		options    string
-	}
-
-	var mounts []mountInfo
+	var dependentMounts []mountInfo
 	lines := strings.Split(string(mountsData), "\n")
 
 	// Parse mount entries
@@ -1121,84 +1095,11 @@ func (j *JuiceFS) findAndUnmountDependentMounts(juicefsMountPath string) error {
 		}
 
 		if isDependentMount {
-			mounts = append(mounts, mount)
+			dependentMounts = append(dependentMounts, mount)
 		}
 	}
 
-	// Sort mounts by mount point depth (deepest first) to ensure proper unmount order
-	for i := 0; i < len(mounts); i++ {
-		for j := i + 1; j < len(mounts); j++ {
-			// Count path separators to determine depth
-			depthI := strings.Count(mounts[i].mountPoint, "/")
-			depthJ := strings.Count(mounts[j].mountPoint, "/")
-
-			// Also check if one is a parent of another
-			isParentJ := strings.HasPrefix(mounts[i].mountPoint, mounts[j].mountPoint+"/")
-
-			// Swap if j should come before i (j is deeper or i is parent of j)
-			if depthJ > depthI || isParentJ {
-				mounts[i], mounts[j] = mounts[j], mounts[i]
-			}
-		}
-	}
-
-	// Unmount each dependent mount
-	for _, mount := range mounts {
-		j.logger.Info("Unmounting dependent mount",
-			"mountPoint", mount.mountPoint,
-			"device", mount.device,
-			"fsType", mount.fsType)
-
-		// First, try to sync the filesystem to flush any pending writes
-		syncStart := time.Now()
-		syncCmd := exec.Command("sync", "-f", mount.mountPoint)
-		syncOutput, syncErr := syncCmd.CombinedOutput()
-
-		if syncErr != nil {
-			// sync might fail for some mount types, but we should still try to unmount
-			j.logger.Warn("Sync failed for mount",
-				"mountPoint", mount.mountPoint,
-				"duration", time.Since(syncStart),
-				"error", syncErr)
-			if len(syncOutput) > 0 {
-				j.logger.Debug("Sync stderr/stdout", "output", string(syncOutput))
-			}
-		} else {
-			j.logger.Info("Sync completed for dependent mount", "mountPoint", mount.mountPoint, "duration", time.Since(syncStart))
-		}
-
-		// First try normal unmount
-		unmountStart := time.Now()
-		cmd := exec.Command("umount", mount.mountPoint)
-		if _, err := cmd.CombinedOutput(); err != nil {
-			// If normal unmount fails, try with --force
-			j.logger.Debug("Normal unmount failed, trying force unmount...")
-			cmd = exec.Command("umount", "--force", mount.mountPoint)
-			if output2, err2 := cmd.CombinedOutput(); err2 != nil {
-				// Try lazy unmount as last resort
-				j.logger.Debug("Force unmount failed, trying lazy unmount...")
-				cmd = exec.Command("umount", "--lazy", mount.mountPoint)
-				if output3, err3 := cmd.CombinedOutput(); err3 != nil {
-					j.logger.Warn("All unmount attempts failed",
-						"mountPoint", mount.mountPoint,
-						"duration", time.Since(unmountStart),
-						"normalError", err,
-						"forceError", err2,
-						"forceOutput", string(output2),
-						"lazyError", err3,
-						"lazyOutput", string(output3))
-				} else {
-					j.logger.Info("Lazy unmount succeeded", "mountPoint", mount.mountPoint, "duration", time.Since(unmountStart))
-				}
-			} else {
-				j.logger.Info("Force unmount succeeded", "mountPoint", mount.mountPoint, "duration", time.Since(unmountStart))
-			}
-		} else {
-			j.logger.Info("Unmounted successfully", "mountPoint", mount.mountPoint, "duration", time.Since(unmountStart))
-		}
-	}
-
-	return nil
+	return dependentMounts, nil
 }
 
 // addResourceVerifiers populates the setup and cleanup verifiers

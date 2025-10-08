@@ -6,18 +6,16 @@ package overlay
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
 // TestOverlayFullLifecycle tests the complete overlay lifecycle with real overlayfs
 func TestOverlayFullLifecycle(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("Overlay tests require root")
-	}
+	// Overlay tests always run as root in Docker environment
 
 	// Check if overlayfs is available
 	if _, err := os.Stat("/sys/module/overlay"); os.IsNotExist(err) {
@@ -30,7 +28,7 @@ func TestOverlayFullLifecycle(t *testing.T) {
 	var m *Manager
 	defer func() {
 		if m != nil {
-			CleanupTestOverlays(t, m)
+			VerifyNoTestOverlays(t, m)
 		}
 	}()
 
@@ -42,7 +40,7 @@ func TestOverlayFullLifecycle(t *testing.T) {
 
 	// Add some test content to lower
 	testFile := filepath.Join(lowerDir, "test.txt")
-	if err := ioutil.WriteFile(testFile, []byte("lower content"), 0644); err != nil {
+	if err := os.WriteFile(testFile, []byte("lower content"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -61,6 +59,10 @@ func TestOverlayFullLifecycle(t *testing.T) {
 
 	// Test Mount
 	t.Run("Mount", func(t *testing.T) {
+		// Ensure image exists before mounting
+		if err := m.EnsureImage(); err != nil {
+			t.Fatalf("failed to ensure image: %v", err)
+		}
 		if err := m.Mount(ctx); err != nil {
 			t.Fatalf("failed to mount: %v", err)
 		}
@@ -72,7 +74,7 @@ func TestOverlayFullLifecycle(t *testing.T) {
 
 		// Verify we can read from lower through overlay
 		overlayTestFile := filepath.Join(targetDir, "test.txt")
-		content, err := ioutil.ReadFile(overlayTestFile)
+		content, err := os.ReadFile(overlayTestFile)
 		if err != nil {
 			t.Fatalf("failed to read test file through overlay: %v", err)
 		}
@@ -82,7 +84,7 @@ func TestOverlayFullLifecycle(t *testing.T) {
 
 		// Write to overlay
 		upperFile := filepath.Join(targetDir, "upper.txt")
-		if err := ioutil.WriteFile(upperFile, []byte("upper content"), 0644); err != nil {
+		if err := os.WriteFile(upperFile, []byte("upper content"), 0644); err != nil {
 			t.Fatalf("failed to write to overlay: %v", err)
 		}
 	})
@@ -91,7 +93,7 @@ func TestOverlayFullLifecycle(t *testing.T) {
 	t.Run("PrepareForCheckpoint", func(t *testing.T) {
 		// Write some data that needs to be flushed
 		testFile := filepath.Join(targetDir, "checkpoint-test.txt")
-		if err := ioutil.WriteFile(testFile, []byte("checkpoint data"), 0644); err != nil {
+		if err := os.WriteFile(testFile, []byte("checkpoint data"), 0644); err != nil {
 			t.Fatal(err)
 		}
 
@@ -110,7 +112,7 @@ func TestOverlayFullLifecycle(t *testing.T) {
 		}
 
 		// Verify we can write again
-		if err := ioutil.WriteFile(testFile, []byte("new data"), 0644); err != nil {
+		if err := os.WriteFile(testFile, []byte("new data"), 0644); err != nil {
 			t.Fatalf("failed to write after unfreeze: %v", err)
 		}
 	})
@@ -127,7 +129,7 @@ func TestOverlayFullLifecycle(t *testing.T) {
 		}
 
 		// Verify target directory is empty after unmount
-		entries, err := ioutil.ReadDir(targetDir)
+		entries, err := os.ReadDir(targetDir)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -138,14 +140,14 @@ func TestOverlayFullLifecycle(t *testing.T) {
 
 	// Test Remount
 	t.Run("Remount", func(t *testing.T) {
-		// Mount again
+		// Mount again (image already exists from previous mount)
 		if err := m.Mount(ctx); err != nil {
 			t.Fatalf("failed to remount: %v", err)
 		}
 
 		// Verify previous upper content is still there
 		upperFile := filepath.Join(targetDir, "upper.txt")
-		content, err := ioutil.ReadFile(upperFile)
+		content, err := os.ReadFile(upperFile)
 		if err != nil {
 			t.Fatalf("failed to read upper file after remount: %v", err)
 		}
@@ -162,9 +164,7 @@ func TestOverlayFullLifecycle(t *testing.T) {
 
 // TestOverlayWithMultipleLowers tests overlay with multiple lower directories
 func TestOverlayWithMultipleLowers(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("Overlay tests require root")
-	}
+	// Overlay tests always run as root in Docker environment
 
 	ctx := context.Background()
 	baseDir := t.TempDir()
@@ -172,7 +172,7 @@ func TestOverlayWithMultipleLowers(t *testing.T) {
 	var m *Manager
 	defer func() {
 		if m != nil {
-			CleanupTestOverlays(t, m)
+			VerifyNoTestOverlays(t, m)
 		}
 	}()
 
@@ -186,17 +186,17 @@ func TestOverlayWithMultipleLowers(t *testing.T) {
 	}
 
 	// Add different content to each lower
-	if err := ioutil.WriteFile(filepath.Join(lower1, "file1.txt"), []byte("from lower1"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(lower1, "file1.txt"), []byte("from lower1"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := ioutil.WriteFile(filepath.Join(lower2, "file2.txt"), []byte("from lower2"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(lower2, "file2.txt"), []byte("from lower2"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	// Add same file to both - lower1 should take precedence
-	if err := ioutil.WriteFile(filepath.Join(lower1, "common.txt"), []byte("lower1 version"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(lower1, "common.txt"), []byte("lower1 version"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := ioutil.WriteFile(filepath.Join(lower2, "common.txt"), []byte("lower2 version"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(lower2, "common.txt"), []byte("lower2 version"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -213,6 +213,11 @@ func TestOverlayWithMultipleLowers(t *testing.T) {
 	}
 	m = New(cfg)
 
+	// Ensure image exists before mounting
+	if err := m.EnsureImage(); err != nil {
+		t.Fatalf("failed to ensure image: %v", err)
+	}
+
 	// Mount
 	if err := m.Mount(ctx); err != nil {
 		t.Fatalf("failed to mount: %v", err)
@@ -228,7 +233,7 @@ func TestOverlayWithMultipleLowers(t *testing.T) {
 		{"common.txt", "lower1 version"}, // lower1 takes precedence
 	} {
 		path := filepath.Join(targetDir, test.file)
-		content, err := ioutil.ReadFile(path)
+		content, err := os.ReadFile(path)
 		if err != nil {
 			t.Errorf("failed to read %s: %v", test.file, err)
 			continue
@@ -237,13 +242,16 @@ func TestOverlayWithMultipleLowers(t *testing.T) {
 			t.Errorf("%s: expected %q, got %q", test.file, test.expected, string(content))
 		}
 	}
+
+	// Cleanup
+	if err := m.Unmount(ctx); err != nil {
+		t.Fatalf("failed to unmount: %v", err)
+	}
 }
 
 // TestOverlayErrorHandling tests error conditions
 func TestOverlayErrorHandling(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("Overlay tests require root")
-	}
+	// Overlay tests always run as root in Docker environment
 
 	ctx := context.Background()
 
@@ -253,17 +261,19 @@ func TestOverlayErrorHandling(t *testing.T) {
 			BaseDir: baseDir,
 		}
 		m := New(cfg)
-		defer CleanupTestOverlays(t, m)
+		defer VerifyNoTestOverlays(t, m)
 
 		// Remove the image file if it was created
 		os.Remove(m.GetImagePath())
 
-		// Should fail to mount without image
-		if err := m.Mount(ctx); err == nil {
-			t.Fatal("expected mount to fail without image")
+		// Mount should fail without an image (must call EnsureImage() first)
+		err := m.Mount(ctx)
+		if err == nil {
+			t.Fatal("expected mount to fail without image, but it succeeded")
 		}
-		// Note: Even if mount fails, partial resources (like loop devices)
-		// may have been created and need cleanup
+		if !strings.Contains(err.Error(), "overlay image does not exist") {
+			t.Fatalf("expected 'overlay image does not exist' error, got: %v", err)
+		}
 	})
 
 	t.Run("DoubleMountShouldSucceed", func(t *testing.T) {
@@ -278,6 +288,11 @@ func TestOverlayErrorHandling(t *testing.T) {
 			LowerPaths: []string{lowerDir},
 		}
 		m := New(cfg)
+
+		// Ensure image exists
+		if err := m.EnsureImage(); err != nil {
+			t.Fatal(err)
+		}
 
 		// First mount
 		if err := m.Mount(ctx); err != nil {
@@ -297,7 +312,7 @@ func TestOverlayErrorHandling(t *testing.T) {
 			BaseDir: baseDir,
 		}
 		m := New(cfg)
-		defer CleanupTestOverlays(t, m)
+		defer VerifyNoTestOverlays(t, m)
 
 		// Should succeed (idempotent)
 		if err := m.Unmount(ctx); err != nil {
@@ -308,9 +323,7 @@ func TestOverlayErrorHandling(t *testing.T) {
 
 // TestOverlayConcurrentOperations tests concurrent access
 func TestOverlayConcurrentOperations(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("Overlay tests require root")
-	}
+	// Overlay tests always run as root in Docker environment
 
 	ctx := context.Background()
 	baseDir := t.TempDir()
@@ -318,7 +331,7 @@ func TestOverlayConcurrentOperations(t *testing.T) {
 	var m *Manager
 	defer func() {
 		if m != nil {
-			CleanupTestOverlays(t, m)
+			VerifyNoTestOverlays(t, m)
 		}
 	}()
 
@@ -334,6 +347,11 @@ func TestOverlayConcurrentOperations(t *testing.T) {
 	}
 	m = New(cfg)
 
+	// Ensure image exists
+	if err := m.EnsureImage(); err != nil {
+		t.Fatal(err)
+	}
+
 	// Mount first
 	if err := m.Mount(ctx); err != nil {
 		t.Fatal(err)
@@ -346,7 +364,7 @@ func TestOverlayConcurrentOperations(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		go func(id int) {
 			file := filepath.Join(targetDir, fmt.Sprintf("concurrent-%d.txt", id))
-			err := ioutil.WriteFile(file, []byte(fmt.Sprintf("data from %d", id)), 0644)
+			err := os.WriteFile(file, []byte(fmt.Sprintf("data from %d", id)), 0644)
 			done <- err
 		}(i)
 	}
@@ -361,7 +379,7 @@ func TestOverlayConcurrentOperations(t *testing.T) {
 	// Verify all files exist
 	for i := 0; i < 10; i++ {
 		file := filepath.Join(targetDir, fmt.Sprintf("concurrent-%d.txt", i))
-		content, err := ioutil.ReadFile(file)
+		content, err := os.ReadFile(file)
 		if err != nil {
 			t.Errorf("failed to read concurrent file %d: %v", i, err)
 			continue
@@ -371,13 +389,16 @@ func TestOverlayConcurrentOperations(t *testing.T) {
 			t.Errorf("file %d: expected %q, got %q", i, expected, string(content))
 		}
 	}
+
+	// Cleanup
+	if err := m.Unmount(ctx); err != nil {
+		t.Fatalf("failed to unmount: %v", err)
+	}
 }
 
 // TestOverlayImageGrowth tests that the image file grows as needed
 func TestOverlayImageGrowth(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("Overlay tests require root")
-	}
+	// Overlay tests always run as root in Docker environment
 
 	ctx := context.Background()
 	baseDir := t.TempDir()
@@ -385,7 +406,7 @@ func TestOverlayImageGrowth(t *testing.T) {
 	var m *Manager
 	defer func() {
 		if m != nil {
-			CleanupTestOverlays(t, m)
+			VerifyNoTestOverlays(t, m)
 		}
 	}()
 
@@ -400,6 +421,11 @@ func TestOverlayImageGrowth(t *testing.T) {
 		LowerPaths: []string{lowerDir},
 	}
 	m = New(cfg)
+
+	// Ensure image exists
+	if err := m.EnsureImage(); err != nil {
+		t.Fatal(err)
+	}
 
 	// Mount
 	if err := m.Mount(ctx); err != nil {
@@ -416,7 +442,7 @@ func TestOverlayImageGrowth(t *testing.T) {
 		data[i] = byte(i % 256)
 	}
 
-	if err := ioutil.WriteFile(testFile, data, 0644); err != nil {
+	if err := os.WriteFile(testFile, data, 0644); err != nil {
 		t.Fatalf("failed to write test file: %v", err)
 	}
 
@@ -428,13 +454,16 @@ func TestOverlayImageGrowth(t *testing.T) {
 	if stat.Size() != int64(len(data)) {
 		t.Errorf("expected file size %d, got %d", len(data), stat.Size())
 	}
+
+	// Cleanup
+	if err := m.Unmount(ctx); err != nil {
+		t.Fatalf("failed to unmount: %v", err)
+	}
 }
 
 // TestFreezeUnfreezeStress tests multiple freeze/unfreeze cycles
 func TestFreezeUnfreezeStress(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("Overlay tests require root")
-	}
+	// Overlay tests always run as root in Docker environment
 
 	ctx := context.Background()
 	baseDir := t.TempDir()
@@ -442,7 +471,7 @@ func TestFreezeUnfreezeStress(t *testing.T) {
 	var m *Manager
 	defer func() {
 		if m != nil {
-			CleanupTestOverlays(t, m)
+			VerifyNoTestOverlays(t, m)
 		}
 	}()
 
@@ -458,6 +487,11 @@ func TestFreezeUnfreezeStress(t *testing.T) {
 	}
 	m = New(cfg)
 
+	// Ensure image exists
+	if err := m.EnsureImage(); err != nil {
+		t.Fatal(err)
+	}
+
 	// Mount
 	if err := m.Mount(ctx); err != nil {
 		t.Fatal(err)
@@ -467,7 +501,7 @@ func TestFreezeUnfreezeStress(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		// Write before freeze
 		testFile := filepath.Join(m.overlayTargetPath, fmt.Sprintf("freeze-test-%d.txt", i))
-		if err := ioutil.WriteFile(testFile, []byte(fmt.Sprintf("iteration %d", i)), 0644); err != nil {
+		if err := os.WriteFile(testFile, []byte(fmt.Sprintf("iteration %d", i)), 0644); err != nil {
 			t.Fatalf("iteration %d: failed to write before freeze: %v", i, err)
 		}
 
@@ -485,8 +519,13 @@ func TestFreezeUnfreezeStress(t *testing.T) {
 		}
 
 		// Verify we can still write
-		if err := ioutil.WriteFile(testFile, []byte(fmt.Sprintf("iteration %d - after", i)), 0644); err != nil {
+		if err := os.WriteFile(testFile, []byte(fmt.Sprintf("iteration %d - after", i)), 0644); err != nil {
 			t.Fatalf("iteration %d: failed to write after unfreeze: %v", i, err)
 		}
+	}
+
+	// Cleanup
+	if err := m.Unmount(ctx); err != nil {
+		t.Fatalf("failed to unmount: %v", err)
 	}
 }

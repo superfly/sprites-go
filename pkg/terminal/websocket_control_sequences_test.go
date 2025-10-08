@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -18,9 +17,7 @@ import (
 
 // TestControlSequencePreservation verifies that all control sequences are passed through exactly as-is
 func TestControlSequencePreservation(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("PTY not supported on Windows")
-	}
+	// This test always runs in Linux Docker environment
 
 	tests := []struct {
 		name           string
@@ -184,9 +181,7 @@ func TestControlSequencePreservation(t *testing.T) {
 
 // TestRawByteOrdering verifies that bytes are received in order without buffering
 func TestRawByteOrdering(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("PTY not supported on Windows")
-	}
+	// This test always runs in Linux Docker environment
 
 	// Generate a large amount of sequential data to test for buffering issues
 	var testData bytes.Buffer
@@ -285,9 +280,7 @@ func TestRawByteOrdering(t *testing.T) {
 
 // TestInteractivePTYWithExpect uses go-expect to test interactive PTY behavior
 func TestInteractivePTYWithExpect(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("PTY not supported on Windows")
-	}
+	// This test always runs in Linux Docker environment
 
 	// Create a simple interactive shell session
 	session := NewSession(
@@ -364,9 +357,7 @@ func TestInteractivePTYWithExpect(t *testing.T) {
 
 // TestFullScreenAppSimulation simulates a full-screen terminal app
 func TestFullScreenAppSimulation(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("PTY not supported on Windows")
-	}
+	// This test always runs in Linux Docker environment
 
 	// Script that simulates a full-screen app like vim or top
 	fullScreenScript := `#!/bin/sh
@@ -475,9 +466,7 @@ printf '\033[?1049l'
 
 // TestByteStreamIntegrity verifies no bytes are lost or corrupted
 func TestByteStreamIntegrity(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("PTY not supported on Windows")
-	}
+	// This test always runs in Linux Docker environment
 
 	// Generate test pattern with all printable ASCII characters and control sequences
 	var testPattern bytes.Buffer

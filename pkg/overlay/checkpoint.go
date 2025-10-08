@@ -219,7 +219,7 @@ func (m *Manager) Restore(ctx context.Context, checkpointID string) error {
 	if checkpointID == "" {
 		return fmt.Errorf("checkpoint ID is required")
 	}
-	
+
 	// Step 1: Prepare for restore (shutdown container, unmount overlay)
 	var resume func() error
 	if m.restorePrepare != nil {
@@ -245,15 +245,17 @@ func (m *Manager) Restore(ctx context.Context, checkpointID string) error {
 	if err := m.checkpointFS.Clone(ctx, path, "active"); err != nil {
 		return fmt.Errorf("restore clone failed: %w", err)
 	}
-	
+
 	// Step 5: Resume after restore (mount overlay, boot container)
 	if resume != nil {
 		if err := resume(); err != nil {
 			m.logger.Error("Failed to resume after restore", "error", err)
 			return fmt.Errorf("resume after restore failed: %w", err)
 		}
+	} else {
+		m.logger.Error("No resume function provided for restore")
 	}
-	
+
 	return nil
 }
 
@@ -352,6 +354,7 @@ func prepareRestore(om *Manager, next PrepFunc) PrepFunc {
 	return func(ctx context.Context) (func() error, error) {
 		if om != nil {
 			// Call container shutdown callback if set
+			// This should handle stopping the container and unmounting the overlay
 			if om.restoreContainerPrep != nil {
 				if err := om.restoreContainerPrep(ctx); err != nil {
 					return nil, fmt.Errorf("container shutdown before restore: %w", err)
@@ -361,8 +364,12 @@ func prepareRestore(om *Manager, next PrepFunc) PrepFunc {
 			// Best-effort sync/freeze/unfreeze to flush outstanding writes
 			_ = om.PrepareForCheckpoint(ctx)
 			_ = om.UnfreezeAfterCheckpoint(ctx)
-			if err := om.Unmount(ctx); err != nil {
-				return nil, fmt.Errorf("overlay unmount before restore: %w", err)
+
+			// Only unmount if it's still mounted (restoreContainerPrep may have already unmounted)
+			if om.IsOverlayFSMounted() {
+				if err := om.Unmount(ctx); err != nil {
+					return nil, fmt.Errorf("overlay unmount before restore: %w", err)
+				}
 			}
 		}
 

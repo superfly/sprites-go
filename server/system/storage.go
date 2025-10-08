@@ -121,13 +121,14 @@ func (s *System) initializeOverlay() error {
 	}
 
 	overlayConfig := overlay.Config{
-		BaseDir:           s.config.JuiceFSDataPath,
-		ImageSize:         s.config.OverlayImageSize,
-		MountPath:         "/mnt/user-data",
-		LowerPaths:        s.config.GetOverlayLowerPaths(),
-		OverlayTargetPath: s.config.OverlayTargetPath,
-		SkipOverlayFS:     s.config.OverlaySkipOverlayFS,
-		Logger:            s.logger,
+		BaseDir:             s.config.JuiceFSDataPath,
+		ImageSize:           s.config.OverlayImageSize,
+		MountPath:           "/mnt/user-data",
+		LowerPaths:          s.config.GetOverlayLowerPaths(),
+		OverlayTargetPath:   s.config.OverlayTargetPath,
+		CheckpointMountPath: s.config.CheckpointMountPath,
+		SkipOverlayFS:       s.config.OverlaySkipOverlayFS,
+		Logger:              s.logger,
 	}
 
 	overlayMgr := overlay.New(overlayConfig)

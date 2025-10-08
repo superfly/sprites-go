@@ -74,13 +74,14 @@ type Manager struct {
 
 // Config holds configuration for the overlay manager
 type Config struct {
-	BaseDir           string
-	ImageSize         string   // Default: "100G"
-	MountPath         string   // Default: "/mnt/user-data"
-	LowerPaths        []string // Lower directories for overlayfs
-	OverlayTargetPath string   // Default: "/mnt/newroot"
-	SkipOverlayFS     bool     // Skip overlayfs mounting
-	Logger            *slog.Logger
+	BaseDir             string
+	ImageSize           string   // Default: "100G"
+	MountPath           string   // Default: "/mnt/user-data"
+	LowerPaths          []string // Lower directories for overlayfs
+	OverlayTargetPath   string   // Default: "/mnt/newroot"
+	CheckpointMountPath string   // Default: "/.sprite/checkpoints"
+	SkipOverlayFS       bool     // Skip overlayfs mounting
+	Logger              *slog.Logger
 }
 
 // New creates a new overlay manager instance
@@ -97,13 +98,15 @@ func New(config Config) *Manager {
 	if config.OverlayTargetPath == "" {
 		config.OverlayTargetPath = "/mnt/newroot"
 	}
+	if config.CheckpointMountPath == "" {
+		config.CheckpointMountPath = "/.sprite/checkpoints"
+	}
 	if len(config.LowerPaths) == 0 {
 		config.LowerPaths = []string{"/mnt/system-base"}
 	}
 
 	dataPath := filepath.Join(config.BaseDir, "data")
-	// Checkpoint mounts go on the host at /.sprite/checkpoints
-	checkpointMountBase := "/.sprite/checkpoints"
+	checkpointMountBase := config.CheckpointMountPath
 	return &Manager{
 		baseDir:               config.BaseDir,
 		imagePath:             filepath.Join(dataPath, "active", "root-upper.img"),
@@ -187,9 +190,10 @@ func (m *Manager) Start(ctx context.Context, checkpointDBPath string) error {
 	default:
 	}
 
-	// Mount the overlay filesystem
-	if err := m.Mount(ctx); err != nil {
-		// Cleanup on failure: close channels to signal completion
+	// Prepare and mount the overlay filesystem (creates image if needed)
+	if err := m.PrepareAndMount(ctx); err != nil {
+		// PrepareAndMount already handles cleanup via Mount() error handling
+		// Close channels to signal completion
 		// Keep started=true to prevent double-start attempts
 		select {
 		case <-m.stopCh:
@@ -306,7 +310,9 @@ func (m *Manager) InitializeCheckpointManager(ctx context.Context, checkpointDBP
 	m.restorePrepare = prepareRestore(m, final)
 
 	// Set up callback to update overlay checkpoint mounts when new checkpoints are created
-	m.onCheckpointCreated = m.OnCheckpointCreated
+	m.onCheckpointCreated = func(ctx context.Context) error {
+		return m.OnCheckpointCreated(ctx)
+	}
 
 	m.logger.Info("Checkpoint manager initialized successfully")
 	return nil

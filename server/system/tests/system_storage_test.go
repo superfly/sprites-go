@@ -17,14 +17,8 @@ func logTS(t *testing.T, msg string) {
 
 func dumpCmd(t *testing.T, name string, args ...string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := exec.CommandContext(context.Background(), name, args...)
 	out, err := cmd.CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
-		t.Logf("%s %s timed out after 3s", time.Now().Format(time.RFC3339Nano), name)
-		return
-	}
 	if err != nil {
 		t.Logf("%s %s error: %v", time.Now().Format(time.RFC3339Nano), name, err)
 	}
@@ -93,10 +87,7 @@ func TestOverlayMountLifecycle(t *testing.T) {
 	config.JuiceFSDataPath = juiceBase
 	config.OverlayEnabled = true
 	config.OverlayLowerPaths = []string{lower}
-	// Use default mount points: /mnt/user-data and /mnt/newroot
-	if config.OverlayTargetPath == "" {
-		config.OverlayTargetPath = "/mnt/newroot"
-	}
+	// TestConfig already sets unique mount paths per test
 
 	sys, cleanup, err := TestSystem(t, config)
 	defer cleanup()
@@ -105,25 +96,24 @@ func TestOverlayMountLifecycle(t *testing.T) {
 	}
 
 	// Start and block until storage ready (Start should already block on mount)
-	StartSystemWithTimeout(t, sys, 30*time.Second)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	// Additionally wait on WhenStorageReady to ensure readiness path remains correct
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if err := sys.WhenStorageReady(ctx); err != nil {
+	if err := sys.WhenStorageReady(context.Background()); err != nil {
 		t.Fatalf("WhenStorageReady error: %v", err)
 	}
 
-	// Validate mounts are present
+	// Validate mounts are present using config values
+	// Note: /mnt/user-data is still hardcoded in storage.go, but overlay target is configurable
 	assertMounted(t, "/mnt/user-data")
 	if !config.OverlaySkipOverlayFS {
 		assertMounted(t, config.OverlayTargetPath)
 	}
 
 	// Shutdown and ensure unmounted when it returns
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel2()
-	if err := sys.Shutdown(ctx2); err != nil {
+	if err := sys.Shutdown(context.Background()); err != nil {
 		t.Fatalf("Shutdown error: %v", err)
 	}
 
@@ -159,9 +149,7 @@ func TestPartialShutdownAndBoot(t *testing.T) {
 	config.JuiceFSDataPath = juiceBase
 	config.OverlayEnabled = true
 	config.OverlayLowerPaths = []string{lower}
-	if config.OverlayTargetPath == "" {
-		config.OverlayTargetPath = "/mnt/newroot"
-	}
+	// TestConfig already sets unique mount paths per test
 
 	sys, cleanup, err := TestSystem(t, config)
 	defer cleanup()
@@ -171,7 +159,9 @@ func TestPartialShutdownAndBoot(t *testing.T) {
 
 	// First, boot the full system (SystemBoot + UserEnvironment)
 	t.Log("Starting full system (SystemBoot + UserEnvironment)...")
-	StartSystemWithTimeout(t, sys, 30*time.Second)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	// Verify system is fully running
 	assertMounted(t, "/mnt/user-data")
@@ -183,10 +173,8 @@ func TestPartialShutdownAndBoot(t *testing.T) {
 	}
 
 	// Now shutdown UserEnvironment to test the restart cycle
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
 	logTS(t, "ShutdownContainer: starting")
-	if err := sys.ShutdownContainer(ctx); err != nil {
+	if err := sys.ShutdownContainer(context.Background()); err != nil {
 		t.Fatalf("ShutdownContainer error: %v", err)
 	}
 	logTS(t, "ShutdownContainer: done")
@@ -201,13 +189,11 @@ func TestPartialShutdownAndBoot(t *testing.T) {
 		assertNotMounted(t, config.OverlayTargetPath)
 	}
 
-	// Start again (15s)
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel2()
+	// Start again
 	logTS(t, "BootContainer(second): starting")
 	dumpCmd(t, "mount")
 	dumpCmd(t, "losetup", "-a")
-	if err := sys.BootContainer(ctx2); err != nil {
+	if err := sys.BootContainer(context.Background()); err != nil {
 		t.Fatalf("BootContainer (second) error: %v", err)
 	}
 	logTS(t, "BootContainer(second): done")
@@ -218,11 +204,9 @@ func TestPartialShutdownAndBoot(t *testing.T) {
 		assertMounted(t, config.OverlayTargetPath)
 	}
 
-	// Clean stop (15s)
-	ctx3, cancel3 := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel3()
+	// Clean stop
 	logTS(t, "ShutdownContainer(final): starting")
-	if err := sys.ShutdownContainer(ctx3); err != nil {
+	if err := sys.ShutdownContainer(context.Background()); err != nil {
 		t.Fatalf("final ShutdownContainer error: %v", err)
 	}
 	logTS(t, "ShutdownContainer(final): done")

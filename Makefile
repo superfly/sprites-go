@@ -4,6 +4,23 @@
 TEST_ARGS := $(filter-out test,$(MAKECMDGOALS))
 
 # Run all tests in Docker container (mirrors production environment)
+# 
+# Usage examples:
+#   make test                                    # Run all tests (sequential by package)
+#   make test --parallel                         # Run all tests in parallel (faster)
+#   make test --all                              # Same as --parallel
+#   make test -p=8 --parallel                    # Run with 8 parallel packages
+#   make test server/system/tests                # Run specific package tests
+#   make test server/system/tests -run TestName  # Run specific test function
+#   make test pkg/overlay                        # Run overlay package tests
+#   make test -v                                 # Run with verbose output
+#   make test -timeout=30m                       # Run with custom timeout
+#
+# The script accepts Go test arguments and package paths:
+# - Package paths: server/system/tests, pkg/overlay, etc.
+# - Go test flags: -run, -v, -timeout, -failfast, etc.
+# - Special flags: --parallel or --all (run everything in one container)
+# - Use -run TestFunctionName to run a specific test
 test:
 	bash ./scripts/run-tests-docker.sh $(TEST_ARGS) $(ARGS)
 

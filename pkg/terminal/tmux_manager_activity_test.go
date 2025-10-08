@@ -3,7 +3,6 @@ package terminal
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/exec"
 	"testing"
@@ -49,10 +48,8 @@ func TestTMUXManager_GetAllSessionActivityInfo_ActiveStatus(t *testing.T) {
 
 	socketPath := createActivityTestSocket(t)
 
-	// Create test logger
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
+	// Use discard logger to suppress output
+	logger := tap.NewDiscardLogger()
 
 	// Create context with logger
 	ctx := context.Background()
@@ -204,7 +201,7 @@ func TestTMUXManager_GetAllSessionActivityInfo_ActiveStatus(t *testing.T) {
 
 func TestTMUXManager_GetAllSessionActivityInfo_EdgeCases(t *testing.T) {
 	ctx := context.Background()
-	ctx = tap.WithLogger(ctx, slog.Default())
+	ctx = tap.WithLogger(ctx, tap.NewDiscardLogger())
 
 	// Test without window monitor
 	t.Run("NoWindowMonitor", func(t *testing.T) {
@@ -238,10 +235,8 @@ func TestTMUXManager_GetAllSessionActivityInfo_BugScenario(t *testing.T) {
 
 	socketPath := createActivityTestSocket(t)
 
-	// Create test logger with debug level
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
+	// Use discard logger to suppress output
+	logger := tap.NewDiscardLogger()
 
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)

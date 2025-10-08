@@ -231,8 +231,8 @@ func (s *System) BootContainer(ctx context.Context) error {
 		// Update the image path to point to the restored active directory
 		s.OverlayManager.UpdateImagePath()
 
-		// Mount() should block until overlay is ready
-		if err := s.OverlayManager.Mount(ctx); err != nil {
+		// PrepareAndMount() creates image if needed, mounts, and handles corruption
+		if err := s.OverlayManager.PrepareAndMount(ctx); err != nil {
 			return fmt.Errorf("failed to mount overlay: %w", err)
 		}
 		s.logger.Info("Overlay mounted successfully")

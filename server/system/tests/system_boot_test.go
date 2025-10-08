@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
-	"time"
 )
 
 // TestSystemBootSequence verifies the correct boot order of all subsystems
@@ -48,7 +47,9 @@ func TestSystemBootSequence(t *testing.T) {
 
 	// Start the system and verify boot sequence
 	t.Log("Starting system boot sequence...")
-	StartSystemWithTimeout(t, sys, 60*time.Second)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	// Verify Phase 1: Utilities started
 	t.Run("Phase1_Utilities", func(t *testing.T) {
@@ -89,9 +90,14 @@ func TestSystemBootSequence(t *testing.T) {
 	// Verify Phase 3: Storage
 	t.Run("Phase3_Storage", func(t *testing.T) {
 		// Wait for storage to be ready
-		WaitForCondition(t, 5*time.Second, 100*time.Millisecond,
-			func() bool { return sys.DBManager != nil },
-			"DB manager initialization")
+		if err := sys.WhenStorageReady(t.Context()); err != nil {
+			t.Fatalf("Timeout waiting for storage to be ready: %v", err)
+		}
+
+		// DBManager should be initialized
+		if sys.DBManager == nil {
+			t.Error("DB manager should be initialized")
+		}
 
 		// JuiceFS is optional - only check if configured
 		if config.JuiceFSDataPath != "" && sys.JuiceFS == nil {
@@ -131,9 +137,9 @@ func TestSystemBootSequence(t *testing.T) {
 	// Verify Phase 5: Main process started
 	t.Run("Phase5_MainProcess", func(t *testing.T) {
 		// Process should be running
-		WaitForCondition(t, 5*time.Second, 100*time.Millisecond,
-			sys.IsProcessRunning,
-			"main process to start")
+		if err := sys.WhenProcessRunning(t.Context()); err != nil {
+			t.Fatalf("Timeout waiting for main process to start: %v", err)
+		}
 
 		if !sys.IsProcessRunning() {
 			t.Fatal("Main process should be running after boot")
@@ -141,7 +147,6 @@ func TestSystemBootSequence(t *testing.T) {
 	})
 
 	// Verify system is fully operational
-	VerifySystemRunning(t, sys)
 	// Cleanup (including shutdown and mount verification) handled by deferred TestSystem cleanup
 }
 
@@ -206,11 +211,6 @@ func TestSystemBootWithStorageFailure(t *testing.T) {
 		t.Skipf("Cannot remount as read-only: %v", err)
 	}
 
-	defer func() {
-		// Unmount in cleanup
-		syscall.Unmount(targetDir, 0)
-	}()
-
 	// Verify the directory is actually read-only by trying to create a file
 	testFile := filepath.Join(targetDir, "test-write")
 	if err := os.WriteFile(testFile, []byte("test"), 0644); err == nil {
@@ -223,7 +223,13 @@ func TestSystemBootWithStorageFailure(t *testing.T) {
 
 	// Create system - this might fail due to permissions
 	sys, cleanup, err := TestSystem(t, config)
+	// Defer cleanup - runs FIRST (last defer registered)
 	defer cleanup()
+	// Defer unmount of test bind mount - runs SECOND (first defer registered)
+	// This ensures the bind mount is cleaned up before the cleanup verifiers run
+	defer func() {
+		syscall.Unmount(targetDir, 0)
+	}()
 	if err != nil {
 		t.Logf("System creation failed as expected: %v", err)
 		return
@@ -258,7 +264,9 @@ func TestSystemBootIdempotency(t *testing.T) {
 	}
 
 	// Start the system
-	StartSystemWithTimeout(t, sys, 10*time.Second)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	// Try to start again - should fail
 	err = sys.Start()
@@ -297,7 +305,9 @@ func TestSystemBootWithCustomPorts(t *testing.T) {
 	}
 
 	// Start the system with longer timeout for JuiceFS format
-	StartSystemWithTimeout(t, sys, 30*time.Second)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	// Verify API server config has the correct address
 	if config.APIListenAddr != listenAddr {

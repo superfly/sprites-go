@@ -32,3 +32,7 @@ cmd/tmp/
 CLAUDE.md
 .tmux-ui
 .vscode/
+
+# Test artifacts
+test-results/
+.cache/

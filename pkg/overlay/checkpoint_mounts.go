@@ -1,13 +1,15 @@
+//go:build linux
+
 package overlay
 
 import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -188,23 +190,30 @@ func (m *Manager) doMountSingleCheckpoint(ctx context.Context, cpName string) (s
 	m.logger.Info("Mounting checkpoint image", "checkpoint", cpName, "image", imgPath, "mount", mountPath)
 
 	// Attach to loop device
-	losetupCmd := exec.CommandContext(ctx, "losetup", "-f", "--show", "-r", imgPath)
-	output, err := losetupCmd.CombinedOutput()
+	m.logger.Debug("Attaching checkpoint to loop device", "checkpoint", cpName, "image", imgPath)
+	losetupStart := time.Now()
+	loopDevice, err := attachLoopDeviceReadonly(imgPath)
+	losetupDuration := time.Since(losetupStart)
 	if err != nil {
-		return "", "", fmt.Errorf("losetup failed: %w, output: %s", err, string(output))
+		m.logger.Error("Checkpoint losetup failed", "checkpoint", cpName, "error", err, "duration", losetupDuration)
+		return "", "", fmt.Errorf("losetup failed: %w", err)
 	}
 
-	loopDevice := strings.TrimSpace(string(output))
+	m.logger.Debug("Checkpoint attached to loop device", "checkpoint", cpName, "device", loopDevice, "duration", losetupDuration)
 
 	// Mount readonly
-	mountCmd := exec.CommandContext(ctx, "mount", "-o", "ro", loopDevice, mountPath)
-	if output, err := mountCmd.CombinedOutput(); err != nil {
+	m.logger.Info("Mounting checkpoint loop device readonly", "checkpoint", cpName, "device", loopDevice, "target", mountPath)
+	mountStart := time.Now()
+	if err := mountExt4(loopDevice, mountPath, "ro"); err != nil {
+		mountDuration := time.Since(mountStart)
+		m.logger.Error("Checkpoint mount failed", "checkpoint", cpName, "device", loopDevice, "error", err, "duration", mountDuration)
 		// Cleanup loop device
-		exec.Command("losetup", "-d", loopDevice).Run()
-		return "", "", fmt.Errorf("mount failed: %w, output: %s", err, string(output))
+		_ = detachLoopDevice(loopDevice)
+		return "", "", fmt.Errorf("mount failed: %w", err)
 	}
+	mountDuration := time.Since(mountStart)
 
-	m.logger.Info("Checkpoint mounted successfully", "checkpoint", cpName, "path", mountPath)
+	m.logger.Info("Checkpoint mounted successfully", "checkpoint", cpName, "path", mountPath, "device", loopDevice, "mountDuration", mountDuration)
 
 	return loopDevice, mountPath, nil
 }
@@ -233,9 +242,8 @@ func (m *Manager) UnmountCheckpoints(ctx context.Context) error {
 		m.logger.Info("Unmounting checkpoint", "checkpoint", cpName, "path", mountPath)
 
 		// Unmount
-		umountCmd := exec.CommandContext(ctx, "umount", mountPath)
-		if output, err := umountCmd.CombinedOutput(); err != nil {
-			m.logger.Warn("Failed to unmount checkpoint", "checkpoint", cpName, "error", err, "output", string(output))
+		if err := unmount(mountPath); err != nil {
+			m.logger.Warn("Failed to unmount checkpoint", "checkpoint", cpName, "error", err)
 			if firstErr == nil {
 				firstErr = fmt.Errorf("unmount %s: %w", cpName, err)
 			}
@@ -243,9 +251,8 @@ func (m *Manager) UnmountCheckpoints(ctx context.Context) error {
 
 		// Detach loop device if exists
 		if loopDevice, ok := m.checkpointLoopDevices[cpName]; ok {
-			losetupCmd := exec.CommandContext(ctx, "losetup", "-d", loopDevice)
-			if output, err := losetupCmd.CombinedOutput(); err != nil {
-				m.logger.Warn("Failed to detach loop device", "checkpoint", cpName, "device", loopDevice, "error", err, "output", string(output))
+			if err := detachLoopDevice(loopDevice); err != nil {
+				m.logger.Warn("Failed to detach loop device", "checkpoint", cpName, "device", loopDevice, "error", err)
 			}
 			delete(m.checkpointLoopDevices, cpName)
 		}
@@ -296,16 +303,14 @@ func (m *Manager) OnCheckpointCreated(ctx context.Context) error {
 			m.logger.Info("Unmounting old checkpoint", "checkpoint", cpName, "path", mountPath)
 
 			// Unmount
-			umountCmd := exec.CommandContext(ctx, "umount", mountPath)
-			if output, err := umountCmd.CombinedOutput(); err != nil {
-				m.logger.Warn("Failed to unmount old checkpoint", "checkpoint", cpName, "error", err, "output", string(output))
+			if err := unmount(mountPath); err != nil {
+				m.logger.Warn("Failed to unmount old checkpoint", "checkpoint", cpName, "error", err)
 			}
 
 			// Detach loop device if exists
 			if loopDevice, ok := m.checkpointLoopDevices[cpName]; ok {
-				losetupCmd := exec.CommandContext(ctx, "losetup", "-d", loopDevice)
-				if output, err := losetupCmd.CombinedOutput(); err != nil {
-					m.logger.Warn("Failed to detach loop device", "checkpoint", cpName, "device", loopDevice, "error", err, "output", string(output))
+				if err := detachLoopDevice(loopDevice); err != nil {
+					m.logger.Warn("Failed to detach loop device", "checkpoint", cpName, "device", loopDevice, "error", err)
 				}
 				delete(m.checkpointLoopDevices, cpName)
 			}
@@ -342,28 +347,17 @@ func (m *Manager) SetupCheckpointMountBase(ctx context.Context) error {
 		return fmt.Errorf("failed to create checkpoint mount base: %w", err)
 	}
 
-	// Check if already mounted
-	checkCmd := exec.CommandContext(ctx, "mountpoint", "-q", m.checkpointMountPath)
-	if err := checkCmd.Run(); err == nil {
+	// Check if already mounted as tmpfs
+	if mounted, err := isTmpfsMounted(m.checkpointMountPath); err == nil && mounted {
 		m.logger.Debug("Checkpoint mount base already set up", "path", m.checkpointMountPath)
 		return nil
 	}
 
-	// Mount as tmpfs to create an isolated filesystem
+	// Mount as tmpfs with shared propagation
 	// This prevents the Docker container's root overlay from appearing as a child mount
-	mountCmd := exec.CommandContext(ctx, "mount", "-t", "tmpfs", "tmpfs", m.checkpointMountPath)
-	if output, err := mountCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to mount checkpoint base as tmpfs: %w, output: %s", err, string(output))
-	}
-
-	// Make it a shared mount so submounts (checkpoints) propagate to containers
-	// Since tmpfs creates a new filesystem (not inside the overlay), this won't
-	// cause the container's root overlay to propagate into this directory
-	shareCmd := exec.CommandContext(ctx, "mount", "--make-shared", m.checkpointMountPath)
-	if output, err := shareCmd.CombinedOutput(); err != nil {
-		// Try to cleanup the tmpfs mount
-		exec.Command("umount", m.checkpointMountPath).Run()
-		return fmt.Errorf("failed to make checkpoint base shared: %w, output: %s", err, string(output))
+	// and allows submounts (checkpoints) to propagate to containers
+	if err := mountTmpfsShared(m.checkpointMountPath); err != nil {
+		return fmt.Errorf("failed to mount checkpoint base as tmpfs with shared propagation: %w", err)
 	}
 
 	m.logger.Info("Checkpoint mount base configured as tmpfs with shared propagation", "path", m.checkpointMountPath)
@@ -372,19 +366,18 @@ func (m *Manager) SetupCheckpointMountBase(ctx context.Context) error {
 
 // unmountCheckpointBase unmounts the base checkpoint directory
 func (m *Manager) unmountCheckpointBase(ctx context.Context) error {
-	// Check if mounted
-	checkCmd := exec.CommandContext(ctx, "mountpoint", "-q", m.checkpointMountPath)
-	if err := checkCmd.Run(); err != nil {
-		// Not mounted
+	// Check if mounted as tmpfs
+	mounted, err := isTmpfsMounted(m.checkpointMountPath)
+	if err != nil || !mounted {
+		// Path doesn't exist, not accessible, or not mounted as tmpfs
 		return nil
 	}
 
 	m.logger.Info("Unmounting checkpoint mount base", "path", m.checkpointMountPath)
 
 	// Unmount
-	umountCmd := exec.CommandContext(ctx, "umount", m.checkpointMountPath)
-	if output, err := umountCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("unmount checkpoint base failed: %w, output: %s", err, string(output))
+	if err := unmount(m.checkpointMountPath); err != nil {
+		return fmt.Errorf("unmount checkpoint base failed: %w", err)
 	}
 
 	m.logger.Info("Checkpoint mount base unmounted successfully")
@@ -408,8 +401,7 @@ func (m *Manager) mountActiveCheckpoint(ctx context.Context) error {
 	}
 
 	// Check if already mounted
-	checkCmd := exec.CommandContext(ctx, "mountpoint", "-q", m.activeCheckpointMount)
-	if err := checkCmd.Run(); err == nil {
+	if mounted, err := isMounted(m.activeCheckpointMount); err == nil && mounted {
 		m.logger.Debug("Active checkpoint already mounted", "path", m.activeCheckpointMount)
 		return nil
 	}
@@ -417,38 +409,47 @@ func (m *Manager) mountActiveCheckpoint(ctx context.Context) error {
 	m.logger.Info("Mounting active upper directory readonly", "source", activeUpperDir, "target", m.activeCheckpointMount)
 
 	// Bind mount (step 1: create the bind mount)
-	mountCmd := exec.CommandContext(ctx, "mount", "--bind", activeUpperDir, m.activeCheckpointMount)
-	if output, err := mountCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("bind mount active failed: %w, output: %s", err, string(output))
+	m.logger.Debug("Creating bind mount for active checkpoint", "source", activeUpperDir, "target", m.activeCheckpointMount)
+	bindStart := time.Now()
+	if err := mountBind(activeUpperDir, m.activeCheckpointMount); err != nil {
+		bindDuration := time.Since(bindStart)
+		m.logger.Error("Active checkpoint bind mount failed", "error", err, "duration", bindDuration, "source", activeUpperDir, "target", m.activeCheckpointMount)
+		return fmt.Errorf("bind mount active failed: %w", err)
 	}
+	bindDuration := time.Since(bindStart)
+	m.logger.Debug("Active checkpoint bind mount created", "duration", bindDuration)
 
 	// Remount readonly (step 2: make it read-only)
-	remountCmd := exec.CommandContext(ctx, "mount", "-o", "remount,ro,bind", m.activeCheckpointMount)
-	if output, err := remountCmd.CombinedOutput(); err != nil {
+	m.logger.Debug("Remounting active checkpoint readonly", "target", m.activeCheckpointMount)
+	remountStart := time.Now()
+	if err := remountReadonly(m.activeCheckpointMount); err != nil {
+		remountDuration := time.Since(remountStart)
+		m.logger.Error("Active checkpoint remount readonly failed", "error", err, "duration", remountDuration, "target", m.activeCheckpointMount)
 		// Cleanup: unmount the bind mount we just created
-		exec.CommandContext(ctx, "umount", m.activeCheckpointMount).Run()
-		return fmt.Errorf("remount active readonly failed: %w, output: %s", err, string(output))
+		_ = unmount(m.activeCheckpointMount)
+		return fmt.Errorf("remount active readonly failed: %w", err)
 	}
+	remountDuration := time.Since(remountStart)
+	m.logger.Debug("Active checkpoint remounted readonly", "duration", remountDuration)
 
-	m.logger.Info("Active checkpoint mounted successfully", "path", m.activeCheckpointMount)
+	m.logger.Info("Active checkpoint mounted successfully", "path", m.activeCheckpointMount, "totalDuration", bindDuration+remountDuration)
 	return nil
 }
 
 // unmountActiveCheckpoint unmounts the active checkpoint mount
 func (m *Manager) unmountActiveCheckpoint(ctx context.Context) error {
 	// Check if mounted
-	checkCmd := exec.CommandContext(ctx, "mountpoint", "-q", m.activeCheckpointMount)
-	if err := checkCmd.Run(); err != nil {
-		// Not mounted
+	mounted, err := isMounted(m.activeCheckpointMount)
+	if err != nil || !mounted {
+		// Not mounted or error checking
 		return nil
 	}
 
 	m.logger.Info("Unmounting active checkpoint", "path", m.activeCheckpointMount)
 
 	// Unmount
-	umountCmd := exec.CommandContext(ctx, "umount", m.activeCheckpointMount)
-	if output, err := umountCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("unmount active checkpoint failed: %w, output: %s", err, string(output))
+	if err := unmount(m.activeCheckpointMount); err != nil {
+		return fmt.Errorf("unmount active checkpoint failed: %w", err)
 	}
 
 	m.logger.Info("Active checkpoint unmounted successfully")

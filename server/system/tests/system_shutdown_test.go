@@ -34,21 +34,15 @@ func TestSystemGracefulShutdown(t *testing.T) {
 	}
 
 	// Start the system
-	StartSystemWithTimeout(t, sys, 10*time.Second)
-
-	// Verify system is running
-	VerifySystemRunning(t, sys)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	// Perform graceful shutdown
 	t.Log("Starting graceful shutdown...")
 	startTime := time.Now()
 
-	// Shutdown is not cancelable - context is informational only
-	// Allow 6 minutes for JuiceFS flush (5 min max + 1 min buffer)
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
-	defer cancel()
-
-	err = sys.Shutdown(ctx)
+	err = sys.Shutdown(context.Background())
 	shutdownDuration := time.Since(startTime)
 
 	if err != nil {
@@ -60,10 +54,7 @@ func TestSystemGracefulShutdown(t *testing.T) {
 	// Verify everything is stopped
 	t.Run("VerifyShutdown", func(t *testing.T) {
 		// Wait for process to be fully stopped
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		if err := sys.WhenProcessStopped(ctx); err != nil {
+		if err := sys.WhenProcessStopped(context.Background()); err != nil {
 			isRunning := sys.IsProcessRunning()
 			t.Errorf("Process did not stop within timeout: %v, IsProcessRunning=%v", err, isRunning)
 		}
@@ -115,15 +106,12 @@ done
 	}
 
 	// Start the system
-	StartSystemWithTimeout(t, sys, 10*time.Second)
-
-	// Shutdown with generous timeout to allow for JuiceFS cleanup under load
-	// Shutdown is not cancelable - allow 6 minutes for JuiceFS flush
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
-	defer cancel()
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	startTime := time.Now()
-	err = sys.Shutdown(ctx)
+	err = sys.Shutdown(context.Background())
 	shutdownDuration := time.Since(startTime)
 
 	// The current implementation doesn't return an error from Shutdown even if StopProcess fails
@@ -168,25 +156,18 @@ func TestSystemShutdownIdempotency(t *testing.T) {
 	}
 
 	// Start the system
-	StartSystemWithTimeout(t, sys, 10*time.Second)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	// First shutdown
-	// NOTE: Shutdown is NOT cancelable - the context is only informational
-	// We pass a long timeout here but shutdown will take as long as needed
-	// JuiceFS can take up to 5 minutes, so we allow 6 minutes total
-	ctx1, cancel1 := context.WithTimeout(context.Background(), 6*time.Minute)
-	defer cancel1()
-
-	err = sys.Shutdown(ctx1)
+	err = sys.Shutdown(context.Background())
 	if err != nil {
 		t.Fatalf("First shutdown failed: %v", err)
 	}
 
 	// Second shutdown - should be safe and return quickly since already stopped
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel2()
-
-	err = sys.Shutdown(ctx2)
+	err = sys.Shutdown(context.Background())
 	if err != nil {
 		// This is OK - might return "already shutting down" or similar
 		t.Logf("Second shutdown returned: %v", err)
@@ -213,17 +194,15 @@ func TestSystemShutdownWithActiveConnections(t *testing.T) {
 	}
 
 	// Start the system
-	StartSystemWithTimeout(t, sys, 10*time.Second)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	// TODO: Create active connections to API server
 	// This would require actually making HTTP/WebSocket connections
 
 	// Shutdown should handle active connections gracefully
-	// Shutdown is not cancelable - allow 6 minutes for JuiceFS flush
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
-	defer cancel()
-
-	err = sys.Shutdown(ctx)
+	err = sys.Shutdown(context.Background())
 	if err != nil {
 		t.Errorf("Shutdown with active connections failed: %v", err)
 	}
@@ -263,13 +242,12 @@ done
 	}
 
 	// Start the system
-	StartSystemWithTimeout(t, sys, 10*time.Second)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	// Shutdown - process will crash but shutdown should complete
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	err = sys.Shutdown(ctx)
+	err = sys.Shutdown(context.Background())
 	// Error is OK here - process crashed
 	if err != nil {
 		t.Logf("Shutdown with crash: %v", err)
@@ -301,31 +279,19 @@ func TestSystemSignalTriggeredShutdown(t *testing.T) {
 	}
 
 	// Start the system
-	StartSystemWithTimeout(t, sys, 10*time.Second)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	// Send SIGTERM to trigger shutdown
 	t.Log("Sending SIGTERM to trigger shutdown...")
 	sys.HandleSignal(syscall.SIGTERM)
 
 	// Wait for shutdown to complete
-	done := make(chan struct{})
-	go func() {
-		exitCode, err := sys.WaitForExit()
-		if err != nil {
-			t.Errorf("WaitForExit error: %v", err)
-		}
-		if exitCode != 0 {
-			t.Errorf("Expected exit code 0, got %d", exitCode)
-		}
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		t.Log("System shutdown completed via signal")
-	case <-time.After(60 * time.Second):
-		t.Fatal("Timeout waiting for signal-triggered shutdown")
+	if err := sys.WhenProcessStopped(t.Context()); err != nil {
+		t.Fatalf("Process did not stop: %v", err)
 	}
+	t.Log("System shutdown completed via signal")
 
 	// Give the system a moment to fully clean up
 	time.Sleep(100 * time.Millisecond)
@@ -356,17 +322,15 @@ func TestSystemShutdownOrder(t *testing.T) {
 	}
 
 	// Start the system
-	StartSystemWithTimeout(t, sys, 10*time.Second)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	// Track shutdown order
 	// This would require instrumentation in the actual shutdown code
 	// For now, just verify shutdown completes
 
-	// Shutdown is not cancelable - allow 6 minutes for JuiceFS flush
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
-	defer cancel()
-
-	err = sys.Shutdown(ctx)
+	err = sys.Shutdown(context.Background())
 	if err != nil {
 		t.Errorf("Shutdown failed: %v", err)
 	}
@@ -402,17 +366,14 @@ func TestSystemComponentCleanupVerification(t *testing.T) {
 	}
 
 	// Start the system
-	StartSystemWithTimeout(t, sys, 30*time.Second)
-
-	// Verify system is running
-	VerifySystemRunning(t, sys)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	// Perform graceful shutdown
 	t.Log("Starting graceful shutdown...")
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
-	defer cancel()
 
-	err = sys.Shutdown(ctx)
+	err = sys.Shutdown(context.Background())
 	if err != nil {
 		t.Fatalf("Shutdown failed: %v", err)
 	}
@@ -449,10 +410,14 @@ func TestUserEnvironmentRestart(t *testing.T) {
 
 	// Start the full system (both SystemBoot and UserEnvironment)
 	t.Log("Starting full system...")
-	StartSystemWithTimeout(t, sys, 30*time.Second)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	// Verify system is running
-	VerifySystemRunning(t, sys)
+	if !sys.IsProcessRunning() {
+		t.Fatal("Process should be running")
+	}
 
 	// Verify JuiceFS is mounted (part of SystemBoot - should stay up)
 	if sys.JuiceFS != nil && !sys.JuiceFS.IsMounted() {
@@ -464,9 +429,7 @@ func TestUserEnvironmentRestart(t *testing.T) {
 	// Phase 1: Shutdown UserEnvironment (Container + Overlay + Services)
 	// This simulates a checkpoint or migration scenario
 	t.Log("Phase 1: Shutting down UserEnvironment (keeping SystemBoot running)...")
-	ctx1, cancel1 := context.WithTimeout(context.Background(), 2*time.Minute)
-	err = sys.ShutdownContainer(ctx1)
-	cancel1()
+	err = sys.ShutdownContainer(context.Background())
 	if err != nil {
 		t.Fatalf("Failed to shutdown UserEnvironment: %v", err)
 	}
@@ -489,13 +452,11 @@ func TestUserEnvironmentRestart(t *testing.T) {
 
 	// Verify UserEnvironment cleanup
 	t.Log("Verifying UserEnvironment cleanup after shutdown...")
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel2()
 
 	// Check OverlayManager cleanup verifiers
 	if sys.OverlayManager != nil {
 		for i, verify := range sys.OverlayManager.CleanupVerifiers() {
-			if err := verify(ctx2); err != nil {
+			if err := verify(context.Background()); err != nil {
 				t.Errorf("OverlayManager cleanup verifier %d failed: %v", i, err)
 			}
 		}
@@ -504,7 +465,7 @@ func TestUserEnvironmentRestart(t *testing.T) {
 	// Check ServicesManager cleanup verifiers
 	if sys.ServicesManager != nil {
 		for i, verify := range sys.ServicesManager.CleanupVerifiers() {
-			if err := verify(ctx2); err != nil {
+			if err := verify(context.Background()); err != nil {
 				t.Errorf("ServicesManager cleanup verifier %d failed: %v", i, err)
 			}
 		}
@@ -514,17 +475,15 @@ func TestUserEnvironmentRestart(t *testing.T) {
 
 	// Phase 2: Restart UserEnvironment (while SystemBoot stays up)
 	t.Log("Phase 2: Restarting UserEnvironment (BootContainer)...")
-	ctx3, cancel3 := context.WithTimeout(context.Background(), 2*time.Minute)
-	err = sys.BootContainer(ctx3)
-	cancel3()
+	err = sys.BootContainer(context.Background())
 	if err != nil {
 		t.Fatalf("Failed to restart UserEnvironment: %v", err)
 	}
 
 	// Verify UserEnvironment is running again
-	WaitForCondition(t, 10*time.Second, 100*time.Millisecond,
-		sys.IsProcessRunning,
-		"container process to restart")
+	if err := sys.WhenProcessRunning(t.Context()); err != nil {
+		t.Fatalf("Timeout waiting for container process to restart: %v", err)
+	}
 
 	if !sys.IsProcessRunning() {
 		t.Error("Container process should be running after BootContainer")

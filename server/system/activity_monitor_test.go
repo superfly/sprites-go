@@ -105,7 +105,7 @@ func createTestSystem(t *testing.T, logWriter *testLogger) *System {
 		shutdownTriggeredCh: make(chan struct{}),
 		shutdownCompleteCh:  make(chan struct{}),
 		// Process management fields (needed for activity monitor) - initially stopped
-		processRunningCh: make(chan struct{}),
+		processStartedCh: make(chan struct{}),
 		processStoppedCh: func() chan struct{} {
 			ch := make(chan struct{})
 			close(ch)
@@ -219,9 +219,9 @@ func TestActivityMonitor_IdleTimerTriggersSuspension(t *testing.T) {
 func TestActivityMonitor_ActiveTmuxSessionsPreventSuspension(t *testing.T) {
 	resetSuspendTracker()
 
-	// Skip if tmux is not available
+	// In Docker test environment, tmux must be available
 	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not available")
+		t.Fatal("tmux not available - test environment is misconfigured")
 	}
 
 	ctx := context.Background()
@@ -494,9 +494,9 @@ func TestActivityMonitor_ChannelFull(t *testing.T) {
 func TestActivityMonitor_RealTmuxIntegration(t *testing.T) {
 	resetSuspendTracker()
 
-	// Skip if tmux is not available
+	// In Docker test environment, tmux must be available
 	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not available")
+		t.Fatal("tmux not available - test environment is misconfigured")
 	}
 
 	ctx := context.Background()

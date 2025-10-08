@@ -110,9 +110,18 @@ func (s *System) StartProcess() error {
 	// Connect stdin
 	processCmd.Stdin = os.Stdin
 
-	// If we're using crun with a PID file, set up monitoring BEFORE starting the process
+	// Verify processWaitStarted is false before we start
+	if s.processWaitStarted {
+		panic("processWaitStarted should be false before starting a new process")
+	}
+
+	// Set up process monitoring BEFORE starting the process
+	// This ensures we don't miss any process events
 	var pidFileWatcher *pidFileMonitor
+	var monitorReady chan struct{}
+
 	if pidFile != "" {
+		// For crun with PID file, set up PID file monitoring
 		monitor, err := s.setupPIDFileMonitor(pidFile)
 		if err != nil {
 			s.processStarted.Store(false)
@@ -120,6 +129,9 @@ func (s *System) StartProcess() error {
 		}
 		pidFileWatcher = monitor
 		defer monitor.cleanup()
+	} else {
+		// For direct processes, set up Wait() monitoring before Start()
+		monitorReady = make(chan struct{})
 	}
 
 	// Start the process
@@ -138,6 +150,17 @@ func (s *System) StartProcess() error {
 		"pid", processCmd.Process.Pid,
 		"command", s.config.ProcessCommand,
 		"pidFile", pidFile)
+
+	// If using direct process monitoring (no PID file), start the monitor now
+	if monitorReady != nil {
+		go func() {
+			close(monitorReady)
+			s.monitorProcess(processCmd, stdoutBuffer, stderrBuffer)
+		}()
+		s.processWaitStarted = true
+		// Wait for monitor to be ready before continuing
+		<-monitorReady
+	}
 
 	// If we're using crun with a PID file, wait for it to be written
 	if pidFileWatcher != nil {
@@ -200,7 +223,7 @@ func (s *System) StartProcess() error {
 				default:
 					close(s.processStoppedCh) // Signal stopped
 				}
-				s.processRunningCh = make(chan struct{}) // Open = not running
+				s.processStartedCh = make(chan struct{}) // Open = not running
 				s.processMu.Unlock()
 
 				// Reset the atomic flag so process can be started again
@@ -225,21 +248,29 @@ func (s *System) StartProcess() error {
 		}
 	}
 
-	// Signal process is running by creating new channels
+	// Signal process is running by closing processRunningCh
 	s.processMu.Lock()
-	oldRunningCh := s.processRunningCh
-	s.processRunningCh = make(chan struct{})
-	close(s.processRunningCh)                // Closed = running
-	s.processStoppedCh = make(chan struct{}) // Open = not stopped
-	s.processMu.Unlock()
 
-	// Close old channel if it wasn't already closed
+	// Check if we need to create a new channel or can reuse the existing one
 	select {
-	case <-oldRunningCh:
-		// Already closed
+	case <-s.processStartedCh:
+		// Channel is already closed - process is already marked as started
+		// This shouldn't happen because:
+		// - Initial state: channel is open (created in New())
+		// - After stop: monitorProcess creates a new open channel
+		// If we see this, it means we're trying to start while already started
+		s.logger.Error("BUG: processRunningCh already closed when starting new process - indicates concurrent start or missing stop handler")
+		// Create a new channel to reset state
+		s.processStartedCh = make(chan struct{})
+		close(s.processStartedCh)
 	default:
-		close(oldRunningCh)
+		// Normal case - channel is open (not started), close it to signal started
+		close(s.processStartedCh)
 	}
+
+	// Create new stopped channel (open = not stopped)
+	s.processStoppedCh = make(chan struct{})
+	s.processMu.Unlock()
 
 	// Send notification to admin channel (non-blocking)
 	if s.AdminChannel != nil {
@@ -253,12 +284,7 @@ func (s *System) StartProcess() error {
 	}
 
 	// Process is now running - channels already signaled above
-
-	// Monitor process in background
-	// Only start monitoring if we haven't already started waiting on the process
-	if !s.processWaitStarted {
-		go s.monitorProcess(processCmd, stdoutBuffer, stderrBuffer)
-	}
+	// Monitoring is already set up (either via PID file watcher or direct monitoring)
 
 	return nil
 }
@@ -456,7 +482,7 @@ func (s *System) monitorProcess(cmd *exec.Cmd, stdoutBuffer, stderrBuffer *tap.C
 	default:
 		close(s.processStoppedCh) // Signal stopped
 	}
-	s.processRunningCh = make(chan struct{}) // Open = not running
+	s.processStartedCh = make(chan struct{}) // Open = not running
 	s.processMu.Unlock()
 
 	// Reset the atomic flag so process can be started again
@@ -512,6 +538,17 @@ func (s *System) generateCrashReport(err error, processRuntime time.Duration, st
 }
 
 // StopProcess stops the supervised process gracefully
+//
+// This is called internally during system shutdown to stop the process.
+//
+// External callers who want to initiate a graceful shutdown should instead
+// send SIGINT to the process via ForwardSignal(syscall.SIGINT), which will:
+//  1. Forward signal to process
+//  2. Let process exit naturally with its exit code
+//  3. Let monitorProcessLoop detect the exit and trigger shutdown
+//
+// StopProcess is only called by Shutdown() → PrepareContainerForShutdown()
+// after shutdown has already been triggered by some other means.
 func (s *System) StopProcess() error {
 	s.processMu.Lock()
 	defer s.processMu.Unlock()
@@ -618,7 +655,7 @@ forceKill:
 		default:
 			close(s.processStoppedCh) // Signal stopped
 		}
-		s.processRunningCh = make(chan struct{}) // Open = not running
+		s.processStartedCh = make(chan struct{}) // Open = not running
 		s.processCmd = nil
 		s.processWaitStarted = false
 		// Lock will be released by defer at function exit

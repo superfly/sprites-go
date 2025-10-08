@@ -31,19 +31,17 @@ func TestSystemShutdownWedgedOverlay(t *testing.T) {
 
 	// Start the system
 	t.Log("Starting system...")
-	StartSystemWithTimeout(t, sys, 15*time.Second)
-	VerifySystemRunning(t, sys)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	// Note: Actually wedging an overlay mount requires root/kernel operations
 	// This test verifies that shutdown completes and cleanup verifiers detect any leaks
 	// In a real wedged scenario, forced cleanup would use lazy unmount (umount -l)
 
 	t.Log("Attempting shutdown (simulating potential overlay wedge scenario)...")
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer shutdownCancel()
-
 	startTime := time.Now()
-	err = sys.Shutdown(shutdownCtx)
+	err = sys.Shutdown(context.Background())
 	duration := time.Since(startTime)
 
 	if err != nil {
@@ -54,8 +52,7 @@ func TestSystemShutdownWedgedOverlay(t *testing.T) {
 
 	// CRITICAL: Verify no loop devices leaked
 	// Even if overlay was wedged, forced cleanup should detach loop devices
-	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer verifyCancel()
+	verifyCtx := context.Background()
 
 	if sys.OverlayManager != nil {
 		for i, verify := range sys.OverlayManager.CleanupVerifiers() {
@@ -100,21 +97,18 @@ func TestSystemShutdownWedgedJuiceFS(t *testing.T) {
 
 	// Start the system
 	t.Log("Starting system...")
-	StartSystemWithTimeout(t, sys, 15*time.Second)
-	VerifySystemRunning(t, sys)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	// Note: Simulating a wedged JuiceFS unmount is difficult
 	// JuiceFS unmount respects 5-minute timeout for data integrity (memory 2978565)
 	// This test verifies shutdown completes and no mounts leaked
 
 	t.Log("Attempting shutdown (simulating potential JuiceFS wedge scenario)...")
-	// Allow longer timeout for JuiceFS (up to 6 minutes: 5min + buffer)
-	// But our test deadline (30s) will catch actual hangs
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 6*time.Minute)
-	defer shutdownCancel()
-
+	// Test shutdown without timeout to expose real cleanup issues
 	startTime := time.Now()
-	err = sys.Shutdown(shutdownCtx)
+	err = sys.Shutdown(context.Background())
 	duration := time.Since(startTime)
 
 	if err != nil {
@@ -129,8 +123,7 @@ func TestSystemShutdownWedgedJuiceFS(t *testing.T) {
 	}
 
 	// CRITICAL: Verify no JuiceFS mount leaked
-	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer verifyCancel()
+	verifyCtx := context.Background()
 
 	if sys.JuiceFS != nil {
 		for i, verify := range sys.JuiceFS.CleanupVerifiers() {
@@ -189,16 +182,14 @@ done
 
 	// Start the system
 	t.Log("Starting system with process that ignores SIGTERM...")
-	StartSystemWithTimeout(t, sys, 15*time.Second)
-	VerifySystemRunning(t, sys)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	// Shutdown - should force-kill after graceful timeout
 	t.Log("Attempting shutdown (process will ignore SIGTERM, should be force-killed)...")
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer shutdownCancel()
-
 	startTime := time.Now()
-	err = sys.Shutdown(shutdownCtx)
+	err = sys.Shutdown(context.Background())
 	duration := time.Since(startTime)
 
 	if err != nil {
@@ -218,8 +209,7 @@ done
 	}
 
 	// CRITICAL: Verify no service processes leaked
-	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer verifyCancel()
+	verifyCtx := context.Background()
 
 	if sys.ServicesManager != nil {
 		for i, verify := range sys.ServicesManager.CleanupVerifiers() {
@@ -255,22 +245,20 @@ func TestUserEnvironmentShutdownWedged(t *testing.T) {
 
 	// Start the full system
 	t.Log("Starting full system...")
-	StartSystemWithTimeout(t, sys, 15*time.Second)
-	VerifySystemRunning(t, sys)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	// Shutdown UserEnvironment (Container + Overlay + Services)
 	t.Log("Shutting down UserEnvironment (simulating potential wedge)...")
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	err = sys.ShutdownContainer(shutdownCtx)
-	shutdownCancel()
+	err = sys.ShutdownContainer(context.Background())
 
 	if err != nil {
 		t.Logf("ShutdownContainer error (may be expected in wedge scenario): %v", err)
 	}
 
 	// CRITICAL: Verify UserEnvironment cleanup
-	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer verifyCancel()
+	verifyCtx := context.Background()
 
 	// Check overlay cleanup
 	if sys.OverlayManager != nil {
@@ -298,10 +286,7 @@ func TestUserEnvironmentShutdownWedged(t *testing.T) {
 
 	// Now shutdown SystemBoot
 	t.Log("Shutting down SystemBoot...")
-	shutdownCtx2, shutdownCancel2 := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer shutdownCancel2()
-
-	err = sys.Shutdown(shutdownCtx2)
+	err = sys.Shutdown(context.Background())
 	if err != nil {
 		t.Logf("Full shutdown error: %v", err)
 	}

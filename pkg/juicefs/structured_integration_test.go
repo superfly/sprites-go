@@ -44,7 +44,7 @@ func isMountReadyPath(mountPath string) bool {
 
 func TestJuiceFSRealProcessStructuredLogs(t *testing.T) {
 	if os.Getenv("SPRITE_TEST_DOCKER") != "1" {
-		t.Skip("requires Docker test container with juicefs binary")
+		t.Fatal("This test must run in the Docker test environment (SPRITE_TEST_DOCKER=1)")
 	}
 
 	// Just run a simple juicefs command that will output structured logs

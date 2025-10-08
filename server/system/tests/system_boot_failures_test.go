@@ -3,7 +3,6 @@ package tests
 import (
 	"context"
 	"testing"
-	"time"
 )
 
 // TestSystemBootFailureJuiceFS verifies cleanup when JuiceFS has issues
@@ -40,10 +39,7 @@ func TestSystemBootFailureJuiceFS(t *testing.T) {
 	}
 
 	// Shutdown the system to trigger cleanup
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer shutdownCancel()
-
-	if err := sys.Shutdown(shutdownCtx); err != nil {
+	if err := sys.Shutdown(context.Background()); err != nil {
 		t.Logf("Shutdown error (may be expected): %v", err)
 	}
 
@@ -83,10 +79,7 @@ func TestSystemBootFailureLitestream(t *testing.T) {
 	}
 
 	// Shutdown to trigger cleanup
-	ctx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer shutdownCancel()
-
-	err = sys.Shutdown(ctx)
+	err = sys.Shutdown(context.Background())
 	if err != nil {
 		t.Logf("Shutdown error (may be expected): %v", err)
 	}
@@ -129,10 +122,7 @@ func TestUserEnvironmentBootFailureOverlay(t *testing.T) {
 	}
 
 	// Shutdown the system
-	ctx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer shutdownCancel()
-
-	shutdownErr := sys.Shutdown(ctx)
+	shutdownErr := sys.Shutdown(context.Background())
 	if shutdownErr != nil {
 		t.Logf("Shutdown error (may be expected): %v", shutdownErr)
 	}
@@ -173,10 +163,7 @@ func TestUserEnvironmentBootFailureServices(t *testing.T) {
 	}
 
 	// Shutdown to trigger cleanup
-	ctx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer shutdownCancel()
-
-	shutdownErr := sys.Shutdown(ctx)
+	shutdownErr := sys.Shutdown(context.Background())
 	if shutdownErr != nil {
 		t.Fatalf("Shutdown failed: %v", shutdownErr)
 	}

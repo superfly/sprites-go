@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -13,7 +14,7 @@ import (
 func TestSystemShutdownBehavior(t *testing.T) {
 	_, cancel := SetTestDeadline(t)
 	defer cancel()
-	
+
 	requireDockerTest(t)
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -34,44 +35,73 @@ func TestSystemShutdownBehavior(t *testing.T) {
 	}
 
 	// Start the system
-	StartSystemWithTimeout(t, sys, 30*time.Second)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
-	// Verify system is running
-	VerifySystemRunning(t, sys)
-
-	// Test manual shutdown trigger
-	t.Log("Testing manual shutdown trigger...")
-	sys.HandleSignal(syscall.SIGTERM)
-
-	// Wait for shutdown to complete
-	done := make(chan struct{})
+	// Start WaitForExit in background (mimics production main.go)
+	// This waits for shutdownTriggeredCh to close, then calls Shutdown()
 	go func() {
-		exitCode, shutdownErr := sys.WaitForExit()
-		if shutdownErr != nil {
-			t.Errorf("WaitForExit error: %v", shutdownErr)
+		exitCode, err := sys.WaitForExit()
+		if err != nil {
+			t.Logf("WaitForExit error: %v", err)
 		}
-		t.Logf("System shutdown completed with exit code: %d", exitCode)
-		close(done)
+		t.Logf("WaitForExit completed with exit code: %d", exitCode)
 	}()
 
-	select {
-	case <-done:
-		t.Log("System shutdown completed successfully")
-	case <-time.After(60 * time.Second):
-		t.Fatal("Timeout waiting for shutdown")
+	// Test manual shutdown trigger via signal
+	// Flow: HandleSignal forwards SIGTERM to process → process exits →
+	//       monitorProcessLoop detects exit → closes shutdownTriggeredCh →
+	//       WaitForExit calls Shutdown() → process stops completely
+	t.Log("Testing manual shutdown trigger via signal...")
+
+	// Start a goroutine to monitor the process PID
+	pid := sys.ProcessPID()
+	t.Logf("Process PID: %d", pid)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 60; i++ {
+			time.Sleep(1 * time.Second)
+
+			// Check if PID still exists
+			err := syscall.Kill(pid, 0)
+			isRunning := sys.IsProcessRunning()
+			currentPID := sys.ProcessPID()
+
+			if err != nil {
+				t.Logf("[%ds] PID %d check: syscall.Kill returned error: %v, IsProcessRunning=%v, CurrentPID=%d",
+					i+1, pid, err, isRunning, currentPID)
+			} else {
+				t.Logf("[%ds] PID %d still exists, IsProcessRunning=%v, CurrentPID=%d",
+					i+1, pid, isRunning, currentPID)
+			}
+
+			if !isRunning && currentPID == 0 {
+				t.Logf("[%ds] Process stopped according to system state", i+1)
+				return
+			}
+		}
+		t.Logf("Monitor goroutine timed out after 60 seconds")
+	}()
+
+	sys.HandleSignal(syscall.SIGTERM)
+
+	// Wait for shutdown to complete with a timeout
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	if err := sys.WhenProcessStopped(ctx); err != nil {
+		t.Fatalf("Process did not stop: %v", err)
 	}
 
-	// Verify system is properly shut down
-	if sys.IsProcessRunning() {
-		t.Error("Process should not be running after shutdown")
-	}
+	<-done // Wait for monitor goroutine to finish
 }
 
 // TestSystemShutdownOnProcessExit verifies that shutdown sequence runs when process exits unexpectedly
 func TestSystemShutdownOnProcessExit(t *testing.T) {
 	_, cancel := SetTestDeadline(t)
 	defer cancel()
-	
+
 	requireDockerTest(t)
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -103,37 +133,19 @@ exit 42
 
 	// Start the system successfully
 	t.Log("Starting system with short-running process...")
-	StartSystemWithTimeout(t, sys, 30*time.Second)
-
-	// Verify system is running initially
-	VerifySystemRunning(t, sys)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	// Wait for the process to exit and trigger shutdown
 	t.Log("Waiting for process to exit and trigger shutdown...")
-	done := make(chan struct{})
-	go func() {
-		exitCode, shutdownErr := sys.WaitForExit()
-		if shutdownErr != nil {
-			t.Errorf("WaitForExit error: %v", shutdownErr)
-		}
-		// The exit code should be the process exit code (42)
-		if exitCode != 42 {
-			t.Errorf("Expected exit code 42, got %d", exitCode)
-		}
-		t.Logf("System shutdown completed with exit code: %d", exitCode)
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		t.Log("System shutdown completed after unexpected process exit")
-	case <-time.After(60 * time.Second):
-		t.Fatal("Timeout waiting for shutdown after process exit")
+	if err := sys.WhenProcessStopped(t.Context()); err != nil {
+		t.Fatalf("Process did not stop: %v", err)
 	}
 
-	// Verify system is properly shut down
-	if sys.IsProcessRunning() {
-		t.Error("Process should not be running after unexpected exit and shutdown")
+	// Verify exit code
+	if sys.GetProcessExitCode() != 42 {
+		t.Errorf("Expected exit code 42, got %d", sys.GetProcessExitCode())
 	}
 }
 
@@ -141,7 +153,7 @@ exit 42
 func TestSystemKeepAliveOnError(t *testing.T) {
 	_, cancel := SetTestDeadline(t)
 	defer cancel()
-	
+
 	requireDockerTest(t)
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -173,16 +185,16 @@ exit 1
 
 	// Start the system successfully
 	t.Log("Starting system with KeepAliveOnError enabled...")
-	StartSystemWithTimeout(t, sys, 30*time.Second)
-
-	// Verify system is running initially
-	VerifySystemRunning(t, sys)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	// Wait for the process to exit
 	t.Log("Waiting for process to exit...")
-	WaitForCondition(t, 10*time.Second, 100*time.Millisecond, func() bool {
-		return !sys.IsProcessRunning()
-	}, "process to exit")
+
+	if err := sys.WhenProcessStopped(t.Context()); err != nil {
+		t.Fatalf("Process did not stop: %v", err)
+	}
 
 	// Wait a bit more to ensure shutdown is not triggered
 	time.Sleep(2 * time.Second)
@@ -196,21 +208,8 @@ exit 1
 	// Now manually trigger shutdown
 	t.Log("Manually triggering shutdown...")
 	sys.HandleSignal(syscall.SIGTERM)
-
-	done := make(chan struct{})
-	go func() {
-		exitCode, shutdownErr := sys.WaitForExit()
-		if shutdownErr != nil {
-			t.Errorf("WaitForExit error: %v", shutdownErr)
-		}
-		t.Logf("Manual shutdown completed with exit code: %d", exitCode)
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		t.Log("Manual shutdown completed successfully")
-	case <-time.After(60 * time.Second):
-		t.Fatal("Timeout waiting for manual shutdown")
+	if err := sys.WhenProcessStopped(t.Context()); err != nil {
+		t.Fatalf("Process did not stop: %v", err)
 	}
+
 }

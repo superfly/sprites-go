@@ -37,7 +37,7 @@ func (s *System) ProcessPID() int {
 func (s *System) WhenProcessRunning(ctx context.Context) error {
 	// No mutex needed - just select directly on the field
 	select {
-	case <-s.processRunningCh:
+	case <-s.processStartedCh:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

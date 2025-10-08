@@ -2,7 +2,6 @@ package services
 
 import (
 	"os"
-	"runtime"
 	"testing"
 	"time"
 )
@@ -94,12 +93,10 @@ func TestShutdownWithRealProcesses(t *testing.T) {
 }
 
 func TestShutdownWithForceKill(t *testing.T) {
-	// Skip in Docker environment as signal handling is unreliable
+	// This test requires specific signal handling that may not work in all environments
+	// Skip if in Docker or not on Linux where signal handling differs
 	if _, err := os.Stat("/.dockerenv"); err == nil {
 		t.Skip("Skipping force kill test in Docker environment - signal handling is unreliable")
-	}
-	if runtime.GOOS == "darwin" {
-		t.Skip("Skipping force kill test on Darwin due to signal handling differences")
 	}
 
 	// Create temporary directory for test database

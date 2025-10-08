@@ -63,7 +63,7 @@ type System struct {
 	processCmd          *exec.Cmd
 	processStartTime    time.Time
 	processWaitStarted  bool
-	processRunningCh    chan struct{} // Closed when process is running
+	processStartedCh    chan struct{} // Closed when process is running
 	processStoppedCh    chan struct{} // Closed when process is stopped
 	processExitCode     atomic.Int32  // Exit code for WaitForExit
 	processExitCodeSet  atomic.Bool   // Track if exit code has been set
@@ -100,7 +100,7 @@ func New(config *Config) (*System, error) {
 			return ch
 		}(),
 		// Process management - initially stopped
-		processRunningCh: make(chan struct{}), // Open = not running
+		processStartedCh: make(chan struct{}), // Open = not running
 		processStoppedCh: func() chan struct{} { // Closed = stopped
 			ch := make(chan struct{})
 			close(ch)
@@ -234,18 +234,37 @@ func (s *System) monitorProcessLoop() {
 }
 
 // HandleSignal handles OS signals
+//
+// Signal handling philosophy:
+// - When we receive a shutdown signal (SIGTERM/SIGINT), we forward it to the supervised process
+// - We mark this as an expected/graceful shutdown so we don't generate crash reports
+// - We let the process exit naturally with its own exit code
+// - monitorProcessLoop will detect the exit and trigger system shutdown
+// - The process's actual exit code is preserved and used as the system exit code
+//
+// We do NOT set the exit code to 0 ourselves - the process decides its exit code.
+// We do NOT directly trigger shutdown here - we let the natural flow happen:
+//
+//	Signal → Forward to process → Process exits → monitorProcessLoop triggers shutdown
 func (s *System) HandleSignal(sig os.Signal) {
-	s.logger.Info("Received signal, initiating graceful shutdown", "signal", sig)
+	s.logger.Info("Received signal, forwarding to process", "signal", sig)
 
-	// Handle shutdown signals by triggering graceful shutdown
-	// We do NOT forward signals to the container - we handle them ourselves
 	if sig == syscall.SIGTERM || sig == syscall.SIGINT {
-		// Use exit code 0 for graceful shutdown
-		s.SetProcessExitCode(0, "HandleSignal")
-		// Close channel exactly once
-		s.shutdownTriggeredOnce.Do(func() {
-			close(s.shutdownTriggeredCh)
-		})
+		// Mark this as a graceful shutdown to avoid crash reporting
+		s.processMu.Lock()
+		s.gracefulShutdown = true
+		s.processMu.Unlock()
+
+		// Forward the signal to the supervised process
+		// The process will exit, monitorProcessLoop will detect it, and trigger shutdown
+		if err := s.ForwardSignal(sig); err != nil {
+			s.logger.Error("Failed to forward signal to process", "signal", sig, "error", err)
+			// If we can't forward the signal (e.g., process already stopped),
+			// trigger shutdown directly
+			s.shutdownTriggeredOnce.Do(func() {
+				close(s.shutdownTriggeredCh)
+			})
+		}
 	}
 }
 

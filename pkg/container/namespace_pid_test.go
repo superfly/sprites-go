@@ -2,14 +2,11 @@ package container
 
 import (
 	"os"
-	"runtime"
 	"testing"
 )
 
 func TestGetNamespacePID(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("PID namespace tests only work on Linux")
-	}
+	// PID namespace tests always run in Linux Docker environment
 
 	// Test with current process (should return same PID if not in namespace)
 	currentPID := os.Getpid()
@@ -25,9 +22,7 @@ func TestGetNamespacePID(t *testing.T) {
 }
 
 func TestResolvePID(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("PID namespace tests only work on Linux")
-	}
+	// PID namespace tests always run in Linux Docker environment
 
 	// This test can only work meaningfully in a container environment
 	// In a non-container environment, it should return an error for non-existent PIDs

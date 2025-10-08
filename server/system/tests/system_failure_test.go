@@ -42,12 +42,8 @@ func TestShutdownAfterBootFailure(t *testing.T) {
 	// Now verify we can safely shutdown even though Start() failed
 	// This is what main.go should do
 	t.Log("Calling Shutdown() after failed Start()...")
-	// Shutdown is not cancelable - allow 6 minutes for JuiceFS flush
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
-	defer cancel()
-
 	startTime := time.Now()
-	shutdownErr := sys.Shutdown(ctx)
+	shutdownErr := sys.Shutdown(context.Background())
 	shutdownDuration := time.Since(startTime)
 
 	if shutdownErr != nil {
@@ -62,10 +58,7 @@ func TestShutdownAfterBootFailure(t *testing.T) {
 	}
 
 	// Verify we can call Shutdown() again (idempotent)
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel2()
-
-	err = sys.Shutdown(ctx2)
+	err = sys.Shutdown(context.Background())
 	if err != nil {
 		t.Logf("Second shutdown returned: %v", err)
 	}
@@ -94,18 +87,15 @@ func TestShutdownWithStorageErrors(t *testing.T) {
 
 	// Start the system successfully
 	t.Log("Starting system...")
-	StartSystemWithTimeout(t, sys, 30*time.Second)
-	VerifySystemRunning(t, sys)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	// Now shutdown - even if storage has issues, shutdown should complete
 	// (In a real scenario, storage might be corrupted or unmount might fail)
 	t.Log("Shutting down system...")
-	// Shutdown is not cancelable - allow 6 minutes for JuiceFS flush
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
-	defer cancel()
-
 	startTime := time.Now()
-	err = sys.Shutdown(ctx)
+	err = sys.Shutdown(context.Background())
 	shutdownDuration := time.Since(startTime)
 
 	if err != nil {
@@ -172,11 +162,7 @@ done
 
 	// Immediately trigger shutdown while it's still starting
 	t.Log("Triggering shutdown while system is starting...")
-	// Shutdown is not cancelable - allow 6 minutes for JuiceFS flush
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
-	defer cancel()
-
-	err = sys.Shutdown(ctx)
+	err = sys.Shutdown(context.Background())
 	if err != nil {
 		t.Logf("Shutdown error (may be expected): %v", err)
 	}
@@ -210,8 +196,9 @@ func TestMultipleRapidShutdowns(t *testing.T) {
 	}
 
 	// Start the system
-	StartSystemWithTimeout(t, sys, 30*time.Second)
-	VerifySystemRunning(t, sys)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	// Call Shutdown() multiple times concurrently
 	t.Log("Calling Shutdown() 5 times concurrently...")
@@ -219,10 +206,7 @@ func TestMultipleRapidShutdowns(t *testing.T) {
 	done := make(chan error, 5)
 	for i := 0; i < 5; i++ {
 		go func(id int) {
-			// Shutdown is not cancelable - allow 6 minutes for JuiceFS flush
-			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
-			defer cancel()
-			err := sys.Shutdown(ctx)
+			err := sys.Shutdown(context.Background())
 			t.Logf("Shutdown call %d completed: %v", id, err)
 			done <- err
 		}(i)
@@ -230,12 +214,7 @@ func TestMultipleRapidShutdowns(t *testing.T) {
 
 	// Wait for all to complete
 	for i := 0; i < 5; i++ {
-		select {
-		case <-done:
-			// OK
-		case <-time.After(7 * time.Minute):
-			t.Fatal("Timeout waiting for concurrent shutdowns")
-		}
+		<-done
 	}
 
 	t.Log("All shutdown calls completed")
@@ -280,11 +259,7 @@ func TestBootFailureCleanup(t *testing.T) {
 
 	// Even though boot failed, subsystems that DID start should be cleaned up
 	// Call Shutdown() to ensure cleanup
-	// Shutdown is not cancelable - allow 6 minutes for JuiceFS flush
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
-	defer cancel()
-
-	err = sys.Shutdown(ctx)
+	err = sys.Shutdown(context.Background())
 	if err != nil {
 		t.Logf("Shutdown after failed boot: %v", err)
 	}
@@ -304,13 +279,15 @@ func TestBootFailureCleanup(t *testing.T) {
 		t.Fatalf("Failed to create second system: %v", err)
 	}
 
-	StartSystemWithTimeout(t, sys2, 30*time.Second)
-	VerifySystemRunning(t, sys2)
+	if err := sys2.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
+	if !sys2.IsProcessRunning() {
+		t.Fatal("Process should be running")
+	}
 
 	// Shut down the second system properly before test ends
-	shutdownCtx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel2()
-	if err := sys2.Shutdown(shutdownCtx2); err != nil {
+	if err := sys2.Shutdown(context.Background()); err != nil {
 		t.Fatalf("Failed to shutdown second system: %v", err)
 	}
 

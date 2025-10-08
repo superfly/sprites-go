@@ -1,7 +1,6 @@
 package terminal
 
 import (
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,15 +13,13 @@ import (
 	"time"
 
 	gorillaws "github.com/gorilla/websocket"
+	"github.com/superfly/sprite-env/pkg/tap"
 )
 
 // TestWebSocketDisconnectKillsWrapperChild verifies that when using wrapper commands,
 // child processes are tracked and killed when the websocket disconnects
 func TestWebSocketDisconnectKillsWrapperChild(t *testing.T) {
-	// The container.GetContainerPID function is Linux-specific
-	if _, err := os.Stat("/proc"); err != nil {
-		t.Skip("Child process tracking requires /proc filesystem (Linux)")
-	}
+	// This test always runs in Linux Docker environment with /proc
 	// Track process lifecycle
 	var wrapperPID int
 	var mu sync.Mutex
@@ -50,7 +47,7 @@ wait $CHILD
 		t.Fatalf("failed to create wrapper script: %v", err)
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logger := tap.NewDiscardLogger()
 
 	session := NewSession(
 		WithCommand("dummy"), // This is replaced by the wrapper

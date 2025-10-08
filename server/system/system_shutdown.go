@@ -228,21 +228,14 @@ func (s *System) ShutdownContainer(shutdownCtx context.Context) error {
 	}
 
 	// Phase 3: Unmount overlay filesystem
-	// This must wait until the container process is completely stopped
+	// Use Background context - this MUST complete for data integrity
+	s.logger.Info("Phase 3: Unmounting overlay filesystem")
 	if s.config.OverlayEnabled && s.OverlayManager != nil {
-		s.logger.Info("Phase 3: Unmounting overlay filesystem")
-		overlayStart := time.Now()
-
-		// Use Background context - overlay unmount MUST complete for data integrity
-		// It is NOT cancelable - must either succeed or explicitly error when wedged
-		// This also unmounts checkpoints automatically
-		if err := s.OverlayManager.Unmount(context.Background()); err != nil {
+		if err := s.UnmountOverlayWithVerification(context.Background()); err != nil {
 			s.logger.Error("Failed to unmount overlay", "error", err)
 			return fmt.Errorf("failed to unmount overlay: %w", err)
 		}
-
-		s.logger.Info("Overlay filesystem unmounted successfully",
-			"duration", time.Since(overlayStart))
+		s.logger.Info("Overlay unmounted successfully")
 	}
 
 	s.logger.Info("Container shutdown sequence completed")

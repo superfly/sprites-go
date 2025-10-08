@@ -12,7 +12,7 @@ on:
       - 'tests/**'
       - 'server/**'
       - 'lib/**'
-      - 'packages/**'
+      - 'pkg/**'
       - 'client/**'
       - 'scripts/**'
   pull_request:
@@ -23,7 +23,7 @@ on:
       - 'tests/**'
       - 'server/**'
       - 'lib/**'
-      - 'packages/**'
+      - 'pkg/**'
       - 'client/**'
       - 'scripts/**'
   workflow_call:  # This allows other workflows to call this one
@@ -33,6 +33,10 @@ jobs:
     name: "Tests"
     runs-on: ubuntu-latest
     if: "!contains(github.event.pull_request.title, '[skip ci]') && !contains(github.event.pull_request.title, '[ci skip]')"
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
 
     steps:
     - name: Checkout repo
@@ -44,8 +48,21 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Build test Docker image with cache
-      uses: docker/build-push-action@v5
+    - name: Cache Go modules and build cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          .cache/go-pkg
+          .cache/go-build
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}-${{ hashFiles('**/*.go') }}
+        restore-keys: |
+          ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}-
+          ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
+          ${{ runner.os }}-go-
+          ${{ runner.os }}-go-mod-
+
+    - name: Build test Docker image
+      uses: docker/build-push-action@v6
       with:
         context: .
         file: ./Dockerfile.test
@@ -54,51 +71,29 @@ jobs:
         tags: sprite-env-tests:latest
         cache-from: type=gha
         cache-to: type=gha,mode=max
-        platforms: linux/amd64
 
-    - name: Create Docker volumes for caching
+    - name: Create cache directories
       run: |
-        docker volume create sprite-test-cache || true
-        docker volume create sprite-test-go-cache || true
+        mkdir -p .cache/go-pkg .cache/go-build
 
     - name: Run tests in Docker
+      id: run_tests
       run: |
         docker run --rm --privileged \
           -e SPRITE_TEST_DOCKER=1 \
+          -e CI=true \
+          -e GOMODCACHE=/go/pkg/mod \
+          -e GOCACHE=/root/.cache/go-build \
           -v "$(pwd)":/workspace \
-          -v sprite-test-cache:/tmp \
-          -v sprite-test-go-cache:/go/pkg/mod \
+          -v "$(pwd)/.cache/go-pkg:/go/pkg" \
+          -v "$(pwd)/.cache/go-build:/root/.cache/go-build" \
           -w /workspace \
           sprite-env-tests \
           ./scripts/run-tests.sh
-  
-  # validate-traces:
-  #   name: Validate Traces
-  #   runs-on: ubuntu-latest
-  #   needs: [test-models, test-server-integration]
-  #   if: success()
 
-  #   steps:
-  #   - name: Checkout repo
-  #     uses: actions/checkout@v4
+    - name: Generate test summary
+      if: always() && steps.run_tests.outcome != 'skipped' && hashFiles('test-results/test-summary.md') != ''
+      run: |
+        cat test-results/test-summary.md >> $GITHUB_STEP_SUMMARY
 
-  #   - name: Set up Java
-  #     uses: actions/setup-java@v4
-  #     with:
-  #       distribution: 'temurin'
-  #       java-version: '11'
-
-  #   - name: Set up Python
-  #     uses: actions/setup-python@v4
-  #     with:
-  #       python-version: '3.x'
-
-  #   - name: Download trace artifacts
-  #     uses: actions/download-artifact@v4
-  #     with:
-  #       name: trace-files
-  #       path: server/tests/tmp/
-
-  #   - name: Validate traces
-  #     run: make validate-traces
   

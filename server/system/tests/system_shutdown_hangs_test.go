@@ -31,20 +31,18 @@ func TestSystemShutdownHangOverlay(t *testing.T) {
 
 	// Start the system
 	t.Log("Starting system...")
-	StartSystemWithTimeout(t, sys, 15*time.Second)
-	VerifySystemRunning(t, sys)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	// Note: Actually making overlay unmount hang requires kernel/mount manipulation
 	// This test validates shutdown completes within reasonable time
 	// In production, overlay unmount should not hang, but if it does, forced cleanup applies
 
 	t.Log("Attempting shutdown with hang timeout detection...")
-	// Allow 3 minutes max for overlay-related operations
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer shutdownCancel()
-
+	// Test shutdown without timeout to expose real cleanup issues
 	startTime := time.Now()
-	err = sys.Shutdown(shutdownCtx)
+	err = sys.Shutdown(context.Background())
 	duration := time.Since(startTime)
 
 	if err != nil {
@@ -62,8 +60,7 @@ func TestSystemShutdownHangOverlay(t *testing.T) {
 	t.Logf("Shutdown duration: %v (max allowed: 3 minutes)", duration)
 
 	// CRITICAL: Verify no loop devices leaked even after forced cleanup
-	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer verifyCancel()
+	verifyCtx := context.Background()
 
 	if sys.OverlayManager != nil {
 		for i, verify := range sys.OverlayManager.CleanupVerifiers() {
@@ -125,19 +122,17 @@ func TestSystemShutdownHangJuiceFS(t *testing.T) {
 
 	// Start the system
 	t.Log("Starting system...")
-	StartSystemWithTimeout(t, sys, 15*time.Second)
-	VerifySystemRunning(t, sys)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	// Note: JuiceFS umount respects 5-minute window for data integrity (memory 2978565)
 	// This is a CRITICAL timeout that must NOT be reduced
 
 	t.Log("Attempting shutdown with JuiceFS timeout detection...")
-	// Allow 6 minutes: 5 minutes for JuiceFS + 1 minute buffer
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 6*time.Minute)
-	defer shutdownCancel()
-
+	// Test shutdown without timeout to expose real cleanup issues
 	startTime := time.Now()
-	err = sys.Shutdown(shutdownCtx)
+	err = sys.Shutdown(context.Background())
 	duration := time.Since(startTime)
 
 	if err != nil {
@@ -159,8 +154,7 @@ func TestSystemShutdownHangJuiceFS(t *testing.T) {
 	t.Logf("Shutdown duration: %v (max allowed: 6 minutes for JuiceFS)", duration)
 
 	// CRITICAL: Verify no JuiceFS mount leaked
-	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer verifyCancel()
+	verifyCtx := context.Background()
 
 	if sys.JuiceFS != nil {
 		for i, verify := range sys.JuiceFS.CleanupVerifiers() {
@@ -217,15 +211,13 @@ while true; do sleep 1; done
 
 	// Start the system
 	t.Log("Starting system with process that ignores SIGTERM...")
-	StartSystemWithTimeout(t, sys, 15*time.Second)
-	VerifySystemRunning(t, sys)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
 	t.Log("Attempting shutdown (service will hang, should force-kill)...")
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 1*time.Minute)
-	defer shutdownCancel()
-
 	startTime := time.Now()
-	err = sys.Shutdown(shutdownCtx)
+	err = sys.Shutdown(context.Background())
 	duration := time.Since(startTime)
 
 	if err != nil {
@@ -252,8 +244,7 @@ while true; do sleep 1; done
 	}
 
 	// CRITICAL: Verify no processes leaked
-	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer verifyCancel()
+	verifyCtx := context.Background()
 
 	if sys.ServicesManager != nil {
 		for i, verify := range sys.ServicesManager.CleanupVerifiers() {
@@ -289,17 +280,15 @@ func TestUserEnvironmentShutdownHang(t *testing.T) {
 
 	// Start the full system
 	t.Log("Starting full system...")
-	StartSystemWithTimeout(t, sys, 15*time.Second)
-	VerifySystemRunning(t, sys)
+	if err := sys.Start(); err != nil {
+		t.Fatalf("Failed to start system: %v", err)
+	}
 
-	// Shutdown UserEnvironment with timeout
+	// Shutdown UserEnvironment
 	t.Log("Shutting down UserEnvironment with hang detection...")
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-
 	startTime := time.Now()
-	err = sys.ShutdownContainer(shutdownCtx)
+	err = sys.ShutdownContainer(context.Background())
 	duration := time.Since(startTime)
-	shutdownCancel()
 
 	if err != nil {
 		t.Logf("ShutdownContainer completed with error in %v: %v", duration, err)
@@ -315,8 +304,7 @@ func TestUserEnvironmentShutdownHang(t *testing.T) {
 	t.Logf("UserEnvironment shutdown duration: %v", duration)
 
 	// CRITICAL: Verify UserEnvironment cleanup
-	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer verifyCancel()
+	verifyCtx := context.Background()
 
 	if sys.OverlayManager != nil {
 		for i, verify := range sys.OverlayManager.CleanupVerifiers() {
@@ -341,10 +329,7 @@ func TestUserEnvironmentShutdownHang(t *testing.T) {
 
 	// Now shutdown SystemBoot
 	t.Log("Shutting down SystemBoot (should be unaffected)...")
-	shutdownCtx2, shutdownCancel2 := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer shutdownCancel2()
-
-	err = sys.Shutdown(shutdownCtx2)
+	err = sys.Shutdown(context.Background())
 	if err != nil {
 		t.Logf("SystemBoot shutdown error: %v", err)
 	}

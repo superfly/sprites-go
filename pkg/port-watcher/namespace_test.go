@@ -16,10 +16,7 @@ import (
 
 // setupTestNamespace creates the "sprite" namespace for tests
 func setupTestNamespace(t *testing.T) {
-	// Check if we're running as root
-	if os.Getuid() != 0 {
-		t.Skip("Namespace tests require root privileges")
-	}
+	// This test always runs as root in Docker environment
 
 	// Create /var/run/netns directory if it doesn't exist
 	if err := os.MkdirAll("/var/run/netns", 0755); err != nil {
@@ -162,11 +159,8 @@ func TestNamespaceIsolation(t *testing.T) {
 // TestHostNetworkNamespace tests monitoring in the host network namespace
 func TestHostNetworkNamespace(t *testing.T) {
 	// This test uses the namespace monitor which requires nsenter and ss -ltnp to work
-	// Skip on non-Linux systems
-	if _, err := os.Stat("/proc/self/ns/net"); err != nil {
-		t.Skip("Skipping test on non-Linux system")
-	}
-	
+	// This test always runs in Linux Docker environment
+
 	setupTestNamespace(t)
 
 	// Get the namespace monitor
@@ -176,28 +170,28 @@ func TestHostNetworkNamespace(t *testing.T) {
 	// Use a fixed port for simplicity since we control the namespace
 	expectedPort := 12345
 	cmd := exec.Command("ip", "netns", "exec", "sprite", "nc", "-l", "127.0.0.1", fmt.Sprintf("%d", expectedPort))
-	
+
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("Failed to start listener in namespace: %v", err)
 	}
 	defer cmd.Process.Kill()
-	
+
 	// The actual process inside the namespace is nc, not the ip command
 	// We need to find the PID of nc inside the namespace
 	time.Sleep(100 * time.Millisecond) // Give nc time to start
-	
+
 	// Find the nc process
 	findCmd := exec.Command("ip", "netns", "exec", "sprite", "pidof", "nc")
 	output, err := findCmd.Output()
 	if err != nil {
 		t.Fatalf("Failed to find nc process: %v", err)
 	}
-	
+
 	var pid int
 	if _, err := fmt.Sscanf(strings.TrimSpace(string(output)), "%d", &pid); err != nil {
 		t.Fatalf("Failed to parse nc PID: %v", err)
 	}
-	
+
 	t.Logf("Started listener in sprite namespace on port %d (PID: %d)", expectedPort, pid)
 
 	// Subscribe to the process in the namespace

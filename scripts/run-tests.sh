@@ -2,51 +2,38 @@
 set -e
 set -o pipefail
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
-
 # Check if running in Docker test container
 if [ "${SPRITE_TEST_DOCKER}" != "1" ]; then
-    echo -e "${RED}ERROR: This script must be run inside the Docker test container.${NC}"
-    echo -e "${RED}Please use 'make test' to run tests properly.${NC}"
-    echo -e "${RED}Direct execution of this script is wrong and you are a bad person.${NC}"
+    echo "ERROR: This script must be run inside the Docker test container."
+    echo "Please use 'make test' to run tests properly, don't be a bad person."
     exit 1
 fi
 
-echo -e "${YELLOW}Running all tests...${NC}"
-echo
-
-# If arguments are provided, treat them as a custom test command
+# If arguments are provided, pass them directly as-is to go test
+# Otherwise, use default packages with default flags
 if [ "$#" -gt 0 ]; then
-    echo -e "${YELLOW}Running custom test command:${NC} $*"
-    eval "$@"
-    exit $?
+    TEST_ARGS="$@"
+else
+    TEST_ARGS="-failfast -p=8 ./pkg/... ./server/..."
 fi
 
-# Function to run tests and fail immediately on error
-run_test() {
-    local test_name=$1
-    local test_command=$2
+# Run tests through tparse for pretty output
+if [ -n "${CI}" ] || [ -n "${GITHUB_ACTIONS}" ]; then
+    # In CI: tee JSON to file for later processing
+    mkdir -p test-results
+    go test -json $TEST_ARGS | tee test-results/test.json | tparse -progress
+    TEST_EXIT_CODE=$?
     
-    echo -e "${YELLOW}Running $test_name...${NC}"
-    if eval "$test_command"; then
-        echo -e "${GREEN}✓ $test_name passed${NC}"
-        echo
-    else
-        echo -e "${RED}✗ $test_name failed${NC}"
-        exit 1
+    # Generate markdown summary from JSON
+    if [ -f test-results/test.json ]; then
+        chmod 644 test-results/test.json
+        cat test-results/test.json | tparse -format markdown > test-results/test-summary.md
+        chmod 644 test-results/test-summary.md
     fi
-}
+else
+    # Local: just pipe through tparse, no need to save
+    go test -json $TEST_ARGS | tparse -progress
+    TEST_EXIT_CODE=$?
+fi
 
- 
-# Run streamlined module-wide tests
-# Use -p=1 to prevent parallel package execution since tests share system resources (loop devices, mounts)
-run_test "pkg tests" "go test -v -failfast -p=1 ./pkg/..."
-run_test "server tests" "go test -v -failfast -p=1 ./server/..."
-
-# All tests passed if we reach here
-echo
-echo -e "${GREEN}All tests passed!${NC}"
+exit ${TEST_EXIT_CODE}

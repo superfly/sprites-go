@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/superfly/sprite-env/pkg/tap"
 )
 
 func TestNewSession(t *testing.T) {
@@ -23,7 +24,7 @@ func TestNewSession(t *testing.T) {
 }
 
 func TestSessionWithOptions(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	logger := tap.NewDiscardLogger()
 
 	s := NewSession(
 		WithCommand("echo", "hello", "world"),
@@ -86,10 +87,7 @@ func TestRunWithoutTTY(t *testing.T) {
 }
 
 func TestRunWithTTY(t *testing.T) {
-	// Skip PTY tests on systems where they might not work
-	if os.Getenv("CI") != "" {
-		t.Skip("Skipping PTY test in CI environment")
-	}
+	// PTY tests always work in Docker test environment
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -427,10 +425,7 @@ func TestTTYModeUnderLoad(t *testing.T) {
 	// This test checks that TTY mode works correctly under scheduling pressure
 	t.Parallel()
 
-	// Skip if not on a system with PTY support
-	if runtime.GOOS == "windows" {
-		t.Skip("PTY not supported on Windows")
-	}
+	// PTY is always supported in Linux Docker environment
 
 	// Save current GOMAXPROCS and set to 1 to increase scheduling pressure
 	// This makes race conditions more likely without burning CPU

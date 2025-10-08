@@ -3,7 +3,6 @@ package overlay
 import (
 	"context"
 	"os"
-	"runtime"
 	"testing"
 )
 
@@ -29,9 +28,7 @@ func TestManagerConfig(t *testing.T) {
 }
 
 func TestManagerLinuxOnly(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("Overlay tests require Linux")
-	}
+	// Overlay tests always run in Linux Docker environment
 
 	// Check if overlayfs is available
 	if _, err := os.Stat("/sys/module/overlay"); os.IsNotExist(err) {
@@ -55,9 +52,13 @@ func TestManagerLinuxOnly(t *testing.T) {
 	}
 
 	// If we're root, test basic mount/unmount
-	defer CleanupTestOverlays(t, m)
-	
+	defer VerifyNoTestOverlays(t, m)
+
 	t.Run("Mount", func(t *testing.T) {
+		// Ensure image exists before mounting
+		if err := m.EnsureImage(); err != nil {
+			t.Fatalf("failed to ensure image: %v", err)
+		}
 		if err := m.Mount(ctx); err != nil {
 			t.Fatalf("failed to mount: %v", err)
 		}
@@ -77,12 +78,7 @@ func TestManagerLinuxOnly(t *testing.T) {
 }
 
 func TestPrepareCheckpointLinuxOnly(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("Overlay tests require Linux")
-	}
-	if os.Getuid() != 0 {
-		t.Skip("Overlay tests require root")
-	}
+	// Overlay tests always run as root in Linux Docker environment
 
 	ctx := context.Background()
 	cfg := Config{
@@ -90,7 +86,12 @@ func TestPrepareCheckpointLinuxOnly(t *testing.T) {
 		SkipOverlayFS: true,
 	}
 	m := New(cfg)
-	defer CleanupTestOverlays(t, m)
+	defer VerifyNoTestOverlays(t, m)
+
+	// Ensure image exists before mounting
+	if err := m.EnsureImage(); err != nil {
+		t.Fatalf("failed to ensure image: %v", err)
+	}
 
 	// Mount first
 	if err := m.Mount(ctx); err != nil {
@@ -105,5 +106,10 @@ func TestPrepareCheckpointLinuxOnly(t *testing.T) {
 	// Should be frozen now
 	if err := m.UnfreezeAfterCheckpoint(ctx); err != nil {
 		t.Fatalf("failed to unfreeze: %v", err)
+	}
+
+	// Cleanup
+	if err := m.Unmount(ctx); err != nil {
+		t.Fatalf("failed to unmount: %v", err)
 	}
 }
