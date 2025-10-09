@@ -132,6 +132,8 @@ func (c *Client) GetSpriteWithOrg(ctx context.Context, name string, org *Organiz
 		UpdatedAt:        info.UpdatedAt,
 		BucketName:       info.BucketName,
 		PrimaryRegion:    info.PrimaryRegion,
+		URL:              info.URL,
+		URLSettings:      info.URLSettings,
 	}
 	return sprite, nil
 }
@@ -234,6 +236,8 @@ func (c *Client) ListAllSpritesWithOrg(ctx context.Context, prefix string, org *
 				UpdatedAt:        info.UpdatedAt,
 				BucketName:       info.BucketName,
 				PrimaryRegion:    info.PrimaryRegion,
+				URL:              info.URL,
+				URLSettings:      info.URLSettings,
 			}
 			allSprites = append(allSprites, sprite)
 		}
@@ -321,4 +325,49 @@ func (c *Client) UpgradeSprite(ctx context.Context, name string) error {
 // Upgrade upgrades this sprite to the latest version
 func (s *Sprite) Upgrade(ctx context.Context) error {
 	return s.client.UpgradeSprite(ctx, s.name)
+}
+
+// UpdateURLSettings updates the URL authentication settings for a sprite
+func (c *Client) UpdateURLSettings(ctx context.Context, spriteName string, settings *URLSettings) error {
+	req := UpdateURLSettingsRequest{
+		URLSettings: settings,
+	}
+
+	jsonData, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	// Build URL
+	url := fmt.Sprintf("%s/v1/sprites/%s", c.baseURL, spriteName)
+
+	// Create HTTP request
+	httpReq, err := http.NewRequestWithContext(ctx, "PUT", url, bytes.NewReader(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	// Make request with timeout
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("failed to update URL settings: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Check status code
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to update URL settings (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// UpdateURLSettings updates the URL authentication settings for this sprite
+func (s *Sprite) UpdateURLSettings(ctx context.Context, settings *URLSettings) error {
+	return s.client.UpdateURLSettings(ctx, s.name, settings)
 }

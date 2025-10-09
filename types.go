@@ -12,6 +12,11 @@ type SpriteConfig struct {
 	StorageGB int    `json:"storage_gb,omitempty"`
 }
 
+// URLSettings represents URL authentication settings
+type URLSettings struct {
+	Auth string `json:"auth,omitempty"`
+}
+
 // SpriteInfo represents sprite information from the API
 type SpriteInfo struct {
 	ID            string            `json:"id"`
@@ -24,6 +29,8 @@ type SpriteInfo struct {
 	UpdatedAt     time.Time         `json:"updated_at"`
 	BucketName    string            `json:"bucket_name,omitempty"`
 	PrimaryRegion string            `json:"primary_region,omitempty"`
+	URL           string            `json:"url,omitempty"`
+	URLSettings   *URLSettings      `json:"url_settings,omitempty"`
 }
 
 // CreateSpriteRequest represents the request to create a sprite
@@ -36,6 +43,11 @@ type CreateSpriteRequest struct {
 // CreateSpriteResponse represents the response from sprite creation
 type CreateSpriteResponse struct {
 	Name string `json:"name"`
+}
+
+// UpdateURLSettingsRequest represents the request to update URL settings
+type UpdateURLSettingsRequest struct {
+	URLSettings *URLSettings `json:"url_settings"`
 }
 
 // ListOptions represents options for listing sprites

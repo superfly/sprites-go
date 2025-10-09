@@ -27,6 +27,8 @@ type Sprite struct {
 	UpdatedAt        time.Time
 	BucketName       string
 	PrimaryRegion    string
+	URL              string
+	URLSettings      *URLSettings
 }
 
 // Name returns the sprite's name.
