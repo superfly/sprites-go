@@ -152,6 +152,10 @@ func main() {
 	}
 
 	switch subcommand {
+	case "login":
+		commands.LoginCommand(globalCtx, subArgs)
+	case "logout":
+		commands.LogoutCommand(globalCtx, subArgs)
 	case "exec", "x":
 		exitCode := commands.ExecCommand(globalCtx, subArgs)
 		if exitCode != 0 {
@@ -196,6 +200,8 @@ Usage:
   sprite [global options] <command> [command options] [arguments]
 
 Commands:
+  login                      Authenticate with Fly.io (simplified flow)
+  logout                     Remove Sprites configuration
   exec (x)                   Execute a command in the sprite environment
   console (c)                Open an interactive shell in the sprite environment
   create <name>              Create a new sprite
@@ -226,7 +232,14 @@ Global Options:
   -h, --help                 Show this help message
 
 Examples:
-  # Authenticate with an organization
+  # Authenticate with Fly.io
+  sprite login
+  sprite login -o my-org
+
+  # Logout (removes Sprites config)
+  sprite logout
+
+  # Or use the full org auth flow
   sprite org auth
   sprite orgs auth
   sprite o auth

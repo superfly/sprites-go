@@ -9,6 +9,7 @@ import (
 
 	"github.com/superfly/sprite-env/client/config"
 	"github.com/superfly/sprite-env/client/format"
+	"github.com/superfly/sprite-env/client/prompts"
 	sprites "github.com/superfly/sprites-go"
 )
 
@@ -17,22 +18,23 @@ func CreateCommand(ctx *GlobalContext, args []string) {
 	// Create command structure
 	cmd := &Command{
 		Name:        "create",
-		Usage:       "create [options] <sprite-name>",
+		Usage:       "create [options] [sprite-name]",
 		Description: "Create a new sprite",
 		FlagSet:     flag.NewFlagSet("create", flag.ContinueOnError),
 		Examples: []string{
 			"sprite create my-sprite",
 			"sprite create -o myorg development-sprite",
+			"sprite create",
 		},
 		Notes: []string{
 			"Creates a new sprite with the specified name.",
 			"The sprite will be created in the selected organization.",
+			"If sprite name is not provided, you will be prompted.",
 		},
 	}
 
 	// Set up flags
 	_ = NewSpriteFlags(cmd.FlagSet) // Register flags but we use ctx.OrgOverride instead
-	// Note: We only use the org flag, not the sprite flag, since we're creating a new sprite
 
 	// Parse flags
 	remainingArgs, err := ParseFlags(cmd, args)
@@ -40,17 +42,29 @@ func CreateCommand(ctx *GlobalContext, args []string) {
 		os.Exit(1)
 	}
 
-	// Check for sprite name argument
-	if len(remainingArgs) != 1 {
-		fmt.Fprintf(os.Stderr, "Error: create requires exactly one argument (sprite name)\n\n")
+	// Get sprite name from args or prompt
+	var spriteName string
+	if len(remainingArgs) == 1 {
+		spriteName = remainingArgs[0]
+	} else if len(remainingArgs) == 0 {
+		// Prompt for sprite name using clean prompt component
+		spriteName, err = prompts.PromptForSpriteName()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "Error: create takes at most one argument (sprite name)\n\n")
 		cmd.FlagSet.Usage()
 		os.Exit(1)
 	}
 
-	spriteName := remainingArgs[0]
-
-	// Get organization and client using unified function
-	org, client, err := GetOrgAndClient(ctx, ctx.OrgOverride)
+	// Ensure authenticated and get org/client
+	// This will:
+	// 1. Do login flow if necessary
+	// 2. Show org selector if needed
+	// 3. Return the selected org and client
+	org, client, err := EnsureAuthenticated(ctx, ctx.OrgOverride)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

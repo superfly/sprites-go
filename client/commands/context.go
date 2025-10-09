@@ -10,8 +10,8 @@ import (
 
 	"github.com/superfly/sprite-env/client/config"
 	"github.com/superfly/sprite-env/client/format"
+	"github.com/superfly/sprite-env/client/orgresolve"
 	"github.com/superfly/sprite-env/client/prompts"
-    "github.com/superfly/sprite-env/client/orgresolve"
 	sprites "github.com/superfly/sprites-go"
 )
 
@@ -434,13 +434,56 @@ func GetOrgAndClient(ctx *GlobalContext, orgOverride string) (*config.Organizati
 	// Get the organization using the existing logic
 	org, err := getOrganization(ctx, orgOverride)
 	if err != nil {
+		// If we have a TTY and the error is about missing orgs/auth, run auth flow directly
+		if IsTTY() {
+			if strings.Contains(err.Error(), "no organizations configured") ||
+				strings.Contains(err.Error(), "no active user") {
+				fmt.Println()
+				// Just start the auth flow directly (don't ask y/n)
+				return SelectOrganization(ctx)
+			}
+			
+			// For "not found" errors, use the nice prompt
+			if strings.Contains(err.Error(), "not found") {
+				fmt.Println()
+				confirmed, promptErr := prompts.PromptToAuthenticate()
+				if promptErr != nil {
+					return nil, nil, promptErr
+				}
+				if confirmed {
+					return SelectOrganization(ctx)
+				}
+			}
+		}
+
+		// Return helpful error message for non-TTY
+		if strings.Contains(err.Error(), "no organizations configured") {
+			return nil, nil, fmt.Errorf("no organizations configured. Run 'sprite login' to authenticate")
+		}
+		if strings.Contains(err.Error(), "no active user") {
+			return nil, nil, fmt.Errorf("no active user. Run 'sprite login' to authenticate")
+		}
+
 		return nil, nil, err
 	}
 
 	// Get auth token
 	token, err := org.GetTokenWithKeyringDisabled(ctx.ConfigMgr.IsKeyringDisabled())
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get auth token: %w", err)
+		// If token retrieval fails and we have TTY, use nice prompt to re-authenticate
+		if IsTTY() && strings.Contains(err.Error(), "no token found") {
+			fmt.Println()
+			confirmed, promptErr := prompts.PromptToReAuthenticate(org.Name)
+			if promptErr != nil {
+				return nil, nil, promptErr
+			}
+			if confirmed {
+				return SelectOrganization(ctx)
+			}
+			return nil, nil, fmt.Errorf("authentication required")
+		}
+
+		return nil, nil, fmt.Errorf("failed to get auth token: %w. Run 'sprite login' to authenticate", err)
 	}
 
 	// Create and configure sprites client
@@ -452,13 +495,13 @@ func GetOrgAndClient(ctx *GlobalContext, orgOverride string) (*config.Organizati
 // getOrganization handles all organization selection logic in one place.
 // This consolidates the logic from EnsureOrg and EnsureOrgAndSpriteWithContext.
 func getOrganization(ctx *GlobalContext, orgOverride string) (*config.Organization, error) {
-    // Defer to centralized resolver so logic is testable without importing this package
-    org, err := orgresolve.ResolveOrg(ctx.ConfigMgr, orgOverride)
-    if err != nil {
-        return nil, err
-    }
-    slog.Debug("Final organization selection", "org", org.Name, "url", org.URL)
-    return org, nil
+	// Defer to centralized resolver so logic is testable without importing this package
+	org, err := orgresolve.ResolveOrg(ctx.ConfigMgr, orgOverride)
+	if err != nil {
+		return nil, err
+	}
+	slog.Debug("Final organization selection", "org", org.Name, "url", org.URL)
+	return org, nil
 }
 
 // GetOrgClientAndSprite returns the selected organization, configured sprites client, and sprite instance.

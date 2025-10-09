@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -44,15 +45,90 @@ func DetectConfigVersion(data []byte) string {
 func MigrateConfig(data []byte) ([]byte, error) {
 	version := DetectConfigVersion(data)
 
+	fmt.Printf("Migrating configuration from version %s to %s...\n", version, CurrentConfigVersion)
+
 	switch version {
 	case ConfigVersionV0:
+		fmt.Println("Migrating v0 → v1...")
 		return migrateV0ToV1(data)
 	case ConfigVersionV1:
 		// Already at latest version
 		return data, nil
+	case "2":
+		// Migrating from experimental v2 back to v1
+		fmt.Println("Migrating v2 → v1...")
+		return migrateV2ToV1(data)
 	default:
 		return nil, fmt.Errorf("unknown config version: %s", version)
 	}
+}
+
+// migrateV2ToV1 migrates from experimental v2 back to v1
+func migrateV2ToV1(data []byte) ([]byte, error) {
+	// Parse as generic JSON to handle any v2 structure
+	var v2Data map[string]interface{}
+	if err := json.Unmarshal(data, &v2Data); err != nil {
+		return nil, fmt.Errorf("failed to parse v2 config: %w", err)
+	}
+
+	// Create new v1 config
+	v1Config := v1.Config{
+		Version:    ConfigVersionV1,
+		URLs:       make(map[string]*v1.URLConfig),
+		URLAliases: make(map[string]string),
+		Users:      make([]*v1.UserInfo, 0),
+	}
+
+	// Copy simple fields
+	if val, ok := v2Data["url_aliases"].(map[string]interface{}); ok {
+		for k, v := range val {
+			if str, ok := v.(string); ok {
+				v1Config.URLAliases[k] = str
+			}
+		}
+	}
+	if val, ok := v2Data["disable_keyring"].(bool); ok {
+		v1Config.DisableKeyring = val
+	}
+	if val, ok := v2Data["last_version_check"].(string); ok {
+		v1Config.LastVersionCheck = val
+	}
+	if val, ok := v2Data["latest_version"].(string); ok {
+		v1Config.LatestVersion = val
+	}
+	if val, ok := v2Data["current_version"].(string); ok {
+		v1Config.CurrentVersion = val
+	}
+
+	// Copy users (if they exist) - v2 had users as a map[string]UserConfig
+	if users, ok := v2Data["users"].(map[string]interface{}); ok {
+		for _, userVal := range users {
+			if userMap, ok := userVal.(map[string]interface{}); ok {
+				userInfo := &v1.UserInfo{}
+				if id, ok := userMap["id"].(string); ok {
+					userInfo.ID = id
+				}
+				if email, ok := userMap["email"].(string); ok {
+					userInfo.Email = email
+				}
+				if userInfo.ID != "" {
+					v1Config.Users = append(v1Config.Users, userInfo)
+				}
+			}
+		}
+		slog.Debug("Migrated users from v2", "count", len(v1Config.Users))
+	}
+
+	// Copy current user
+	if currentUser, ok := v2Data["active_user"].(string); ok {
+		v1Config.CurrentUser = currentUser
+	}
+
+	fmt.Println("Note: User-specific organizations from v2 have been removed.")
+	fmt.Println("Please re-run 'sprite login' to re-authenticate.")
+
+	// Marshal the new config
+	return json.MarshalIndent(v1Config, "", "  ")
 }
 
 // migrateV0ToV1 migrates from v0 (legacy) to v1 format
@@ -97,11 +173,11 @@ func migrateV0ToV1(data []byte) ([]byte, error) {
 		} else {
 			// Create new org config
 			newConfig.URLs[org.URL].Orgs[migratedOrgName] = &v1.OrgConfig{
-				Name:        migratedOrgName,
-				Token:       org.Token,
-				UseKeyring:  org.UseKeyring,
-				KeychainKey: orgName, // Preserve the old keychain key for backward compatibility
-				Sprites:     make(map[string]*v1.SpriteConfig),
+				Name:       migratedOrgName,
+				Token:      org.Token,
+				UseKeyring: org.UseKeyring,
+				KeyringKey: orgName, // Preserve the old keyring key for backward compatibility
+				Sprites:    make(map[string]*v1.SpriteConfig),
 			}
 
 			// Create sprite config

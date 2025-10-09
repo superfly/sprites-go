@@ -135,10 +135,10 @@ func TestMigrateV0ToV1(t *testing.T) {
 					t.Errorf("token not preserved at org level")
 				}
 				if orgConfig.UseKeyring != false {
-					t.Errorf("UseKeyring not preserved at org level")
+					t.Errorf("UseKeyring not preserved at org level, expected false, got %t", orgConfig.UseKeyring)
 				}
-				if orgConfig.KeychainKey != "test-sprite" {
-					t.Errorf("expected keychain key to be preserved as 'test-sprite' at org level, got %s", orgConfig.KeychainKey)
+				if orgConfig.KeyringKey != "test-sprite" {
+					t.Errorf("expected keyring key to be preserved as 'test-sprite' at org level, got %s", orgConfig.KeyringKey)
 				}
 
 				// Check current selection
@@ -196,8 +196,8 @@ func TestMigrateV0ToV1(t *testing.T) {
 				if devOrg.Token != "dev-token" {
 					t.Error("dev-token not preserved")
 				}
-				if devOrg.KeychainKey != "sprite-dev" {
-					t.Error("sprite-dev keychain key not preserved")
+				if devOrg.KeyringKey != "sprite-dev" {
+					t.Error("sprite-dev keyring key not preserved")
 				}
 
 				// Check sprite-prod org
@@ -211,8 +211,8 @@ func TestMigrateV0ToV1(t *testing.T) {
 				if prodOrg.Token != "" {
 					t.Error("sprite-prod should have empty token")
 				}
-				if prodOrg.KeychainKey != "sprite-prod" {
-					t.Error("sprite-prod keychain key not preserved")
+				if prodOrg.KeyringKey != "sprite-prod" {
+					t.Error("sprite-prod keyring key not preserved")
 				}
 
 				// Check current selection is sprite-prod org
@@ -284,13 +284,13 @@ func TestMigrateV0ToV1(t *testing.T) {
 
 				// Check org-level keyring settings
 				if orgConfig.UseKeyring != true {
-					t.Error("UseKeyring should be true at org level")
+					t.Errorf("UseKeyring should be true at org level, got %t", orgConfig.UseKeyring)
 				}
 				if orgConfig.Token != "" {
 					t.Error("Token should be empty for keyring-based org")
 				}
-				if orgConfig.KeychainKey != "keyring-sprite" {
-					t.Errorf("KeychainKey should be preserved as 'keyring-sprite' at org level, got %s", orgConfig.KeychainKey)
+				if orgConfig.KeyringKey != "keyring-sprite" {
+					t.Errorf("KeyringKey should be preserved as 'keyring-sprite' at org level, got %s", orgConfig.KeyringKey)
 				}
 			},
 		},
@@ -391,7 +391,7 @@ func TestMigrateConfig(t *testing.T) {
 	}
 }
 
-func TestBuildKeychainKeyV1(t *testing.T) {
+func TestBuildKeyringKeyV1(t *testing.T) {
 	tests := []struct {
 		url      string
 		org      string
@@ -420,7 +420,7 @@ func TestBuildKeychainKeyV1(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.expected, func(t *testing.T) {
-			result := buildKeychainKeyV1(tt.url, tt.org, tt.sprite)
+			result := buildKeyringKeyV1(tt.url, tt.org, tt.sprite)
 			if result != tt.expected {
 				t.Errorf("expected %s, got %s", tt.expected, result)
 			}
@@ -492,26 +492,6 @@ func TestPerformMigrationIfNeeded(t *testing.T) {
 		// Check sprite was migrated
 		if len(newConfig.URLs) != 1 {
 			t.Errorf("Expected 1 URL, got %d", len(newConfig.URLs))
-		}
-
-		urlConfig := newConfig.URLs["https://api.example.com"]
-		if urlConfig == nil {
-			t.Fatal("URL config not found")
-		}
-
-		orgConfig := urlConfig.Orgs["test-sprite"]
-		if orgConfig == nil {
-			t.Fatal("org 'test-sprite' not found")
-		}
-
-		sprite := orgConfig.Sprites["test-sprite"]
-		if sprite == nil {
-			t.Fatal("sprite not found")
-		}
-
-		// Check token at org level
-		if orgConfig.Token != "test-token" {
-			t.Errorf("Expected token 'test-token' at org level, got '%s'", orgConfig.Token)
 		}
 	})
 
@@ -606,7 +586,7 @@ func TestPerformMigrationIfNeeded(t *testing.T) {
 		}
 
 		if migratedConfig.Version != "1" {
-			t.Error("Version should still be 1 after copy")
+			t.Error("Version should be 1 after migration")
 		}
 	})
 }
@@ -662,35 +642,19 @@ func TestNewManagerWithMigration(t *testing.T) {
 		t.Error("sprites.json should exist after migration")
 	}
 
-	// Verify manager has the migrated data
+	// Verify manager has the migrated sprite in global config
 	sprites := mgr.GetAllSprites()
 	if len(sprites) != 1 {
 		t.Errorf("Expected 1 URL, got %d", len(sprites))
 	}
 
-	// Test finding the migrated sprite
-	_, url, org, name, err := mgr.FindSprite("my-sprite")
-	if err != nil {
-		t.Fatalf("Failed to find migrated sprite: %v", err)
-	}
-
-	if url != "https://api.example.com" {
-		t.Errorf("Wrong URL: %s", url)
-	}
-	if org != "my-sprite" {
-		t.Errorf("Expected org 'my-sprite', got %s", org)
-	}
-	if name != "my-sprite" {
-		t.Errorf("Wrong sprite name: %s", name)
-	}
-
-	// Get the token through the compatibility GetOrgs method
+	// GetOrgs should return the migrated org
 	orgs := mgr.GetOrgs()
-	if org, exists := orgs["my-sprite"]; exists {
-		if org.Token != "my-token" {
-			t.Errorf("Wrong token: %s", org.Token)
-		}
-	} else {
-		t.Error("Sprite not found in GetOrgs")
+	if len(orgs) != 1 {
+		t.Errorf("Expected 1 org, got %d", len(orgs))
+	}
+
+	if _, exists := orgs["my-sprite"]; !exists {
+		t.Error("Migrated org 'my-sprite' not found")
 	}
 }

@@ -10,6 +10,9 @@ type Config struct {
 	LastVersionCheck string                `json:"last_version_check,omitempty"`
 	LatestVersion    string                `json:"latest_version,omitempty"`
 	CurrentVersion   string                `json:"current_version,omitempty"`
+	// User management
+	Users       []*UserInfo `json:"users,omitempty"`        // List of authenticated users
+	CurrentUser string      `json:"current_user,omitempty"` // User ID of current user
 }
 
 // CurrentSelection tracks the currently selected organization
@@ -26,14 +29,23 @@ type URLConfig struct {
 
 // OrgConfig represents configuration for a specific organization
 type OrgConfig struct {
-	Name        string                   `json:"name"`
-	KeychainKey string                   `json:"keychain_key"`          // The key used to store token in keychain
-	Token       string                   `json:"token,omitempty"`       // Only used when keyring is disabled
-	UseKeyring  bool                     `json:"use_keyring,omitempty"` // Tracks whether keyring is being used
-	Sprites     map[string]*SpriteConfig `json:"sprites"`               // key: sprite name
+	Name       string                   `json:"name"`
+	KeyringKey string                   `json:"keyring_key"`           // The key used to store token in keyring
+	Token      string                   `json:"token,omitempty"`       // Only used when keyring is disabled
+	UseKeyring bool                     `json:"use_keyring,omitempty"` // Tracks whether keyring is being used
+	UserID     string                   `json:"user_id,omitempty"`     // User ID who owns this org
+	Sprites    map[string]*SpriteConfig `json:"sprites"`               // key: sprite name
 }
 
 // SpriteConfig represents configuration for a specific sprite
 type SpriteConfig struct {
 	Name string `json:"name"`
+}
+
+// UserInfo represents information about an authenticated user
+type UserInfo struct {
+	ID         string `json:"id"`          // Fly.io user ID
+	Email      string `json:"email"`       // User's email address
+	ConfigPath string `json:"config_path"` // Path to user's config file
+	TokenPath  string `json:"token_path"`  // Path to user's encrypted token file
 }

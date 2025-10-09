@@ -1,14 +1,17 @@
 package commands
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"log/slog"
 	"strings"
 
 	"github.com/superfly/sprite-env/client/config"
+	"github.com/superfly/sprite-env/client/fly"
 	"github.com/superfly/sprite-env/client/format"
 	"github.com/superfly/sprite-env/client/prompts"
 )
@@ -170,22 +173,37 @@ func AuthenticateWithFly(cfg *config.Manager, orgOverride string, aliasOverride 
 	// Get Fly token
 	flyToken, source, err := GetFlyToken()
 	if err != nil {
-		slog.Debug("Failed to get Fly token", "error", err)
-		// Check if flyctl is installed
-		if CheckFlyctlInstalled() {
-			return nil, fmt.Errorf("no Fly.io authentication found. Please run 'flyctl auth login' first")
-		}
-		return nil, fmt.Errorf("flyctl is not installed. Please install flyctl from https://fly.io/docs/flyctl/install/ and run 'flyctl auth login' to authenticate")
-	}
+		if err == fly.ErrNoToken {
+			// No token found - run web-based login flow
+			fmt.Println("No user information found locally. Starting login...")
 
-	// Print where credentials were found
-	if strings.HasPrefix(source, "FLY_") {
-		fmt.Printf("Using Fly credentials from %s\n", source)
-	} else {
-		fmt.Printf("Using Fly credentials from %s\n", source)
+			authCtx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+			defer cancel()
+
+			flyToken, err = RunWebLoginForFlyToken(authCtx)
+			if err != nil {
+				slog.Debug("Web login failed", "error", err)
+				return nil, fmt.Errorf("authentication failed: %w", err)
+			}
+			source = "web login"
+		} else {
+			slog.Debug("Failed to get Fly token", "error", err)
+			return nil, fmt.Errorf("failed to read Fly token: %w", err)
+		}
 	}
 
 	slog.Debug("Successfully retrieved Fly token", "token_prefix", flyToken[:10]+"...", "token_length", len(flyToken), "source", source)
+
+	// Get user info for user-scoped keychain
+	fmt.Print("Getting user info...")
+	user, err := fly.GetCurrentUser(context.Background(), flyToken)
+	if err != nil {
+		fmt.Print("\r\033[K") // Clear the line
+		slog.Debug("Failed to get user info", "error", err)
+		return nil, fmt.Errorf("failed to get user info: %w", err)
+	}
+	fmt.Print("\r\033[K") // Clear the line
+
 	fmt.Print("Fetching organizations...")
 
 	// Fetch organizations
@@ -314,9 +332,9 @@ func AuthenticateWithFly(cfg *config.Manager, orgOverride string, aliasOverride 
 	// Print the API URL being used
 	fmt.Printf("Using API URL: %s\n", format.URL(apiURL))
 
-	// Add the organization with the Fly org name (uses keyring by default)
-	slog.Debug("Saving organization", "name", selectedOrg.Slug, "url", apiURL)
-	if err := cfg.AddOrg(selectedOrg.Slug, spriteToken, apiURL); err != nil {
+	// Add the organization with user-scoped token storage
+	slog.Debug("Saving organization", "name", selectedOrg.Slug, "url", apiURL, "userID", user.ID)
+	if err := cfg.AddOrgWithUser(selectedOrg.Slug, spriteToken, apiURL, user.ID, user.Email); err != nil {
 		slog.Debug("Failed to save organization", "error", err)
 		return nil, fmt.Errorf("failed to save credentials: %w", err)
 	}

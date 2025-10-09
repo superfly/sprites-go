@@ -53,6 +53,18 @@ func TestAddAndGetSprite(t *testing.T) {
 		t.Fatalf("Failed to create manager: %v", err)
 	}
 
+	// Add a user first (required for v2)
+	err = mgr.AddUser("test-user-123", "test@example.com")
+	if err != nil {
+		t.Fatalf("Failed to add user: %v", err)
+	}
+
+	// Set as active user
+	err = mgr.SetActiveUser("test-user-123")
+	if err != nil {
+		t.Fatalf("Failed to set active user: %v", err)
+	}
+
 	// Add a sprite
 	err = mgr.AddSprite("https://api.test.com", "test-org", "test-sprite", "test-token")
 	if err != nil {
@@ -100,6 +112,16 @@ func TestFindSprite(t *testing.T) {
 	mgr, err := NewManager()
 	if err != nil {
 		t.Fatalf("Failed to create manager: %v", err)
+	}
+
+	// Add a user and set as active (required for v2)
+	err = mgr.AddUser("test-user-123", "test@example.com")
+	if err != nil {
+		t.Fatalf("Failed to add user: %v", err)
+	}
+	err = mgr.SetActiveUser("test-user-123")
+	if err != nil {
+		t.Fatalf("Failed to set active user: %v", err)
 	}
 
 	// Add sprites with same name to different URLs
@@ -150,6 +172,16 @@ func TestRemoveSprite(t *testing.T) {
 		t.Fatalf("Failed to create manager: %v", err)
 	}
 
+	// Add a user and set as active (required for v2)
+	err = mgr.AddUser("test-user-123", "test@example.com")
+	if err != nil {
+		t.Fatalf("Failed to add user: %v", err)
+	}
+	err = mgr.SetActiveUser("test-user-123")
+	if err != nil {
+		t.Fatalf("Failed to set active user: %v", err)
+	}
+
 	// Add sprites
 	err = mgr.AddSprite("https://api.test.com", "test-org", "sprite1", "token1")
 	if err != nil {
@@ -185,9 +217,9 @@ func TestRemoveSprite(t *testing.T) {
 		t.Fatalf("Failed to remove sprite2: %v", err)
 	}
 
-	// Verify org is gone
-	if len(mgr.config.URLs) != 0 {
-		t.Error("URL config should be empty after removing all sprites")
+	// Verify org is gone (check user config)
+	if mgr.userConfig != nil && len(mgr.userConfig.URLs) != 0 {
+		t.Error("User's URL config should be empty after removing all sprites")
 	}
 
 	// Verify current selection is cleared
@@ -216,6 +248,16 @@ func TestSetCurrentOrg(t *testing.T) {
 	mgr, err := NewManager()
 	if err != nil {
 		t.Fatalf("Failed to create manager: %v", err)
+	}
+
+	// Add a user and set as active (required for v2)
+	err = mgr.AddUser("test-user-123", "test@example.com")
+	if err != nil {
+		t.Fatalf("Failed to add user: %v", err)
+	}
+	err = mgr.SetActiveUser("test-user-123")
+	if err != nil {
+		t.Fatalf("Failed to set active user: %v", err)
 	}
 
 	// Add sprites to different orgs
