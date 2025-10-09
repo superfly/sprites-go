@@ -175,11 +175,8 @@ func (m *Manager) Mount(ctx context.Context) error {
 	m.logger.Info("Mounting root overlay", "mountPath", m.mountPath)
 	m.logger.Debug("Source image", "path", m.imagePath)
 
-	// Prefer explicit loop device attach with discard, then mount with -o discard
-	m.logger.Debug("Mounting via loop device with discard", "image", m.imagePath, "target", m.mountPath)
-	// Create a short timeout for attach+mount to fail fast on IO errors
-	mountCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
+	// Prefer explicit loop device attach, then mount with ext4 options
+	m.logger.Debug("Attaching loop device", "image", m.imagePath)
 
 	loopDevice, err := attachLoopDevice(m.imagePath)
 	if err != nil {
@@ -188,19 +185,13 @@ func (m *Manager) Mount(ctx context.Context) error {
 	m.loopDevice = loopDevice
 	m.logger.Debug("Created loop device", "device", m.loopDevice)
 
-	m.logger.Info("Mounting loop device to overlay mount path", "device", m.loopDevice, "target", m.mountPath, "options", "discard")
-	cmd := exec.CommandContext(mountCtx, "mount", "-o", "discard", m.loopDevice, m.mountPath)
+	m.logger.Info("Mounting loop device to overlay mount path", "device", m.loopDevice, "target", m.mountPath, "options", "discard,noatime,lazytime,commit=30,delalloc,data=ordered")
 	mountStart := time.Now()
-	mountOutput, err := cmd.CombinedOutput()
+	err = mountExt4(m.loopDevice, m.mountPath, "discard,noatime,lazytime,commit=30,delalloc,data=ordered")
 	mountDuration := time.Since(mountStart)
 
-	if mountCtx.Err() == context.DeadlineExceeded {
-		m.logger.Error("Loop device mount command timed out after 10 seconds, likely due to I/O error", "duration", mountDuration, "device", m.loopDevice, "target", m.mountPath)
-		err = fmt.Errorf("mount timeout")
-	}
-
 	if err != nil {
-		m.logger.Error("Loop device mount failed", "error", err, "output", string(mountOutput), "duration", mountDuration, "device", m.loopDevice, "target", m.mountPath)
+		m.logger.Error("Loop device mount failed", "error", err, "duration", mountDuration, "device", m.loopDevice, "target", m.mountPath)
 		// Probe to see if mount actually succeeded despite error
 		if m.isMounted() {
 			m.logger.Warn("Loop device mount reported error but mount is present in /proc/mounts - treating as success", "device", m.loopDevice, "target", m.mountPath)
@@ -214,7 +205,7 @@ func (m *Manager) Mount(ctx context.Context) error {
 			_ = detachLoopDevice(m.loopDevice)
 			m.loopDevice = ""
 		}
-		return fmt.Errorf("failed to mount overlay: %w, output: %s", err, string(mountOutput))
+		return fmt.Errorf("failed to mount overlay: %w", err)
 	}
 
 	m.logger.Info("Root overlay mounted successfully", "path", m.mountPath)

@@ -138,6 +138,10 @@ COPY --from=crun /crun /usr/local/bin/crun
 COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
 COPY --from=juicefs /usr/local/bin/juicefs /usr/local/bin/juicefs
 
+# Copy spritefs wrapper script
+COPY base-env/spritefs.sh /usr/local/bin/spritefs.sh
+RUN chmod +x /usr/local/bin/spritefs.sh
+
 # Copy the complete assembled system directory
 COPY --from=assemble-system /system /system
 

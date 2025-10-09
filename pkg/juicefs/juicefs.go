@@ -46,6 +46,9 @@ type JuiceFS struct {
 	mountedMu    sync.RWMutex // Protect mounted flag
 	started      bool         // Track if Start() has been called
 
+	// Writeback watcher for monitoring pending uploads
+	writebackWatcher *WritebackWatcher
+
 	// Verifiers for external resources
 	// These check actual system state, not internal Go values
 	setupVerifiers   []func(context.Context) error // verify resources exist
@@ -245,7 +248,7 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 		"--no-usage-report",
 		"-o", "writeback_cache",
 		"--writeback",
-		//"--upload-delay=1m", // bring this back when we account for suspend not having everything uploaded yet
+		"--upload-delay=1m", // Now monitored by rawstaging watcher
 		"--cache-dir", cacheDir,
 		"--cache-size", fmt.Sprintf("%d", cacheSizeMB),
 		"--buffer-size", fmt.Sprintf("%d", bufferSizeMB),
@@ -344,6 +347,20 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	// Add verifiers for external resources now that setup is complete
 	// These check ONLY system state, not internal Go values
 	j.addResourceVerifiers(mountPath)
+
+	// Start writeback watcher to monitor pending uploads
+	watcher, err := NewWritebackWatcher(ctx, cacheDir)
+	if err != nil {
+		j.logger.Warn("Failed to create writeback watcher", "error", err)
+	} else {
+		j.writebackWatcher = watcher
+		if err := j.writebackWatcher.Start(ctx); err != nil {
+			j.logger.Warn("Failed to start writeback watcher", "error", err)
+			j.writebackWatcher = nil
+		} else {
+			j.logger.Info("Started writeback watcher for upload monitoring")
+		}
+	}
 
 	j.logger.Debug("JuiceFS mount ready", "duration", time.Since(waitStart).Seconds())
 	j.logger.Debug("Total JuiceFS Start completed", "duration", time.Since(startTime).Seconds())
@@ -532,6 +549,17 @@ func (j *JuiceFS) monitorProcess() {
 
 		if lastErr != nil {
 			j.logger.Error("juicefs umount failed after all retries", "error", lastErr, "attempts", maxRetries, "duration", time.Since(shutdownStart))
+		}
+
+		// Log writeback stats after unmount to see if any files were left behind
+		if j.writebackWatcher != nil {
+			j.writebackWatcher.LogStats()
+
+			// Now stop the watcher
+			j.logger.Info("Stopping writeback watcher...")
+			if err := j.writebackWatcher.Stop(); err != nil {
+				j.logger.Warn("Error stopping writeback watcher", "error", err)
+			}
 		}
 
 		// Wait for the mount process to fully exit
@@ -859,6 +887,15 @@ func (j *JuiceFS) WhenReady(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// WaitForWritebackFlush waits for all pending writeback uploads to complete
+// Returns the number of files that were pending and the error if any
+func (j *JuiceFS) WaitForWritebackFlush(ctx context.Context) (int64, error) {
+	if j.writebackWatcher == nil {
+		return 0, nil
+	}
+	return j.writebackWatcher.WaitForUploads(ctx)
 }
 
 // WaitForMount blocks until JuiceFS is mounted or the context is cancelled.

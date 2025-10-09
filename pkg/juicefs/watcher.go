@@ -121,8 +121,31 @@ func (w *OutputWatcher) watchStream(stream io.ReadCloser, streamName string) {
 	defer stream.Close()
 	scanner := bufio.NewScanner(stream)
 
+	// Split on either \n or \r to stream progress updates immediately
+	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+		if atEOF && len(data) == 0 {
+			return 0, nil, nil
+		}
+		// Look for \n or \r
+		if i := strings.IndexAny(string(data), "\n\r"); i >= 0 {
+			// Found a delimiter, return everything before it
+			return i + 1, data[0:i], nil
+		}
+		// If at EOF, return remaining data
+		if atEOF {
+			return len(data), data, nil
+		}
+		// Request more data
+		return 0, nil, nil
+	})
+
 	for scanner.Scan() {
 		line := scanner.Text()
+
+		// Skip empty or whitespace-only lines (from \r sequences used to clear progress)
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
 
 		// Store in buffer for debugging
 		w.bufferMu.Lock()

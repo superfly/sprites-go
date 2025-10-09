@@ -28,3 +28,23 @@ func isTmpfsMounted(path string) (bool, error) {
 func isOverlayFSMounted(path string) (bool, error) {
 	return false, fmt.Errorf("filesystem type checking not supported on this platform")
 }
+
+// mountExt4 is not supported on non-Linux platforms
+func mountExt4(device, target, options string) error {
+	return fmt.Errorf("ext4 mounting not supported on this platform")
+}
+
+// mountBind is not supported on non-Linux platforms
+func mountBind(source, target string) error {
+	return fmt.Errorf("bind mounting not supported on this platform")
+}
+
+// remountReadonly is not supported on non-Linux platforms
+func remountReadonly(target string) error {
+	return fmt.Errorf("remount not supported on this platform")
+}
+
+// isMounted is not supported on non-Linux platforms
+func isMounted(path string) (bool, error) {
+	return false, fmt.Errorf("mount checking not supported on this platform")
+}

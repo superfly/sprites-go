@@ -222,15 +222,9 @@ func (m *Manager) Start(ctx context.Context, checkpointDBPath string) error {
 
 	// Mount existing checkpoints - this blocks until all parallel mounts complete
 	// Individual checkpoint mounts run in parallel internally
+	// Checkpoint mount failures are non-fatal - we continue even if some/all fail
 	if err := m.MountCheckpoints(ctx); err != nil {
-		m.logger.Error("Failed to mount checkpoints", "error", err)
-		// Cleanup: unmount the overlay we just mounted
-		m.logger.Info("Cleaning up overlay mount after checkpoint mount failure")
-		cleanupCtx := context.Background()
-		if unmountErr := m.Unmount(cleanupCtx); unmountErr != nil {
-			m.logger.Error("Failed to cleanup overlay after checkpoint mount failure", "error", unmountErr)
-		}
-		return fmt.Errorf("failed to mount checkpoints: %w", err)
+		m.logger.Warn("Some checkpoint mounts may have failed", "error", err)
 	}
 
 	// Add verifiers for external resources now that setup is complete

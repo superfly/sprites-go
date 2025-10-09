@@ -54,8 +54,79 @@ func remountReadonly(target string) error {
 }
 
 // mountExt4 mounts an ext4 filesystem with options
+// This handles both mount flags (noatime, lazytime, ro) and ext4-specific options
 func mountExt4(device, target, options string) error {
-	return unix.Mount(device, target, "ext4", 0, options)
+	// Parse out mount flags from options string
+	var flags uintptr
+	var ext4Options string
+
+	// Common mount flags that should be flags, not options
+	// ro, noatime, lazytime need to be flags
+	if containsOption(options, "ro") {
+		flags |= unix.MS_RDONLY
+		options = removeOption(options, "ro")
+	}
+	if containsOption(options, "noatime") {
+		flags |= unix.MS_NOATIME
+		options = removeOption(options, "noatime")
+	}
+	if containsOption(options, "lazytime") {
+		flags |= unix.MS_LAZYTIME
+		options = removeOption(options, "lazytime")
+	}
+
+	// Remaining options are ext4-specific
+	ext4Options = options
+
+	return unix.Mount(device, target, "ext4", flags, ext4Options)
+}
+
+// containsOption checks if an option is present in a comma-separated options string
+func containsOption(options, option string) bool {
+	if options == option {
+		return true
+	}
+	if len(options) >= len(option)+1 {
+		// Check if it's at the start
+		if options[:len(option)+1] == option+"," {
+			return true
+		}
+		// Check if it's at the end
+		if options[len(options)-len(option)-1:] == ","+option {
+			return true
+		}
+		// Check if it's in the middle
+		if len(options) > len(option)+2 {
+			for i := 0; i < len(options)-len(option)-1; i++ {
+				if options[i:i+len(option)+2] == ","+option+"," {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// removeOption removes an option from a comma-separated options string
+func removeOption(options, option string) string {
+	if options == option {
+		return ""
+	}
+	// Remove from start
+	if len(options) >= len(option)+1 && options[:len(option)+1] == option+"," {
+		return options[len(option)+1:]
+	}
+	// Remove from end
+	if len(options) >= len(option)+1 && options[len(options)-len(option)-1:] == ","+option {
+		return options[:len(options)-len(option)-1]
+	}
+	// Remove from middle
+	for i := 0; i < len(options)-len(option)-1; i++ {
+		if options[i:i+len(option)+2] == ","+option+"," {
+			return options[:i+1] + options[i+len(option)+2:]
+		}
+	}
+	return options
 }
 
 // unmount unmounts a filesystem at the specified path

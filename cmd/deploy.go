@@ -247,6 +247,34 @@ func updateMachine(appName, machineID, token string, config *fly.MachineConfig) 
 	return nil
 }
 
+// updateMachineWithRetry wraps updateMachine with retry logic for registry race conditions
+func updateMachineWithRetry(appName, machineID, token string, config *fly.MachineConfig) error {
+	maxRetries := 10
+	retryDelay := 10 * time.Second
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		err := updateMachine(appName, machineID, token, config)
+		if err == nil {
+			return nil
+		}
+
+		// Check if this is a registry/image resolution error
+		if strings.Contains(err.Error(), "failed to resolve image") ||
+			strings.Contains(err.Error(), "invalid reference") {
+			if attempt < maxRetries {
+				log.Printf("Image resolution failed (attempt %d/%d), retrying in %v: %v", attempt, maxRetries, retryDelay, err)
+				time.Sleep(retryDelay)
+				continue
+			}
+		}
+
+		// If it's not a registry error or we're out of retries, return the error
+		return err
+	}
+
+	return fmt.Errorf("failed to update machine after %d attempts", maxRetries)
+}
+
 // waitForMachineStarted waits for a machine to reach "started" state
 // Returns an error if the machine is in "creating" or "updating" state
 func waitForMachineStarted(ctx context.Context, client *flaps.Client, machineID string, timeout time.Duration) error {
@@ -755,29 +783,55 @@ func main() {
 				}
 			}
 
-			// Update the machine using direct API
+			// Update the machine using direct API with retry logic
 			log.Printf("Updating machine with new image: %s\n", imageRef)
-			if err := updateMachine(appName, machineID, token, currentConfig); err != nil {
+			if err := updateMachineWithRetry(appName, machineID, token, currentConfig); err != nil {
 				log.Fatal("Failed to update machine: ", err)
 			}
 
 			log.Printf("Updated machine: %s (image only)\n", machineID)
 		} else {
-			// Use the existing behavior - replace entire config
+			// Use the existing behavior - replace entire config with retry logic
 			log.Printf("Replacing entire machine config...")
 			updateInput := fly.LaunchMachineInput{
 				ID:     machineID,
 				Config: &machineConfig,
 			}
-			machine, err := flapsClient.Update(ctx, updateInput, "")
-			if err != nil {
+
+			// Retry logic for registry race conditions
+			maxRetries := 10
+			retryDelay := 10 * time.Second
+			var machine *fly.Machine
+			var err error
+
+			for attempt := 1; attempt <= maxRetries; attempt++ {
+				machine, err = flapsClient.Update(ctx, updateInput, "")
+				if err == nil {
+					break
+				}
+
+				// Check if this is a registry/image resolution error
+				if strings.Contains(err.Error(), "failed to resolve image") ||
+					strings.Contains(err.Error(), "invalid reference") {
+					if attempt < maxRetries {
+						log.Printf("Image resolution failed (attempt %d/%d), retrying in %v: %v", attempt, maxRetries, retryDelay, err)
+						time.Sleep(retryDelay)
+						continue
+					}
+				}
+
+				// If it's not a registry error, fail immediately
 				log.Fatal("Failed to update machine: ", err)
+			}
+
+			if err != nil {
+				log.Fatal("Failed to update machine after retries: ", err)
 			}
 
 			log.Printf("Updated machine: %s (full config)\n", machine.ID)
 		}
 	} else {
-		// Create new machine
+		// Create new machine with retry logic
 		log.Println("Creating new sprite_compute machine...")
 
 		launchInput := fly.LaunchMachineInput{
@@ -786,9 +840,34 @@ func main() {
 			Config: &machineConfig,
 		}
 
-		machine, err := flapsClient.Launch(ctx, launchInput)
-		if err != nil {
+		// Retry logic for registry race conditions
+		maxRetries := 10
+		retryDelay := 10 * time.Second
+		var machine *fly.Machine
+		var err error
+
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			machine, err = flapsClient.Launch(ctx, launchInput)
+			if err == nil {
+				break
+			}
+
+			// Check if this is a registry/image resolution error
+			if strings.Contains(err.Error(), "failed to resolve image") ||
+				strings.Contains(err.Error(), "invalid reference") {
+				if attempt < maxRetries {
+					log.Printf("Image resolution failed (attempt %d/%d), retrying in %v: %v", attempt, maxRetries, retryDelay, err)
+					time.Sleep(retryDelay)
+					continue
+				}
+			}
+
+			// If it's not a registry error, fail immediately
 			log.Fatal("Failed to create machine: ", err)
+		}
+
+		if err != nil {
+			log.Fatal("Failed to create machine after retries: ", err)
 		}
 
 		log.Printf("Created machine: %s\n", machine.ID)

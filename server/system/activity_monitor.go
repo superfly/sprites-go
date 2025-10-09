@@ -142,62 +142,16 @@ func (m *ActivityMonitor) makeFlapsRequest(ctx context.Context, method, path str
 	return client.Do(req)
 }
 
-// checkApiTime checks for time divergence between local and API server time
-// Returns true if resume is detected, false otherwise
-func (m *ActivityMonitor) checkApiTime(loopCount int) bool {
-	// Get current system time before API call
-	apiCheckTime := time.Now()
+// handleActivityEvent processes an activity event and updates internal state.
+func (m *ActivityMonitor) handleActivityEvent(ev activityEvent) {
+	currentCount := atomic.LoadInt64(&m.activeCount)
 
-	// Make metadata request
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	resp, err := m.makeFlapsRequest(ctx, http.MethodGet, "/machines/%s/metadata")
-	cancel()
-
-	if err != nil {
-		m.logger.Debug("Failed to get metadata", "error", err, "loop", loopCount)
-		return false
+	if ev.isStart {
+		m.logger.Debug("Activity started", "source", ev.source, "active_count", currentCount)
+	} else {
+		m.logger.Debug("Activity ended", "source", ev.source, "active_count", currentCount)
+		m.lastActivity = time.Now()
 	}
-
-	if resp == nil {
-		return false
-	}
-
-	// Parse Date header
-	dateStr := resp.Header.Get("Date")
-	resp.Body.Close()
-
-	if dateStr == "" {
-		m.logger.Debug("No Date header in metadata response", "loop", loopCount)
-		return false
-	}
-
-	serverTime, err := http.ParseTime(dateStr)
-	if err != nil {
-		m.logger.Debug("Failed to parse Date header", "error", err, "date", dateStr, "loop", loopCount)
-		return false
-	}
-
-	// Compare server time with local time
-	timeDiff := serverTime.Sub(apiCheckTime).Abs()
-	timeDiffMs := timeDiff.Milliseconds()
-
-	m.logger.Debug("API time check",
-		"loop", loopCount,
-		"local_time", apiCheckTime.Format(time.RFC3339),
-		"server_time", serverTime.Format(time.RFC3339),
-		"time_diff_ms", timeDiffMs)
-
-	// If server and local time diverge by more than 2 seconds, resume detected
-	if timeDiff > 2*time.Second {
-		m.logger.Info("Resume detected via API time divergence",
-			"loops", loopCount,
-			"local_time", apiCheckTime.Format(time.RFC3339),
-			"server_time", serverTime.Format(time.RFC3339),
-			"divergence_ms", timeDiffMs)
-		return true
-	}
-
-	return false
 }
 
 func (m *ActivityMonitor) run(ctx context.Context) {
@@ -240,12 +194,10 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 			return
 
 		case ev := <-m.activityCh:
+			m.handleActivityEvent(ev)
 			currentCount := atomic.LoadInt64(&m.activeCount)
 
 			if ev.isStart {
-				// Activity started
-				m.logger.Debug("Activity started", "source", ev.source, "active_count", currentCount)
-
 				// Cancel idle timer if running
 				if idleTimer != nil {
 					if !idleTimer.Stop() {
@@ -259,10 +211,6 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 					idleTimerCh = nil
 				}
 			} else {
-				// Activity ended
-				m.logger.Debug("Activity ended", "source", ev.source, "active_count", currentCount)
-				m.lastActivity = time.Now()
-
 				// Start idle timer if no more activities
 				if currentCount == 0 && idleTimer == nil {
 					idleTimer = time.NewTimer(m.idleAfter)
@@ -277,12 +225,43 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 			m.logger.Debug("Idle timer expired", "active_count", currentCount)
 
 			if currentCount == 0 {
-				// No active activities, suspend
-				m.suspend(time.Since(m.lastActivity))
+				// No active activities, start suspend in a goroutine
+				suspendCtx, suspendCancel := context.WithCancel(context.Background())
+				suspendDone := make(chan struct{})
+
+				tap.Go(m.logger, m.errCh, func() {
+					defer close(suspendDone)
+					m.suspend(suspendCtx, time.Since(m.lastActivity))
+				})
+
+				// Wait for suspend to complete or for activity to be detected
+			suspendLoop:
+				for {
+					select {
+					case ev := <-m.activityCh:
+						// Activity detected during suspend, cancel it
+						currentCount := atomic.LoadInt64(&m.activeCount)
+						m.logger.Info("Activity detected during suspend, cancelling",
+							"source", ev.source, "active_count", currentCount, "is_start", ev.isStart)
+						suspendCancel()
+
+						// Process the activity event normally
+						m.handleActivityEvent(ev)
+
+						// Continue draining activity events until suspend is done
+						// Don't break out of suspendLoop yet
+
+					case <-suspendDone:
+						// Suspend completed (either successfully or cancelled)
+						break suspendLoop
+					}
+				}
+
+				suspendCancel() // Ensure context is cancelled
 				idleTimer = nil
 				idleTimerCh = nil
 
-				// Restart the idle timer after suspend/resume completes
+				// Restart the idle timer after suspend completes (or if cancelled)
 				// This allows repeated suspensions if the system remains idle
 				currentCount = atomic.LoadInt64(&m.activeCount)
 				if currentCount == 0 {
@@ -299,7 +278,107 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 	}
 }
 
-func (m *ActivityMonitor) suspend(inactive time.Duration) {
+// prepSuspend prepares the system for suspend synchronously.
+// Returns a cleanup function (must always be called), cancelled flag, and error.
+// The cleanup function handles post-resume or cancellation cleanup.
+func (m *ActivityMonitor) prepSuspend(ctx context.Context) (cleanup func(), cancelled bool, err error) {
+	var cleanupFuncs []func() error
+
+	// Cleanup function calls all accumulated cleanup functions in order
+	cleanup = func() {
+		for _, fn := range cleanupFuncs {
+			if err := fn(); err != nil {
+				m.logger.Error("Cleanup function failed", "error", err)
+			}
+		}
+	}
+
+	m.logger.Info("Starting suspend preparation")
+
+	// Flush cgroup metrics before suspend
+	if m.system.ResourceMonitor != nil {
+		m.system.ResourceMonitor.PreSuspend()
+		// Add cleanup to call PostResume
+		cleanupFuncs = append(cleanupFuncs, func() error {
+			m.system.ResourceMonitor.PostResume()
+			return nil
+		})
+	}
+
+	// Sync filesystem and get unfreeze function
+	start := time.Now()
+	syncCtx, syncCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer syncCancel()
+
+	unfreezeFunc, syncErr := m.system.SyncOverlay(syncCtx)
+	if syncErr != nil {
+		if ctx.Err() != nil {
+			m.logger.Info("Overlay sync cancelled", "error", syncErr)
+			return cleanup, true, ctx.Err()
+		}
+		m.logger.Error("Overlay sync failed", "error", syncErr)
+		return cleanup, false, syncErr
+	}
+	m.logger.Info("Suspending, fs sync completed", "duration_s", time.Since(start).Seconds())
+
+	// Add cleanup to unfreeze filesystem
+	if unfreezeFunc != nil {
+		cleanupFuncs = append(cleanupFuncs, unfreezeFunc)
+	}
+
+	// Wait for JuiceFS writeback flush before suspend
+	if m.system.JuiceFS != nil {
+		flushStart := time.Now()
+		fileCount, flushErr := m.system.JuiceFS.WaitForWritebackFlush(ctx)
+		flushDuration := time.Since(flushStart)
+		if flushErr != nil {
+			if ctx.Err() != nil {
+				m.logger.Info("JuiceFS writeback flush cancelled", "duration_s", flushDuration.Seconds())
+				return cleanup, true, ctx.Err()
+			}
+			m.logger.Error("JuiceFS writeback flush failed", "error", flushErr, "duration_s", flushDuration.Seconds())
+			return cleanup, false, flushErr
+		} else if fileCount > 0 {
+			m.logger.Info("JuiceFS writeback flush completed", "files", fileCount, "duration_s", flushDuration.Seconds())
+		}
+	}
+
+	// Stop litestream replication before suspend to ensure everything is flushed
+	if m.system.DBManager != nil {
+		// Check if we've been cancelled before starting the stop operation
+		if ctx.Err() != nil {
+			return cleanup, true, ctx.Err()
+		}
+
+		m.logger.Info("Stopping litestream before suspend")
+		stopStart := time.Now()
+		// Use non-cancellable context - once we start stopping, we must complete it
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer stopCancel()
+
+		lsErr := m.system.DBManager.StopLitestream(stopCtx)
+
+		// Add cleanup to restart litestream regardless of stop success/failure
+		cleanupFuncs = append(cleanupFuncs, func() error {
+			m.logger.Info("Restarting litestream")
+			restartCtx, restartCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer restartCancel()
+			return m.system.DBManager.StartLitestream(restartCtx)
+		})
+
+		// Now check if stop failed and return error
+		if lsErr != nil {
+			m.logger.Error("Failed to stop litestream", "error", lsErr)
+			return cleanup, false, lsErr
+		}
+		m.logger.Info("Litestream stopped", "duration_s", time.Since(stopStart).Seconds())
+	}
+
+	m.logger.Info("Suspend preparation complete")
+	return cleanup, false, nil
+}
+
+func (m *ActivityMonitor) suspend(ctx context.Context, inactive time.Duration) {
 	// Check if suspend should be prevented
 	preventSuspend := os.Getenv("SPRITE_PREVENT_SUSPEND") == "true"
 
@@ -312,77 +391,29 @@ func (m *ActivityMonitor) suspend(inactive time.Duration) {
 		})
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
 	if preventSuspend {
 		m.logger.Info("ActivityMonitor: would suspend but SPRITE_PREVENT_SUSPEND=true", "idle_s", inactive.Seconds())
-	} else {
-		m.logger.Info("ActivityMonitor: suspending", "idle_s", inactive.Seconds())
-	}
-
-	// Flush cgroup metrics before suspend
-	if m.system.ResourceMonitor != nil {
-		m.system.ResourceMonitor.PreSuspend()
-	}
-
-	// Sync filesystem and get unfreeze function
-	start := time.Now()
-	unfreezeFunc, err := m.system.SyncOverlay(ctx)
-	if err != nil {
-		m.logger.Debug("overlay sync error", "error", err)
-	}
-	m.logger.Info("Suspending, fs sync completed", "duration_s", time.Since(start).Seconds())
-
-	// Stop litestream replication before suspend to ensure everything is flushed
-	if m.system.DBManager != nil {
-		m.logger.Info("Stopping litestream before suspend")
-		stopStart := time.Now()
-		if err := m.system.DBManager.StopLitestream(ctx); err != nil {
-			m.logger.Error("Failed to stop litestream", "error", err)
-		} else {
-			m.logger.Info("Litestream stopped", "duration_s", time.Since(stopStart).Seconds())
-		}
-	}
-
-	// Defer unfreeze and litestream restart to run after suspend/resume detection
-	defer func() {
-		if unfreezeFunc != nil {
-			if err := unfreezeFunc(); err != nil {
-				m.logger.Error("Failed to unfreeze filesystem after resume", "error", err)
-			} else {
-				m.logger.Info("Filesystem unfrozen after resume")
-			}
-		} else {
-			m.logger.Debug("Skipping unfreeze after resume: overlay not prepared or SyncOverlay failed")
-		}
-
-		// Restart litestream async after resume
-		if m.system.DBManager != nil {
-			m.logger.Info("Restarting litestream after resume")
-			tap.Go(m.logger, m.errCh, func() {
-				restartCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				restartStart := time.Now()
-				if err := m.system.DBManager.StartLitestream(restartCtx); err != nil {
-					m.logger.Error("Failed to restart litestream", "error", err)
-				} else {
-					m.logger.Info("Litestream restarted", "duration_s", time.Since(restartStart).Seconds())
-				}
-			})
-		}
-
-		// Reset CPU bank and flush metrics after resume
-		if m.system.ResourceMonitor != nil {
-			m.system.ResourceMonitor.PostResume()
-		}
-	}()
-
-	// Skip the actual suspend API call and wait loop if prevented
-	if preventSuspend {
-		m.logger.Info("Suspend prevented by SPRITE_PREVENT_SUSPEND=true, continuing to run")
 		return
 	}
+
+	m.logger.Info("ActivityMonitor: suspending", "idle_s", inactive.Seconds())
+
+	// Prepare for suspend (sync filesystem, flush juicefs, stop litestream)
+	cleanup, wasCancelled, err := m.prepSuspend(ctx)
+	defer cleanup()
+
+	if wasCancelled {
+		m.logger.Info("Activity detected during suspend preparation, cancelling")
+		return
+	}
+
+	if err != nil {
+		m.logger.Error("Suspend preparation failed, aborting suspend", "error", err)
+		return
+	}
+
+	apiCtx, apiCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer apiCancel()
 
 	// Capture system wall time BEFORE the suspend API call
 	initialSystemTime := time.Now()
@@ -392,7 +423,7 @@ func (m *ActivityMonitor) suspend(inactive time.Duration) {
 	m.logger.Info("Calling Fly suspend API")
 
 	apiStart := time.Now()
-	resp, err := m.makeFlapsRequest(ctx, http.MethodPost, "/machines/%s/suspend")
+	resp, err := m.makeFlapsRequest(apiCtx, http.MethodPost, "/machines/%s/suspend")
 	apiDuration := time.Since(apiStart)
 
 	if err != nil {

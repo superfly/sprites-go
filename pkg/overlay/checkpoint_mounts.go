@@ -79,12 +79,13 @@ func (m *Manager) MountCheckpoints(ctx context.Context) error {
 				loopDevice: loopDevice,
 				err:        err,
 			}
-			return err
+			// Don't return error - individual checkpoint mount failures shouldn't stop the system
+			return nil
 		})
 	}
 
 	// Wait for all parallel mounts to complete
-	mountErr := g.Wait()
+	_ = g.Wait()
 	close(results)
 
 	// Reacquire the lock to update maps
@@ -102,7 +103,8 @@ func (m *Manager) MountCheckpoints(ctx context.Context) error {
 		}
 	}
 
-	return mountErr
+	// Don't return error - checkpoint mount failures are non-fatal
+	return nil
 }
 
 // listCheckpoints returns a list of checkpoint directory names, sorted newest first
@@ -204,7 +206,7 @@ func (m *Manager) doMountSingleCheckpoint(ctx context.Context, cpName string) (s
 	// Mount readonly
 	m.logger.Info("Mounting checkpoint loop device readonly", "checkpoint", cpName, "device", loopDevice, "target", mountPath)
 	mountStart := time.Now()
-	if err := mountExt4(loopDevice, mountPath, "ro"); err != nil {
+	if err := mountExt4(loopDevice, mountPath, "ro,noatime,lazytime,commit=30,delalloc,data=ordered"); err != nil {
 		mountDuration := time.Since(mountStart)
 		m.logger.Error("Checkpoint mount failed", "checkpoint", cpName, "device", loopDevice, "error", err, "duration", mountDuration)
 		// Cleanup loop device
