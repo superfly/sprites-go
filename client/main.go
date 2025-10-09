@@ -180,6 +180,8 @@ func main() {
 		commands.ApiCommand(globalCtx, subArgs)
 	case "upgrade":
 		commands.UpgradeCommand(globalCtx, subArgs)
+	case "url":
+		commands.UrlCommand(globalCtx, subArgs)
 	default:
 		slog.Error("Unknown command", "command", subcommand)
 		printUsage()
@@ -208,6 +210,8 @@ Commands:
 
   proxy <port1> [port2...]   Forward local ports through the remote server proxy
   api [options] <path>       Make authenticated API calls with curl
+  url                        Show sprite URL
+  url update --auth <type>   Update URL authentication settings
   upgrade                    Upgrade the sprite client to the latest version
 
 Organization Commands:
@@ -279,6 +283,12 @@ Examples:
 
   # Forward local ports 8080 and 3000
   sprite proxy 8080 3000
+
+  # Show sprite URL
+  sprite url
+
+  # Make sprite URL public
+  sprite url update --auth public
 
   # Upgrade to the latest version
   sprite upgrade
