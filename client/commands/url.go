@@ -159,6 +159,30 @@ func updateURL(ctx *GlobalContext, args []string) {
 	fmt.Printf("Updated URL settings for sprite %s\n",
 		format.Sprite(spriteName))
 	fmt.Printf("Auth: %s\n", auth)
+
+	// Fetch and display the updated URL
+	org, _, err := GetOrgAndClient(ctx, ctx.OrgOverride)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error getting organization info: %v\n", err)
+		os.Exit(1)
+	}
+
+	sprite, err := client.GetSpriteWithOrg(spriteCtx, spriteName, &sprites.OrganizationInfo{
+		Name: org.Name,
+		URL:  org.URL,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error getting updated sprite info: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Display the URL
+	if sprite.URL == "" {
+		fmt.Printf("No URL available for sprite %s\n",
+			format.Sprite(spriteName))
+	} else {
+		fmt.Printf("URL: %s\n", sprite.URL)
+	}
 }
 
 // printURLUsage prints the usage for the url command
