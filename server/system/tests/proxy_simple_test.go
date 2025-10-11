@@ -329,3 +329,10 @@ func (m *simpleSystemManager) GetServicesManager() *services.Manager {
 func (m *simpleSystemManager) GetLogDir() string {
 	return "/tmp/test-logs"
 }
+
+func (m *simpleSystemManager) SetSpriteEnvironment(ctx context.Context, info interface{}) (interface{}, error) {
+	return map[string]string{
+		"status":  "ok",
+		"message": "Mock sprite environment set",
+	}, nil
+}

@@ -157,6 +157,15 @@ func (s *System) StartProcess() error {
 		"command", s.config.ProcessCommand,
 		"pidFile", pidFile)
 
+	// Set sprite hostname if configured
+	if spriteInfo, err := s.GetSpriteInfo(context.Background()); err == nil {
+		if err := setContainerHostname(spriteInfo.SpriteName); err != nil {
+			s.logger.Warn("Failed to set sprite hostname on container start", "error", err)
+		} else {
+			s.logger.Info("Set sprite hostname on container start", "hostname", spriteInfo.SpriteName)
+		}
+	}
+
 	// If using direct process monitoring (no PID file), start the monitor now
 	if monitorReady != nil {
 		go func() {

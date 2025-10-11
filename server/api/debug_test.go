@@ -188,6 +188,14 @@ func (m *mockSystemManager) GetLogDir() string {
 	return "/tmp/test-logs"
 }
 
+func (m *mockSystemManager) SetSpriteEnvironment(ctx context.Context, info interface{}) (interface{}, error) {
+	// Mock implementation returns a simple success response
+	return map[string]string{
+		"status":  "ok",
+		"message": "Mock sprite environment set",
+	}, nil
+}
+
 // TestHandleDebugCreateZombie tests the debug zombie creation handler
 func TestHandleDebugCreateZombie(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))

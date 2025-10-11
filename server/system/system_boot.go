@@ -126,6 +126,18 @@ func (s *System) Boot(ctx context.Context) error {
 		}
 	}
 
+	// Initialize sprite database table schema
+	// Note: sprite.db was already added to DB manager in initializeDBManager()
+	// and litestream replication started when DB manager started above
+	// This step just creates the table schema if it doesn't exist
+	s.logger.Info("Initializing sprite database schema")
+	if err := s.InitializeSpriteDB(s.ctx); err != nil {
+		s.logger.Warn("Failed to initialize sprite database schema", "error", err)
+		// Non-fatal - sprite assignment will fail if DB can't be initialized
+	} else {
+		s.logger.Info("Sprite database schema initialized")
+	}
+
 	// Overlay manager (depends on JuiceFS)
 	// If shutdown triggered, stop progressing to next step
 	select {

@@ -43,6 +43,7 @@ func (s *System) initializeAdminChannel() error {
 		url:    channelURL,
 		token:  s.config.APIToken,
 		logger: s.logger,
+		system: s, // Set system reference for handling sprite assignment
 	}
 
 	if s.config.APIToken == "" {

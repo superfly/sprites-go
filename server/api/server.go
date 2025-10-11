@@ -226,6 +226,18 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 
 	// Admin endpoints - require regular auth (admin auth middleware removed)
 	mux.HandleFunc("/admin/reset-state", s.authMiddleware(s.handlers.HandleAdminResetState))
+
+	// Sprite environment endpoint - POST /v1/sprites/:name/environment
+	// Waits for storage to be ready (needs JuiceFS for sprite.db)
+	mux.HandleFunc("/v1/sprites/", s.authMiddleware(s.waitForStorageMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		// Only handle paths matching /v1/sprites/:name/environment
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) == 4 && parts[0] == "v1" && parts[1] == "sprites" && parts[3] == "environment" {
+			s.handlers.HandleSetSpriteEnvironment(w, r)
+		} else {
+			http.NotFound(w, r)
+		}
+	})))
 }
 
 // Start starts the API server

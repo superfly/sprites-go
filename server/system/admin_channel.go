@@ -7,10 +7,10 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"reflect"
 
 	"github.com/superfly/sprite-env/pkg/phx"
 	"github.com/superfly/sprite-env/pkg/tap"
-	"github.com/superfly/sprite-env/server/api"
 )
 
 // Context key for storing admin channel data
@@ -23,6 +23,7 @@ type AdminChannel struct {
 	socket  *phx.Socket
 	channel *phx.Channel
 	logger  *slog.Logger
+	system  *System // Reference to system for handling sprite assignment
 }
 
 // NewAdminChannel creates a new admin channel manager
@@ -115,15 +116,7 @@ func (ac *AdminChannel) Start() error {
 
 	// Handle sprite_assigned notifications
 	ac.channel.On("sprite_assigned", func(payload any) {
-		if data, ok := payload.(map[string]interface{}); ok {
-			ac.logger.Info("Sprite assigned",
-				"org_id", data["org_id"],
-				"sprite_name", data["sprite_name"],
-				"sprite_id", data["sprite_id"],
-				"app_name", data["app_name"])
-		} else {
-			ac.logger.Info("Sprite assigned", "payload", payload)
-		}
+		ac.handleSpriteAssigned(payload)
 	})
 
 	// Join the channel - it will wait for socket connection if needed
@@ -265,40 +258,33 @@ func (ac *AdminChannel) RequestEnd(ctx context.Context, infoInterface interface{
 		return // No-op if channel not created
 	}
 
-	// Cast to the expected type
-	info, ok := infoInterface.(*api.RequestInfo)
-	if !ok {
-		return // Silently ignore wrong type
-	}
-
 	// Check if this context has the admin channel
 	if channel, ok := ctx.Value(adminChannelContextKey{}).(*AdminChannel); !ok || channel != ac {
 		// Context doesn't have our channel, skip
 		return
 	}
 
-	// Prepare the message
-	payload := map[string]interface{}{
-		"type":         "request_end",
-		"request_type": info.RequestType,
-		"request_id":   info.RequestID,
-		"method":       info.Method,
-		"path":         info.Path,
-		"start_time":   info.StartTime.Unix(),
-		"end_time":     info.EndTime.Unix(),
-		"duration_ms":  info.DurationMS,
-		"status_code":  info.StatusCode,
+	// Use reflection to extract fields (avoids import cycle with api package)
+	v := reflect.ValueOf(infoInterface)
+	if v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return // Not a struct
 	}
 
-	if info.Error != nil {
-		payload["error"] = info.Error.Error()
-	}
-
-	if info.ExtraData != nil {
-		for k, v := range info.ExtraData {
-			payload[k] = v
+	// Build payload from struct fields
+	payload := make(map[string]interface{})
+	t := v.Type()
+	for i := 0; i < v.NumField(); i++ {
+		field := t.Field(i)
+		value := v.Field(i)
+		// Convert field name to snake_case for JSON
+		if field.IsExported() && value.CanInterface() {
+			payload[field.Name] = value.Interface()
 		}
 	}
+	payload["type"] = "request_end"
 
 	// Send directly - Phoenix library handles queueing
 	ac.channel.Push("request_end", payload)
@@ -346,4 +332,47 @@ func (l *phxLogAdapter) log(level phx.LoggerLevel, kind string, msg string) {
 	default:
 		l.logger.Info(msg, "kind", kind)
 	}
+}
+
+// SetSystem sets the system reference for the admin channel
+// This is called after the system is fully initialized
+func (ac *AdminChannel) SetSystem(system *System) {
+	if ac != nil {
+		ac.system = system
+	}
+}
+
+// handleSpriteAssigned processes sprite_assigned events from the admin channel
+func (ac *AdminChannel) handleSpriteAssigned(payload any) {
+	// Hand off to system for processing (it will handle deserialization)
+	if ac.system == nil {
+		ac.logger.Error("System not available for sprite assignment")
+		ac.replyToSpriteAssigned(map[string]string{
+			"status":  "error",
+			"message": "system not initialized",
+		})
+		return
+	}
+
+	ctx := context.Background()
+	response, err := ac.system.SetSpriteEnvironment(ctx, payload)
+	if err != nil {
+		ac.replyToSpriteAssigned(map[string]string{
+			"status":  "error",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	// Reply with the exact same response structure
+	ac.replyToSpriteAssigned(response)
+}
+
+// replyToSpriteAssigned sends a reply to the sprite_assigned event
+func (ac *AdminChannel) replyToSpriteAssigned(response interface{}) {
+	if ac.channel == nil {
+		return
+	}
+
+	ac.channel.Push("sprite_assigned_reply", response)
 }

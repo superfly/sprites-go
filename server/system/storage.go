@@ -56,6 +56,11 @@ func (s *System) initializeDBManager() error {
 		dbPaths = append(dbPaths, checkpointDBPath)
 	}
 
+	// Sprite database (stores sprite assignment info)
+	// Stored in WriteDir like checkpoints, not in JuiceFS
+	spriteDBPath := filepath.Join(s.config.WriteDir, "sprite.db")
+	dbPaths = append(dbPaths, spriteDBPath)
+
 	dbConfig := db.Config{
 		BaseDir:           s.config.WriteDir,
 		S3AccessKey:       s.config.S3AccessKey,
