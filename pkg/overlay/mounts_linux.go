@@ -130,8 +130,16 @@ func removeOption(options, option string) string {
 }
 
 // unmount unmounts a filesystem at the specified path
+// Returns nil if the target is not mounted or doesn't exist
 func unmount(target string) error {
-	return unix.Unmount(target, 0)
+	err := unix.Unmount(target, 0)
+	if err != nil {
+		// If the target doesn't exist or is not mounted, treat as success
+		if err == unix.ENOENT || err == unix.EINVAL {
+			return nil
+		}
+	}
+	return err
 }
 
 // isMounted checks if a path is a mount point by comparing device ID with parent
