@@ -106,7 +106,7 @@ func (m *Manager) ReadStats() (Stats, error) {
 	}
 	memCurrent, err := m.readUintFromFile("memory.current")
 	if err != nil {
-		slog.Default().With("cgroup", m.cgroupPath).Warn("Failed to read memory.current", "error", err)
+		// Suppress noisy warning in environments without cgroup memory controller
 		memCurrent = 0
 	}
 	ioStats, _ := m.readIOStat()

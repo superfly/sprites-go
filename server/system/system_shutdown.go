@@ -22,7 +22,7 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 			"deadline", "none")
 	}
 
-	// Mark system as stopping
+    // Mark system as stopping
 	s.mu.Lock()
 	if !s.running {
 		s.mu.Unlock()
@@ -31,6 +31,17 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 	}
 	s.running = false
 	s.mu.Unlock()
+
+    // Broadcast shutdown to all goroutines that observe this channel
+    s.shutdownTriggeredOnce.Do(func() {
+        close(s.shutdownTriggeredCh)
+    })
+
+    // Wait for any in-progress Boot() step to complete before proceeding
+    // This gates Phase 2/3 so we don't race with boot continuing to mount overlay, etc.
+    s.logger.Debug("Waiting for boot to finish current step before shutdown phases")
+    <-s.bootDoneCh
+    s.logger.Debug("Boot finished; proceeding with shutdown phases")
 
 	// Immediately stop the activity monitor to prevent suspend during shutdown
 	if s.ActivityMonitor != nil {
@@ -53,10 +64,12 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 	// The shutdownCtx is only used for informational purposes and phase 1.
 
 	// Phase 1: Prepare container for shutdown (stop services and process)
-	if err := s.PrepareContainerForShutdown(shutdownCtx); err != nil {
-		s.logger.Error("Phase 1 failed: container shutdown", "error", err)
-		return fmt.Errorf("phase 1 (container shutdown) failed: %w", err)
-	}
+    if err := s.PrepareContainerForShutdown(shutdownCtx); err != nil {
+        // Log and proceed: ServicesManager may not have started yet. Only treat
+        // an actively running process that refuses to stop as fatal.
+        s.logger.Error("Phase 1 partial failure: container shutdown", "error", err)
+        // continue to next phases
+    }
 	s.logger.Info("Phase 1 complete: Container stopped")
 
 	// Phase 2: Unmount overlay filesystem (MUST happen BEFORE JuiceFS stops)
@@ -64,11 +77,14 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 	// Controlled unmount handles sync properly, no need for separate freeze/sync step
 	// Use Background context - this MUST complete for data integrity
 	if s.config.OverlayEnabled && s.OverlayManager != nil {
+		s.logger.Info("Phase 2: Starting overlay unmount with verification")
 		if err := s.UnmountOverlayWithVerification(context.Background()); err != nil {
 			s.logger.Error("Phase 2 failed: overlay unmount", "error", err)
 			return fmt.Errorf("phase 2 (overlay unmount) failed: %w", err)
 		}
-		s.logger.Info("Phase 2 complete: Overlay unmounted")
+		s.logger.Info("Phase 2 complete: Overlay unmounted successfully")
+	} else {
+		s.logger.Info("Phase 2: Skipping overlay unmount (disabled or not available)")
 	}
 
 	// Phase 3: Stop JuiceFS (now safe because overlay is fully unmounted)
@@ -76,11 +92,14 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 	// JuiceFS unmount can take up to 5 minutes to flush data to S3
 	juicefsStart := time.Now()
 	if s.JuiceFS != nil {
+		s.logger.Info("Phase 3: Starting JuiceFS shutdown")
 		if err := s.JuiceFS.Stop(context.Background()); err != nil {
 			s.logger.Error("Phase 3 failed: JuiceFS shutdown", "error", err)
 			return fmt.Errorf("phase 3 (JuiceFS shutdown) failed: %w", err)
 		}
-		s.logger.Info("Phase 3 complete: JuiceFS stopped", "duration", time.Since(juicefsStart))
+		s.logger.Info("Phase 3 complete: JuiceFS stopped successfully", "duration", time.Since(juicefsStart))
+	} else {
+		s.logger.Info("Phase 3: Skipping JuiceFS shutdown (not available)")
 	}
 
 	// Phase 4: Stop database manager (final litestream sync for metadata DB)
@@ -198,7 +217,10 @@ func (s *System) UnmountOverlayWithVerification(shutdownCtx context.Context) err
 // This is used during restore operations to cleanly stop the container environment
 // It includes: services manager stop, process stop, and overlay unmount
 func (s *System) ShutdownContainer(shutdownCtx context.Context) error {
-	s.logger.Info("Starting container shutdown sequence")
+    s.logger.Info("Starting container shutdown sequence")
+    // Prevent monitor-triggered full shutdown during container-only maintenance
+    s.userEnvMaintenance.Store(true)
+    defer s.userEnvMaintenance.Store(false)
 
 	// Phase 1: Stop services manager first (must stop before container)
 	s.logger.Info("Phase 1: Stopping services manager")

@@ -22,7 +22,7 @@ RUN case ${TARGETARCH} in \
 FROM litestream/litestream:0.3 AS litestream
 
 # Get juicefs binary (same as production)
-FROM ghcr.io/superfly/juicefs:61e1f6e AS juicefs
+FROM ghcr.io/superfly/juicefs:d5c2495 AS juicefs
 
 # Build tmux and utilities (same as production)
 FROM alpine:3.20 AS utility-builder

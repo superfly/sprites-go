@@ -355,100 +355,151 @@ func (m *Manager) mountOverlayFS(ctx context.Context) error {
 
 // Unmount unmounts the overlay
 func (m *Manager) Unmount(ctx context.Context) error {
+	m.logger.Info("Starting overlay unmount sequence")
+	
 	// Signal shutdown
 	select {
 	case <-m.stopCh:
+		m.logger.Info("Overlay already stopping")
 		// Already stopping
 	default:
+		m.logger.Info("Signaling overlay shutdown")
 		close(m.stopCh)
 	}
 
 	// Perform cleanup in reverse order of Start()
 	// First unmount checkpoint mounts
+	m.logger.Info("Step 1: Unmounting checkpoints")
 	if err := m.UnmountCheckpoints(ctx); err != nil {
 		m.logger.Warn("Failed to unmount checkpoints during overlay unmount", "error", err)
 		// Continue - non-fatal
+	} else {
+		m.logger.Info("Step 1 complete: Checkpoints unmounted successfully")
 	}
 
 	// Then unmount overlayfs if it's mounted
+	m.logger.Info("Step 2: Checking overlayfs mount status", "overlayTargetPath", m.overlayTargetPath)
 	if m.isOverlayFSMounted() {
+		m.logger.Info("Step 2: OverlayFS is mounted, attempting unmount", "path", m.overlayTargetPath)
 		// Try normal unmount first
 		cmd := exec.Command("umount", m.overlayTargetPath)
+		m.logger.Debug("Step 2: Running umount command", "command", "umount", "path", m.overlayTargetPath)
 		if output, err := cmd.CombinedOutput(); err != nil {
+			m.logger.Warn("Step 2: Normal umount failed, trying force unmount", "error", err, "output", string(output))
 			// Try force unmount
 			cmd = exec.Command("umount", "-f", m.overlayTargetPath)
+			m.logger.Debug("Step 2: Running force umount command", "command", "umount -f", "path", m.overlayTargetPath)
 			if output2, err2 := cmd.CombinedOutput(); err2 != nil {
+				m.logger.Error("Step 2: Force umount also failed", "error", err2, "output", string(output2))
 				return fmt.Errorf("failed to unmount overlayfs: %w, outputs: %s, %s", err2, string(output), string(output2))
 			}
+			m.logger.Info("Step 2: Force umount succeeded")
+		} else {
+			m.logger.Info("Step 2: Normal umount succeeded")
 		}
 
 		// Verify overlayfs is actually unmounted
 		if m.isOverlayFSMounted() {
+			m.logger.Error("Step 2: OverlayFS still mounted after unmount command")
 			return fmt.Errorf("overlayfs still mounted after unmount command")
 		}
+		m.logger.Info("Step 2 complete: OverlayFS unmounted successfully")
+	} else {
+		m.logger.Info("Step 2: OverlayFS not mounted, skipping")
 	}
 
 	// Then unmount the loopback mount
+	m.logger.Info("Step 3: Checking loopback mount status", "mountPath", m.mountPath, "loopDevice", m.loopDevice)
 	if !m.isMounted() {
+		m.logger.Info("Step 3: Loopback not mounted, checking for loop device cleanup")
 		// Even if not mounted, ensure any associated loop device is detached
 		if m.loopDevice != "" {
+			m.logger.Info("Step 3: Detaching loop device", "device", m.loopDevice)
 			if err := detachLoopDevice(m.loopDevice); err != nil {
+				m.logger.Error("Step 3: Failed to detach loop device", "device", m.loopDevice, "error", err)
 				return fmt.Errorf("failed to detach loop device %s: %w", m.loopDevice, err)
 			}
+			m.logger.Info("Step 3: Loop device detached successfully")
 			m.loopDevice = ""
+		} else {
+			m.logger.Info("Step 3: No loop device to detach")
 		}
 
 		// Close stoppedCh and reset started flag
 		select {
 		case <-m.stoppedCh:
+			m.logger.Info("Step 3: stoppedCh already closed")
 			// Already closed
 		default:
+			m.logger.Info("Step 3: Closing stoppedCh")
 			close(m.stoppedCh)
 		}
 		m.started = false
+		m.logger.Info("Step 3 complete: Overlay unmount completed (no loopback mount)")
 		return nil
 	}
 
-	m.logger.Info("Unmounting root overlay", "path", m.mountPath)
+	m.logger.Info("Step 3: Loopback is mounted, proceeding with unmount", "path", m.mountPath)
 
 	// Sync first
+	m.logger.Info("Step 3: Syncing filesystem before unmount")
 	if err := m.sync(ctx); err != nil {
-		m.logger.Warn("Sync failed", "error", err)
+		m.logger.Warn("Step 3: Sync failed", "error", err)
+	} else {
+		m.logger.Info("Step 3: Sync completed successfully")
 	}
 
 	// Try normal unmount first
+	m.logger.Info("Step 3: Attempting normal loopback unmount", "path", m.mountPath)
 	cmd := exec.Command("umount", m.mountPath)
+	m.logger.Debug("Step 3: Running umount command", "command", "umount", "path", m.mountPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
+		m.logger.Warn("Step 3: Normal loopback umount failed, trying force unmount", "error", err, "output", string(output))
 		// Try force unmount
 		cmd = exec.Command("umount", "-f", m.mountPath)
+		m.logger.Debug("Step 3: Running force umount command", "command", "umount -f", "path", m.mountPath)
 		if output2, err2 := cmd.CombinedOutput(); err2 != nil {
+			m.logger.Error("Step 3: Force loopback umount also failed", "error", err2, "output", string(output2))
 			return fmt.Errorf("failed to unmount overlay: %w, outputs: %s, %s", err2, string(output), string(output2))
 		}
+		m.logger.Info("Step 3: Force loopback umount succeeded")
+	} else {
+		m.logger.Info("Step 3: Normal loopback umount succeeded")
 	}
 
 	// Verify loopback mount is actually unmounted
 	if m.isMounted() {
+		m.logger.Error("Step 3: Loopback mount still mounted after umount command")
 		return fmt.Errorf("loopback mount still mounted after umount command")
 	}
+	m.logger.Info("Step 3: Loopback mount verified as unmounted")
 
 	// Detach loop device now that the mount is gone
 	// The detachLoopDevice function will wait for the kernel to release all references
 	if m.loopDevice != "" {
+		m.logger.Info("Step 3: Detaching loop device after unmount", "device", m.loopDevice)
 		if err := detachLoopDevice(m.loopDevice); err != nil {
+			m.logger.Error("Step 3: Failed to detach loop device after unmount", "device", m.loopDevice, "error", err)
 			return fmt.Errorf("failed to detach loop device %s: %w", m.loopDevice, err)
 		}
+		m.logger.Info("Step 3: Loop device detached successfully after unmount")
 		m.loopDevice = ""
+	} else {
+		m.logger.Info("Step 3: No loop device to detach after unmount")
 	}
 
 	// Close stoppedCh and reset started flag
 	select {
 	case <-m.stoppedCh:
+		m.logger.Info("Step 3: stoppedCh already closed")
 		// Already closed
 	default:
+		m.logger.Info("Step 3: Closing stoppedCh")
 		close(m.stoppedCh)
 	}
 	m.started = false
 
+	m.logger.Info("Step 3 complete: Overlay unmount completed successfully")
 	return nil
 }
 

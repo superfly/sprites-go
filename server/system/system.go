@@ -2,6 +2,7 @@ package system
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -69,13 +70,22 @@ type System struct {
 	processExitCodeSet  atomic.Bool   // Track if exit code has been set
 	gracefulShutdown    bool
 	restoringInProgress atomic.Bool // Flag to prevent shutdown trigger during restore
+    userEnvMaintenance  atomic.Bool // Flag to prevent global shutdown during container-only ops
 
 	// Shutdown channels
 	shutdownTriggeredCh      chan struct{} // Closed to START shutdown
 	shutdownTriggeredOnce    sync.Once     // Ensures shutdown is only triggered once
 	shutdownCompleteCh       chan struct{} // Closed when shutdown is COMPLETE
 	servicesManagerStoppedCh chan struct{} // Closed when services manager is stopped
+
+	// Boot coordination
+	// bootDoneCh is open while Boot() is in progress and closed when Boot() returns
+	// This allows Shutdown() to block until the current boot step completes
+	bootDoneCh chan struct{}
 }
+
+// ErrShutdownDuringBoot is returned by Boot when shutdown is triggered mid-boot.
+var ErrShutdownDuringBoot = errors.New("shutdown triggered during boot")
 
 // New creates a new System instance
 func New(config *Config) (*System, error) {
@@ -102,6 +112,12 @@ func New(config *Config) (*System, error) {
 		// Process management - initially stopped
 		processStartedCh: make(chan struct{}), // Open = not running
 		processStoppedCh: func() chan struct{} { // Closed = stopped
+			ch := make(chan struct{})
+			close(ch)
+			return ch
+		}(),
+		// Boot coordination - not booting initially (closed channel)
+		bootDoneCh: func() chan struct{} {
 			ch := make(chan struct{})
 			close(ch)
 			return ch
@@ -137,7 +153,13 @@ func (s *System) Start() error {
 	}
 
 	// Boot the system
+	// Re-open bootDoneCh to indicate boot in progress
+	s.bootDoneCh = make(chan struct{})
 	if err := s.Boot(s.ctx); err != nil {
+		if errors.Is(err, ErrShutdownDuringBoot) {
+			s.logger.Info("Boot aborted due to shutdown; treating as successful shutdown initiation")
+			return nil
+		}
 		return fmt.Errorf("failed to boot system: %w", err)
 	}
 
@@ -217,8 +239,12 @@ func (s *System) monitorProcessLoop() {
 			continue
 		}
 
-		// Process exited - trigger shutdown sequence
-		if s.config.KeepAliveOnError {
+        // Process exited - trigger shutdown sequence unless in user-env maintenance
+        if s.userEnvMaintenance.Load() {
+            s.logger.Info("Process exited during user-environment maintenance; not triggering full system shutdown")
+            return
+        }
+        if s.config.KeepAliveOnError {
 			s.logger.Info("Process exited, but keeping server alive (SPRITE_KEEP_ALIVE_ON_ERROR=true)")
 			s.logger.Info("Server is still running and accepting API requests")
 		} else {

@@ -119,7 +119,7 @@ func (m *Manager) PredictMemoryBytes(t time.Time) (bytes uint64, confidence floa
 func (m *Manager) tickMemory(now time.Time, elapsed time.Duration) {
 	memCurrent, err := m.readUintFromFile("memory.current")
 	if err != nil {
-		slog.Default().With("cgroup", m.cgroupPath).Warn("Failed to read memory.current in tick", "error", err)
+		// Suppress noisy warning in environments without cgroup memory controller
 		memCurrent = 0
 	}
 	memHigh, _ := m.readUintFromFile("memory.high")
@@ -171,7 +171,7 @@ func (m *Manager) tickMemory(now time.Time, elapsed time.Duration) {
 func (m *Manager) checkMemoryPressure(p *ResourcePressure, logger *slog.Logger) error {
 	memCurrent, err := m.readUintFromFile("memory.current")
 	if err != nil {
-		logger.Warn("Failed to read memory.current in pressure check", "error", err)
+		// Suppress noisy warning in environments without cgroup memory controller
 		memCurrent = 0
 	}
 	memHigh, _ := m.readUintFromFile("memory.high")

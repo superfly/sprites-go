@@ -38,6 +38,7 @@ jobs:
       sprite_env_tag: ${{ steps.tag.outputs.sprite_env_tag }}
       is_version_tag: ${{ steps.tag.outputs.is_version_tag }}
       previous_tag: ${{ steps.tag.outputs.previous_tag }}
+      short_sha: ${{ steps.short-sha.outputs.short-sha }}
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -138,8 +139,8 @@ jobs:
       dockerfile: base-env/images/ubuntu-devtools/Dockerfile
       tag: ${{ needs.generate-tag.outputs.ubuntu_tag }}
       image_name: superfly/sprite-ubuntu
-        version: ${{ needs.generate-tag.outputs.is_version_tag == 'true' && github.ref_name || 'v0.0.1-dev' }}
-        git_sha: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && steps.short-sha.outputs.short-sha || '' }}
+      version: ${{ needs.generate-tag.outputs.is_version_tag == 'true' && github.ref_name || '' }}
+      git_sha: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && needs.generate-tag.outputs.short_sha || '' }}
       cache_tag: 25.04-latest
       latest_tag: 25.04-latest
       tag_latest: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && (inputs.tag_latest == true || inputs.tag_latest == null) }}
@@ -189,8 +190,8 @@ jobs:
       cache_tag: 25.04-languages-latest
       latest_tag: 25.04-languages-latest
       tag_latest: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && (inputs.tag_latest == true || inputs.tag_latest == null) }}
-        version: ${{ needs.generate-tag.outputs.is_version_tag == 'true' && github.ref_name || 'v0.0.1-dev' }}
-        git_sha: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && steps.short-sha.outputs.short-sha || '' }}
+      version: ${{ needs.generate-tag.outputs.is_version_tag == 'true' && github.ref_name || '' }}
+      git_sha: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && needs.generate-tag.outputs.short_sha || '' }}
     secrets: inherit
 
   retag-languages:
@@ -235,6 +236,6 @@ jobs:
       cache_tag: latest
       latest_tag: latest
       tag_latest: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && (inputs.tag_latest == true || inputs.tag_latest == null) }}
-        version: ${{ needs.generate-tag.outputs.is_version_tag == 'true' && github.ref_name || 'v0.0.1-dev' }}
-        git_sha: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && steps.short-sha.outputs.short-sha || '' }}
+      version: ${{ needs.generate-tag.outputs.is_version_tag == 'true' && github.ref_name || '' }}
+      git_sha: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && needs.generate-tag.outputs.short_sha || '' }}
     secrets: inherit

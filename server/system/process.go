@@ -19,6 +19,12 @@ import (
 
 // StartProcess starts the configured process
 func (s *System) StartProcess() error {
+    // If shutdown has been triggered, do not start the process
+    select {
+    case <-s.shutdownTriggeredCh:
+        return fmt.Errorf("cannot start process: shutdown in progress")
+    default:
+    }
 	// Use atomic compare-and-swap to ensure only one process can be started
 	if !s.processStarted.CompareAndSwap(false, true) {
 		return fmt.Errorf("process already started or starting")

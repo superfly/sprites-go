@@ -19,7 +19,7 @@ func TestSystemBootFailureJuiceFS(t *testing.T) {
 
 	testDir := SetupTestEnvironment(t)
 
-	config := TestConfig(testDir)
+	config := VerboseTestConfig(testDir)
 	// Note: In local mode, JuiceFS is resilient and will create directories
 	// A truly invalid path would need to be unwriteable, but that's hard to test portably
 
@@ -39,10 +39,14 @@ func TestSystemBootFailureJuiceFS(t *testing.T) {
 	}
 
 	// Shutdown the system to trigger cleanup
+	t.Log("Starting system shutdown...")
 	if err := sys.Shutdown(context.Background()); err != nil {
 		t.Logf("Shutdown error (may be expected): %v", err)
+	} else {
+		t.Log("System shutdown completed successfully")
 	}
 
+	t.Log("Starting cleanup verification...")
 	// Cleanup verification happens automatically via TestSystem's cleanup function
 }
 

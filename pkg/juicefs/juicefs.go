@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log/slog"
@@ -241,6 +242,22 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 
 	// Litestream replication is now managed by the DB manager; do not start it here
 
+	// Start writeback watcher BEFORE mount so it can detect rawstaging directory creation
+	stepStart = time.Now()
+	watcher, err := NewWritebackWatcher(ctx, cacheDir)
+	if err != nil {
+		j.logger.Warn("Failed to create writeback watcher", "error", err)
+	} else {
+		j.writebackWatcher = watcher
+		if err := j.writebackWatcher.Start(ctx); err != nil {
+			j.logger.Warn("Failed to start writeback watcher", "error", err)
+			j.writebackWatcher = nil
+		} else {
+			j.logger.Info("Started writeback watcher before mount for directory detection")
+		}
+	}
+	j.logger.Debug("Writeback watcher setup completed", "duration", time.Since(stepStart).Seconds())
+
 	// Mount JuiceFS
 	stepStart = time.Now()
 	mountArgs := []string{
@@ -248,7 +265,7 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 		"--no-usage-report",
 		"-o", "writeback_cache",
 		"--writeback",
-		"--upload-delay=1m", // Now monitored by rawstaging watcher
+		"--upload-delay", "1m",
 		"--cache-dir", cacheDir,
 		"--cache-size", fmt.Sprintf("%d", cacheSizeMB),
 		"--buffer-size", fmt.Sprintf("%d", bufferSizeMB),
@@ -348,19 +365,7 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	// These check ONLY system state, not internal Go values
 	j.addResourceVerifiers(mountPath)
 
-	// Start writeback watcher to monitor pending uploads
-	watcher, err := NewWritebackWatcher(ctx, cacheDir)
-	if err != nil {
-		j.logger.Warn("Failed to create writeback watcher", "error", err)
-	} else {
-		j.writebackWatcher = watcher
-		if err := j.writebackWatcher.Start(ctx); err != nil {
-			j.logger.Warn("Failed to start writeback watcher", "error", err)
-			j.writebackWatcher = nil
-		} else {
-			j.logger.Info("Started writeback watcher for upload monitoring")
-		}
-	}
+	// Writeback watcher was already started before mount
 
 	j.logger.Debug("JuiceFS mount ready", "duration", time.Since(waitStart).Seconds())
 	j.logger.Debug("Total JuiceFS Start completed", "duration", time.Since(startTime).Seconds())
@@ -409,6 +414,24 @@ func (j *JuiceFS) Stop(ctx context.Context) error {
 	j.logger.Info("JuiceFS.Stop() called", "contextErr", ctx.Err())
 
 	// NOTE: Signal handling removed from JuiceFS to avoid conflicts
+
+	// If we're still starting up, wait for startup to complete before shutting down
+	// This prevents race conditions where shutdown happens during mount initialization
+	if j.started {
+		j.logger.Info("JuiceFS is still starting up, waiting for startup to complete before shutdown...")
+
+		// Wait for mount to be ready with a reasonable timeout
+		// Use a shorter timeout for shutdown context to avoid hanging
+		startupCtx, startupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer startupCancel()
+
+		if err := j.WhenReady(startupCtx); err != nil {
+			j.logger.Warn("Startup did not complete before shutdown", "error", err)
+			// Continue with shutdown even if startup didn't complete
+		} else {
+			j.logger.Info("Startup completed, proceeding with shutdown")
+		}
+	}
 
 	// Signal stop
 	select {
@@ -496,6 +519,32 @@ func (j *JuiceFS) monitorProcess() {
 			j.logger.Info("No dependent mounts found")
 		}
 
+		// If mount was never ready, skip umount; kill process if running
+		select {
+		case <-j.mountReady:
+			// mountReady closed (ready or failed) - proceed to umount path below
+		default:
+			j.logger.Info("Stop received before mount was ready; skipping juicefs umount and terminating mount process")
+			if j.mountCmd != nil && j.mountCmd.Process != nil {
+				_ = j.mountCmd.Process.Kill()
+			}
+			// Stop watcher if it was started
+			if j.writebackWatcher != nil {
+				j.logger.Info("Stopping writeback watcher (pre-ready)")
+				_ = j.writebackWatcher.Stop()
+			}
+			// Wait for process exit quickly
+			select {
+			case err := <-processDone:
+				if err != nil {
+					j.logger.Warn("JuiceFS mount process exited with error after pre-ready stop", "error", err)
+				}
+			case <-time.After(3 * time.Second):
+				j.logger.Warn("Timeout waiting for JuiceFS process to exit after pre-ready stop")
+			}
+			return
+		}
+
 		// Sync the JuiceFS filesystem to flush pending writes
 		j.logger.Info("Syncing JuiceFS filesystem...", "path", mountPath)
 		syncStart := time.Now()
@@ -507,6 +556,30 @@ func (j *JuiceFS) monitorProcess() {
 			}
 		} else {
 			j.logger.Info("JuiceFS filesystem sync completed", "path", mountPath, "duration", time.Since(syncStart))
+		}
+
+		// Log writeback watcher status for diagnostics, but don't wait for flush
+		// The umount --flush command below will handle flushing all pending data
+		if j.writebackWatcher != nil {
+			j.logger.Info("Checking writeback watcher status (for diagnostics only)")
+			readyCtx, readyCancel := context.WithTimeout(context.Background(), 1*time.Second)
+			defer readyCancel()
+			if err := j.writebackWatcher.WaitUntilReady(readyCtx); err == nil {
+				initialPending := j.writebackWatcher.GetPendingCount()
+				initialNonZero := j.writebackWatcher.GetNonZeroPendingCount()
+				j.logger.Info("Writeback watcher status before unmount",
+					"totalPending", initialPending,
+					"nonZeroPending", initialNonZero)
+			} else {
+				j.logger.Debug("Writeback watcher not ready yet", "error", err)
+			}
+		}
+
+		// Trigger a cache flush via the JuiceFS control file before unmounting
+		// This blocks until JuiceFS acknowledges the FlushNow command
+		controlFile := filepath.Join(mountPath, ".control")
+		if err := j.flushCacheViaControl(controlFile); err != nil {
+			j.logger.Warn("Failed to flush cache via control file before umount", "error", err)
 		}
 
 		// Unmount JuiceFS with --flush to ensure all data is written
@@ -892,10 +965,89 @@ func (j *JuiceFS) WhenReady(ctx context.Context) error {
 // WaitForWritebackFlush waits for all pending writeback uploads to complete
 // Returns the number of files that were pending and the error if any
 func (j *JuiceFS) WaitForWritebackFlush(ctx context.Context) (int64, error) {
+	mountPath := j.GetMountPath()
+	controlFile := filepath.Join(mountPath, ".control")
+
+	// First, trigger immediate cache flush via JuiceFS control file
+	if err := j.flushCacheViaControl(controlFile); err != nil {
+		j.logger.Warn("Failed to flush cache via control file", "error", err)
+		// Continue with writeback watcher even if control flush fails
+	}
+
 	if j.writebackWatcher == nil {
 		return 0, nil
 	}
 	return j.writebackWatcher.WaitForUploads(ctx)
+}
+
+// flushCacheViaControl triggers an immediate cache flush via JuiceFS control file
+// Writes command 1009 (flush cache) to the .control file and reads back the response
+func (j *JuiceFS) flushCacheViaControl(controlFile string) error {
+	startTime := time.Now()
+	j.logger.Info("Starting cache flush via control file", "controlFile", controlFile)
+
+	// Check if control file exists
+	fileInfo, err := os.Stat(controlFile)
+	if err != nil {
+		j.logger.Error("Control file stat failed", "controlFile", controlFile, "error", err)
+		return fmt.Errorf("failed to stat control file: %w", err)
+	}
+	j.logger.Debug("Control file info", "size", fileInfo.Size(), "mode", fileInfo.Mode(), "modTime", fileInfo.ModTime())
+
+	// Open the control file for read/write (FIFO-like behavior)
+	j.logger.Debug("Opening control file for read/write", "controlFile", controlFile, "flags", "O_RDWR")
+	file, err := os.OpenFile(controlFile, os.O_RDWR, 0)
+	if err != nil {
+		j.logger.Error("Failed to open control file", "controlFile", controlFile, "error", err)
+		return fmt.Errorf("failed to open control file: %w", err)
+	}
+	defer file.Close()
+	j.logger.Debug("Control file opened for read/write")
+
+	// Write 8-byte big-endian message: cmd (1009) and size (0)
+	command := uint32(1009)
+	size := uint32(0)
+	j.logger.Debug("Writing flush command to control file", "command", command, "size", size, "bytes", 8)
+	if err := binary.Write(file, binary.BigEndian, command); err != nil {
+		j.logger.Error("Failed to write flush command", "command", command, "error", err)
+		return fmt.Errorf("failed to write flush command: %w", err)
+	}
+	if err := binary.Write(file, binary.BigEndian, size); err != nil {
+		j.logger.Error("Failed to write flush size", "size", size, "error", err)
+		return fmt.Errorf("failed to write flush size: %w", err)
+	}
+	j.logger.Debug("Flush command written successfully, syncing to ensure write is flushed")
+
+	// Sync to ensure write is flushed
+	if err := file.Sync(); err != nil {
+		j.logger.Warn("Failed to sync control file", "error", err)
+		// Continue anyway - sync might not be supported on FIFO
+	}
+
+	j.logger.Debug("Flush command sent to JuiceFS, attempting to read response")
+
+	// Read 1 byte response (should be 1 for success per FlushNow contract)
+	response := make([]byte, 1)
+	j.logger.Debug("Reading response from control file", "expectedBytes", 1)
+	n, err := file.Read(response)
+	if err != nil {
+		j.logger.Error("Failed to read control file response",
+			"bytesRead", n,
+			"error", err,
+			"errorType", fmt.Sprintf("%T", err),
+			"isEOF", err == io.EOF)
+		return fmt.Errorf("failed to read control file response: %w", err)
+	}
+	j.logger.Debug("Response read from control file", "bytesRead", n, "response", response[0])
+
+	if response[0] != 1 {
+		j.logger.Error("Control file returned unexpected response", "response", response[0])
+		return fmt.Errorf("control file returned unexpected response: %d", response[0])
+	}
+
+	duration := time.Since(startTime)
+	j.logger.Info("Successfully triggered cache flush via control file", "duration", duration)
+	return nil
 }
 
 // WaitForMount blocks until JuiceFS is mounted or the context is cancelled.

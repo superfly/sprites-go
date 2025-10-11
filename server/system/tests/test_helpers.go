@@ -27,10 +27,16 @@ func requireDockerTest(t *testing.T) {
 // SetTestDeadline sets a hard 30-second deadline for the test to prevent hangs
 // This should be called at the start of every integration test
 func SetTestDeadline(t *testing.T) (context.Context, context.CancelFunc) {
+	return SetTestDeadlineWithTimeout(t, 30*time.Second)
+}
+
+// SetTestDeadlineWithTimeout sets a custom deadline for the test to prevent hangs
+// This should be called at the start of every integration test that needs a custom timeout
+func SetTestDeadlineWithTimeout(t *testing.T, timeout time.Duration) (context.Context, context.CancelFunc) {
 	t.Helper()
 
-	// Default to 30 seconds as requested
-	deadline := time.Now().Add(30 * time.Second)
+	// Use the provided timeout
+	deadline := time.Now().Add(timeout)
 
 	// If test already has a deadline set via -timeout flag, use that instead
 	if d, ok := t.Deadline(); ok && d.Before(deadline) {
@@ -45,7 +51,7 @@ func SetTestDeadline(t *testing.T) (context.Context, context.CancelFunc) {
 		select {
 		case <-ctx.Done():
 			if ctx.Err() == context.DeadlineExceeded {
-				t.Error("TEST DEADLINE EXCEEDED - test took longer than 30 seconds, likely hanging")
+				t.Errorf("TEST DEADLINE EXCEEDED - test took longer than %v, likely hanging", timeout)
 			}
 		case <-done:
 			// Test completed normally
@@ -113,8 +119,7 @@ func TestSystem(t *testing.T, config *system.Config) (*system.System, func(), er
 		return nil, func() {}, err
 	}
 
-	// Add test name to logger context for easier debugging
-	// This makes all logs from this system include the test name
+	// Attach test name to logs (uses system default log level)
 	sys.WithLogger(sys.Logger().With("test", t.Name()))
 
 	cleanup := func() {

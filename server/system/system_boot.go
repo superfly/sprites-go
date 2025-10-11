@@ -12,6 +12,15 @@ import (
 // Boot starts the system and all its modules in the correct order
 // This is the main entry point for starting the system
 func (s *System) Boot(ctx context.Context) error {
+	// Ensure bootDoneCh is closed on any return so Shutdown can proceed
+	defer func() {
+		select {
+		case <-s.bootDoneCh:
+			// already closed
+		default:
+			close(s.bootDoneCh)
+		}
+	}()
 	s.logger.Info("Starting system boot sequence", "system_ptr", fmt.Sprintf("%p", s))
 
 	// Mark system as running
@@ -118,6 +127,12 @@ func (s *System) Boot(ctx context.Context) error {
 	}
 
 	// Overlay manager (depends on JuiceFS)
+	// If shutdown triggered, stop progressing to next step
+	select {
+	case <-s.shutdownTriggeredCh:
+		return ErrShutdownDuringBoot
+	default:
+	}
 	if s.config.OverlayEnabled {
 		s.logger.Info("Starting overlay manager")
 
@@ -133,6 +148,11 @@ func (s *System) Boot(ctx context.Context) error {
 	}
 
 	// Phase 4: Start process if configured
+	select {
+	case <-s.shutdownTriggeredCh:
+		return ErrShutdownDuringBoot
+	default:
+	}
 	if len(s.config.ProcessCommand) > 0 {
 		s.logger.Info("Phase 4: Starting container process")
 		if err := s.StartProcess(); err != nil {
@@ -141,6 +161,11 @@ func (s *System) Boot(ctx context.Context) error {
 	}
 
 	// Phase 5: Start services manager (depends on container being running)
+	select {
+	case <-s.shutdownTriggeredCh:
+		return ErrShutdownDuringBoot
+	default:
+	}
 	s.logger.Info("Phase 5: Starting services manager")
 	if err := s.ServicesManager.Start(); err != nil {
 		return fmt.Errorf("failed to start services manager: %w", err)
@@ -229,6 +254,9 @@ func (s *System) setupTmuxActivityMonitoring() {
 // PREREQUISITE: SystemBoot must be running (JuiceFS, DBManager) - call Start() first
 func (s *System) BootContainer(ctx context.Context) error {
 	s.logger.Info("Starting container boot sequence")
+    // Prevent monitor-triggered full shutdown during container-only maintenance
+    s.userEnvMaintenance.Store(true)
+    defer s.userEnvMaintenance.Store(false)
 
 	// Validate that SystemBoot is running
 	// BootContainer expects SystemBoot (JuiceFS, DBManager) to be already initialized

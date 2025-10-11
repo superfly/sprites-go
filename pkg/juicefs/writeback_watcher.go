@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -21,7 +22,9 @@ type WritebackWatcher struct {
 	rawstagingPath string
 	watcher        *fsnotify.Watcher
 	stopCh         chan struct{}
-	stoppedCh      chan struct{}
+	stoppedCh      chan struct{} // closed when processEvents exits
+	stateDoneCh    chan struct{} // closed when stateManager exits
+	readyCh        chan struct{} // closed when rawstaging directory is found and being watched
 
 	// State management via channels (owned by state goroutine)
 	cmdCh   chan watcherCmd
@@ -54,6 +57,12 @@ const (
 	cmdInitFiles
 )
 
+// isIgnoredWritebackFile returns true for files we should not track in writeback
+// Currently ignores temporary files with a .tmp suffix.
+func isIgnoredWritebackFile(name string) bool {
+	return strings.HasSuffix(name, ".tmp")
+}
+
 // NewWritebackWatcher creates a new writeback directory watcher
 func NewWritebackWatcher(ctx context.Context, cacheDir string) (*WritebackWatcher, error) {
 	logger := tap.Logger(ctx)
@@ -78,6 +87,8 @@ func NewWritebackWatcher(ctx context.Context, cacheDir string) (*WritebackWatche
 		rawstagingPath: rawstagingPath,
 		stopCh:         make(chan struct{}),
 		stoppedCh:      make(chan struct{}),
+		stateDoneCh:    make(chan struct{}),
+		readyCh:        make(chan struct{}),
 		cmdCh:          make(chan watcherCmd, 100),
 		countCh:        make(chan int64, 1),
 	}
@@ -130,8 +141,19 @@ func (w *WritebackWatcher) Start(ctx context.Context) error {
 		if err := w.scanExistingFiles(); err != nil {
 			w.logger.Warn("Failed to scan existing files", "error", err)
 		}
+
+		// Signal that watcher is ready
+		close(w.readyCh)
+	} else {
+		// If not found, also watch the cache directory so we can detect when rawstaging appears
+		if err := w.watcher.Add(w.cacheDir); err != nil {
+			w.watcher.Close()
+			close(w.stoppedCh)
+			return fmt.Errorf("failed to watch cache directory: %w", err)
+		}
+		w.logger.Info("Watching cache directory for rawstaging creation", "cacheDir", w.cacheDir)
 	}
-	// If not found, processEvents will retry finding it
+	// processEvents will signal ready when rawstaging is found
 
 	// Start the state management goroutine
 	go w.stateManager(ctx)
@@ -167,6 +189,9 @@ func (w *WritebackWatcher) scanExistingFiles() error {
 		}
 		if !info.IsDir() {
 			filename := filepath.Base(path)
+			if isIgnoredWritebackFile(filename) {
+				return nil
+			}
 			select {
 			case w.cmdCh <- watcherCmd{typ: cmdAddFile, filename: filename, fileSize: info.Size(), timestamp: info.ModTime()}:
 			case <-w.stopCh:
@@ -230,6 +255,8 @@ func countBySize(fileSizes map[string]int64) (int64, int64) {
 
 // stateManager owns all state and processes commands on a single goroutine
 func (w *WritebackWatcher) stateManager(ctx context.Context) {
+	defer close(w.stateDoneCh)
+
 	fileSizes := make(map[string]int64) // filename -> size
 	var pendingCount int64
 	var totalUploaded int64           // lifetime counter of uploaded files
@@ -382,6 +409,8 @@ func (w *WritebackWatcher) processEvents(ctx context.Context) {
 						if err := w.scanExistingFiles(); err != nil {
 							w.logger.Warn("Failed to scan existing files", "error", err)
 						}
+						// Signal that watcher is ready
+						close(w.readyCh)
 					}
 				}
 			}
@@ -411,14 +440,57 @@ func (w *WritebackWatcher) handleEvent(event fsnotify.Event) {
 	// Check if this is a directory creation (need to watch new subdirs)
 	if event.Op&fsnotify.Create == fsnotify.Create {
 		if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
-			// New subdirectory created - add watch for it
-			if err := w.watcher.Add(event.Name); err != nil {
-				w.logger.Warn("Failed to watch new subdirectory", "path", event.Name, "error", err)
-			} else {
-				w.logger.Debug("Added watch for new subdirectory", "path", event.Name)
+			// If we're waiting for rawstaging, check if this might be it or a parent
+			if w.rawstagingPath == "" {
+				// Check if this is the rawstaging directory (cache/<uuid>/rawstaging)
+				if filename == "rawstaging" && filepath.HasPrefix(event.Name, w.cacheDir) {
+					w.logger.Info("Detected rawstaging directory creation via fsnotify", "path", event.Name)
+					w.rawstagingPath = event.Name
+
+					// Add recursive watch for rawstaging and its subdirs
+					if err := w.addRecursiveWatch(w.rawstagingPath); err != nil {
+						w.logger.Error("Failed to watch rawstaging directory", "error", err)
+						w.rawstagingPath = "" // Reset
+						return
+					}
+
+					// Scan for existing files
+					if err := w.scanExistingFiles(); err != nil {
+						w.logger.Warn("Failed to scan existing files", "error", err)
+					}
+
+					// Signal that watcher is ready
+					close(w.readyCh)
+					w.logger.Info("Writeback watcher is now ready")
+					return
+				}
+
+				// If this is a UUID directory under cache, watch it so we can detect rawstaging creation
+				if filepath.Dir(event.Name) == w.cacheDir {
+					if err := w.watcher.Add(event.Name); err != nil {
+						w.logger.Warn("Failed to watch UUID directory", "path", event.Name, "error", err)
+					} else {
+						w.logger.Debug("Added watch for UUID directory", "path", event.Name)
+					}
+				}
+				return
+			}
+
+			// For other directories, just add watch if we're already watching rawstaging
+			if filepath.HasPrefix(event.Name, w.rawstagingPath) {
+				if err := w.watcher.Add(event.Name); err != nil {
+					w.logger.Warn("Failed to watch new subdirectory", "path", event.Name, "error", err)
+				} else {
+					w.logger.Debug("Added watch for new subdirectory", "path", event.Name)
+				}
 			}
 			return // Don't treat directory as a file
 		}
+	}
+
+	// Ignore temporary files we don't want to track
+	if isIgnoredWritebackFile(filename) {
+		return
 	}
 
 	switch {
@@ -474,13 +546,13 @@ func (w *WritebackWatcher) Stop() error {
 		close(w.stopCh)
 	}
 
-	// Wait for stopped
-	<-w.stoppedCh
+	// Wait for both goroutines to exit
+	<-w.stoppedCh   // processEvents goroutine
+	<-w.stateDoneCh // stateManager goroutine
 
-	if count := w.GetPendingCount(); count > 0 {
-		w.logger.Warn("Writeback watcher stopped with pending files",
-			"pendingCount", count)
-	}
+	// Don't call GetPendingCount() here as it would try to send to cmdCh
+	// which might block if stateManager has already exited
+	// The pending count is already logged periodically by stateManager
 
 	return nil
 }
@@ -488,6 +560,19 @@ func (w *WritebackWatcher) Stop() error {
 // Wait blocks until the watcher stops
 func (w *WritebackWatcher) Wait() {
 	<-w.stoppedCh
+}
+
+// WaitUntilReady blocks until the watcher has found the rawstaging directory
+// Returns immediately if already ready, or when context is cancelled
+func (w *WritebackWatcher) WaitUntilReady(ctx context.Context) error {
+	select {
+	case <-w.readyCh:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-w.stopCh:
+		return fmt.Errorf("watcher stopped before becoming ready")
+	}
 }
 
 // GetPendingCount returns the number of files currently pending upload

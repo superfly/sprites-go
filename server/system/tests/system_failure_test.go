@@ -52,8 +52,9 @@ func TestShutdownAfterBootFailure(t *testing.T) {
 
 	t.Logf("Shutdown completed in %v", shutdownDuration)
 
-	// Shutdown should complete quickly since system never fully started
-	if shutdownDuration > 10*time.Second {
+	// Shutdown may take up to 30s for JuiceFS writeback flush even after boot failure
+	// This is because JuiceFS starts early in boot and creates writeback files
+	if shutdownDuration > 35*time.Second {
 		t.Errorf("Shutdown took too long after failed Start(): %v", shutdownDuration)
 	}
 

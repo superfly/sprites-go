@@ -212,6 +212,10 @@ func (m *Manager) getAllStates() map[string]*ServiceState {
 // Stop initiates shutdown then waits for completion
 // Can be called multiple times safely (idempotent)
 func (m *Manager) Stop(ctx context.Context) error {
+    // If manager was never started, treat Stop as no-op (idempotent)
+    if !m.started {
+        return nil
+    }
 	// Check if already stopped
 	select {
 	case <-m.stoppedCh:
