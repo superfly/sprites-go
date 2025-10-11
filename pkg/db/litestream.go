@@ -84,6 +84,8 @@ func (ls *Litestream) generateConfig() error {
         endpoint: %s
         access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
         secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}
+        snapshot-interval: 1h
+        retention: 6h
         sync-interval: 1s`, dbPath, ls.config.S3Bucket, dbName, ls.config.S3EndpointURL)
 		dbConfigs = append(dbConfigs, dbConfig)
 	}
@@ -295,24 +297,4 @@ func (ls *Litestream) GetPid() int {
 	return 0
 }
 
-// litestreamLogger adapts litestream output to slog
-type litestreamLogger struct {
-	logger *slog.Logger
-	level  string
-}
-
-func (l *litestreamLogger) Write(p []byte) (n int, err error) {
-	msg := strings.TrimSpace(string(p))
-	if msg == "" {
-		return len(p), nil
-	}
-
-	switch l.level {
-	case "error":
-		l.logger.Error("litestream", "output", msg)
-	default:
-		l.logger.Info("litestream", "output", msg)
-	}
-
-	return len(p), nil
-}
+// (removed unused litestreamLogger)
