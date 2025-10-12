@@ -88,7 +88,7 @@ func TestProxyHandler(t *testing.T) {
 
 	// Create proxy handler
 	logger := slog.Default()
-	handler := NewProxyHandler(logger, parts[0], port)
+	handler := NewProxyHandler(logger, parts[0], parts[0], port)
 
 	// Test cases
 	tests := []struct {
@@ -151,7 +151,7 @@ func TestProxyHandler(t *testing.T) {
 func TestProxyHandlerErrorHandling(t *testing.T) {
 	// Create proxy handler pointing to non-existent backend
 	logger := slog.Default()
-	handler := NewProxyHandler(logger, "localhost", 99999) // Invalid port
+	handler := NewProxyHandler(logger, "localhost", "localhost", 99999) // Invalid port
 
 	req := httptest.NewRequest("GET", "/test", nil)
 	rec := httptest.NewRecorder()

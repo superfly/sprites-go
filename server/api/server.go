@@ -388,3 +388,32 @@ func (s *Server) GetTMUXManager() *terminal.TMUXManager {
 	}
 	return nil
 }
+
+// authMiddleware wraps an http.Handler with authentication
+// This is exposed for testing purposes
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, isProxy, err := s.authManager.ExtractTokenWithProxyCheck(r)
+		if err != nil {
+			s.logger.Debug("Authentication failed",
+				"error", err,
+				"path", r.URL.Path,
+				"method", r.Method)
+			http.Error(w, "Missing or invalid authentication", http.StatusUnauthorized)
+			return
+		}
+
+		// If it's a proxy token, route to proxy handler
+		if isProxy {
+			// Tag the context with proxy info for the default HTTP logger
+			ctx := context.WithValue(r.Context(), proxyInfoKey{}, "proxy")
+			r = r.WithContext(ctx)
+
+			s.proxyHandler.ServeHTTP(w, r)
+			return
+		}
+
+		// Otherwise, continue with normal handling
+		next.ServeHTTP(w, r)
+	})
+}
