@@ -227,7 +227,7 @@ func (m *Manager) handleStartAll(states map[string]*ServiceState, processes map[
 	// Start services level by level
 	for level := 0; level < len(levels); level++ {
 		servicesAtLevel := levels[level]
-		tap.Logger(m.ctx).Info("starting services at dependency level", "level", level, "services", servicesAtLevel)
+		tap.Logger(m.ctx).Info("starting services at dependency level", "level", level, "count", len(servicesAtLevel))
 
 		// Start all services at this level
 		for _, name := range servicesAtLevel {
@@ -244,14 +244,19 @@ func (m *Manager) handleStartAll(states map[string]*ServiceState, processes map[
 				continue
 			}
 
+			// Log before starting
+			tap.Logger(m.ctx).Info("starting service", "name", name, "cmd", svc.Cmd)
+
 			// Start the service
 			if err := m.startService(svc, states, processes); err != nil {
 				tap.Logger(m.ctx).Error("failed to start service", "name", name, "error", err)
 				// Continue with other services instead of failing entirely
+			} else {
+				tap.Logger(m.ctx).Info("service started successfully", "name", name)
 			}
 		}
 	}
 
-	tap.Logger(m.ctx).Info("finished starting all services")
+	tap.Logger(m.ctx).Info("finished starting all services", "total", len(services))
 	return nil
 }

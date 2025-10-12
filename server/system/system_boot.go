@@ -266,9 +266,9 @@ func (s *System) setupTmuxActivityMonitoring() {
 // PREREQUISITE: SystemBoot must be running (JuiceFS, DBManager) - call Start() first
 func (s *System) BootContainer(ctx context.Context) error {
 	s.logger.Info("Starting container boot sequence")
-    // Prevent monitor-triggered full shutdown during container-only maintenance
-    s.userEnvMaintenance.Store(true)
-    defer s.userEnvMaintenance.Store(false)
+	// Prevent monitor-triggered full shutdown during container-only maintenance
+	s.userEnvMaintenance.Store(true)
+	defer s.userEnvMaintenance.Store(false)
 
 	// Validate that SystemBoot is running
 	// BootContainer expects SystemBoot (JuiceFS, DBManager) to be already initialized

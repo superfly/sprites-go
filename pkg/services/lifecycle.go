@@ -46,8 +46,14 @@ func (m *Manager) startService(svc *Service, states map[string]*ServiceState, pr
 			}
 		}
 
-		if err := m.startService(depSvc, states, processes); err != nil {
-			return fmt.Errorf("failed to start dependency %s: %w", dep, err)
+		// Check if dependency is already running
+		if states[depSvc.Name].Status != StatusRunning {
+			tap.Logger(m.ctx).Info("starting dependency", "service", svc.Name, "dependency", dep)
+			if err := m.startService(depSvc, states, processes); err != nil {
+				return fmt.Errorf("failed to start dependency %s: %w", dep, err)
+			}
+		} else {
+			tap.Logger(m.ctx).Info("dependency already running", "service", svc.Name, "dependency", dep)
 		}
 	}
 
@@ -208,7 +214,7 @@ func (m *Manager) startProcess(name string, cmd string, args []string) (*Process
 	}
 
 	logger := tap.Logger(m.ctx).With("service", name)
-	logger.Info("starting service", "cmd", cmd, "args", args)
+	logger.Info("starting service process", "cmd", cmd, "args", args, "full_command", fullCmd)
 
 	// Create a context that we can cancel
 	procCtx, cancel := context.WithCancel(m.ctx)

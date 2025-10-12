@@ -299,6 +299,10 @@ func (m *Manager) AddOrgWithUser(name, token, url, userID, userEmail string) err
 			Sprites:    make(map[string]*v1.SpriteConfig),
 		}
 		m.userConfig.URLs[url].Orgs[name] = orgConfig
+	} else {
+		// On re-auth, ensure we overwrite any stale keyring key with the correct format
+		// so subsequent token retrievals use the new per-user key layout.
+		orgConfig.KeyringKey = keyringKey
 	}
 
 	// Store token in user-scoped keyring

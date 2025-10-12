@@ -109,6 +109,8 @@ func (s *SockServer) setupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /v1/services/{name}", s.apiHandlers.HandleCreateService)
 	mux.HandleFunc("GET /v1/services/{name}", s.apiHandlers.HandleGetService)
 	mux.HandleFunc("DELETE /v1/services/{name}", s.apiHandlers.HandleDeleteService)
+	mux.HandleFunc("POST /v1/services/{name}/start", s.apiHandlers.HandleStartService)
+	mux.HandleFunc("POST /v1/services/{name}/stop", s.apiHandlers.HandleStopService)
 	mux.HandleFunc("POST /v1/services/signal", s.apiHandlers.HandleSignalService)
 
 	// Checkpoint endpoints (no auth required)

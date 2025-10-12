@@ -58,13 +58,13 @@ func NewProxyHandler(logger *slog.Logger, targetHost string, targetPort int) *Pr
 		targetHost: targetHost,
 		targetPort: targetPort,
 		proxy:      proxy,
-		logger:     logger,
+		logger:     logger.With("hostname", fmt.Sprintf("%s:%d", targetHost, targetPort)),
 	}
 }
 
 // ServeHTTP handles the HTTP request by proxying it to the target
 func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	p.logger.Debug("Proxying request",
+	p.logger.Info("Proxying request",
 		"method", r.Method,
 		"path", r.URL.Path,
 		"target", fmt.Sprintf("%s:%d", p.targetHost, p.targetPort))

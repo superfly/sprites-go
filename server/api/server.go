@@ -106,6 +106,36 @@ func NewServer(config Config, system SystemManager, ctx context.Context) (*Serve
 	}
 
 	handler := stripSpritePrefix(mux)
+
+	// Add global auth middleware - this handles both authentication and proxy routing
+	{
+		next := handler
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, isProxy, err := s.authManager.ExtractTokenWithProxyCheck(r)
+			if err != nil {
+				s.logger.Debug("Authentication failed",
+					"error", err,
+					"path", r.URL.Path,
+					"method", r.Method)
+				http.Error(w, "Missing or invalid authentication", http.StatusUnauthorized)
+				return
+			}
+
+			// If it's a proxy token, route to proxy handler
+			if isProxy {
+				s.logger.Info("Routing request to proxy handler via fly-replay-src",
+					"path", r.URL.Path,
+					"method", r.Method,
+					"fly-replay-src", r.Header.Get("fly-replay-src"))
+				s.proxyHandler.ServeHTTP(w, r)
+				return
+			}
+
+			// Otherwise, continue with normal handling
+			next.ServeHTTP(w, r)
+		})
+	}
+
 	{
 		next := handler
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -179,19 +209,19 @@ func (s *Server) SetActivityObserver(observe func(start bool)) {
 
 // setupEndpoints configures HTTP endpoints for the API
 func (s *Server) setupEndpoints(mux *http.ServeMux) {
-	// All endpoints require authentication
+	// Note: All endpoints have global authentication applied at the top level
 
 	// Exec endpoint - waits for process to be running
-	mux.HandleFunc("/exec", s.authMiddleware(s.enrichContextMiddleware(s.waitForProcessMiddleware(s.handlers.HandleExec))))
+	mux.HandleFunc("/exec", s.enrichContextMiddleware(s.waitForProcessMiddleware(s.handlers.HandleExec)))
 
-	mux.HandleFunc("/sync", s.authMiddleware(s.waitForProcessMiddleware(s.syncServer.HandleWebSocket)))
+	mux.HandleFunc("/sync", s.waitForProcessMiddleware(s.syncServer.HandleWebSocket))
 
 	// Checkpoint endpoint - waits for storage to be ready
-	mux.HandleFunc("/checkpoint", s.authMiddleware(s.waitForStorageMiddleware(s.handlers.HandleCheckpoint)))
+	mux.HandleFunc("/checkpoint", s.waitForStorageMiddleware(s.handlers.HandleCheckpoint))
 
 	// Checkpoint management endpoints - wait for storage to be ready
 	// This pattern matches /checkpoints and any subpaths like /checkpoints/{id} or /checkpoints/{id}/restore
-	checkpointsHandler := s.authMiddleware(s.waitForStorageMiddleware(func(w http.ResponseWriter, r *http.Request) {
+	checkpointsHandler := s.waitForStorageMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		// Route to appropriate handler based on path
 		path := r.URL.Path
 		parts := strings.Split(strings.Trim(path, "/"), "/")
@@ -208,28 +238,28 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 		} else {
 			http.NotFound(w, r)
 		}
-	}))
+	})
 
 	// Register both exact and prefix patterns to handle all checkpoint routes
 	mux.HandleFunc("/checkpoints", checkpointsHandler)
 	mux.HandleFunc("/checkpoints/", checkpointsHandler)
 
 	// Proxy endpoint - waits for process to be running
-	mux.HandleFunc("/proxy", s.authMiddleware(s.enrichContextMiddleware(s.waitForProcessMiddleware(s.handlers.HandleProxy))))
+	mux.HandleFunc("/proxy", s.enrichContextMiddleware(s.waitForProcessMiddleware(s.handlers.HandleProxy)))
 
-	// Suspend endpoint - wait for storage to be ready, requires auth
-	mux.HandleFunc("/suspend", s.authMiddleware(s.waitForStorageMiddleware(s.handlers.HandleSuspend)))
+	// Suspend endpoint - wait for storage to be ready
+	mux.HandleFunc("/suspend", s.waitForStorageMiddleware(s.handlers.HandleSuspend))
 
-	// Debug endpoints - require auth but don't wait for process or JuiceFS
-	mux.HandleFunc("/debug/create-zombie", s.authMiddleware(s.handlers.HandleDebugCreateZombie))
-	mux.HandleFunc("/debug/check-process", s.authMiddleware(s.handlers.HandleDebugCheckProcess))
+	// Debug endpoints - don't wait for process or JuiceFS
+	mux.HandleFunc("/debug/create-zombie", s.handlers.HandleDebugCreateZombie)
+	mux.HandleFunc("/debug/check-process", s.handlers.HandleDebugCheckProcess)
 
-	// Admin endpoints - require regular auth (admin auth middleware removed)
-	mux.HandleFunc("/admin/reset-state", s.authMiddleware(s.handlers.HandleAdminResetState))
+	// Admin endpoints
+	mux.HandleFunc("/admin/reset-state", s.handlers.HandleAdminResetState)
 
 	// Sprite environment endpoint - POST /v1/sprites/:name/environment
 	// Waits for storage to be ready (needs JuiceFS for sprite.db)
-	mux.HandleFunc("/v1/sprites/", s.authMiddleware(s.waitForStorageMiddleware(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/sprites/", s.waitForStorageMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		// Only handle paths matching /v1/sprites/:name/environment
 		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 		if len(parts) == 4 && parts[0] == "v1" && parts[1] == "sprites" && parts[3] == "environment" {
@@ -237,7 +267,7 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 		} else {
 			http.NotFound(w, r)
 		}
-	})))
+	}))
 }
 
 // Start starts the API server
@@ -265,30 +295,6 @@ func (s *Server) enrichContextMiddleware(next http.HandlerFunc) http.HandlerFunc
 			ctx = context.WithValue(ctx, contextEnricherKey{}, s.contextEnricher)
 			r = r.WithContext(ctx)
 		}
-		next(w, r)
-	}
-}
-
-// authMiddleware checks for authentication token and handles proxy routing
-func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		_, isProxy, err := s.authManager.ExtractTokenWithProxyCheck(r)
-		if err != nil {
-			s.logger.Debug("Authentication failed",
-				"error", err,
-				"path", r.URL.Path,
-				"method", r.Method)
-			http.Error(w, "Missing or invalid authentication", http.StatusUnauthorized)
-			return
-		}
-
-		// If it's a proxy token, route to proxy handler
-		if isProxy {
-			s.proxyHandler.ServeHTTP(w, r)
-			return
-		}
-
-		// Otherwise, continue with normal handling
 		next(w, r)
 	}
 }

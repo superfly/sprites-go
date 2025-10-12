@@ -196,6 +196,62 @@ func (h *Handlers) HandleDeleteService(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// HandleStartService handles POST /v1/services/{name}/start
+func (h *Handlers) HandleStartService(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		http.Error(w, "service name required", http.StatusBadRequest)
+		return
+	}
+
+	// Start the service
+	if err := h.system.GetServicesManager().StartService(name); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			http.Error(w, err.Error(), http.StatusNotFound)
+		} else if strings.Contains(err.Error(), "already") {
+			http.Error(w, err.Error(), http.StatusConflict)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// HandleStopService handles POST /v1/services/{name}/stop
+// Blocks until the service is fully stopped (with timeout)
+func (h *Handlers) HandleStopService(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		http.Error(w, "service name required", http.StatusBadRequest)
+		return
+	}
+
+	// Stop the service
+	if err := h.system.GetServicesManager().StopService(name); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			http.Error(w, err.Error(), http.StatusNotFound)
+		} else if strings.Contains(err.Error(), "not running") {
+			http.Error(w, err.Error(), http.StatusConflict)
+		} else if strings.Contains(err.Error(), "depends") {
+			http.Error(w, err.Error(), http.StatusConflict)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	// Wait for the service to stop (max 10 seconds)
+	if err := h.system.GetServicesManager().WaitForStop(name, 10*time.Second); err != nil {
+		h.logger.Error("service did not stop within timeout", "name", name, "error", err)
+		http.Error(w, "service did not stop within timeout", http.StatusRequestTimeout)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // HandleSignalService handles POST /v1/services/signal
 func (h *Handlers) HandleSignalService(w http.ResponseWriter, r *http.Request) {
 	var req ServiceSignalRequest

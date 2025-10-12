@@ -80,6 +80,10 @@ func WithLogDir(logDir string) Option {
 func NewManager(dataDir string, opts ...Option) (*Manager, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Tag logger with "services" component
+	logger := tap.Logger(ctx).With("component", "services")
+	ctx = tap.WithLogger(ctx, logger)
+
 	m := &Manager{
 		dataDir:       dataDir,
 		commands:      make(chan command),
@@ -169,6 +173,16 @@ func (m *Manager) Start() error {
 	})
 
 	tap.Logger(m.ctx).Info("Services manager started", "dataDir", m.dataDir)
+
+	// Automatically start all services
+	tap.Logger(m.ctx).Info("Starting all services")
+	if err := m.StartAll(); err != nil {
+		tap.Logger(m.ctx).Error("Failed to start services", "error", err)
+		// Non-fatal error - services manager is still operational
+	} else {
+		tap.Logger(m.ctx).Info("All services started successfully")
+	}
+
 	return nil
 }
 
@@ -212,10 +226,10 @@ func (m *Manager) getAllStates() map[string]*ServiceState {
 // Stop initiates shutdown then waits for completion
 // Can be called multiple times safely (idempotent)
 func (m *Manager) Stop(ctx context.Context) error {
-    // If manager was never started, treat Stop as no-op (idempotent)
-    if !m.started {
-        return nil
-    }
+	// If manager was never started, treat Stop as no-op (idempotent)
+	if !m.started {
+		return nil
+	}
 	// Check if already stopped
 	select {
 	case <-m.stoppedCh:
