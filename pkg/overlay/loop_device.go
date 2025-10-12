@@ -176,10 +176,6 @@ func detachLoopDevice(loopPath string) error {
 
 	loop, err := os.OpenFile(loopPath, os.O_RDWR, 0)
 	if err != nil {
-		// If device doesn't exist, treat as already detached (success)
-		if os.IsNotExist(err) {
-			return nil
-		}
 		return fmt.Errorf("failed to open loop device %s: %w", loopPath, err)
 	}
 	defer loop.Close()

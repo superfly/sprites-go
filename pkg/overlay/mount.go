@@ -368,10 +368,14 @@ func (m *Manager) Unmount(ctx context.Context) error {
 	}
 
 	// Perform cleanup in reverse order of Start()
-	// First unmount checkpoint mounts (always succeeds, logs failures individually)
+	// First unmount checkpoint mounts
 	m.logger.Info("Step 1: Unmounting checkpoints")
-	_ = m.UnmountCheckpoints(ctx)
-	m.logger.Info("Step 1 complete: Checkpoints unmounted")
+	if err := m.UnmountCheckpoints(ctx); err != nil {
+		m.logger.Warn("Failed to unmount checkpoints during overlay unmount", "error", err)
+		// Continue - non-fatal
+	} else {
+		m.logger.Info("Step 1 complete: Checkpoints unmounted successfully")
+	}
 
 	// Then unmount overlayfs if it's mounted
 	m.logger.Info("Step 2: Checking overlayfs mount status", "overlayTargetPath", m.overlayTargetPath)

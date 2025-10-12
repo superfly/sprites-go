@@ -227,15 +227,16 @@ func (m *Manager) isCheckpointMounted(cpName string) bool {
 }
 
 // UnmountCheckpoints unmounts all checkpoint mounts including the active checkpoint
-// Always returns nil - failures are logged but do not stop the unmount process
 func (m *Manager) UnmountCheckpoints(ctx context.Context) error {
 	m.checkpointMu.Lock()
 	defer m.checkpointMu.Unlock()
 
+	var firstErr error
+
 	// Unmount active checkpoint first
 	if err := m.unmountActiveCheckpoint(ctx); err != nil {
 		m.logger.Warn("Failed to unmount active checkpoint", "error", err)
-		// Continue with other checkpoints
+		firstErr = err
 	}
 
 	// Unmount all other checkpoints
@@ -244,8 +245,10 @@ func (m *Manager) UnmountCheckpoints(ctx context.Context) error {
 
 		// Unmount
 		if err := unmount(mountPath); err != nil {
-			m.logger.Warn("Failed to unmount checkpoint", "checkpoint", cpName, "path", mountPath, "error", err)
-			// Continue with other checkpoints
+			m.logger.Warn("Failed to unmount checkpoint", "checkpoint", cpName, "error", err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("unmount %s: %w", cpName, err)
+			}
 		}
 
 		// Detach loop device if exists
@@ -262,11 +265,12 @@ func (m *Manager) UnmountCheckpoints(ctx context.Context) error {
 	// Finally unmount the base checkpoint directory
 	if err := m.unmountCheckpointBase(ctx); err != nil {
 		m.logger.Warn("Failed to unmount checkpoint base", "error", err)
-		// Continue - this is non-fatal
+		if firstErr == nil {
+			firstErr = err
+		}
 	}
 
-	// Always return nil - checkpoint unmount failures should not stop system shutdown
-	return nil
+	return firstErr
 }
 
 // OnCheckpointCreated is called when a new checkpoint is created
