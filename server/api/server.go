@@ -67,7 +67,8 @@ func NewServer(config Config, system SystemManager, ctx context.Context) (*Serve
 	authManager := NewAuthManager(config.APIToken, config.AdminToken)
 
 	// Create proxy handler for proxy:: prefixed tokens
-	proxyHandler := NewProxyHandler(logger, "10.0.0.1", 8080)
+	// Try IPv6 (fd00:...) first, then fall back to IPv4 (10.0.0.1)
+	proxyHandler := NewProxyHandler(logger, "fd00::2", "10.0.0.1", 8080)
 
 	s := &Server{
 		logger:       logger,
