@@ -18,7 +18,7 @@ type SpriteInfo struct {
 	SpriteURL  string    `json:"sprite_url"`
 	OrgID      string    `json:"org_id"`
 	SpriteID   string    `json:"sprite_id"`
-	AssignedAt time.Time `json:"assigned_at,omitempty"`
+	AssignedAt time.Time `json:"assigned_at"`
 }
 
 // InitializeSpriteDB creates the sprite database and table if they don't exist

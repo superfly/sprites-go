@@ -119,7 +119,7 @@ func (p *ProxyHandler) selectProxy() (*httputil.ReverseProxy, string) {
 func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	proxy, host := p.selectProxy()
 
-	p.logger.Info("Proxying request",
+	p.logger.Debug("Proxying request",
 		"hostname", r.Host,
 		"method", r.Method,
 		"path", r.URL.Path,

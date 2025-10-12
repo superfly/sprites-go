@@ -124,10 +124,10 @@ func NewServer(config Config, system SystemManager, ctx context.Context) (*Serve
 
 			// If it's a proxy token, route to proxy handler
 			if isProxy {
-				s.logger.Info("Routing request to proxy handler via fly-replay-src",
-					"path", r.URL.Path,
-					"method", r.Method,
-					"fly-replay-src", r.Header.Get("fly-replay-src"))
+				// Tag the context with proxy info for the default HTTP logger
+				ctx := context.WithValue(r.Context(), proxyInfoKey{}, "proxy")
+				r = r.WithContext(ctx)
+
 				s.proxyHandler.ServeHTTP(w, r)
 				return
 			}
@@ -183,7 +183,12 @@ func NewServer(config Config, system SystemManager, ctx context.Context) (*Serve
 	s.server = &http.Server{
 		Addr: config.ListenAddr,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			s.logger.Info("request", "url", r.URL.String())
+			// Check if this is a proxy request and include that in the log
+			if proxyInfo := r.Context().Value(proxyInfoKey{}); proxyInfo != nil {
+				s.logger.Info("request", "url", r.URL.String(), "type", proxyInfo)
+			} else {
+				s.logger.Info("request", "url", r.URL.String())
+			}
 			handler.ServeHTTP(w, r)
 		}),
 	}
@@ -285,6 +290,9 @@ func (s *Server) Stop(ctx context.Context) error {
 
 // contextEnricherKey is the key for storing the enricher in context
 type contextEnricherKey struct{}
+
+// proxyInfoKey is the key for storing proxy information in context
+type proxyInfoKey struct{}
 
 // enrichContextMiddleware enriches the request context if a context enricher is configured
 func (s *Server) enrichContextMiddleware(next http.HandlerFunc) http.HandlerFunc {
