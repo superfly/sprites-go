@@ -84,6 +84,20 @@ func NewSocket(endPoint *url.URL) *Socket {
 	return socket
 }
 
+// sanitizeURL returns a copy of the URL with the authToken parameter redacted for logging
+func sanitizeURL(u *url.URL) string {
+	if u == nil {
+		return "<nil>"
+	}
+	sanitized := *u
+	q := sanitized.Query()
+	if q.Has("authToken") {
+		q.Set("authToken", "[REDACTED]")
+		sanitized.RawQuery = q.Encode()
+	}
+	return sanitized.String()
+}
+
 // Connect will start connection attempts with the server until successful or canceled with Disconnect.
 func (s *Socket) Connect() error {
 	// Add the 'vsn' query parameter to the connection url
@@ -91,7 +105,7 @@ func (s *Socket) Connect() error {
 	q.Set("vsn", s.Serializer.vsn())
 	s.EndPoint.RawQuery = q.Encode()
 
-	s.Logger.Printf(LogInfo, "socket", "connecting to %v\n", s.EndPoint)
+	s.Logger.Printf(LogInfo, "socket", "connecting to %v\n", sanitizeURL(s.EndPoint))
 
 	err := s.Transport.Connect(s.EndPoint, s.RequestHeader, s.ConnectTimeout)
 	if err != nil {
@@ -273,7 +287,7 @@ func (s *Socket) reconnectAfter(tries int) time.Duration {
 }
 
 func (s *Socket) onConnOpen() {
-	s.Logger.Printf(LogInfo, "socket", "Connected to %v", s.EndPoint)
+	s.Logger.Printf(LogInfo, "socket", "Connected to %v", sanitizeURL(s.EndPoint))
 	s.startHeartbeat()
 	for _, cb := range s.openCallbacks {
 		go cb()
@@ -281,7 +295,7 @@ func (s *Socket) onConnOpen() {
 }
 
 func (s *Socket) onConnClose() {
-	s.Logger.Printf(LogInfo, "socket", "Disconnected from %v", s.EndPoint)
+	s.Logger.Printf(LogInfo, "socket", "Disconnected from %v", sanitizeURL(s.EndPoint))
 	s.stopHeartbeat()
 	for _, cb := range s.closeCallbacks {
 		go cb()

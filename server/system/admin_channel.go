@@ -85,8 +85,17 @@ func (ac *AdminChannel) Start() error {
 	if appName == "" {
 		channelTopic = "sprite:unknown"
 	}
+
+	// Create a sanitized URL for logging (without auth token)
+	sanitizedURL := *u
+	sanitizedQuery := sanitizedURL.Query()
+	if sanitizedQuery.Has("authToken") {
+		sanitizedQuery.Set("authToken", "[REDACTED]")
+		sanitizedURL.RawQuery = sanitizedQuery.Encode()
+	}
+
 	ac.logger.Info("Starting admin channel",
-		"url", u.String(),
+		"url", sanitizedURL.String(),
 		"topic", channelTopic,
 		"app_name", appName)
 
