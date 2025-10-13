@@ -81,6 +81,9 @@ type Cmd struct {
 	detachable  bool
 	controlMode bool
 
+	// Control connection for cleanup
+	controlConn *controlConn
+
 	// TextMessageHandler is called when text messages are received from the server.
 	// This is typically used for port notifications or other out-of-band messages.
 	// The handler is called with the raw message data.
@@ -252,18 +255,9 @@ func (c *Cmd) Start() error {
 		return fmt.Errorf("failed to start sprite command: %w", err)
 	}
 
-	// If using control connection, handle cleanup in Wait()
-	// Store the control connection for cleanup
+	// Store control connection for cleanup in Wait()
 	if usingControl {
-		// We'll handle cleanup in a wrapper goroutine that waits for the command to finish
-		go func() {
-			c.wsCmd.Wait()
-			if controlConn != nil {
-				controlConn.sendRelease()
-				pool := c.sprite.client.getOrCreatePool(c.sprite.name)
-				pool.checkin(controlConn)
-			}
-		}()
+		c.controlConn = controlConn
 	}
 
 	return nil
@@ -306,6 +300,14 @@ func (c *Cmd) Wait() error {
 	// Close all descriptors
 	for _, closer := range c.closers {
 		closer.Close()
+	}
+
+	// Clean up control connection if we used one
+	if c.controlConn != nil {
+		c.controlConn.sendRelease()
+		pool := c.sprite.client.getOrCreatePool(c.sprite.name)
+		pool.checkin(c.controlConn)
+		c.controlConn = nil
 	}
 
 	c.mu.Lock()
