@@ -53,6 +53,11 @@ type wsCmd struct {
 
 	// TextMessageHandler is called when text messages are received over the WebSocket
 	TextMessageHandler func([]byte)
+
+	// existingConn allows reusing an existing WebSocket connection (for control connections)
+	existingConn *websocket.Conn
+	// usingControl indicates if this is using a control connection
+	usingControl bool
 }
 
 // wsAdapter wraps a WebSocket connection for terminal communication
@@ -117,29 +122,61 @@ func (c *wsCmd) Start() error {
 
 func (c *wsCmd) start() {
 	defer close(c.doneChan)
-	dialer := websocket.DefaultDialer
-	dialer.HandshakeTimeout = 10 * time.Second
-	dialer.ReadBufferSize = 1024 * 1024
-	dialer.WriteBufferSize = 1024 * 1024
 
-	if c.Request.URL.Scheme == "wss" {
-		dialer.TLSClientConfig = &tls.Config{}
-	}
-	conn, resp, err := dialer.DialContext(c.ctx, c.Request.URL.String(), c.Request.Header)
-	if err != nil {
-		errMsg := fmt.Sprintf("failed to connect: %v", err)
-		if resp != nil {
-			body, readErr := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if readErr == nil && len(body) > 0 {
-				errMsg = fmt.Sprintf("failed to connect: %v (HTTP %d: %s)", err, resp.StatusCode, string(body))
-			} else if readErr == nil {
-				errMsg = fmt.Sprintf("failed to connect: %v (HTTP %d)", err, resp.StatusCode)
+	var conn *websocket.Conn
+	var err error
+
+	// Use existing connection if provided (for control connections)
+	if c.existingConn != nil {
+		conn = c.existingConn
+
+		// Send operation start message for control connections
+		if c.usingControl {
+			startMsg := map[string]interface{}{
+				"type":      "start",
+				"operation": "exec",
+				"params": map[string]interface{}{
+					"path":       c.Path,
+					"args":       c.Args,
+					"env":        c.Env,
+					"dir":        c.Dir,
+					"tty":        c.Tty,
+					"stdin":      c.Stdin != nil,
+					"keep_alive": true,
+				},
+			}
+			if err := conn.WriteJSON(&startMsg); err != nil {
+				c.startChan <- fmt.Errorf("failed to send operation start message: %w", err)
+				return
 			}
 		}
-		c.startChan <- fmt.Errorf("%s", errMsg)
-		return
+	} else {
+		// Dial new connection (legacy direct WebSocket path)
+		dialer := websocket.DefaultDialer
+		dialer.HandshakeTimeout = 10 * time.Second
+		dialer.ReadBufferSize = 1024 * 1024
+		dialer.WriteBufferSize = 1024 * 1024
+
+		if c.Request.URL.Scheme == "wss" {
+			dialer.TLSClientConfig = &tls.Config{}
+		}
+		conn, resp, err := dialer.DialContext(c.ctx, c.Request.URL.String(), c.Request.Header)
+		if err != nil {
+			errMsg := fmt.Sprintf("failed to connect: %v", err)
+			if resp != nil {
+				body, readErr := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if readErr == nil && len(body) > 0 {
+					errMsg = fmt.Sprintf("failed to connect: %v (HTTP %d: %s)", err, resp.StatusCode, string(body))
+				} else if readErr == nil {
+					errMsg = fmt.Sprintf("failed to connect: %v (HTTP %d)", err, resp.StatusCode)
+				}
+			}
+			c.startChan <- fmt.Errorf("%s", errMsg)
+			return
+		}
 	}
+
 	c.conn = conn
 	c.adapter = newWSAdapter(conn, c.Tty)
 

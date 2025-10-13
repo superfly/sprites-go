@@ -171,16 +171,43 @@ func (c *Cmd) Start() error {
 		}
 	}
 
-	// Build WebSocket URL
+	// Check if sprite supports control connections (lazy check on first use)
+	c.sprite.ensureControlSupport(c.ctx)
+
+	var controlConn *controlConn
+	usingControl := false
+
+	if c.sprite.supportsControl {
+		// Try to use control connection
+		pool := c.sprite.client.getOrCreatePool(c.sprite.name)
+		var err error
+		controlConn, err = pool.checkout(c.ctx)
+
+		if err == nil && controlConn != nil {
+			// Successfully got a control connection
+			usingControl = true
+			c.controlMode = true
+		}
+	}
+
+	// Build WebSocket URL (needed for Request even if using control connection)
 	wsURL, err := c.buildWebSocketURL()
 	if err != nil {
+		if controlConn != nil {
+			pool := c.sprite.client.getOrCreatePool(c.sprite.name)
+			pool.checkin(controlConn)
+		}
 		closeDescriptors(c.closers)
 		return err
 	}
 
-	// Create HTTP request with auth
+	// Create HTTP request (for Request field, even though we may not dial)
 	req, err := http.NewRequestWithContext(c.ctx, "GET", wsURL.String(), nil)
 	if err != nil {
+		if controlConn != nil {
+			pool := c.sprite.client.getOrCreatePool(c.sprite.name)
+			pool.checkin(controlConn)
+		}
 		closeDescriptors(c.closers)
 		return err
 	}
@@ -189,11 +216,21 @@ func (c *Cmd) Start() error {
 	// Create WebSocket command
 	c.wsCmd = newWSCmdContext(c.ctx, req, c.Path, c.Args[1:]...)
 
+	// If using control connection, provide the existing WebSocket
+	if usingControl {
+		c.wsCmd.existingConn = controlConn.ws
+		c.wsCmd.usingControl = true
+	}
+
 	// Set up I/O
 	c.setupIO()
 
 	// Set TTY mode
 	c.wsCmd.Tty = c.tty
+
+	// Set environment and directory
+	c.wsCmd.Env = c.Env
+	c.wsCmd.Dir = c.Dir
 
 	// Set text message handler if provided
 	if c.TextMessageHandler != nil {
@@ -207,8 +244,26 @@ func (c *Cmd) Start() error {
 
 	// Start the WebSocket command
 	if err := c.wsCmd.Start(); err != nil {
+		if controlConn != nil {
+			pool := c.sprite.client.getOrCreatePool(c.sprite.name)
+			pool.checkin(controlConn)
+		}
 		closeDescriptors(c.closers)
 		return fmt.Errorf("failed to start sprite command: %w", err)
+	}
+
+	// If using control connection, handle cleanup in Wait()
+	// Store the control connection for cleanup
+	if usingControl {
+		// We'll handle cleanup in a wrapper goroutine that waits for the command to finish
+		go func() {
+			c.wsCmd.Wait()
+			if controlConn != nil {
+				controlConn.sendRelease()
+				pool := c.sprite.client.getOrCreatePool(c.sprite.name)
+				pool.checkin(controlConn)
+			}
+		}()
 	}
 
 	return nil
