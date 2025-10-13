@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -17,6 +18,10 @@ type Client struct {
 	baseURL    string
 	token      string
 	httpClient *http.Client
+
+	// Control connection pools per sprite
+	poolsMu sync.RWMutex
+	pools   map[string]*controlPool
 }
 
 // Option is a functional option for configuring the SDK client.
@@ -30,6 +35,7 @@ func New(token string, opts ...Option) *Client {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
+		pools: make(map[string]*controlPool),
 	}
 
 	for _, opt := range opts {
@@ -168,4 +174,41 @@ func CreateToken(ctx context.Context, flyMacaroon, orgSlug string, inviteCode st
 	}
 
 	return tokenResp.Token, nil
+}
+
+// getOrCreatePool gets or creates a control pool for the given sprite
+func (c *Client) getOrCreatePool(spriteName string) *controlPool {
+	c.poolsMu.RLock()
+	pool, exists := c.pools[spriteName]
+	c.poolsMu.RUnlock()
+
+	if exists {
+		return pool
+	}
+
+	c.poolsMu.Lock()
+	defer c.poolsMu.Unlock()
+
+	// Check again in case another goroutine created it
+	pool, exists = c.pools[spriteName]
+	if exists {
+		return pool
+	}
+
+	pool = newControlPool(c, spriteName)
+	c.pools[spriteName] = pool
+	return pool
+}
+
+// Close closes the client and all pooled connections
+func (c *Client) Close() error {
+	c.poolsMu.Lock()
+	defer c.poolsMu.Unlock()
+
+	for _, pool := range c.pools {
+		pool.close()
+	}
+	c.pools = nil
+
+	return nil
 }
