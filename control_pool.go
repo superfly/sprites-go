@@ -121,6 +121,8 @@ func (p *controlPool) dial(ctx context.Context) (*controlConn, error) {
 		return nil, err
 	}
 
+	fmt.Printf("DEBUG: Dialing control connection to: %s\n", wsURL.String())
+
 	// Set up WebSocket dialer
 	dialer := &websocket.Dialer{
 		ReadBufferSize:   1024 * 1024, // 1MB
@@ -140,9 +142,14 @@ func (p *controlPool) dial(ctx context.Context) (*controlConn, error) {
 	header.Set("Authorization", fmt.Sprintf("Bearer %s", p.client.token))
 	header.Set("User-Agent", "sprites-go-sdk/1.0")
 
+	fmt.Printf("DEBUG: Auth token: %s\n", p.client.token[:min(10, len(p.client.token))]+"...")
+
 	// Connect to WebSocket
-	ws, _, err := dialer.DialContext(ctx, wsURL.String(), header)
+	ws, resp, err := dialer.DialContext(ctx, wsURL.String(), header)
 	if err != nil {
+		if resp != nil {
+			fmt.Printf("DEBUG: WebSocket dial failed with HTTP status: %d\n", resp.StatusCode)
+		}
 		return nil, fmt.Errorf("failed to dial control connection: %w", err)
 	}
 

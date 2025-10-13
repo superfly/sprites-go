@@ -180,17 +180,24 @@ func (c *Cmd) Start() error {
 	var controlConn *controlConn
 	usingControl := false
 
+	fmt.Printf("DEBUG: sprite.supportsControl = %v\n", c.sprite.supportsControl)
+
 	if c.sprite.supportsControl {
 		// Try to use control connection
 		pool := c.sprite.client.getOrCreatePool(c.sprite.name)
 		var err error
 		controlConn, err = pool.checkout(c.ctx)
 
+		fmt.Printf("DEBUG: pool.checkout returned conn=%v, err=%v\n", controlConn != nil, err)
+
 		if err == nil && controlConn != nil {
 			// Successfully got a control connection
 			usingControl = true
 			c.controlMode = true
+			fmt.Printf("DEBUG: Using control connection\n")
 		}
+	} else {
+		fmt.Printf("DEBUG: Control not supported, falling back to direct WebSocket\n")
 	}
 
 	// Build WebSocket URL (needed for Request even if using control connection)
