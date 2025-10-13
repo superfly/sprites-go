@@ -124,7 +124,6 @@ func (c *wsCmd) start() {
 	defer close(c.doneChan)
 
 	var conn *websocket.Conn
-	var err error
 
 	// Use existing connection if provided (for control connections)
 	if c.existingConn != nil {
@@ -160,7 +159,9 @@ func (c *wsCmd) start() {
 		if c.Request.URL.Scheme == "wss" {
 			dialer.TLSClientConfig = &tls.Config{}
 		}
-		conn, resp, err := dialer.DialContext(c.ctx, c.Request.URL.String(), c.Request.Header)
+		var err error
+		var resp *http.Response
+		conn, resp, err = dialer.DialContext(c.ctx, c.Request.URL.String(), c.Request.Header)
 		if err != nil {
 			errMsg := fmt.Sprintf("failed to connect: %v", err)
 			if resp != nil {
