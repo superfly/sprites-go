@@ -166,7 +166,7 @@ func ListSpritesWithClient(client *sprites.Client, prefix string) ([]*sprites.Sp
 // This is kept for backward compatibility but should be replaced with ListSpritesWithClient
 func ListSpritesWithPrefix(cfg *config.Manager, org *config.Organization, prefix string) ([]*sprites.Sprite, error) {
 	// Get token
-	token, err := org.GetTokenWithKeyringDisabled(cfg.IsKeyringDisabled())
+	token, err := org.GetToken()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get auth token: %w", err)
 	}

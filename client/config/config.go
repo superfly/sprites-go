@@ -13,7 +13,7 @@ import (
 	"time"
 
 	v1 "github.com/superfly/sprite-env/client/config/v1"
-	"github.com/zalando/go-keyring"
+	"github.com/superfly/sprite-env/client/keyring"
 )
 
 const (
@@ -140,6 +140,12 @@ func NewManager() (*Manager, error) {
 				slog.Debug("Failed to load user config", "userID", m.config.CurrentUser, "error", err)
 			}
 		}
+
+		// Migrate any tokens from config to keyring
+		if err := m.MigrateTokensToKeyring(); err != nil {
+			slog.Warn("Failed to migrate tokens to keyring", "error", err)
+			// Don't fail on migration errors, just log them
+		}
 	} else if !os.IsNotExist(err) {
 		return nil, fmt.Errorf("failed to read sprites.json: %w", err)
 	}
@@ -220,6 +226,9 @@ func (m *Manager) Save() error {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
+	// Clean config before saving (remove tokens and UseKeyring flags)
+	cleanConfigBeforeSave(m.config)
+
 	// Marshal config
 	data, err := json.MarshalIndent(m.config, "", "  ")
 	if err != nil {
@@ -287,6 +296,9 @@ func (m *Manager) saveUserConfig(userID string) error {
 		return err
 	}
 
+	// Clean user config before saving (remove tokens and UseKeyring flags)
+	cleanConfigBeforeSave(m.userConfig)
+
 	data, err := json.MarshalIndent(m.userConfig, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal user config: %w", err)
@@ -341,61 +353,39 @@ func (m *Manager) GetCurrentOrgToken() (string, error) {
 	return m.getOrgToken(orgConfig)
 }
 
-// getOrgToken retrieves the token for an org, checking keyring first
+// getOrgToken retrieves the token for an org from keyring
 func (m *Manager) getOrgToken(org *v1.OrgConfig) (string, error) {
 	slog.Debug("getOrgToken called",
 		"org", org.Name,
-		"useKeyring", org.UseKeyring,
-		"disableKeyring", m.config.DisableKeyring,
-		"hasToken", org.Token != "",
 		"keyringKey", org.KeyringKey)
 
-	if !m.config.DisableKeyring && org.UseKeyring {
-		// Use the active user's keyring service
-		activeUser := m.GetActiveUser()
-		slog.Debug("Active user for token retrieval",
-			"hasActiveUser", activeUser != nil,
-			"activeUserID", func() string {
-				if activeUser != nil {
-					return activeUser.ID
-				}
-				return ""
-			}())
-
-		if activeUser != nil {
-			keyringService := fmt.Sprintf("%s:%s", KeyringService, activeUser.ID)
-			slog.Debug("Attempting to get token from user-scoped keyring",
-				"service", keyringService,
-				"key", org.KeyringKey)
-			token, err := keyring.Get(keyringService, org.KeyringKey)
-			if err != nil {
-				slog.Debug("Failed to get token from user-scoped keyring", "error", err)
-			} else if token != "" {
-				slog.Debug("Successfully retrieved token from user-scoped keyring",
-					"org", org.Name, "tokenLen", len(token))
-				return token, nil
-			}
-		}
-
-		// Fallback to legacy keyring
-		slog.Debug("Attempting to get token from legacy keyring",
-			"service", KeyringService,
+	// Try user-scoped keyring first if user is active
+	activeUser := m.GetActiveUser()
+	if activeUser != nil {
+		keyringService := fmt.Sprintf("%s:%s", KeyringService, activeUser.ID)
+		slog.Debug("Attempting to get token from user-scoped keyring",
+			"service", keyringService,
 			"key", org.KeyringKey)
-		token, err := keyring.Get(KeyringService, org.KeyringKey)
-		if err != nil {
-			slog.Debug("Failed to get token from legacy keyring", "error", err)
-		} else if token != "" {
-			slog.Debug("Successfully retrieved token from legacy keyring",
+		token, err := keyring.Get(keyringService, org.KeyringKey)
+		if err == nil && token != "" {
+			slog.Debug("Successfully retrieved token from user-scoped keyring",
 				"org", org.Name, "tokenLen", len(token))
 			return token, nil
 		}
+		slog.Debug("Failed to get token from user-scoped keyring", "error", err)
 	}
 
-	// Fallback to file-stored token
-	if org.Token != "" {
-		slog.Debug("Using file-stored token", "org", org.Name, "tokenLen", len(org.Token))
-		return org.Token, nil
+	// Fallback to legacy keyring format
+	slog.Debug("Attempting to get token from legacy keyring",
+		"service", KeyringService,
+		"key", org.KeyringKey)
+	token, err := keyring.Get(KeyringService, org.KeyringKey)
+	if err == nil && token != "" {
+		slog.Debug("Successfully retrieved token from legacy keyring",
+			"org", org.Name, "tokenLen", len(token))
+		return token, nil
 	}
+	slog.Debug("Failed to get token from legacy keyring", "error", err)
 
 	slog.Debug("No token found for org", "org", org.Name)
 	return "", fmt.Errorf("no token found for org %s", org.Name)
@@ -407,20 +397,22 @@ func (m *Manager) setOrgToken(org *v1.OrgConfig, token string) error {
 		return fmt.Errorf("cannot store empty token for organization %s", org.Name)
 	}
 
-	if !m.config.DisableKeyring {
-		// Try to store in keyring first
-		err := keyring.Set(KeyringService, org.KeyringKey, token)
-		if err == nil {
-			// Successfully stored in keyring
-			org.Token = "" // Clear file-stored token
-			org.UseKeyring = true
-			return nil
-		}
+	// Use user-scoped keyring if user is active, otherwise use legacy keyring
+	service := KeyringService
+	activeUser := m.GetActiveUser()
+	if activeUser != nil {
+		service = fmt.Sprintf("%s:%s", KeyringService, activeUser.ID)
+		slog.Debug("Storing token in user-scoped keyring", "service", service, "key", org.KeyringKey)
+	} else {
+		slog.Debug("Storing token in legacy keyring", "service", service, "key", org.KeyringKey)
 	}
 
-	// Keyring disabled or failed, use file storage
-	org.Token = token
-	org.UseKeyring = false
+	// Always store in keyring (with automatic fallback to file if needed)
+	if err := keyring.Set(service, org.KeyringKey, token); err != nil {
+		return fmt.Errorf("failed to store token in keyring: %w", err)
+	}
+
+	org.UseKeyring = true
 	return nil
 }
 

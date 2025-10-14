@@ -180,7 +180,7 @@ func ApiCommand(ctx *GlobalContext, args []string) {
 	// Note: sprite is optional for this command
 
 	// Get auth token
-	token, err := org.GetTokenWithKeyringDisabled(ctx.ConfigMgr.IsKeyringDisabled())
+	token, err := org.GetToken()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", err)
 		os.Exit(1)

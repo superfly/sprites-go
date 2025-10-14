@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/superfly/sprite-env/client/config"
-	"github.com/zalando/go-keyring"
+	"github.com/superfly/sprite-env/client/keyring"
 )
 
 const (

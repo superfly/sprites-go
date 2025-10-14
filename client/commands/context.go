@@ -468,7 +468,7 @@ func GetOrgAndClient(ctx *GlobalContext, orgOverride string) (*config.Organizati
 	}
 
 	// Get auth token
-	token, err := org.GetTokenWithKeyringDisabled(ctx.ConfigMgr.IsKeyringDisabled())
+	token, err := org.GetToken()
 	if err != nil {
 		// If token retrieval fails and we have TTY, use nice prompt to re-authenticate
 		if IsTTY() && strings.Contains(err.Error(), "no token found") {

@@ -13,8 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zalando/go-keyring"
 	"gopkg.in/yaml.v3"
+
+	"github.com/superfly/sprite-env/client/keyring"
 )
 
 const (

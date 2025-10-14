@@ -13,7 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/zalando/go-keyring"
+	"github.com/superfly/sprite-env/client/keyring"
 )
 
 const (

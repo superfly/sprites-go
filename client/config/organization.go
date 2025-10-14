@@ -6,7 +6,7 @@ import (
 	"os"
 
 	v1 "github.com/superfly/sprite-env/client/config/v1"
-	"github.com/zalando/go-keyring"
+	"github.com/superfly/sprite-env/client/keyring"
 )
 
 // Organization represents a simplified view of org configuration for client commands
@@ -23,17 +23,10 @@ type Organization struct {
 
 // GetToken retrieves the token for this organization
 func (o *Organization) GetToken() (string, error) {
-	return o.GetTokenWithKeyringDisabled(false)
-}
-
-// GetTokenWithKeyringDisabled retrieves the token with optional keyring bypass
-func (o *Organization) GetTokenWithKeyringDisabled(disableKeyring bool) (string, error) {
-	slog.Debug("GetTokenWithKeyringDisabled called",
+	slog.Debug("GetToken called",
 		"org", o.Name,
-		"disableKeyring", disableKeyring,
 		"hasManager", o.manager != nil,
 		"keyringKey", o.keyringKey,
-		"useKeyring", o.UseKeyring,
 		"userID", o.UserID,
 		"userEmail", o.UserEmail)
 
@@ -43,54 +36,34 @@ func (o *Organization) GetTokenWithKeyringDisabled(disableKeyring bool) (string,
 		return o.Token, nil
 	}
 
-	// If we have a manager and keyring key, try to get from storage
+	// Try to get from keyring
 	if o.manager != nil && o.keyringKey != "" {
-		if !disableKeyring && o.UseKeyring {
-			// Use the active user's keyring service
-			activeUser := o.manager.GetActiveUser()
-			slog.Debug("Active user check", "activeUser", activeUser != nil,
-				"activeUserID", func() string {
-					if activeUser != nil {
-						return activeUser.ID
-					}
-					return "none"
-				}())
-
-			if activeUser != nil {
-				slog.Debug("Attempting to get token from user-scoped keyring",
-					"service", fmt.Sprintf("%s:%s", KeyringService, activeUser.ID),
-					"key", o.keyringKey)
-				token, err := keyring.Get(fmt.Sprintf("%s:%s", KeyringService, activeUser.ID), o.keyringKey)
-				if err != nil {
-					slog.Debug("Failed to get token from user-scoped keyring", "error", err)
-				} else if token != "" {
-					slog.Debug("Successfully retrieved token from user-scoped keyring",
-						"org", o.Name, "tokenLen", len(token))
-					return token, nil
-				}
-			}
-
-			// Fall back to legacy keyring format
-			slog.Debug("Attempting to get token from legacy keyring",
-				"service", KeyringService,
+		// Try user-scoped keyring first
+		activeUser := o.manager.GetActiveUser()
+		if activeUser != nil {
+			slog.Debug("Attempting to get token from user-scoped keyring",
+				"service", fmt.Sprintf("%s:%s", KeyringService, activeUser.ID),
 				"key", o.keyringKey)
-			token, err := keyring.Get(KeyringService, o.keyringKey)
-			if err != nil {
-				slog.Debug("Failed to get token from legacy keyring", "error", err)
-			} else if token != "" {
-				slog.Debug("Successfully retrieved token from legacy keyring",
+			token, err := keyring.Get(fmt.Sprintf("%s:%s", KeyringService, activeUser.ID), o.keyringKey)
+			if err == nil && token != "" {
+				slog.Debug("Successfully retrieved token from user-scoped keyring",
 					"org", o.Name, "tokenLen", len(token))
 				return token, nil
 			}
-		} else {
-			slog.Debug("Skipping keyring lookup",
-				"disableKeyring", disableKeyring,
-				"useKeyring", o.UseKeyring)
+			slog.Debug("Failed to get token from user-scoped keyring", "error", err)
 		}
-	} else {
-		slog.Debug("Cannot use keyring",
-			"hasManager", o.manager != nil,
-			"hasKeyringKey", o.keyringKey != "")
+
+		// Fall back to legacy keyring format
+		slog.Debug("Attempting to get token from legacy keyring",
+			"service", KeyringService,
+			"key", o.keyringKey)
+		token, err := keyring.Get(KeyringService, o.keyringKey)
+		if err == nil && token != "" {
+			slog.Debug("Successfully retrieved token from legacy keyring",
+				"org", o.Name, "tokenLen", len(token))
+			return token, nil
+		}
+		slog.Debug("Failed to get token from legacy keyring", "error", err)
 	}
 
 	// Check for SPRITE_TOKEN environment variable as fallback
@@ -123,11 +96,6 @@ func (m *Manager) GetOrgs() map[string]*Organization {
 						keyringKey: orgConfig.KeyringKey,
 					}
 
-					// Pre-populate token if not using keyring
-					if !orgConfig.UseKeyring && orgConfig.Token != "" {
-						org.Token = orgConfig.Token
-					}
-
 					orgs[orgConfig.Name] = org
 				}
 			}
@@ -144,11 +112,6 @@ func (m *Manager) GetOrgs() map[string]*Organization {
 					UseKeyring: orgConfig.UseKeyring,
 					manager:    m,
 					keyringKey: orgConfig.KeyringKey,
-				}
-
-				// Pre-populate token if not using keyring
-				if !orgConfig.UseKeyring && orgConfig.Token != "" {
-					org.Token = orgConfig.Token
 				}
 
 				orgs[orgConfig.Name] = org
@@ -182,11 +145,6 @@ func (m *Manager) GetCurrentOrg() *Organization {
 					org.UserEmail = activeUser.Email
 				}
 
-				// Pre-populate token if not using keyring
-				if !orgConfig.UseKeyring && orgConfig.Token != "" {
-					org.Token = orgConfig.Token
-				}
-
 				return org
 			}
 		}
@@ -201,11 +159,6 @@ func (m *Manager) GetCurrentOrg() *Organization {
 				UseKeyring: orgConfig.UseKeyring,
 				manager:    m,
 				keyringKey: orgConfig.KeyringKey,
-			}
-
-			// Pre-populate token if not using keyring
-			if !orgConfig.UseKeyring && orgConfig.Token != "" {
-				org.Token = orgConfig.Token
 			}
 
 			return org
@@ -305,24 +258,13 @@ func (m *Manager) AddOrgWithUser(name, token, url, userID, userEmail string) err
 		orgConfig.KeyringKey = keyringKey
 	}
 
-	// Store token in user-scoped keyring
-	if !m.config.DisableKeyring {
-		err := keyring.Set(keyringService, keyringKey, token)
-		if err == nil {
-			orgConfig.UseKeyring = true
-			orgConfig.Token = "" // Clear file-stored token
-			slog.Debug("Stored token in user-scoped keyring", "service", keyringService, "key", keyringKey)
-		} else {
-			// Keyring failed, use file storage
-			slog.Debug("Keyring failed, using file storage", "error", err)
-			orgConfig.UseKeyring = false
-			orgConfig.Token = token
-		}
-	} else {
-		// Keyring disabled, use file storage
-		orgConfig.UseKeyring = false
-		orgConfig.Token = token
+	// Store token in keyring (always)
+	if err := keyring.Set(keyringService, keyringKey, token); err != nil {
+		return fmt.Errorf("failed to store token in keyring: %w", err)
 	}
+
+	orgConfig.UseKeyring = true
+	slog.Debug("Stored token in user-scoped keyring", "service", keyringService, "key", keyringKey)
 
 	// Add a sprite with the same name for backward compatibility
 	if _, exists := orgConfig.Sprites[name]; !exists {
@@ -396,11 +338,6 @@ func (m *Manager) FindOrgAtURL(url, orgName string) (*Organization, error) {
 					org.UserEmail = activeUser.Email
 				}
 
-				// Pre-populate token if not using keyring
-				if !orgConfig.UseKeyring && orgConfig.Token != "" {
-					org.Token = orgConfig.Token
-				}
-
 				return org, nil
 			}
 		}
@@ -423,11 +360,6 @@ func (m *Manager) FindOrgAtURL(url, orgName string) (*Organization, error) {
 		UseKeyring: orgConfig.UseKeyring,
 		manager:    m,
 		keyringKey: orgConfig.KeyringKey,
-	}
-
-	// Pre-populate token if not using keyring
-	if !orgConfig.UseKeyring && orgConfig.Token != "" {
-		org.Token = orgConfig.Token
 	}
 
 	return org, nil
@@ -540,10 +472,6 @@ func (m *Manager) FindOrgWithAlias(orgSpec string) (*Organization, string, error
 							org.UserID = activeUser.ID
 							org.UserEmail = activeUser.Email
 						}
-						// Only set token if not using keyring
-						if !orgConfig.UseKeyring && orgConfig.Token != "" {
-							org.Token = orgConfig.Token
-						}
 						slog.Debug("FindOrgWithAlias: returning org from user config", "name", org.Name, "url", org.URL, "alias", alias)
 						return org, url, nil
 					}
@@ -559,10 +487,6 @@ func (m *Manager) FindOrgWithAlias(orgSpec string) (*Organization, string, error
 						UseKeyring: orgConfig.UseKeyring,
 						manager:    m,
 						keyringKey: orgConfig.KeyringKey,
-					}
-					// Only set token if not using keyring
-					if !orgConfig.UseKeyring && orgConfig.Token != "" {
-						org.Token = orgConfig.Token
 					}
 					slog.Debug("FindOrgWithAlias: returning org from global config", "name", org.Name, "url", org.URL, "alias", alias)
 					return org, url, nil
@@ -597,10 +521,6 @@ func (m *Manager) FindOrgWithAlias(orgSpec string) (*Organization, string, error
 					org.UserID = activeUser.ID
 					org.UserEmail = activeUser.Email
 				}
-				// Only set token if not using keyring
-				if !orgConfig.UseKeyring && orgConfig.Token != "" {
-					org.Token = orgConfig.Token
-				}
 				foundOrgs = append(foundOrgs, struct {
 					org *Organization
 					url string
@@ -621,10 +541,6 @@ func (m *Manager) FindOrgWithAlias(orgSpec string) (*Organization, string, error
 				UseKeyring: orgConfig.UseKeyring,
 				manager:    m,
 				keyringKey: orgConfig.KeyringKey,
-			}
-			// Only set token if not using keyring
-			if !orgConfig.UseKeyring && orgConfig.Token != "" {
-				org.Token = orgConfig.Token
 			}
 			foundOrgs = append(foundOrgs, struct {
 				org *Organization
