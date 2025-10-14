@@ -153,8 +153,8 @@ func (c *wsCmd) start() {
 				"type":      "start",
 				"operation": "exec",
 				"params": map[string]interface{}{
+					"cmd":        c.Args, // Full command with args (e.g. ["echo", "hello"])
 					"path":       c.Path,
-					"args":       c.Args,
 					"env":        c.Env,
 					"dir":        c.Dir,
 					"tty":        c.Tty,
