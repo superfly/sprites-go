@@ -180,7 +180,11 @@ func ExecCommand(ctx *GlobalContext, args []string) int {
 		go handleSpriteTerminalResize(spriteCmd)
 	} else {
 		// Non-TTY mode - standard I/O
-		spriteCmd.Stdin = os.Stdin
+		// Only attach stdin if it's a pipe (not a terminal)
+		// This prevents hanging on commands that don't need stdin
+		if !term.IsTerminal(int(os.Stdin.Fd())) {
+			spriteCmd.Stdin = os.Stdin
+		}
 		spriteCmd.Stdout = os.Stdout
 		spriteCmd.Stderr = os.Stderr
 	}
