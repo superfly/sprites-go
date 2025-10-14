@@ -479,6 +479,11 @@ func (c *Cmd) buildWebSocketURL() (*url.URL, error) {
 		q.Set("cc", "true")
 	}
 
+	// Add stdin parameter - if Stdin is nil, tell server not to expect stdin
+	if c.Stdin == nil {
+		q.Set("stdin", "false")
+	}
+
 	u.RawQuery = q.Encode()
 	return u, nil
 }

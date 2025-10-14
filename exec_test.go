@@ -91,6 +91,36 @@ func TestCmdBuildWebSocketURL(t *testing.T) {
 				"cols": {"80"},
 			},
 		},
+		{
+			name:       "command with no stdin",
+			spriteName: "my-sprite",
+			cmd: &Cmd{
+				Path:  "echo",
+				Args:  []string{"echo", "hello"},
+				Stdin: nil,
+			},
+			wantPath: "/v1/sprites/my-sprite/exec",
+			wantQuery: map[string][]string{
+				"cmd":   {"echo", "hello"},
+				"path":  {"echo"},
+				"stdin": {"false"},
+			},
+		},
+		{
+			name:       "command with stdin set",
+			spriteName: "my-sprite",
+			cmd: &Cmd{
+				Path:  "cat",
+				Args:  []string{"cat"},
+				Stdin: strings.NewReader("test input"),
+			},
+			wantPath: "/v1/sprites/my-sprite/exec",
+			wantQuery: map[string][]string{
+				"cmd":  {"cat"},
+				"path": {"cat"},
+				// stdin parameter should NOT be present when Stdin is set
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -126,6 +156,20 @@ func TestCmdBuildWebSocketURL(t *testing.T) {
 					if gotValues[i] != want {
 						t.Errorf("query[%q][%d] = %q, want %q", key, i, gotValues[i], want)
 					}
+				}
+			}
+
+			// Verify stdin parameter behavior
+			// If Stdin is nil, stdin=false should be present
+			// If Stdin is set, stdin parameter should NOT be present
+			stdinParam := query.Get("stdin")
+			if tt.cmd.Stdin == nil {
+				if stdinParam != "false" {
+					t.Errorf("Expected stdin=false when Stdin is nil, got stdin=%q", stdinParam)
+				}
+			} else {
+				if stdinParam != "" {
+					t.Errorf("Expected no stdin parameter when Stdin is set, got stdin=%q", stdinParam)
 				}
 			}
 		})
