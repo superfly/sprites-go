@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	gorillaws "github.com/gorilla/websocket"
@@ -169,6 +170,9 @@ type webSocketStreams struct {
 
 	// Buffered stdin for non-TTY mode to avoid blocking on reads
 	stdinChan chan []byte
+
+	// Ensure stdin channel is only closed once
+	stdinCloseOnce sync.Once
 }
 
 type writeRequest struct {
@@ -269,26 +273,32 @@ func (ws *webSocketStreams) writeLoop() {
 
 // Read implements io.Reader for the WebSocket streams
 func (ws *webSocketStreams) Read(p []byte) (n int, err error) {
-	// Non-TTY: serve from buffered stdin without blocking
+	// Non-TTY: serve from buffered stdin, blocking until data arrives or channel closes
 	if !ws.tty {
 		if len(ws.readBuf) > 0 {
 			n = copy(p, ws.readBuf)
 			ws.readBuf = ws.readBuf[n:]
+			if ws.session.logger != nil {
+				ws.session.logger.Debug("Read from buffer", "bytes", n)
+			}
 			return n, nil
 		}
-		select {
-		case data, ok := <-ws.stdinChan:
-			if !ok || len(data) == 0 {
-				return 0, io.EOF
+		// Block on channel - StdinPipe will handle EPIPE if command doesn't read
+		data, ok := <-ws.stdinChan
+		if !ok || len(data) == 0 {
+			if ws.session.logger != nil {
+				ws.session.logger.Info("Read: stdin channel closed, returning EOF", "ok", ok, "dataLen", len(data))
 			}
-			n = copy(p, data)
-			if n < len(data) {
-				ws.readBuf = data[n:]
-			}
-			return n, nil
-		default:
 			return 0, io.EOF
 		}
+		n = copy(p, data)
+		if n < len(data) {
+			ws.readBuf = data[n:]
+		}
+		if ws.session.logger != nil {
+			ws.session.logger.Debug("Read from stdin channel", "bytes", n)
+		}
+		return n, nil
 	}
 
 	// Return buffered data first
@@ -460,6 +470,15 @@ func (ws *webSocketStreams) WriteControlMessage(msg ControlMessage) error {
 	return ws.WriteTextMessage(data)
 }
 
+// CloseStdin closes the stdin channel to unblock any pending reads
+func (ws *webSocketStreams) CloseStdin() {
+	if !ws.tty && ws.stdinChan != nil {
+		ws.stdinCloseOnce.Do(func() {
+			close(ws.stdinChan)
+		})
+	}
+}
+
 // Close closes the WebSocket streams
 func (ws *webSocketStreams) Close() error {
 	// Non-blocking close - if already closed, this is a no-op
@@ -469,6 +488,9 @@ func (ws *webSocketStreams) Close() error {
 	default:
 		close(ws.closeChan)
 	}
+
+	// Close stdin channel for non-TTY mode to unblock any pending reads
+	ws.CloseStdin()
 
 	// Wait for writeLoop to finish, but with a timeout to prevent hanging
 	select {
@@ -483,6 +505,13 @@ func (ws *webSocketStreams) Close() error {
 
 // readLoopNonTTY continuously reads websocket frames and buffers stdin for non-TTY
 func (ws *webSocketStreams) readLoopNonTTY() {
+	// Monitor closeChan in a goroutine and set read deadline when it closes
+	go func() {
+		<-ws.closeChan
+		// Set read deadline to unblock ReadMessage
+		ws.conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
+	}()
+
 	for {
 		messageType, data, err := ws.conn.ReadMessage()
 		if err != nil {
@@ -490,7 +519,9 @@ func (ws *webSocketStreams) readLoopNonTTY() {
 			case ws.readErrChan <- err:
 			default:
 			}
-			close(ws.stdinChan)
+			ws.stdinCloseOnce.Do(func() {
+				close(ws.stdinChan)
+			})
 			return
 		}
 
@@ -498,6 +529,19 @@ func (ws *webSocketStreams) readLoopNonTTY() {
 		case gorillaws.BinaryMessage:
 			if len(data) == 0 {
 				continue
+			}
+			// Check for StreamStdinEOF signal
+			if len(data) == 1 && StreamID(data[0]) == StreamStdinEOF {
+				if ws.session.logger != nil {
+					ws.session.logger.Info("Received StreamStdinEOF signal, closing stdin channel")
+				}
+				ws.stdinCloseOnce.Do(func() {
+					close(ws.stdinChan)
+				})
+				return
+			}
+			if ws.session.logger != nil {
+				ws.session.logger.Debug("Received stdin data", "bytes", len(data))
 			}
 			select {
 			case ws.stdinChan <- data:
@@ -516,7 +560,9 @@ func (ws *webSocketStreams) readLoopNonTTY() {
 				case "resize":
 					ws.session.Resize(controlMsg.Cols, controlMsg.Rows)
 				case "stdin_eof":
-					close(ws.stdinChan)
+					ws.stdinCloseOnce.Do(func() {
+						close(ws.stdinChan)
+					})
 					return
 				}
 			}

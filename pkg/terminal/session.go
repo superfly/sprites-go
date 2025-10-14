@@ -554,7 +554,17 @@ func (s *Session) runWithoutTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Rea
 
 	cmd.Stdout = stdoutWriter
 	cmd.Stderr = stderrWriter
-	if s.stdin {
+
+	// For non-TTY mode, use StdinPipe to detect when command closes stdin
+	var stdinPipe io.WriteCloser
+	if s.stdin && !s.tty {
+		var err error
+		stdinPipe, err = cmd.StdinPipe()
+		if err != nil {
+			return -1, fmt.Errorf("failed to create stdin pipe: %w", err)
+		}
+	} else if s.stdin {
+		// TTY mode: use io.Pipe as before
 		stdinReader, stdinWriter = io.Pipe()
 		cmd.Stdin = stdinReader
 	} else {
@@ -580,13 +590,27 @@ func (s *Session) runWithoutTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Rea
 	var stdinDone chan struct{}
 	if s.stdin {
 		stdinDone = make(chan struct{})
-		go func() {
-			defer close(stdinDone)
-			if stdinWriter != nil {
+		if stdinPipe != nil {
+			// Non-TTY: use StdinPipe - can detect when command closes stdin
+			go func() {
+				defer close(stdinDone)
+				defer stdinPipe.Close()
+
+				// Copy stdin data, but stop if command closes stdin (EPIPE error)
+				_, err := io.Copy(stdinPipe, stdin)
+				if err != nil && s.logger != nil {
+					// EPIPE means command closed stdin - this is normal
+					s.logger.Debug("Stdin copy ended", "error", err)
+				}
+			}()
+		} else if stdinWriter != nil {
+			// TTY mode: use pipe writer
+			go func() {
+				defer close(stdinDone)
 				io.Copy(stdinWriter, stdin)
 				stdinWriter.Close()
-			}
-		}()
+			}()
+		}
 	}
 
 	// Start the command
@@ -616,19 +640,24 @@ func (s *Session) runWithoutTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Rea
 		stdinWriter.Close()
 	}
 
+	// Close stdin channel if using webSocketStreams to unblock any pending Read() calls
+	// This ensures the stdin goroutine exits even if it's blocked waiting for data
+	if stdinPipe != nil {
+		if wsStreams, ok := stdin.(interface{ CloseStdin() }); ok {
+			wsStreams.CloseStdin()
+		}
+	}
+
 	// Close writers to signal EOF
 	stdoutWriter.Close()
 	stderrWriter.Close()
 
-	// Wait for readers to finish
+	// Wait for stdout/stderr readers to finish
 	<-stdoutDone
 	<-stderrDone
-	if stdinDone != nil {
-		select {
-		case <-stdinDone:
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
+
+	// Don't wait for stdin - it will exit on its own when it gets EPIPE
+	// or when the Read() call returns EOF after we closed the stdin channel
 
 	return getExitCode(cmdErr), nil
 }
