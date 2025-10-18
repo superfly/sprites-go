@@ -2,7 +2,6 @@ package sprites
 
 import (
 	"context"
-	"fmt"
 	"time"
 )
 
@@ -64,20 +63,16 @@ func (s *Sprite) ensureControlSupport(ctx context.Context) {
 	}
 	s.controlChecked = true
 
-	fmt.Printf("DEBUG: ensureControlSupport checking for sprite %s\n", s.name)
-
 	// Try to establish a control connection to test support
 	pool := s.client.getOrCreatePool(s.name)
 	conn, err := pool.dial(ctx)
 	if err != nil {
 		// Control connections not supported (404 or other error)
-		fmt.Printf("DEBUG: Control connection dial failed: %v\n", err)
 		s.supportsControl = false
 		return
 	}
 
 	// Success - control connections are supported
-	fmt.Printf("DEBUG: Control connection dial succeeded\n")
 	s.supportsControl = true
 
 	// Add this initial connection to the pool
@@ -85,5 +80,8 @@ func (s *Sprite) ensureControlSupport(ctx context.Context) {
 	conn.busy = false
 	conn.mu.Unlock()
 
-	// Connection is already in pool.conns from dial()
+	// Add the connection to the pool
+	pool.mu.Lock()
+	pool.conns = append(pool.conns, conn)
+	pool.mu.Unlock()
 }

@@ -58,6 +58,8 @@ type wsCmd struct {
 	existingConn *websocket.Conn
 	// usingControl indicates if this is using a control connection
 	usingControl bool
+	// controlConn is the control connection wrapper (for reading from readCh)
+	controlConn *controlConn
 }
 
 // wsAdapter wraps a WebSocket connection for terminal communication
@@ -195,6 +197,21 @@ func (c *wsCmd) start() {
 
 	c.startChan <- nil
 	c.runIO()
+
+	// For control connections, consume the operation completion message
+	// This is sent by the wss.Conn layer after the operation completes
+	// We need to read it to keep the connection clean for the next operation
+	if c.usingControl && c.controlConn != nil {
+		// Read from readCh (fed by readLoop)
+		select {
+		case <-c.controlConn.readCh:
+			// Consume and discard the completion message
+		case <-c.ctx.Done():
+			// Context cancelled, don't wait
+		case <-time.After(100 * time.Millisecond):
+			// Timeout - completion message may have already been consumed
+		}
+	}
 }
 
 // Wait waits for the command to finish
@@ -205,6 +222,23 @@ func (c *wsCmd) Wait() error {
 	case <-c.ctx.Done():
 		return c.ctx.Err()
 	}
+}
+
+// readMessage reads the next WebSocket message
+// For control connections, reads from the readCh (fed by readLoop)
+// For direct connections, reads directly from the WebSocket
+func (c *wsCmd) readMessage() (messageType int, data []byte, err error) {
+	if c.usingControl && c.controlConn != nil {
+		// Read from the control connection's read channel
+		select {
+		case msg := <-c.controlConn.readCh:
+			return msg.MessageType, msg.Data, nil
+		case <-c.ctx.Done():
+			return 0, nil, c.ctx.Err()
+		}
+	}
+	// Direct WebSocket read
+	return c.conn.ReadMessage()
 }
 
 func (c *wsCmd) runIO() {
@@ -231,7 +265,7 @@ func (c *wsCmd) runIO() {
 		}
 
 		for {
-			messageType, data, err := conn.ReadMessage()
+			messageType, data, err := c.readMessage()
 			if err != nil {
 				adapter.Close()
 				if c.ctx.Err() != nil {
@@ -258,7 +292,7 @@ func (c *wsCmd) runIO() {
 			case websocket.BinaryMessage:
 				stdout.Write(data)
 			case websocket.TextMessage:
-				// Handle control messages
+				// Handle text messages (e.g., port notifications)
 				if c.TextMessageHandler != nil {
 					c.TextMessageHandler(data)
 				}
@@ -281,12 +315,17 @@ func (c *wsCmd) runIO() {
 	}
 
 	for {
-		messageType, data, err := conn.ReadMessage()
+		messageType, data, err := c.readMessage()
 		if err != nil {
 			adapter.Close()
 			return
 		}
 		switch messageType {
+		case websocket.TextMessage:
+			// Handle text messages (e.g., port notifications)
+			if c.TextMessageHandler != nil {
+				c.TextMessageHandler(data)
+			}
 		case websocket.BinaryMessage:
 			if len(data) == 0 {
 				continue
@@ -308,11 +347,6 @@ func (c *wsCmd) runIO() {
 				}
 				adapter.Close()
 				return
-			}
-		case websocket.TextMessage:
-			// Handle control messages
-			if c.TextMessageHandler != nil {
-				c.TextMessageHandler(data)
 			}
 		}
 	}
