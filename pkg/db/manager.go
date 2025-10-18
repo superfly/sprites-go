@@ -137,7 +137,7 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	// Start litestream replication
 	if m.litestream != nil {
-		m.logger.Info("Starting litestream replication...")
+		m.logger.Debug("Starting litestream replication...")
 		if err := m.litestream.Start(ctx); err != nil {
 			// If litestream fails, stop the lease
 			if m.leaser != nil {
@@ -147,7 +147,7 @@ func (m *Manager) Start(ctx context.Context) error {
 			}
 			return fmt.Errorf("failed to start litestream: %w", err)
 		}
-		m.logger.Info("Litestream replication started")
+		m.logger.Debug("Litestream replication started")
 	}
 
 	m.started = true
@@ -183,7 +183,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 	// CRITICAL: Stop in REVERSE ORDER of startup
 	// Stop litestream first
 	if m.litestream != nil {
-		m.logger.Info("Stopping litestream...")
+		m.logger.Debug("Stopping litestream...")
 		if err := m.litestream.Stop(ctx); err != nil {
 			m.logger.Error("Failed to stop litestream", "error", err)
 			firstErr = err
@@ -251,12 +251,12 @@ func (m *Manager) StopLitestream(ctx context.Context) error {
 		return nil
 	}
 
-	m.logger.Info("Stopping litestream replication...")
+	m.logger.Debug("Stopping litestream replication...")
 	if err := m.litestream.Stop(ctx); err != nil {
 		m.logger.Error("Failed to stop litestream", "error", err)
 		return err
 	}
-	m.logger.Info("Litestream replication stopped")
+	m.logger.Debug("Litestream replication stopped")
 	return nil
 }
 
@@ -269,12 +269,12 @@ func (m *Manager) StartLitestream(ctx context.Context) error {
 		return nil
 	}
 
-	m.logger.Info("Starting litestream replication...")
+	m.logger.Debug("Starting litestream replication...")
 	if err := m.litestream.Start(ctx); err != nil {
 		m.logger.Error("Failed to start litestream", "error", err)
 		return err
 	}
-	m.logger.Info("Litestream replication started")
+	m.logger.Debug("Litestream replication started")
 	return nil
 }
 

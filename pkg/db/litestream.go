@@ -199,7 +199,7 @@ func (ls *Litestream) Start(ctx context.Context) error {
 	// Monitor litestream in background
 	tap.Go(ls.logger, ls.errCh, ls.monitor)
 
-	ls.logger.Info("Litestream replication started", "pid", ls.cmd.Process.Pid)
+	ls.logger.Debug("Litestream replication started", "pid", ls.cmd.Process.Pid)
 	return nil
 }
 
@@ -218,7 +218,7 @@ func (ls *Litestream) Stop(ctx context.Context) error {
 	}
 	ls.mu.Unlock()
 
-	ls.logger.Info("Stopping litestream...")
+	ls.logger.Debug("Stopping litestream...")
 	shutdownStart := time.Now()
 
 	// Signal shutdown - sync.Once ensures this is safe to call multiple times
@@ -238,7 +238,7 @@ func (ls *Litestream) Stop(ctx context.Context) error {
 		ls.mu.Lock()
 		ls.running = false
 		ls.mu.Unlock()
-		ls.logger.Info("Litestream stopped gracefully", "duration", time.Since(shutdownStart))
+		ls.logger.Debug("Litestream stopped gracefully", "duration", time.Since(shutdownStart))
 		return nil
 	case <-ctx.Done():
 		// Context cancelled - force kill

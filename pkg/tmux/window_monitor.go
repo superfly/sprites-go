@@ -205,7 +205,7 @@ func (wm *WindowMonitor) Start(ctx context.Context) error {
 		wm.discoverAndLinkWindows()
 	}()
 
-	wm.logger.Info("Window monitor started", "session", wm.monitorSession)
+	wm.logger.Debug("Window monitor started", "session", wm.monitorSession)
 	return nil
 }
 

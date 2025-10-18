@@ -472,7 +472,7 @@ func (s *System) SyncOverlay(ctx context.Context) (func() error, error) {
 
 	// Return the unfreeze function to be called after resume
 	unfreezeFunc := func() error {
-		s.logger.Info("Unfreezing filesystem after resume")
+		s.logger.Debug("Unfreezing filesystem after resume")
 		return s.OverlayManager.UnfreezeAfterCheckpoint(ctx)
 	}
 

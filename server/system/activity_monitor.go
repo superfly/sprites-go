@@ -1,15 +1,17 @@
 package system
 
 import (
-	"context"
-	"log/slog"
-	"os"
-	"sync"
-	"sync/atomic"
-	"time"
+    "context"
+    "fmt"
+    "log/slog"
+    "net"
+    "net/http"
+    "os"
+    "sync"
+    "sync/atomic"
+    "time"
 
-	"github.com/superfly/sprite-env/pkg/fly"
-	"github.com/superfly/sprite-env/pkg/tap"
+    "github.com/superfly/sprite-env/pkg/tap"
 )
 
 // Context key for storing activity monitor
@@ -119,6 +121,29 @@ func (m *ActivityMonitor) EnrichContext(ctx context.Context) context.Context {
 type activityTrackerKey struct{}
 
 
+// makeFlapsRequest is a helper function to make requests to the Flaps API
+func (m *ActivityMonitor) makeFlapsRequest(ctx context.Context, method, path string) (*http.Response, error) {
+    d := &net.Dialer{Timeout: 2 * time.Second}
+    tr := &http.Transport{
+        DialContext: func(c context.Context, network, addr string) (net.Conn, error) {
+            return d.DialContext(c, "unix", "/.fly/api")
+        },
+    }
+    client := &http.Client{Transport: tr, Timeout: 5 * time.Second}
+
+    app := os.Getenv("FLY_APP_NAME")
+    mid := os.Getenv("FLY_MACHINE_ID")
+    url := fmt.Sprintf("http://flaps/v1/apps/%s%s", app, fmt.Sprintf(path, mid))
+
+    req, err := http.NewRequestWithContext(ctx, method, url, nil)
+    if err != nil {
+        return nil, err
+    }
+
+    return client.Do(req)
+}
+
+
 // handleActivityEvent processes an activity event and updates internal state.
 func (m *ActivityMonitor) handleActivityEvent(ev activityEvent) {
 	currentCount := atomic.LoadInt64(&m.activeCount)
@@ -153,7 +178,7 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 	if currentCount == 0 {
 		idleTimer = time.NewTimer(m.idleAfter)
 		idleTimerCh = idleTimer.C
-		m.logger.Info("Starting idle timer", "duration", m.idleAfter)
+		m.logger.Debug("Starting idle timer", "duration", m.idleAfter)
 	}
 
 	for {
@@ -296,7 +321,7 @@ func (m *ActivityMonitor) prepSuspend(ctx context.Context) (cleanup func(), canc
 		m.logger.Error("Overlay sync failed", "error", syncErr)
 		return cleanup, false, syncErr
 	}
-	m.logger.Info("Suspending, fs sync completed", "duration_s", time.Since(start).Seconds())
+	m.logger.Debug("Overlay sync completed", "duration_s", time.Since(start).Seconds())
 
 	// Add cleanup to unfreeze filesystem
 	if unfreezeFunc != nil {
@@ -327,7 +352,7 @@ func (m *ActivityMonitor) prepSuspend(ctx context.Context) (cleanup func(), canc
 			return cleanup, true, ctx.Err()
 		}
 
-		m.logger.Info("Stopping litestream before suspend")
+		m.logger.Debug("Stopping litestream before suspend")
 		stopStart := time.Now()
 		// Use non-cancellable context - once we start stopping, we must complete it
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -337,7 +362,7 @@ func (m *ActivityMonitor) prepSuspend(ctx context.Context) (cleanup func(), canc
 
 		// Add cleanup to restart litestream regardless of stop success/failure
 		cleanupFuncs = append(cleanupFuncs, func() error {
-			m.logger.Info("Restarting litestream")
+			m.logger.Debug("Restarting litestream after resume")
 			restartCtx, restartCancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer restartCancel()
 			return m.system.DBManager.StartLitestream(restartCtx)
@@ -348,7 +373,7 @@ func (m *ActivityMonitor) prepSuspend(ctx context.Context) (cleanup func(), canc
 			m.logger.Error("Failed to stop litestream", "error", lsErr)
 			return cleanup, false, lsErr
 		}
-		m.logger.Info("Litestream stopped", "duration_s", time.Since(stopStart).Seconds())
+		m.logger.Debug("Litestream stopped", "duration_s", time.Since(stopStart).Seconds())
 	}
 
 	m.logger.Info("Suspend preparation complete")
@@ -394,20 +419,24 @@ func (m *ActivityMonitor) suspend(ctx context.Context, inactive time.Duration) {
 
 	// Capture system wall time BEFORE the suspend API call
 	initialSystemTime := time.Now()
-	m.logger.Info("Starting suspend process", "initial_time", initialSystemTime.Format(time.RFC3339Nano))
+    m.logger.Debug("Starting suspend process", "initial_time", initialSystemTime.Format(time.RFC3339Nano))
 
-	// Call fly suspend API
-	m.logger.Info("Calling Fly suspend API")
+    // Call flaps suspend API
+    apiStart := time.Now()
+    resp, err := m.makeFlapsRequest(apiCtx, http.MethodPost, "/machines/%s/suspend")
+    apiDuration := time.Since(apiStart)
 
-	apiStart := time.Now()
-	err = fly.Suspend(apiCtx)
-	apiDuration := time.Since(apiStart)
-
-	if err != nil {
-		m.logger.Error("Failed to call suspend API", "error", err, "duration", apiDuration)
-	} else {
-		m.logger.Info("Suspend API completed successfully", "duration", apiDuration)
-	}
+    if err != nil {
+        m.logger.Error("Failed to call suspend API", "error", err, "duration", apiDuration)
+    } else if resp != nil {
+        m.logger.Info("Suspend API response",
+            "status", resp.StatusCode,
+            "duration", apiDuration,
+            "status_text", resp.Status)
+        if resp.Body != nil {
+            resp.Body.Close()
+        }
+    }
 
 	// Start loop after suspend API call for resume detection
 	const sleepInterval = 500 * time.Millisecond

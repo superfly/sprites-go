@@ -169,7 +169,16 @@ func (h *Handlers) ExecHandler(w http.ResponseWriter, r *http.Request) {
 
 	// PID (blocks until ready)
 	pid := run.PID()
-	h.logger.Info("process started", "pid", pid)
+
+	// Build log attributes with wrapper context tags
+	logAttrs := []any{"pid", pid}
+	if monitoredSessionID != "" {
+		logAttrs = append(logAttrs, "sessionID", monitoredSessionID, "wrapper", "tmux")
+	}
+	if h.containerEnabled && wrapped != nil {
+		logAttrs = append(logAttrs, "wrapper", "crun")
+	}
+	h.logger.Info("process started", logAttrs...)
 
 	// Create and start port watcher now that we have a PID
 	var watcher *portwatcher.PortWatcher

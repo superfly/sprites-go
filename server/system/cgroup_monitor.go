@@ -116,7 +116,7 @@ func (crm *ResourceMonitor) Flush() {
 
 // PreSuspend flushes metrics and pauses the monitoring interval before system suspend
 func (crm *ResourceMonitor) PreSuspend() {
-	crm.logger.Info("Flushing cgroup metrics and pausing monitoring before suspend")
+	crm.logger.Debug("Flushing cgroup metrics and pausing monitoring before suspend")
 	if crm.monitorGroup != nil {
 		crm.monitorGroup.Flush()
 		crm.monitorGroup.Pause()
@@ -125,7 +125,7 @@ func (crm *ResourceMonitor) PreSuspend() {
 
 // PostResume resets time tracking, ticks immediately, and resumes monitoring after system resume
 func (crm *ResourceMonitor) PostResume() {
-	crm.logger.Info("Resetting time tracking and resuming cgroup monitoring after resume")
+	crm.logger.Debug("Resetting time tracking and resuming cgroup monitoring after resume")
 	if crm.monitorGroup != nil {
 		crm.monitorGroup.Resume()
 	}

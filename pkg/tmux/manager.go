@@ -132,7 +132,7 @@ func (m *Manager) monitorManager(ctx context.Context) {
 						m.logger.Error("monitorManager: window monitor failed to start", "error", err)
 					}
 				} else if m.logger != nil {
-					m.logger.Info("monitorManager: window monitor started")
+					m.logger.Debug("monitorManager: window monitor started")
 				}
 			}
 		}

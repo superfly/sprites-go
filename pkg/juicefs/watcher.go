@@ -187,6 +187,8 @@ func (w *OutputWatcher) watchStream(stream io.ReadCloser, streamName string) {
 				delete(parsed, "severity")
 				// Remove source to avoid duplication (logger already has source=juicefs)
 				delete(parsed, "source")
+				// Remove time field (redundant with timestamp)
+				delete(parsed, "time")
 				// Build event with remaining attributes flattened
 				evt := map[string]any{
 					"level":  levelVal,

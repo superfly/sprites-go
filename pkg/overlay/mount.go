@@ -508,24 +508,24 @@ func (m *Manager) PrepareForCheckpoint(ctx context.Context) error {
 	if m.isOverlayFSMounted() {
 
 		// 1) Sync the overlayfs filesystem (where actual writes occur)
-		m.logger.Info("Syncing OverlayFS filesystem", "path", m.overlayTargetPath)
+		m.logger.Debug("Syncing OverlayFS filesystem", "path", m.overlayTargetPath)
 		syncCmd := exec.Command("sync", "-f", m.overlayTargetPath)
 		if output, err := syncCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("failed to sync overlayfs: %w, output: %s", err, string(output))
 		}
-		m.logger.Info("OverlayFS sync completed")
+		m.logger.Debug("OverlayFS sync completed")
 	}
 
 	// 2) Freeze the underlying ext4 filesystem to prevent new writes
-	m.logger.Info("Freezing underlying ext4 filesystem", "path", m.mountPath)
+	m.logger.Debug("Freezing underlying ext4 filesystem", "path", m.mountPath)
 	freezeCmd := exec.Command("fsfreeze", "--freeze", m.mountPath)
 	if output, err := freezeCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to freeze ext4 filesystem: %w, output: %s", err, string(output))
 	}
-	m.logger.Info("Filesystem frozen successfully")
+	m.logger.Debug("Filesystem frozen successfully")
 
 	// 3) Sync the loopback mount while frozen
-	m.logger.Info("Syncing loopback mount after freeze", "path", m.mountPath)
+	m.logger.Debug("Syncing loopback mount after freeze", "path", m.mountPath)
 	if err := m.sync(ctx); err != nil {
 		return fmt.Errorf("failed to sync loopback mount after freeze: %w", err)
 	}
@@ -550,7 +550,7 @@ func (m *Manager) UnfreezeAfterCheckpoint(ctx context.Context) error {
 		return nil // Not an error if not mounted
 	}
 
-	m.logger.Info("Unfreezing underlying ext4 filesystem", "path", m.mountPath)
+	m.logger.Debug("Unfreezing underlying ext4 filesystem", "path", m.mountPath)
 	unfreezeCmd := exec.Command("fsfreeze", "--unfreeze", m.mountPath)
 	if output, err := unfreezeCmd.CombinedOutput(); err != nil {
 		// Check if it's already unfrozen by trying to write to the underlying mount
@@ -558,12 +558,12 @@ func (m *Manager) UnfreezeAfterCheckpoint(ctx context.Context) error {
 		if testErr := os.WriteFile(testFile, []byte("test"), 0644); testErr == nil {
 			// Successfully wrote, so it's not frozen
 			os.Remove(testFile)
-			m.logger.Info("Filesystem was already unfrozen")
+			m.logger.Debug("Filesystem was already unfrozen")
 			return nil
 		}
 		return fmt.Errorf("failed to unfreeze ext4 filesystem: %w, output: %s", err, string(output))
 	}
-	m.logger.Info("Filesystem unfrozen successfully")
+	m.logger.Debug("Filesystem unfrozen successfully")
 
 	return nil
 }
@@ -608,7 +608,7 @@ func (m *Manager) isOverlayFSMounted() bool {
 func (m *Manager) sync(ctx context.Context) error {
 	// Don't use context for sync - let it complete fully
 	// This is critical for data integrity during shutdown
-	m.logger.Info("Starting filesystem sync", "path", m.mountPath)
+	m.logger.Debug("Starting filesystem sync", "path", m.mountPath)
 	syncStart := time.Now()
 
 	syncCmd := exec.Command("sync", "-f", m.mountPath)
@@ -619,7 +619,7 @@ func (m *Manager) sync(ctx context.Context) error {
 		return fmt.Errorf("sync failed: %w", err)
 	}
 
-	m.logger.Info("Filesystem sync completed", "path", m.mountPath, "duration", time.Since(syncStart))
+	m.logger.Debug("Filesystem sync completed", "path", m.mountPath, "duration", time.Since(syncStart))
 	return nil
 }
 

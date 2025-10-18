@@ -66,7 +66,7 @@ func isIgnoredWritebackFile(name string) bool {
 // NewWritebackWatcher creates a new writeback directory watcher
 func NewWritebackWatcher(ctx context.Context, cacheDir string) (*WritebackWatcher, error) {
 	logger := tap.Logger(ctx)
-	logger = logger.With("source", "juicefs-writeback")
+	logger = logger.With("source", "juicefs", "method", "monitor")
 
 	// The rawstaging directory is inside the cache directory
 	// JuiceFS creates it dynamically, so we need to find it
@@ -276,7 +276,7 @@ func (w *WritebackWatcher) stateManager(ctx context.Context) {
 			if pendingCount > 0 {
 				// Count zero-length files using cached sizes
 				zeroCount, nonZeroCount := countBySize(fileSizes)
-				w.logger.Info("Writeback status",
+				w.logger.Debug("Writeback status",
 					"pendingFiles", nonZeroCount,
 					"zeroByteFiles", zeroCount,
 					"totalUploaded", totalUploaded,
