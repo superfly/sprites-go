@@ -25,6 +25,11 @@ on:
         required: false
         type: boolean
         default: true
+      checkout_ref:
+        description: 'Git ref/sha to check out when called from workflow_run'
+        required: false
+        default: ''
+        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -46,6 +51,7 @@ jobs:
         submodules: recursive
         token: ${{ secrets.GH_PAT || github.token }}
         fetch-depth: 0  # Fetch all history for tags
+        ref: ${{ inputs.checkout_ref != '' && inputs.checkout_ref || github.ref }}
     
     - name: Generate short SHA
       id: short-sha
@@ -89,6 +95,7 @@ jobs:
         submodules: recursive
         token: ${{ secrets.GH_PAT || github.token }}
         fetch-depth: 0  # Fetch all history for comparison
+        ref: ${{ inputs.checkout_ref != '' && inputs.checkout_ref || github.ref }}
     
     - name: Check for changes in ubuntu-devtools
       id: check

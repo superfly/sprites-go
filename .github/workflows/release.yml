@@ -5,6 +5,9 @@ on:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
       - 'v[0-9]+.[0-9]+.[0-9]+-*'
+  workflow_run:
+    workflows: ["Tests"]
+    types: ["completed"]
   workflow_call:
     inputs:
       tag_suffix:
@@ -17,29 +20,86 @@ on:
         type: boolean
 
 jobs:
+  context:
+    name: Compute context
+    runs-on: ubuntu-latest
+    outputs:
+      is_main_run: ${{ steps.flags.outputs.is_main_run }}
+      sha: ${{ steps.sha.outputs.sha }}
+      short_sha: ${{ steps.sha.outputs.short_sha }}
+      ref_name: ${{ steps.ref.outputs.ref_name }}
+      tag_suffix: ${{ steps.suffix.outputs.tag_suffix }}
+      tag_latest: ${{ steps.flags.outputs.tag_latest }}
+    steps:
+    - name: Determine triggering context
+      id: flags
+      run: |
+        if [[ "${{ github.event_name }}" == "workflow_run" ]] && \
+           [[ "${{ github.event.workflow_run.name }}" == "Tests" ]] && \
+           [[ "${{ github.event.workflow_run.conclusion }}" == "success" ]] && \
+           [[ "${{ github.event.workflow_run.head_branch }}" == "main" ]]; then
+          echo "is_main_run=true" >> $GITHUB_OUTPUT
+          echo "tag_latest=false" >> $GITHUB_OUTPUT
+        else
+          echo "is_main_run=false" >> $GITHUB_OUTPUT
+          # default: tag latest on true version tags without suffix
+          echo "tag_latest=${{ !contains(github.ref_name, '-') }}" >> $GITHUB_OUTPUT
+        fi
+    - name: Compute SHA and ref
+      id: sha
+      run: |
+        if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+          echo "sha=${{ github.event.workflow_run.head_sha }}" >> $GITHUB_OUTPUT
+          echo "short_sha=${{ github.event.workflow_run.head_sha }}" | sed -E 's/^short_sha=([a-f0-9]{7}).*/short_sha=\1/' >> $GITHUB_OUTPUT
+        else
+          echo "sha=${GITHUB_SHA}" >> $GITHUB_OUTPUT
+          echo "short_sha=${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
+        fi
+    - name: Compute ref name
+      id: ref
+      run: |
+        if [[ "${{ github.ref_type }}" == "tag" ]]; then
+          echo "ref_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+        elif [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+          echo "ref_name=${{ github.event.workflow_run.head_branch }}" >> $GITHUB_OUTPUT
+        else
+          echo "ref_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+        fi
+    - name: Compute tag suffix
+      id: suffix
+      run: |
+        if [[ "${{ github.ref_type }}" == "tag" ]]; then
+          echo "tag_suffix=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+        elif [[ "${{ steps.flags.outputs.is_main_run }}" == "true" ]]; then
+          echo "tag_suffix=dev-${{ steps.sha.outputs.short_sha }}" >> $GITHUB_OUTPUT
+        else
+          echo "tag_suffix=" >> $GITHUB_OUTPUT
+        fi
   # test:
   #   name: Run Tests
   #   uses: ./.github/workflows/test.yml
 
   release-images:
     name: Release Docker Images
-    #needs: test
+    needs: [context]
+    if: ${{ github.ref_type == 'tag' || needs.context.outputs.is_main_run == 'true' }}
     uses: ./.github/workflows/release-images.yml
     permissions:
       contents: read
       packages: write
     with:
-      tag_suffix: ${{ inputs.tag_suffix || github.ref_name }}
-      tag_latest: ${{ inputs.tag_latest != '' && inputs.tag_latest || !contains(github.ref_name, '-') }}
+      tag_suffix: ${{ inputs.tag_suffix || needs.context.outputs.tag_suffix || github.ref_name }}
+      tag_latest: ${{ inputs.tag_latest != '' && inputs.tag_latest || needs.context.outputs.tag_latest }}
+      checkout_ref: ${{ needs.context.outputs.sha }}
     secrets: inherit
 
   release-client:
     name: Release Client
-    #needs: test
+    needs: [context]
     uses: ./.github/workflows/release-client.yml
     permissions:
       contents: write 
     secrets: inherit
-    if: ${{ github.ref_type == 'tag' || inputs.tag_suffix != '' }}
+    if: ${{ github.ref_type == 'tag' }}
     with:
-      tag_suffix: ${{ inputs.tag_suffix || github.ref_name }}
+      tag_suffix: ${{ inputs.tag_suffix || needs.context.outputs.tag_suffix || github.ref_name }}

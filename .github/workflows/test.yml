@@ -106,16 +106,4 @@ jobs:
       id: s
       run: echo "short=${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
 
-  release-dev:
-    name: Release -dev (on main)
-    if: ${{ github.ref == 'refs/heads/main' && needs.test-lib.result == 'success' }}
-    needs: [test-lib, short-sha]
-    uses: ./.github/workflows/release.yml
-    permissions:
-      contents: write
-      packages: write
-    with:
-      tag_suffix: dev-${{ needs.short-sha.outputs.short }}
-      tag_latest: false
-    secrets: inherit
   
