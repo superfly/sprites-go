@@ -3,10 +3,10 @@ package api
 import (
 	"context"
 	"fmt"
-	"net"
 	"net/http"
-	"os"
 	"time"
+
+	"github.com/superfly/sprite-env/pkg/fly"
 )
 
 func (h *Handlers) HandleSuspend(w http.ResponseWriter, r *http.Request) {
@@ -37,37 +37,16 @@ func (h *Handlers) HandleSuspend(w http.ResponseWriter, r *http.Request) {
 		),
 	)
 
-	app := os.Getenv("FLY_APP_NAME")
-	mid := os.Getenv("FLY_MACHINE_ID")
-	url := fmt.Sprintf(
-		"http://flaps/v1/apps/%s/machines/%s/suspend",
-		app, mid,
-	)
-
-	d := &net.Dialer{}
-	tr := &http.Transport{
-		DialContext: func(c context.Context, network, addr string) (net.Conn, error) {
-			return d.DialContext(c, "unix", "/.fly/api")
-		},
-	}
-	client := &http.Client{Transport: tr}
-
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
-	h.logger.Debug("flaps suspend request", "url", url, "socket", "/.fly/api")
+	// Use fly package to suspend
+	h.logger.Debug("calling fly suspend API")
 	reqStart := time.Now()
-	resp, err := client.Do(req)
+	err = fly.Suspend(ctx)
 	elapsed := time.Since(reqStart)
+
 	if err != nil {
-		h.logger.Debug("flaps suspend call error", "error", err)
-	} else if resp != nil {
-		h.logger.Debug(
-			"flaps suspend response",
-			"status", resp.StatusCode,
-			"duration_s", elapsed.Seconds(),
-		)
-		if resp.Body != nil {
-			resp.Body.Close()
-		}
+		h.logger.Debug("fly suspend call error", "error", err, "duration_s", elapsed.Seconds())
+	} else {
+		h.logger.Debug("fly suspend completed", "duration_s", elapsed.Seconds())
 	}
 
 	w.WriteHeader(http.StatusOK)

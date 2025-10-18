@@ -23,11 +23,12 @@ type AdminChannel struct {
 	socket  *phx.Socket
 	channel *phx.Channel
 	logger  *slog.Logger
+	env     Environment
 	system  *System // Reference to system for handling sprite assignment
 }
 
 // NewAdminChannel creates a new admin channel manager
-func NewAdminChannel(ctx context.Context) *AdminChannel {
+func NewAdminChannel(ctx context.Context, env Environment) *AdminChannel {
 	logger := tap.Logger(ctx)
 	channelURL := os.Getenv("SPRITE_ADMIN_CHANNEL")
 	token := os.Getenv("SPRITE_HTTP_API_TOKEN")
@@ -49,6 +50,7 @@ func NewAdminChannel(ctx context.Context) *AdminChannel {
 		url:    channelURL,
 		token:  token,
 		logger: logger,
+		env:    env,
 	}
 
 	return ac
@@ -74,7 +76,7 @@ func (ac *AdminChannel) Start() error {
 	}
 
 	// Add authentication parameters to the URL
-	appName := os.Getenv("FLY_APP_NAME")
+	appName := ac.env.AppName()
 	q := u.Query()
 	q.Set("authToken", ac.token)
 	q.Set("appName", appName)
@@ -117,7 +119,7 @@ func (ac *AdminChannel) Start() error {
 	// Create and join channel immediately - no need to wait for socket connection
 	ac.channel = ac.socket.Channel(channelTopic, nil)
 
-	// Set up ping/pong handler
+	// Set up ping/pong handler (no message ID checking needed for ping/pong)
 	ac.channel.On("ping", func(payload any) {
 		// Simply echo back the payload as pong
 		ac.channel.Push("pong", payload)
@@ -351,9 +353,20 @@ func (ac *AdminChannel) SetSystem(system *System) {
 	}
 }
 
-// handleSpriteAssigned processes sprite_assigned events from the admin channel
+// handleSpriteAssigned processes sprite_assigned events
 func (ac *AdminChannel) handleSpriteAssigned(payload any) {
-	// Hand off to system for processing (it will handle deserialization)
+	// Convert payload to map for logging
+	data, ok := payload.(map[string]interface{})
+	if ok {
+		ac.logger.Info("Sprite assigned",
+			"org_id", data["org_id"],
+			"sprite_name", data["sprite_name"],
+			"sprite_id", data["sprite_id"])
+	} else {
+		ac.logger.Info("Sprite assigned", "payload", payload)
+	}
+
+	// Hand off to system for processing
 	if ac.system == nil {
 		ac.logger.Error("System not available for sprite assignment")
 		ac.replyToSpriteAssigned(map[string]string{

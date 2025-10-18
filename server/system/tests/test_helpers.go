@@ -288,8 +288,10 @@ func SetupTestEnvironment(t *testing.T) string {
 
 	// Set required environment variables
 	os.Setenv("SPRITE_WRITE_DIR", testDir)
+	os.Setenv("HOST_ID", fmt.Sprintf("test-host-%s", t.Name()))
 	t.Cleanup(func() {
 		os.Unsetenv("SPRITE_WRITE_DIR")
+		os.Unsetenv("HOST_ID")
 	})
 
 	return testDir

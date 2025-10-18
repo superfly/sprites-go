@@ -18,6 +18,8 @@ type Config struct {
 	S3SecretAccessKey string
 	S3EndpointURL     string
 	S3Bucket          string
+	S3Region          string   // S3 region for leaser
+	HostID            string   // Host identifier for leaser (e.g., machine ID)
 	Logger            *slog.Logger
 
 	// Databases to manage with litestream
@@ -58,13 +60,15 @@ func New(config Config) (*Manager, error) {
 
 	// Create leaser for S3 mode if configured
 	if config.S3AccessKey != "" && config.S3SecretAccessKey != "" &&
-		config.S3EndpointURL != "" && config.S3Bucket != "" {
+		config.S3EndpointURL != "" && config.S3Bucket != "" && config.HostID != "" {
 		leaserConfig := leaser.Config{
 			S3AccessKey:       config.S3AccessKey,
 			S3SecretAccessKey: config.S3SecretAccessKey,
 			S3EndpointURL:     config.S3EndpointURL,
 			S3Bucket:          config.S3Bucket,
+			S3Region:          config.S3Region,
 			BaseDir:           config.BaseDir,
+			HostID:            config.HostID,
 			Logger:            config.Logger, // keep base logger for leaser
 		}
 		m.leaser = leaser.New(leaserConfig)

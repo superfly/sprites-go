@@ -40,6 +40,7 @@ func TestManagerWithS3(t *testing.T) {
 		S3SecretAccessKey: "test-secret",
 		S3EndpointURL:     "http://localhost:9000",
 		S3Bucket:          "test-bucket",
+		HostID:            "test-host-id",
 		DatabasePaths:     []string{"/tmp/test.db"},
 	}
 

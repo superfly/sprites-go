@@ -172,6 +172,15 @@ func (s *System) Boot(ctx context.Context) error {
 		}
 	}
 
+	// Apply sprite hostname if assigned (after container is running)
+	if info, err := s.GetSpriteInfo(s.ctx); err == nil && info != nil {
+		s.logger.Info("Applying sprite hostname during boot", "sprite_name", info.SpriteName)
+		if err := s.ApplySpriteHostname(s.ctx, info.SpriteName); err != nil {
+			s.logger.Warn("Failed to apply sprite hostname during boot", "error", err)
+			// Non-fatal - hostname setting is best-effort
+		}
+	}
+
 	// Phase 5: Start services manager (depends on container being running)
 	select {
 	case <-s.shutdownTriggeredCh:
@@ -261,6 +270,15 @@ func (s *System) BootContainer(ctx context.Context) error {
 			return fmt.Errorf("failed to start process: %w", err)
 		}
 		s.logger.Info("Container process started")
+	}
+
+	// Apply sprite hostname if assigned (after container is running)
+	if info, err := s.GetSpriteInfo(ctx); err == nil && info != nil {
+		s.logger.Info("Applying sprite hostname during container boot", "sprite_name", info.SpriteName)
+		if err := s.ApplySpriteHostname(ctx, info.SpriteName); err != nil {
+			s.logger.Warn("Failed to apply sprite hostname during container boot", "error", err)
+			// Non-fatal - hostname setting is best-effort
+		}
 	}
 
 	// Phase 3: Start services manager (depends on container being running)

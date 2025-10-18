@@ -28,10 +28,11 @@ import (
 // System is the main system orchestrator
 type System struct {
 	// Core
-	ctx    context.Context
-	cancel context.CancelFunc
-	config *Config
-	logger *slog.Logger
+	ctx         context.Context
+	cancel      context.CancelFunc
+	config      *Config
+	logger      *slog.Logger
+	Environment Environment
 
 	// Storage modules
 	DBManager      *db.Manager
@@ -97,11 +98,20 @@ func New(config *Config) (*System, error) {
 	ctx = tap.WithLogger(ctx, logger)
 	ctx, cancel := context.WithCancel(ctx)
 
+	// Choose environment implementation based on Fly env vars
+	var env Environment
+	if os.Getenv("FLY_APP_NAME") != "" && os.Getenv("FLY_MACHINE_ID") != "" {
+		env = NewFlyEnvironment()
+	} else {
+		env = NewLocalEnvironment()
+	}
+
 	s := &System{
-		ctx:    ctx,
-		cancel: cancel,
-		config: config,
-		logger: logger,
+		ctx:         ctx,
+		cancel:      cancel,
+		config:      config,
+		logger:      logger,
+		Environment: env,
 		// Shutdown channels
 		shutdownTriggeredCh: make(chan struct{}), // Open = running
 		shutdownCompleteCh:  make(chan struct{}), // Open = not complete
@@ -136,6 +146,11 @@ func New(config *Config) (*System, error) {
 		cancel()
 		return nil, fmt.Errorf("failed to initialize modules: %w", err)
 	}
+
+	// Register callback for sprite info changes
+	RegisterSpriteInfoChangeCallback(func(info *SpriteInfo) {
+		s.handleSpriteInfoChange(info)
+	})
 
 	return s, nil
 }

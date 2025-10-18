@@ -2,15 +2,13 @@ package system
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
-	"net"
-	"net/http"
 	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/superfly/sprite-env/pkg/fly"
 	"github.com/superfly/sprite-env/pkg/tap"
 )
 
@@ -120,27 +118,6 @@ func (m *ActivityMonitor) EnrichContext(ctx context.Context) context.Context {
 // activityTrackerKey matches the one used in handlers package
 type activityTrackerKey struct{}
 
-// makeFlapsRequest is a helper function to make requests to the Flaps API
-func (m *ActivityMonitor) makeFlapsRequest(ctx context.Context, method, path string) (*http.Response, error) {
-	d := &net.Dialer{Timeout: 2 * time.Second}
-	tr := &http.Transport{
-		DialContext: func(c context.Context, network, addr string) (net.Conn, error) {
-			return d.DialContext(c, "unix", "/.fly/api")
-		},
-	}
-	client := &http.Client{Transport: tr, Timeout: 5 * time.Second}
-
-	app := os.Getenv("FLY_APP_NAME")
-	mid := os.Getenv("FLY_MACHINE_ID")
-	url := fmt.Sprintf("http://flaps/v1/apps/%s%s", app, fmt.Sprintf(path, mid))
-
-	req, err := http.NewRequestWithContext(ctx, method, url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return client.Do(req)
-}
 
 // handleActivityEvent processes an activity event and updates internal state.
 func (m *ActivityMonitor) handleActivityEvent(ev activityEvent) {
@@ -419,23 +396,17 @@ func (m *ActivityMonitor) suspend(ctx context.Context, inactive time.Duration) {
 	initialSystemTime := time.Now()
 	m.logger.Info("Starting suspend process", "initial_time", initialSystemTime.Format(time.RFC3339Nano))
 
-	// Call flaps suspend API
+	// Call fly suspend API
 	m.logger.Info("Calling Fly suspend API")
 
 	apiStart := time.Now()
-	resp, err := m.makeFlapsRequest(apiCtx, http.MethodPost, "/machines/%s/suspend")
+	err = fly.Suspend(apiCtx)
 	apiDuration := time.Since(apiStart)
 
 	if err != nil {
 		m.logger.Error("Failed to call suspend API", "error", err, "duration", apiDuration)
-	} else if resp != nil {
-		m.logger.Info("Suspend API response",
-			"status", resp.StatusCode,
-			"duration", apiDuration,
-			"status_text", resp.Status)
-		if resp.Body != nil {
-			resp.Body.Close()
-		}
+	} else {
+		m.logger.Info("Suspend API completed successfully", "duration", apiDuration)
 	}
 
 	// Start loop after suspend API call for resume detection

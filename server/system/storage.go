@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/superfly/sprite-env/pkg/db"
+	"github.com/superfly/sprite-env/pkg/fly"
 	"github.com/superfly/sprite-env/pkg/juicefs"
 	"github.com/superfly/sprite-env/pkg/overlay"
 )
@@ -61,12 +62,26 @@ func (s *System) initializeDBManager() error {
 	spriteDBPath := filepath.Join(s.config.WriteDir, "sprite.db")
 	dbPaths = append(dbPaths, spriteDBPath)
 
+	// Get HostID from environment
+	var hostID string
+	if s.Environment.AppName() != "" {
+		// On Fly, use machine ID
+		hostID = fly.Environment().MachineID
+	} else {
+		// Not on Fly, require HOST_ID environment variable
+		hostID = os.Getenv("HOST_ID")
+		if hostID == "" {
+			return fmt.Errorf("HOST_ID environment variable is required for non-Fly environments")
+		}
+	}
+
 	dbConfig := db.Config{
 		BaseDir:           s.config.WriteDir,
 		S3AccessKey:       s.config.S3AccessKey,
 		S3SecretAccessKey: s.config.S3SecretAccessKey,
 		S3EndpointURL:     s.config.S3EndpointURL,
 		S3Bucket:          s.config.S3Bucket,
+		HostID:            hostID,
 		Logger:            s.logger,
 		DatabasePaths:     dbPaths,
 	}

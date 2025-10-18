@@ -85,7 +85,7 @@ func TestSpriteDB(t *testing.T) {
 		t.Errorf("SpriteID mismatch: got %s, want %s", retrieved.SpriteID, info.SpriteID)
 	}
 
-	// Test that changing name/org fails
+	// Test that changing org_id or sprite_id fails
 	newInfo := &SpriteInfo{
 		SpriteName: "different-sprite",
 		SpriteURL:  "different-sprite-xyz789.sprites.app",
@@ -96,9 +96,9 @@ func TestSpriteDB(t *testing.T) {
 
 	err = sys.SetSpriteInfo(ctx, newInfo)
 	if err == nil {
-		t.Error("Expected error when changing sprite name/org, got nil")
+		t.Error("Expected error when changing org_id/sprite_id, got nil")
 	}
-	if err != nil && err.Error() != "sprite name and org cannot be changed once set" {
+	if err != nil && err.Error() != "sprite org_id and sprite_id cannot be changed once set" {
 		t.Errorf("Wrong error message: %v", err)
 	}
 
@@ -110,35 +110,41 @@ func TestSpriteDB(t *testing.T) {
 	if retrieved.SpriteName != info.SpriteName {
 		t.Errorf("SpriteName changed after failed reassignment: got %s, want %s", retrieved.SpriteName, info.SpriteName)
 	}
+	if retrieved.OrgID != info.OrgID {
+		t.Errorf("OrgID changed after failed reassignment: got %s, want %s", retrieved.OrgID, info.OrgID)
+	}
 
-	// Test that URL can be updated
+	// Test that sprite_name and sprite_url can be updated
 	updatedInfo := &SpriteInfo{
-		SpriteName: info.SpriteName, // Same name
+		SpriteName: "updated-sprite-name",
 		SpriteURL:  "updated-sprite-url.sprites.app",
-		OrgID:      info.OrgID,      // Same org
-		SpriteID:   info.SpriteID,   // Same sprite ID
+		OrgID:      info.OrgID,   // Same org
+		SpriteID:   info.SpriteID, // Same sprite ID
 		AssignedAt: time.Now().UTC(),
 	}
 
 	err = sys.SetSpriteInfo(ctx, updatedInfo)
 	if err != nil {
-		t.Errorf("Expected URL update to succeed, got error: %v", err)
+		t.Errorf("Expected name/URL update to succeed, got error: %v", err)
 	}
 
-	// Verify URL was updated
+	// Verify name and URL were updated
 	retrieved, err = sys.GetSpriteInfo(ctx)
 	if err != nil {
-		t.Fatalf("Failed to get sprite info after URL update: %v", err)
+		t.Fatalf("Failed to get sprite info after update: %v", err)
+	}
+	if retrieved.SpriteName != updatedInfo.SpriteName {
+		t.Errorf("SpriteName not updated: got %s, want %s", retrieved.SpriteName, updatedInfo.SpriteName)
 	}
 	if retrieved.SpriteURL != updatedInfo.SpriteURL {
 		t.Errorf("URL not updated: got %s, want %s", retrieved.SpriteURL, updatedInfo.SpriteURL)
 	}
-	// Verify other fields remain unchanged
-	if retrieved.SpriteName != info.SpriteName {
-		t.Errorf("SpriteName changed during URL update: got %s, want %s", retrieved.SpriteName, info.SpriteName)
-	}
+	// Verify immutable fields remain unchanged
 	if retrieved.OrgID != info.OrgID {
-		t.Errorf("OrgID changed during URL update: got %s, want %s", retrieved.OrgID, info.OrgID)
+		t.Errorf("OrgID changed during update: got %s, want %s", retrieved.OrgID, info.OrgID)
+	}
+	if retrieved.SpriteID != info.SpriteID {
+		t.Errorf("SpriteID changed during update: got %s, want %s", retrieved.SpriteID, info.SpriteID)
 	}
 }
 
@@ -181,10 +187,9 @@ func TestApplySpriteHostname(t *testing.T) {
 
 	// Apply sprite hostname
 	spriteName := "test-sprite"
-	spriteURL := "test-sprite-abc123.sprites.app"
 
 	ctx := context.Background()
-	err := sys.ApplySpriteHostname(ctx, spriteName, spriteURL)
+	err := sys.ApplySpriteHostname(ctx, spriteName)
 	if err != nil {
 		t.Fatalf("Failed to apply sprite hostname: %v", err)
 	}
@@ -221,7 +226,6 @@ func TestSetSpriteEnvironment(t *testing.T) {
 	}
 
 	tempDir := t.TempDir()
-	hostsFile := filepath.Join(tempDir, "hosts")
 
 	config := &Config{
 		JuiceFSDataPath: tempDir,
@@ -241,16 +245,6 @@ func TestSetSpriteEnvironment(t *testing.T) {
 		t.Fatalf("Failed to initialize sprite DB: %v", err)
 	}
 
-	// Mock writeHostsFile - only write /etc/hosts to our test file
-	originalWriteFile := writeHostsFile
-	writeHostsFile = func(path string, data []byte, perm uint32) error {
-		if path == "/mnt/newroot/etc/hosts" {
-			return os.WriteFile(hostsFile, data, os.FileMode(perm))
-		}
-		return nil
-	}
-	defer func() { writeHostsFile = originalWriteFile }()
-
 	// Set sprite environment
 	info := &SpriteInfo{
 		SpriteName: "my-sprite",
@@ -266,9 +260,6 @@ func TestSetSpriteEnvironment(t *testing.T) {
 	if !ok {
 		t.Fatalf("Invalid response type")
 	}
-	if err != nil {
-		t.Fatalf("Failed to set sprite environment: %v", err)
-	}
 	if response.Status != "ok" {
 		t.Errorf("Expected status ok, got %s", response.Status)
 	}
@@ -281,18 +272,11 @@ func TestSetSpriteEnvironment(t *testing.T) {
 	if info.SpriteName != "my-sprite" {
 		t.Errorf("SpriteName mismatch: got %s, want my-sprite", info.SpriteName)
 	}
-
-	// Verify container hosts file was written
-	hostsContent, err := os.ReadFile(hostsFile)
-	if err != nil {
-		t.Fatalf("Failed to read hosts file: %v", err)
-	}
-	if !contains(string(hostsContent), "127.0.0.1   my-sprite") {
-		t.Error("hosts file does not contain sprite hostname entry")
+	if info.SpriteURL != "my-sprite-xyz789.sprites.app" {
+		t.Errorf("SpriteURL mismatch: got %s, want my-sprite-xyz789.sprites.app", info.SpriteURL)
 	}
 
-	// Note: We don't verify hostname was set because setContainerHostname requires
-	// a running container with a PID file, which we don't have in this test
+	// Note: Hostname application now happens during system boot, not when setting sprite environment
 }
 
 // Helper function

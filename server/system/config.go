@@ -1,6 +1,7 @@
 package system
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -9,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/superfly/sprite-env/pkg/fly"
 )
 
 // Config holds all application configuration
@@ -299,7 +302,11 @@ func applyEnvironmentVariables(config *Config) {
 	config.AdminToken = os.Getenv("SPRITE_HTTP_ADMIN_TOKEN")
 	config.AdminChannelURL = os.Getenv("SPRITE_ADMIN_CHANNEL")
 
-	// S3 configuration
+	// S3 configuration - check env vars first, then fall back to Fly Secrets API if on Fly
+	ctx := context.Background()
+	isRunningOnFly := os.Getenv("FLY_APP_NAME") != "" && os.Getenv("FLY_MACHINE_ID") != ""
+
+	// Always check environment variables first
 	if s3Key := os.Getenv("SPRITE_S3_ACCESS_KEY"); s3Key != "" {
 		config.S3AccessKey = s3Key
 	}
@@ -311,6 +318,30 @@ func applyEnvironmentVariables(config *Config) {
 	}
 	if s3Bucket := os.Getenv("SPRITE_S3_BUCKET"); s3Bucket != "" {
 		config.S3Bucket = s3Bucket
+	}
+
+	// On Fly, fall back to Secrets API for any missing values
+	if isRunningOnFly {
+		if config.S3AccessKey == "" {
+			if s3Key, err := fly.Secrets.Get(ctx, "SPRITE_S3_ACCESS_KEY", ""); err == nil && s3Key != nil && s3Key.Value != "" {
+				config.S3AccessKey = s3Key.Value
+			}
+		}
+		if config.S3SecretAccessKey == "" {
+			if s3Secret, err := fly.Secrets.Get(ctx, "SPRITE_S3_SECRET_ACCESS_KEY", ""); err == nil && s3Secret != nil && s3Secret.Value != "" {
+				config.S3SecretAccessKey = s3Secret.Value
+			}
+		}
+		if config.S3EndpointURL == "" {
+			if s3Endpoint, err := fly.Secrets.Get(ctx, "SPRITE_S3_ENDPOINT_URL", ""); err == nil && s3Endpoint != nil && s3Endpoint.Value != "" {
+				config.S3EndpointURL = s3Endpoint.Value
+			}
+		}
+		if config.S3Bucket == "" {
+			if s3Bucket, err := fly.Secrets.Get(ctx, "SPRITE_S3_BUCKET", ""); err == nil && s3Bucket != nil && s3Bucket.Value != "" {
+				config.S3Bucket = s3Bucket.Value
+			}
+		}
 	}
 
 	// Overlay configuration
