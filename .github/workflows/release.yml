@@ -5,6 +5,7 @@ on:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
       - 'v[0-9]+.[0-9]+.[0-9]+-*'
+  workflow_dispatch:
   workflow_run:
     workflows: ["Tests"]
     types: ["completed"]
@@ -101,5 +102,3 @@ jobs:
       contents: write 
     secrets: inherit
     if: ${{ github.ref_type == 'tag' }}
-    with:
-      tag_suffix: ${{ inputs.tag_suffix || needs.context.outputs.tag_suffix || github.ref_name }}
