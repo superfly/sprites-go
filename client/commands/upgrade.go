@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/superfly/sprite-env/client/config"
+	"github.com/superfly/sprite-env/client/prompts"
 
 	"github.com/Masterminds/semver/v3"
 )
@@ -103,10 +104,9 @@ func runUpgrade(globalCtx *GlobalContext, checkOnly, force bool, targetVersion s
 		"currentExe", currentExe)
 
 	// Find the latest version or the target version
-	var selectedVersion *semver.Version
 	var selectedVersionStr string
 	if targetVersion != "" {
-		// Find specific version - need to list all versions
+		// Find specific version (supports partials) - need to list all versions
 		slog.Debug("Listing bucket versions for specific version", "targetVersion", targetVersion)
 		versions, err := listBucketVersions(bucketURL, clientPrefix)
 		if err != nil {
@@ -117,16 +117,61 @@ func runUpgrade(globalCtx *GlobalContext, checkOnly, force bool, targetVersion s
 			return fmt.Errorf("no versions found in the bucket")
 		}
 
+		// Normalize target (strip leading 'v')
+		target := strings.TrimPrefix(targetVersion, "v")
+
+		// Extract base and optional prerelease prefix from the target
+		baseTarget := target
+		prePrefix := ""
+		if idx := strings.Index(target, "-"); idx != -1 {
+			baseTarget = target[:idx]
+			prePrefix = target[idx+1:]
+		}
+
+		var bestKey string
+		var bestVer *semver.Version
+
 		for vStr, v := range versions {
-			if vStr == targetVersion {
-				selectedVersion = v
-				selectedVersionStr = vStr
-				break
+			// Split candidate into base and prerelease
+			candBase := vStr
+			candPre := ""
+			if idx := strings.Index(vStr, "-"); idx != -1 {
+				candBase = vStr[:idx]
+				candPre = vStr[idx+1:]
+			}
+
+			// Match exact base (major.minor.patch)
+			if candBase != baseTarget {
+				continue
+			}
+
+			// If a prerelease prefix was provided, filter candidates
+			if prePrefix != "" {
+				// For dev, require exact '-dev' (no numeric suffixes)
+				if prePrefix == "dev" {
+					if candPre != "dev" {
+						continue
+					}
+				} else {
+					// For others (e.g., rc), allow prefix match like rc, rc1, rc2, etc.
+					if candPre == "" || !strings.HasPrefix(candPre, prePrefix) {
+						continue
+					}
+				}
+			}
+
+			if bestVer == nil || v.GreaterThan(bestVer) {
+				bestVer = v
+				bestKey = vStr
 			}
 		}
-		if selectedVersion == nil {
+
+		if bestVer == nil {
 			return fmt.Errorf("version %s not found", targetVersion)
 		}
+
+		// Keep 'v' prefix for bucket path consistency
+		selectedVersionStr = "v" + bestKey
 	} else {
 		// Get the latest version using channel-based check
 		currentVersion := cfg.GetCurrentVersion()
@@ -192,8 +237,56 @@ func runUpgrade(globalCtx *GlobalContext, checkOnly, force bool, targetVersion s
 				fmt.Println("Use --force to downgrade to the release version.")
 				return nil
 			}
+
+			// If we're on dev channel and targeting dev-latest, compare remote Last-Modified to local binary
+			if selectedVersionStr == "dev-latest" {
+				platform := getPlatform()
+				var binaryName string
+				if runtime.GOOS == "windows" {
+					binaryName = fmt.Sprintf("sprite-%s.zip", platform)
+				} else {
+					binaryName = fmt.Sprintf("sprite-%s.tar.gz", platform)
+				}
+				downloadURL := fmt.Sprintf("%s%s%s/%s", bucketURL, clientPrefix, selectedVersionStr, binaryName)
+				newer, err := isRemoteArchiveNewer(downloadURL, currentExe)
+				if err == nil && !newer {
+					fmt.Println("Already running the latest version.")
+					return nil
+				}
+			}
 		} else if currentVersion == selectedVersionStr {
-			fmt.Println("Already running the latest version.")
+			// For dev builds, allow refresh if remote archive is newer than local binary timestamp
+			if strings.Contains(selectedVersionStr, "-dev") {
+				platform := getPlatform()
+				var binaryName string
+				if runtime.GOOS == "windows" {
+					binaryName = fmt.Sprintf("sprite-%s.zip", platform)
+				} else {
+					binaryName = fmt.Sprintf("sprite-%s.tar.gz", platform)
+				}
+				downloadURL := fmt.Sprintf("%s%s%s/%s", bucketURL, clientPrefix, selectedVersionStr, binaryName)
+				newer, err := isRemoteArchiveNewer(downloadURL, currentExe)
+				if err == nil && !newer {
+					fmt.Println("Already running the latest version.")
+					return nil
+				}
+				// If remote is newer or we can't determine, continue to download
+			} else {
+				fmt.Println("Already running the latest version.")
+				return nil
+			}
+		}
+	}
+
+	// Confirm before proceeding with the upgrade, unless forced
+	if !force {
+		desc := fmt.Sprintf("This will download and install %s, replacing the current binary at %s.", selectedVersionStr, currentExe)
+		if targetVersion == "" {
+			desc = fmt.Sprintf("This will upgrade to %s and replace the current binary at %s.", selectedVersionStr, currentExe)
+		}
+		confirmed, err := prompts.PromptForConfirmation("Upgrade sprite?", desc)
+		if err != nil || !confirmed {
+			fmt.Println("Upgrade cancelled.")
 			return nil
 		}
 	}
@@ -358,29 +451,38 @@ func GetLatestVersionForChannelDetailed(currentVersion string) (*VersionCheckRes
 		return nil, fmt.Errorf("no versions found")
 	}
 
-	// Find the highest version
-	var highestVersion *semver.Version
-	var highestVersionStr string
-
-	for _, versionStr := range versions {
-		// Remove v prefix for semver parsing
-		cleanVersion := strings.TrimPrefix(versionStr, "v")
-		v, err := semver.NewVersion(cleanVersion)
-		if err != nil {
-			continue
+	// Prefer current channel; fall back rc → release
+	var chosen string
+	switch currentChannel {
+	case "dev":
+		// Always prefer the rolling dev-latest path when on dev channel
+		chosen = "dev-latest"
+	case "rc":
+		if v, ok := result.ChannelVersions["rc"]; ok && v != "" {
+			chosen = v
 		}
-
-		if highestVersion == nil || v.GreaterThan(highestVersion) {
-			highestVersion = v
-			highestVersionStr = versionStr // Keep original format (with v if present)
+	default: // release
+		if v, ok := result.ChannelVersions["release"]; ok && v != "" {
+			chosen = v
 		}
 	}
 
-	if highestVersionStr == "" {
+	if chosen == "" {
+		if v, ok := result.ChannelVersions["rc"]; ok && v != "" {
+			chosen = v
+		}
+	}
+	if chosen == "" {
+		if v, ok := result.ChannelVersions["release"]; ok && v != "" {
+			chosen = v
+		}
+	}
+
+	if chosen == "" {
 		return nil, fmt.Errorf("no valid versions found")
 	}
 
-	result.LatestVersion = highestVersionStr
+	result.LatestVersion = chosen
 	return result, nil
 }
 
@@ -707,4 +809,50 @@ func replaceExecutable(oldPath, newPath string) error {
 	}
 
 	return nil
+}
+
+// isRemoteArchiveNewer checks the remote archive's Last-Modified against the local executable's timestamp.
+// Returns true if remote is newer. If Last-Modified is missing or unparsable, returns true to allow refresh.
+func isRemoteArchiveNewer(url, localPath string) (bool, error) {
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequest("HEAD", url, nil)
+	if err != nil {
+		return false, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	lm := resp.Header.Get("Last-Modified")
+	if lm == "" {
+		return true, nil
+	}
+	remoteTime, err := http.ParseTime(lm)
+	if err != nil {
+		return true, nil
+	}
+
+	localTime, err := getFileCreateTimeOrMTime(localPath)
+	if err != nil {
+		return false, err
+	}
+
+	return remoteTime.After(localTime), nil
+}
+
+// getFileCreateTimeOrMTime returns the file creation time if available; otherwise falls back to modification time.
+// Note: portable fallback uses ModTime, as creation time is not universally available across platforms.
+func getFileCreateTimeOrMTime(path string) (time.Time, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}, err
+	}
+	// Portable fallback
+	return info.ModTime(), nil
 }

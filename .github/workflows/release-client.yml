@@ -171,6 +171,29 @@ jobs:
         aws configure set aws_secret_access_key ${{ secrets.BINARY_BUCKET_SECRET_ACCESS_KEY }}
         aws configure set region auto
     
+    - name: Cleanup previous dev artifacts (vX.Y.Z-dev*)
+      if: endsWith(github.ref_name, '-dev')
+      env:
+        AWS_ENDPOINT_URL_S3: https://t3.storage.dev
+      run: |
+        TAG_NAME="${{ github.ref_name }}"
+        echo "Removing any existing dev artifacts with prefix $TAG_NAME* under s3://sprites-binaries/client/"
+        # List and remove any keys starting with client/$TAG_NAME (matches vX.Y.Z-dev and vX.Y.Z-dev*)
+        KEYS=$(aws s3api list-objects-v2 \
+          --bucket sprites-binaries \
+          --prefix "client/$TAG_NAME" \
+          --endpoint-url "$AWS_ENDPOINT_URL_S3" \
+          --query 'Contents[].Key' \
+          --output text || true)
+        if [ -n "$KEYS" ] && [ "$KEYS" != "None" ]; then
+          for key in $KEYS; do
+            echo "Deleting s3://sprites-binaries/$key"
+            aws s3 rm "s3://sprites-binaries/$key" --endpoint-url "$AWS_ENDPOINT_URL_S3" || true
+          done
+        else
+          echo "No matching dev artifacts to delete."
+        fi
+    
     - name: Create channel version file
       run: |
         # Extract tag name
