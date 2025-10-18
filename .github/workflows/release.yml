@@ -5,6 +5,16 @@ on:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
       - 'v[0-9]+.[0-9]+.[0-9]+-*'
+  workflow_call:
+    inputs:
+      tag_suffix:
+        description: "Tag suffix or full tag to use for release (e.g., dev-<sha>)"
+        required: true
+        type: string
+      tag_latest:
+        description: "Whether to also tag as latest"
+        required: false
+        type: boolean
 
 jobs:
   # test:
@@ -19,8 +29,8 @@ jobs:
       contents: read
       packages: write
     with:
-      tag_suffix: ${{ github.ref_name }}
-      tag_latest: ${{ !contains(github.ref_name, '-') }}
+      tag_suffix: ${{ inputs.tag_suffix || github.ref_name }}
+      tag_latest: ${{ inputs.tag_latest != '' && inputs.tag_latest || !contains(github.ref_name, '-') }}
     secrets: inherit
 
   release-client:
@@ -30,3 +40,6 @@ jobs:
     permissions:
       contents: write 
     secrets: inherit
+    if: ${{ github.ref_type == 'tag' || inputs.tag_suffix != '' }}
+    with:
+      tag_suffix: ${{ inputs.tag_suffix || github.ref_name }}
