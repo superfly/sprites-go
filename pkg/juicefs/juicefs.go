@@ -73,6 +73,9 @@ type Config struct {
 	// Volume name for the JuiceFS filesystem
 	VolumeName string
 
+	// UploadDelay sets JuiceFS writeback upload delay (e.g., 2m, 30s). If zero, defaults to 1m.
+	UploadDelay time.Duration
+
 	// Logger for logging (optional, defaults to no-op logger)
 	Logger *slog.Logger
 }
@@ -260,12 +263,18 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 
 	// Mount JuiceFS
 	stepStart = time.Now()
+	// Determine upload delay
+	uploadDelay := j.config.UploadDelay
+	if uploadDelay == 0 {
+		uploadDelay = time.Minute
+	}
+
 	mountArgs := []string{
 		"mount",
 		"--no-usage-report",
 		"-o", "writeback_cache",
 		"--writeback",
-		"--upload-delay", "1m",
+		"--upload-delay", uploadDelay.String(),
 		"--cache-dir", cacheDir,
 		"--cache-size", fmt.Sprintf("%d", cacheSizeMB),
 		"--buffer-size", fmt.Sprintf("%d", bufferSizeMB),
@@ -1025,16 +1034,44 @@ func (j *JuiceFS) flushCacheViaControl(controlFile string) error {
 	// Read 1 byte response (should be 1 for success per FlushNow contract)
 	response := make([]byte, 1)
 	j.logger.Debug("Reading response from control file", "expectedBytes", 1)
-	n, err := file.Read(response)
-	if err != nil {
+
+	// Some environments can briefly return EOF if the response isn't ready yet.
+	// Retry a few times with short backoff before failing. Track attempts and wait time.
+	var n int
+	var readErr error
+	attempts := 0
+	readStart := time.Now()
+	for attempt := 1; attempt <= 20; attempt++ { // up to ~200ms total
+		attempts = attempt
+		n, readErr = file.Read(response)
+		if readErr == nil && n == 1 {
+			break
+		}
+		if readErr == io.EOF {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		// Non-EOF error: fail fast
 		j.logger.Error("Failed to read control file response",
 			"bytesRead", n,
-			"error", err,
-			"errorType", fmt.Sprintf("%T", err),
-			"isEOF", err == io.EOF)
-		return fmt.Errorf("failed to read control file response: %w", err)
+			"error", readErr,
+			"errorType", fmt.Sprintf("%T", readErr))
+		return fmt.Errorf("failed to read control file response: %w", readErr)
 	}
-	j.logger.Debug("Response read from control file", "bytesRead", n, "response", response[0])
+	if readErr != nil {
+		j.logger.Error("Failed to read control file response after retries",
+			"bytesRead", n,
+			"error", readErr,
+			"errorType", fmt.Sprintf("%T", readErr),
+			"attempts", attempts,
+			"waitDuration", time.Since(readStart))
+		return fmt.Errorf("failed to read control file response: %w", readErr)
+	}
+	j.logger.Debug("Control file response received",
+		"bytesRead", n,
+		"response", response[0],
+		"attempts", attempts,
+		"waitDuration", time.Since(readStart))
 
 	if response[0] != 1 {
 		j.logger.Error("Control file returned unexpected response", "response", response[0])
