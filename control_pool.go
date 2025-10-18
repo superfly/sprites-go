@@ -44,8 +44,8 @@ type controlConn struct {
 
 // controlMessage represents a message on the control connection
 type controlMessage struct {
-	Type string          `json:"type"`
-	Data json.RawMessage `json:"data,omitempty"`
+	MessageType int    // WebSocket message type (binary or text)
+	Data        []byte // Raw message data
 }
 
 // newControlPool creates a new control connection pool for a sprite
@@ -121,8 +121,6 @@ func (p *controlPool) dial(ctx context.Context) (*controlConn, error) {
 		return nil, err
 	}
 
-	fmt.Printf("DEBUG: Dialing control connection to: %s\n", wsURL.String())
-
 	// Set up WebSocket dialer
 	dialer := &websocket.Dialer{
 		ReadBufferSize:   1024 * 1024, // 1MB
@@ -142,14 +140,9 @@ func (p *controlPool) dial(ctx context.Context) (*controlConn, error) {
 	header.Set("Authorization", fmt.Sprintf("Bearer %s", p.client.token))
 	header.Set("User-Agent", "sprites-go-sdk/1.0")
 
-	fmt.Printf("DEBUG: Auth token: %s\n", p.client.token[:min(10, len(p.client.token))]+"...")
-
 	// Connect to WebSocket
-	ws, resp, err := dialer.DialContext(ctx, wsURL.String(), header)
+	ws, _, err := dialer.DialContext(ctx, wsURL.String(), header)
 	if err != nil {
-		if resp != nil {
-			fmt.Printf("DEBUG: WebSocket dial failed with HTTP status: %d\n", resp.StatusCode)
-		}
 		return nil, fmt.Errorf("failed to dial control connection: %w", err)
 	}
 
@@ -160,7 +153,7 @@ func (p *controlPool) dial(ctx context.Context) (*controlConn, error) {
 		lastUsed: time.Now(),
 		ctx:      connCtx,
 		cancel:   cancel,
-		readCh:   make(chan controlMessage, 10),
+		readCh:   make(chan controlMessage, 1000), // Large buffer to prevent blocking
 		closedCh: make(chan struct{}),
 	}
 
@@ -223,27 +216,50 @@ func (c *controlConn) readLoop() {
 		default:
 		}
 
-		var msg controlMessage
-		err := c.ws.ReadJSON(&msg)
+		// Read next message (could be JSON or binary)
+		messageType, data, err := c.ws.ReadMessage()
 		if err != nil {
 			// Connection closed or error
 			return
 		}
 
-		// Handle different message types
-		switch msg.Type {
-		case "dial":
-			// Server is requesting a new connection - ignore in SDK
-			// The server will handle this on its end
-		case "keepalive":
-			// Keepalive message - acknowledge by staying alive
-		default:
-			// Other messages can be queued for operations
+		// Create message wrapper
+		msg := controlMessage{
+			MessageType: messageType,
+			Data:        data,
+		}
+
+		// Check if connection is busy (in use by an operation)
+		c.mu.Lock()
+		busy := c.busy
+		c.mu.Unlock()
+
+		if busy {
+			// Connection is busy - forward message to operation
 			select {
 			case c.readCh <- msg:
-			default:
-				// Channel full, drop message
+			case <-c.ctx.Done():
+				return
 			}
+		} else {
+			// Connection is idle - handle control messages
+			if messageType == websocket.TextMessage {
+				// Try to parse as control message
+				var ctrlMsg struct {
+					Type string `json:"type"`
+				}
+				if json.Unmarshal(data, &ctrlMsg) == nil {
+					switch ctrlMsg.Type {
+					case "dial":
+						// Server is requesting a new connection - ignore in SDK
+					case "keepalive":
+						// Keepalive message - stay alive
+					default:
+						// Unknown message type
+					}
+				}
+			}
+			// Binary messages while idle are unexpected, ignore
 		}
 	}
 }

@@ -74,6 +74,8 @@ type wsCmd struct {
 	existingConn *websocket.Conn
 	// usingControl indicates if this is using a control connection
 	usingControl bool
+	// controlConn is the control connection wrapper (for reading from readCh)
+	controlConn *controlConn
 }
 
 // wsAdapter wraps a WebSocket connection for terminal communication
@@ -238,6 +240,21 @@ func (c *wsCmd) start() {
 
 	c.startChan <- nil
 	c.runIO()
+
+	// For control connections, consume the operation completion message
+	// This is sent by the wss.Conn layer after the operation completes
+	// We need to read it to keep the connection clean for the next operation
+	if c.usingControl && c.controlConn != nil {
+		// Read from readCh (fed by readLoop)
+		select {
+		case <-c.controlConn.readCh:
+			// Consume and discard the completion message
+		case <-c.ctx.Done():
+			// Context cancelled, don't wait
+		case <-time.After(100 * time.Millisecond):
+			// Timeout - completion message may have already been consumed
+		}
+	}
 }
 
 // waitForSessionInfo reads messages until it receives the session_info message,
@@ -290,6 +307,23 @@ func (c *wsCmd) Wait() error {
 	}
 }
 
+// readMessage reads the next WebSocket message
+// For control connections, reads from the readCh (fed by readLoop)
+// For direct connections, reads directly from the WebSocket
+func (c *wsCmd) readMessage() (messageType int, data []byte, err error) {
+	if c.usingControl && c.controlConn != nil {
+		// Read from the control connection's read channel
+		select {
+		case msg := <-c.controlConn.readCh:
+			return msg.MessageType, msg.Data, nil
+		case <-c.ctx.Done():
+			return 0, nil, c.ctx.Err()
+		}
+	}
+	// Direct WebSocket read
+	return c.conn.ReadMessage()
+}
+
 func (c *wsCmd) runIO() {
 	adapter := c.adapter
 	conn := c.conn
@@ -328,7 +362,7 @@ func (c *wsCmd) runIO() {
 		}
 
 		for {
-			messageType, data, err := conn.ReadMessage()
+			messageType, data, err := c.readMessage()
 			if err != nil {
 				slog.Default().Debug("ws read error", "error", err, "errorType", fmt.Sprintf("%T", err))
 				adapter.Close()
@@ -366,7 +400,7 @@ func (c *wsCmd) runIO() {
 				if json.Unmarshal(data, &info) == nil && info.Type == "session_info" && info.SessionID != "" {
 					c.sessionID = info.SessionID
 				}
-				// Handle control messages
+				// Handle text messages (e.g., port notifications)
 				if c.TextMessageHandler != nil {
 					c.TextMessageHandler(data)
 				}
@@ -389,7 +423,7 @@ func (c *wsCmd) runIO() {
 	}
 
 	for {
-		messageType, data, err := conn.ReadMessage()
+		messageType, data, err := c.readMessage()
 		if err != nil {
 			adapter.Close()
 			return
@@ -397,6 +431,19 @@ func (c *wsCmd) runIO() {
 		// Reset read deadline on any successful read
 		conn.SetReadDeadline(time.Now().Add(wsPongWait))
 		switch messageType {
+		case websocket.TextMessage:
+			// Parse session_info to capture session ID
+			var info struct {
+				Type      string `json:"type"`
+				SessionID string `json:"session_id"`
+			}
+			if json.Unmarshal(data, &info) == nil && info.Type == "session_info" && info.SessionID != "" {
+				c.sessionID = info.SessionID
+			}
+			// Handle text messages (e.g., port notifications)
+			if c.TextMessageHandler != nil {
+				c.TextMessageHandler(data)
+			}
 		case websocket.BinaryMessage:
 			if len(data) == 0 {
 				continue
@@ -418,19 +465,6 @@ func (c *wsCmd) runIO() {
 				}
 				adapter.Close()
 				return
-			}
-		case websocket.TextMessage:
-			// Parse session_info to capture session ID
-			var info struct {
-				Type      string `json:"type"`
-				SessionID string `json:"session_id"`
-			}
-			if json.Unmarshal(data, &info) == nil && info.Type == "session_info" && info.SessionID != "" {
-				c.sessionID = info.SessionID
-			}
-			// Handle control messages
-			if c.TextMessageHandler != nil {
-				c.TextMessageHandler(data)
 			}
 		}
 	}
