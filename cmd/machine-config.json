@@ -5,7 +5,7 @@
     "cpus": 8,
     "memory_mb": 4096,
     "kernel_args": [],
-    "persist_rootfs": "never"
+    "persist_rootfs": "always"
   },
   "metadata": {
     "sprite_config_version": "aa0774c40aaf0224bc69df451997c5f80fe64e590608d696a6d3693158bac768"

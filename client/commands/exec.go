@@ -17,7 +17,7 @@ import (
 
 	"github.com/superfly/sprite-env/client/config"
 	"github.com/superfly/sprite-env/client/format"
-	"github.com/superfly/sprite-env/pkg/terminal"
+	clientterm "github.com/superfly/sprite-env/client/terminal"
 	sprites "github.com/superfly/sprites-go"
 	"golang.org/x/term"
 )
@@ -166,7 +166,7 @@ func ExecCommand(ctx *GlobalContext, args []string) int {
 		// Set up stdin/stdout/stderr for TTY mode
 		spriteCmd.Stdin = os.Stdin
 		browserHandler := makeBrowserOSCHandler()
-		oscMonitor := terminal.NewOSCMonitor(browserHandler)
+		oscMonitor := clientterm.NewOSCMonitor(browserHandler)
 		// Filter remote OSC title updates so our local title stays consistent
 		titleWriter := newOSCTitleFilterWriter(os.Stdout, buildTitle(sprite.Name(), "", ""), ctx.Logger)
 		spriteCmd.Stdout = io.MultiWriter(titleWriter, oscMonitor)
@@ -477,7 +477,7 @@ func attachToSession(ctx *GlobalContext, sprite *sprites.Sprite, sessionID strin
 
 	attachCmd.Stdin = os.Stdin
 	browserHandler := makeBrowserOSCHandler()
-	oscMonitor := terminal.NewOSCMonitor(browserHandler)
+	oscMonitor := clientterm.NewOSCMonitor(browserHandler)
 	// Filter remote OSC title updates so our local title stays consistent
 	titleWriter := newOSCTitleFilterWriter(os.Stdout, buildTitle(sprite.Name(), sessionID, cmdForTitle), ctx.Logger)
 	attachCmd.Stdout = io.MultiWriter(titleWriter, oscMonitor)

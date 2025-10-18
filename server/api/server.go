@@ -11,7 +11,6 @@ import (
 
 	"github.com/superfly/sprite-env/pkg/sync"
 	"github.com/superfly/sprite-env/pkg/tap"
-	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
 var (
@@ -46,10 +45,9 @@ func NewServer(config Config, system SystemManager, ctx context.Context) (*Serve
 	// Create handlers config
 	handlersConfig := HandlerConfig{
 		MaxWaitTime:        config.MaxWaitTime,
-		ExecWrapperCommand: config.ExecWrapperCommand,
+		ContainerEnabled:   config.ContainerEnabled,
 		ProxyLocalhostIPv4: config.ProxyLocalhostIPv4,
 		ProxyLocalhostIPv6: config.ProxyLocalhostIPv6,
-		TMUXManager:        config.TMUXManager,
 	}
 
 	// Create handlers
@@ -201,12 +199,7 @@ func (s *Server) SetAdminChannel(enricher ContextEnricher) {
 	s.contextEnricher = enricher
 }
 
-// SetTMUXManager sets the TMUX manager on the handlers
-func (s *Server) SetTMUXManager(tmuxManager *terminal.TMUXManager) {
-	if s.handlers != nil {
-		s.handlers.SetTMUXManager(tmuxManager)
-	}
-}
+// (tmux manager obtained on-demand from system; no setter needed)
 
 // SetActivityObserver sets a callback to observe request start/end
 func (s *Server) SetActivityObserver(observe func(start bool)) {
@@ -218,7 +211,7 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 	// Note: All endpoints have global authentication applied at the top level
 
 	// Exec endpoint - waits for process to be running
-	mux.HandleFunc("/exec", s.enrichContextMiddleware(s.waitForProcessMiddleware(s.handlers.HandleExec)))
+	mux.HandleFunc("/exec", s.enrichContextMiddleware(s.waitForProcessMiddleware(s.handlers.ExecHandler)))
 
 	mux.HandleFunc("/sync", s.waitForProcessMiddleware(s.syncServer.HandleWebSocket))
 
@@ -381,13 +374,7 @@ func (s *Server) waitForStorageMiddleware(next http.HandlerFunc) http.HandlerFun
 	}
 }
 
-// GetTMUXManager returns the TMUX manager from the handlers
-func (s *Server) GetTMUXManager() *terminal.TMUXManager {
-	if s.handlers != nil {
-		return s.handlers.GetTMUXManager()
-	}
-	return nil
-}
+// (no direct getter; handlers query system as needed)
 
 // authMiddleware wraps an http.Handler with authentication
 // This is exposed for testing purposes

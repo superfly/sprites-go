@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/superfly/sprite-env/pkg/tap"
-	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
 func TestNewServerRequiresAuth(t *testing.T) {
@@ -21,9 +20,8 @@ func TestNewServerRequiresAuth(t *testing.T) {
 
 	// Test that server creation fails without API token
 	config := Config{
-		ListenAddr:  ":8080",
-		APIToken:    "", // No token
-		TMUXManager: terminal.NewTMUXManager(ctx),
+		ListenAddr: ":8080",
+		APIToken:   "", // No token
 	}
 
 	_, err := NewServer(config, systemManager, ctx)

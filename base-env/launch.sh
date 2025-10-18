@@ -237,7 +237,7 @@ CONFIG_JSON='{
     {
       "destination": "/.sprite/tmp",
       "type": "bind",
-      "source": "/dev/fly_vol/local-storage/tmp",
+      "source": "/.sprite/tmp",
       "options": ["rbind"]
     },
     {
@@ -511,24 +511,9 @@ fi
 # Update the config with the user
 CONFIG_JSON=$(echo "$CONFIG_JSON" | jq --argjson uid "$uid" --argjson gid "$gid" '.process.user = {"uid": $uid, "gid": $gid}')
 
-# Prepare current environment variables, filtering APP_RUNNER_*, SPRITE_*, FLY_* and PATH
-# Exclude variables that might interfere with jq processing if they contain newlines or quotes improperly
-current_env_vars=$(env | grep -v '^APP_RUNNER_' | grep -v '^SPRITE_' | grep -v '^FLY_' | grep -v '^PATH=' | grep -v '^CONFIG_JSON=' | grep -v '^APP_IMAGE_CONFIG=' | grep -v '^_=' | grep -v '^PWD=')
-
-# Convert current env and json env to objects, merge them (current overrides json), then back to array
-# This jq command builds KEY:VALUE objects from both env sources, merges them,
-# favouring the current env ($current_obj) over the JSON one ($json_obj),
-# then converts back to ["KEY=VALUE", ...] format. Handles values containing '='.
-merged_env_jq=$(jq -n \
-    --argjson json_env "$json_env_jq" \
-    --arg current_env "$current_env_vars" \
-    'def to_object: map( index("=") as $i | {(.[0:$i]): .[$i+1:]} ) | add;
-     ($json_env | to_object) as $json_obj |
-     ($current_env | split("\n") | map(select(. != "")) | to_object) as $current_obj |
-     ($json_obj + $current_obj) | to_entries | map("\( .key )=\( .value )")')
-
-# Update the config with merged environment variables
-CONFIG_JSON=$(echo "$CONFIG_JSON" | jq --argjson env_vars "$merged_env_jq" '.process.env = $env_vars')
+# Use only the environment variables from the config file (json_env_jq)
+# Don't merge in current environment - keep container environment clean and explicit
+CONFIG_JSON=$(echo "$CONFIG_JSON" | jq --argjson env_vars "$json_env_jq" '.process.env = $env_vars')
 
 # If PATH_APP is set, ensure it overrides PATH in the merged env
 # Note: This comes *after* merging to ensure PATH_APP takes ultimate precedence
@@ -541,6 +526,11 @@ fi
 
 # Write the final config to file
 mkdir -p "${SPRITE_WRITE_DIR}/tmp"
+
+# Generate template process.json mirroring env and cwd from the OCI config
+PROCESS_JSON=$(echo "$CONFIG_JSON" | jq '{terminal:false,args:[],env:.process.env,cwd:.process.cwd}')
+echo "$PROCESS_JSON" > "${SPRITE_WRITE_DIR}/tmp/process.json"
+
 echo "$CONFIG_JSON" > "${SPRITE_WRITE_DIR}/tmp/config.json"
 
 if [ -n "${CONSOLE_SOCKET:-}" ]; then

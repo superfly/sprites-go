@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/superfly/sprite-env/pkg/tap"
-	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
 // Handlers contains all HTTP handlers
@@ -23,49 +22,33 @@ type Handlers struct {
 
 	// Config fields
 	maxWaitTime        time.Duration
-	execWrapperCommand []string
+	containerEnabled   bool
 	proxyLocalhostIPv4 string
 	proxyLocalhostIPv6 string
 
-	// TMUX manager for detachable sessions
-	tmuxManager *terminal.TMUXManager
+	// System will supply tmux manager on demand
+	// (no stored reference to avoid lifecycle/dup problems)
 }
 
 // HandlerConfig holds handler configuration
 type HandlerConfig struct {
 	MaxWaitTime        time.Duration
-	ExecWrapperCommand []string
+	ContainerEnabled   bool
 	ProxyLocalhostIPv4 string
 	ProxyLocalhostIPv6 string
-	TMUXManager        *terminal.TMUXManager // Optional - can be set later via SetTMUXManager
 }
 
 // NewHandlers creates a new Handlers instance
 func NewHandlers(ctx context.Context, system SystemManager, config HandlerConfig) *Handlers {
 	logger := tap.Logger(ctx)
 
-	// TMUXManager is optional - it may be set later
-	tmuxManager := config.TMUXManager
-	if tmuxManager == nil {
-		logger.Warn("NewHandlers called without TMUXManager - terminal operations will be unavailable until set")
-	}
-
 	return &Handlers{
 		logger:             logger,
 		system:             system,
 		maxWaitTime:        config.MaxWaitTime,
-		execWrapperCommand: config.ExecWrapperCommand,
+		containerEnabled:   config.ContainerEnabled,
 		proxyLocalhostIPv4: config.ProxyLocalhostIPv4,
 		proxyLocalhostIPv6: config.ProxyLocalhostIPv6,
-		tmuxManager:        tmuxManager,
-	}
-}
-
-// SetTMUXManager sets the TMUX manager (can be called after handlers are created)
-func (h *Handlers) SetTMUXManager(tmuxManager *terminal.TMUXManager) {
-	h.tmuxManager = tmuxManager
-	if tmuxManager != nil {
-		h.logger.Info("TMUXManager set on handlers")
 	}
 }
 
@@ -160,9 +143,4 @@ func (h *Handlers) getContextEnricher(ctx context.Context) ContextEnricher {
 		return val.(ContextEnricher)
 	}
 	return nil
-}
-
-// GetTMUXManager returns the TMUX manager instance
-func (h *Handlers) GetTMUXManager() *terminal.TMUXManager {
-	return h.tmuxManager
 }

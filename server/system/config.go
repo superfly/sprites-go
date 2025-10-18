@@ -38,7 +38,7 @@ type Config struct {
 	S3Bucket          string
 
 	// Exec
-	ExecWrapperCommand []string
+	ContainerEnabled bool
 
 	// Debug
 	KeepAliveOnError bool // Keep server running when process fails
@@ -198,13 +198,13 @@ func loadConfigFile(filename string, config *Config) error {
 
 	// Define the JSON structure
 	var fileConfig struct {
-		LogLevel           string   `json:"log_level"`
-		LogJSON            bool     `json:"log_json"`
-		APIListen          string   `json:"api_listen_addr"`
-		ProcessCmd         []string `json:"process_command"`
-		ProcessDir         string   `json:"process_working_dir"`
-		ProcessEnv         []string `json:"process_environment"`
-		ExecWrapperCommand []string `json:"exec_wrapper_command"`
+		LogLevel         string   `json:"log_level"`
+		LogJSON          bool     `json:"log_json"`
+		APIListen        string   `json:"api_listen_addr"`
+		ProcessCmd       []string `json:"process_command"`
+		ProcessDir       string   `json:"process_working_dir"`
+		ProcessEnv       []string `json:"process_environment"`
+		ContainerEnabled bool     `json:"container_enabled"`
 
 		// JuiceFS configuration
 		JuiceFSEnabled    bool   `json:"juicefs_enabled"`
@@ -255,7 +255,7 @@ func loadConfigFile(filename string, config *Config) error {
 	config.ProcessCommand = fileConfig.ProcessCmd
 	config.ProcessWorkingDir = fileConfig.ProcessDir
 	config.ProcessEnvironment = fileConfig.ProcessEnv
-	config.ExecWrapperCommand = fileConfig.ExecWrapperCommand
+	config.ContainerEnabled = fileConfig.ContainerEnabled
 
 	config.JuiceFSBaseDir = fileConfig.JuiceFSBaseDir
 	config.JuiceFSLocalMode = fileConfig.JuiceFSLocalMode

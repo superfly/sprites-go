@@ -7,7 +7,6 @@
   "process_environment": [],
   "process_graceful_shutdown_timeout": "30s",
   
-  "exec_wrapper_command": ["/home/sprite/exec.sh", "app"],
   "proxy_localhost_ipv4": "10.0.0.1",
   "proxy_localhost_ipv6": "fdf::1",
   

@@ -69,11 +69,10 @@ func (s *System) initializeAPIServer() error {
 		APIToken:           s.config.APIToken,
 		AdminToken:         s.config.AdminToken,
 		MaxWaitTime:        30 * time.Second,
-		ExecWrapperCommand: s.config.ExecWrapperCommand,
+		ContainerEnabled:   s.config.ContainerEnabled,
 		SyncTargetPath:     syncTargetPath,
 		ProxyLocalhostIPv4: s.config.ProxyLocalhostIPv4,
 		ProxyLocalhostIPv6: s.config.ProxyLocalhostIPv6,
-		TMUXManager:        s.TMUXManager,
 	}
 
 	// API server will be no-op if ListenAddr is empty
@@ -88,6 +87,8 @@ func (s *System) initializeAPIServer() error {
 	}
 
 	s.APIServer = apiServer
+
+	// Do not create tmux manager here; it is initialized in initializeServices()
 	return nil
 }
 

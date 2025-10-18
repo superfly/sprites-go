@@ -1,0 +1,62 @@
+Conversation summary: pkg/cmd design, tests, and findings
+
+Decisions & API
+- New package: pkg/cmd with a small, procedural Runner.
+- Runner.Run(ctx, *exec.Cmd, opts ...Option) (exitCode int, error)
+- Options:
+  - WithStdin(r io.Reader)
+  - WithStdout(w io.Writer)
+  - WithStderr(w io.Writer) (non-TTY only)
+  - WithNewTTY() (alloc PTY; merges stdout+stderr to stdout)
+  - WithTTY(master *os.File) (use provided master; slave wired externally)
+  - WithWaitTTY(func(ctx) (*os.File, error)) (async PTY provider; source-agnostic)
+- Validation: TTY options are mutually exclusive; any TTY mode forbids WithStderr; stdout writer is required.
+
+Execution semantics
+- Non-TTY:
+  - cmd.Stdout/cmd.Stderr set directly to provided writers (no extra goroutines/pipes by us).
+  - Stdin uses a dedicated cancellable loop via StdinPipe (close on EOF/cancel) to avoid races.
+  - Setpgid=true; on ctx cancel kill the process group; return exit after Wait completes.
+- TTY:
+  - WithNewTTY: open master/slave; assign slave to child; SysProcAttr{Setsid, Setctty}; close slave in parent right after Start.
+  - WithTTY: use provided master; assume caller wired slave.
+  - WithWaitTTY: Start child, then obtain master from callback (e.g., fd-pass); proceed as above.
+  - Single read loop from master -> stdout; optional stdin loop to master. Return only after PTY read loop drains post-exit.
+
+Utilities
+- StartReadPump(ctx, src, dst io.WriteCloser) -> <-chan struct{}: EOF-forwarding, cancel-aware stdin copier for edge cases.
+
+Key tests added (aggressive concurrency; GOMAXPROCS(1) in stress cases)
+- Non-TTY basics: stdout/stderr correctness; stdin round-trip (cat); stdin early-close (head -n1).
+- TTY basics: merged output correctness (CRLF normalized); exit code ordering.
+- Large output: MB-scale stdout/stderr (non-TTY) and PTY merged output ordering.
+- Concurrency stress: many concurrent runs with GOMAXPROCS(1), no explicit parallelism limit.
+- WithWaitTTY: error path (provider fails) and success path using a stub PTY provider (test allocates PTY and returns master).
+- TCP bridge: wire Runner stdin/stdout to net.Conn (non-TTY) and merged PTY stream (TTY), tolerating PTY echo.
+- Race stress: cancel during stdin loop (non-TTY and TTY); slow writers; deterministic chunking writer under GOMAXPROCS(1).
+
+Flakiness & mitigations
+1) PTY newline normalization
+- Symptom: TTY assertions saw CRLF (e.g., "out\r\nerr\r\n").
+- Fix: normalize CRLF->LF in TTY test assertions only.
+
+2) stderr redirection in large-output test
+- Symptom: expected stderr size 1MB but got 0.
+- Cause: shell redirection order wrong.
+- Fix: use "... 1>&2 2>/dev/null" so stdout redirects to current stderr before silencing dd progress.
+
+3) Heavy concurrency timeouts under GOMAXPROCS(1)
+- Symptom: timeouts at large N and sizes.
+- Causes: single-OS-thread scheduling; shell+dd overhead.
+- Fix: tuned N and sizes; timeout 15s while keeping unlimited parallelism in other tests.
+
+4) Short-writer flake
+- Symptom: nondeterministic short writes led to dropped bytes.
+- Cause: writer returned short write with nil error (violates io.Writer). io.Copy treats as ErrShortWrite.
+- Fix: deterministic chunking writer that writes all bytes before returning.
+
+Notes
+- Avoid StdoutPipe/StderrPipe; rely on direct writers.
+- Use StdinPipe only for a cancel-aware stdin loop.
+- Close PTY slave in parent after Start in NewTTY to guarantee master EOF at process exit.
+- All pkg/cmd tests pass: go test ./pkg/cmd

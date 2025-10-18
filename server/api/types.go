@@ -2,8 +2,6 @@ package api
 
 import (
 	"time"
-
-	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
 // RequestInfo contains information about a request
@@ -28,8 +26,7 @@ type Config struct {
 	MaxWaitTime time.Duration
 
 	// Exec configuration
-	ExecWrapperCommand []string
-	TMUXManager        *terminal.TMUXManager // Optional, will be passed to handlers
+	ContainerEnabled bool
 
 	// Sync configuration
 	SyncTargetPath string

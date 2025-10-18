@@ -16,12 +16,13 @@ import (
 
 	"github.com/superfly/sprite-env/server/api"
 
+	"github.com/superfly/sprite-env/pkg/container"
 	"github.com/superfly/sprite-env/pkg/db"
 	"github.com/superfly/sprite-env/pkg/juicefs"
 	"github.com/superfly/sprite-env/pkg/overlay"
 	"github.com/superfly/sprite-env/pkg/services"
 	"github.com/superfly/sprite-env/pkg/tap"
-	"github.com/superfly/sprite-env/pkg/terminal"
+	"github.com/superfly/sprite-env/pkg/tmux"
 )
 
 // System is the main system orchestrator
@@ -47,7 +48,7 @@ type System struct {
 	AdminChannel *AdminChannel
 
 	// Terminal
-	TMUXManager *terminal.TMUXManager
+	TMUXManager *tmux.Manager
 
 	// Utilities
 	Reaper          *Reaper
@@ -70,7 +71,7 @@ type System struct {
 	processExitCodeSet  atomic.Bool   // Track if exit code has been set
 	gracefulShutdown    bool
 	restoringInProgress atomic.Bool // Flag to prevent shutdown trigger during restore
-    userEnvMaintenance  atomic.Bool // Flag to prevent global shutdown during container-only ops
+	userEnvMaintenance  atomic.Bool // Flag to prevent global shutdown during container-only ops
 
 	// Shutdown channels
 	shutdownTriggeredCh      chan struct{} // Closed to START shutdown
@@ -239,12 +240,12 @@ func (s *System) monitorProcessLoop() {
 			continue
 		}
 
-        // Process exited - trigger shutdown sequence unless in user-env maintenance
-        if s.userEnvMaintenance.Load() {
-            s.logger.Info("Process exited during user-environment maintenance; not triggering full system shutdown")
-            return
-        }
-        if s.config.KeepAliveOnError {
+		// Process exited - trigger shutdown sequence unless in user-env maintenance
+		if s.userEnvMaintenance.Load() {
+			s.logger.Info("Process exited during user-environment maintenance; not triggering full system shutdown")
+			return
+		}
+		if s.config.KeepAliveOnError {
 			s.logger.Info("Process exited, but keeping server alive (SPRITE_KEEP_ALIVE_ON_ERROR=true)")
 			s.logger.Info("Server is still running and accepting API requests")
 		} else {
@@ -413,6 +414,21 @@ func (s *System) initializeProcessManagement() error {
 	// The process-related fields are already initialized in New()
 	// This method exists for consistency with other initialization methods
 	return nil
+}
+
+// WrapContainer wraps the command for container execution if ContainerEnabled.
+// If not enabled, returns the original command.
+func (s *System) WrapContainer(cmd *exec.Cmd, tty bool) *exec.Cmd {
+	if !s.config.ContainerEnabled {
+		return cmd
+	}
+	wrapped := container.Wrap(cmd, "app", container.WithTTY(tty))
+	return wrapped.Cmd
+}
+
+// GetTMUXManager returns the tmux manager instance
+func (s *System) GetTMUXManager() *tmux.Manager {
+	return s.TMUXManager
 }
 
 // GetOverlayManager returns the overlay manager (may be nil)

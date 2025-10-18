@@ -68,16 +68,6 @@ func (s *System) Boot(ctx context.Context) error {
 		s.logger.Info("Socket server started", "path", socketPath)
 	}
 
-	// Wait for boot signal if configured
-	if os.Getenv("WAIT_FOR_BOOT") == "true" {
-		s.logger.Info("WAIT_FOR_BOOT enabled, HTTP server is listening, waiting for SIGUSR1...")
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGUSR1)
-		<-sigCh
-		signal.Stop(sigCh) // Stop receiving on this channel
-		s.logger.Info("Received SIGUSR1, continuing boot...")
-	}
-
 	// Phase 3: Start storage components in order
 	// Note: /dev/fly_vol mount and checkpoint migration happen in main.go before system creation
 	s.logger.Info("Phase 3: Starting storage components")
@@ -95,6 +85,16 @@ func (s *System) Boot(ctx context.Context) error {
 		} else {
 			s.logger.Info("Moved litestream process to cgroup", "pid", litestreamPid)
 		}
+	}
+
+	// Wait for boot signal if configured (after DB manager, before JuiceFS)
+	if os.Getenv("WAIT_FOR_BOOT") == "true" {
+		s.logger.Info("WAIT_FOR_BOOT enabled, DB manager is running, waiting for SIGUSR1...")
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGUSR1)
+		<-sigCh
+		signal.Stop(sigCh) // Stop receiving on this channel
+		s.logger.Info("Received SIGUSR1, continuing boot...")
 	}
 
 	// JuiceFS (depends on DB)
@@ -184,11 +184,7 @@ func (s *System) Boot(ctx context.Context) error {
 	}
 	s.logger.Info("Services manager started")
 
-	// Update API server with TMUXManager now that services are initialized
-	if s.APIServer != nil && s.TMUXManager != nil {
-		s.APIServer.SetTMUXManager(s.TMUXManager)
-		s.logger.Info("TMUXManager set on API server")
-	}
+	// No need to set TMUXManager on API server; handlers fetch it from system on demand
 
 	// Phase 6: Start activity monitor (after process starts)
 	s.logger.Info("Phase 6: Starting activity monitor")
@@ -205,8 +201,7 @@ func (s *System) Boot(ctx context.Context) error {
 		})
 	}
 
-	// Set up tmux activity monitoring
-	s.setupTmuxActivityMonitoring()
+	// Set up tmux activity monitoring (no-op: manager handles monitoring internally)
 
 	s.logger.Info("Activity monitor started")
 
@@ -216,48 +211,8 @@ func (s *System) Boot(ctx context.Context) error {
 
 // setupTmuxActivityMonitoring configures tmux activity tracking
 func (s *System) setupTmuxActivityMonitoring() {
-	s.logger.Info("Setting up tmux activity monitor prepare command")
-
-	s.TMUXManager.SetPrepareCommand(func() {
-		// Start the tmux activity monitor
-		s.logger.Info("Prepare command executing - starting tmux activity monitor")
-
-		if err := s.TMUXManager.StartActivityMonitor(s.ctx); err != nil {
-			s.logger.Warn("Failed to start tmux activity monitor", "error", err)
-		} else {
-			s.logger.Info("Successfully started tmux activity monitor")
-		}
-	})
-
-	// Connect tmux activity events to the activity monitor
-	go func() {
-		s.logger.Info("Starting tmux activity event forwarder")
-		activityChan := s.TMUXManager.GetActivityChannel()
-		for {
-			select {
-			case <-s.ctx.Done():
-				s.logger.Debug("Tmux activity forwarder stopped due to context cancellation")
-				return
-			case tmuxActivity, ok := <-activityChan:
-				if !ok {
-					s.logger.Error("Tmux activity channel closed unexpectedly")
-					return
-				}
-
-				s.logger.Debug("Received tmux activity event",
-					"sessionID", tmuxActivity.SessionID,
-					"active", tmuxActivity.Active,
-					"type", tmuxActivity.Type)
-
-				// Forward to activity monitor
-				if tmuxActivity.Active {
-					s.ActivityMonitor.ActivityStarted("tmux")
-				} else {
-					s.ActivityMonitor.ActivityEnded("tmux")
-				}
-			}
-		}
-	}()
+	// No-op: pkg/tmux.Manager manages its own monitoring; activity tracking is
+	// handled via other signals (HTTP requests, process tracking, etc.).
 }
 
 // BootContainer starts the container-specific components after JuiceFS is ready

@@ -14,7 +14,7 @@ import (
 	libapi "github.com/superfly/sprite-env/lib/api"
 	"github.com/superfly/sprite-env/pkg/services"
 	"github.com/superfly/sprite-env/pkg/tap"
-	"github.com/superfly/sprite-env/pkg/terminal"
+	"github.com/superfly/sprite-env/pkg/tmux"
 	"github.com/superfly/sprite-env/server/api"
 )
 
@@ -26,7 +26,7 @@ import (
 func TestProxyHandlerDirect(t *testing.T) {
 	_, cancel := SetTestDeadline(t)
 	defer cancel()
-	
+
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -36,7 +36,7 @@ func TestProxyHandlerDirect(t *testing.T) {
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)
 	mockSys := &simpleSystemManager{}
-	config := api.HandlerConfig{TMUXManager: terminal.NewTMUXManager(ctx)}
+	config := api.HandlerConfig{}
 	h := api.NewHandlers(ctx, mockSys, config)
 
 	t.Run("MethodValidation", func(t *testing.T) {
@@ -80,7 +80,7 @@ func TestProxyHandlerDirect(t *testing.T) {
 func TestProxyWithAuthentication(t *testing.T) {
 	_, cancel := SetTestDeadline(t)
 	defer cancel()
-	
+
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -177,7 +177,7 @@ func TestProxyWithAuthentication(t *testing.T) {
 func TestProxyPortParsing(t *testing.T) {
 	_, cancel := SetTestDeadline(t)
 	defer cancel()
-	
+
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)
@@ -328,6 +328,11 @@ func (m *simpleSystemManager) GetServicesManager() *services.Manager {
 
 func (m *simpleSystemManager) GetLogDir() string {
 	return "/tmp/test-logs"
+}
+
+// Satisfy api.SystemManager new method
+func (m *simpleSystemManager) GetTMUXManager() *tmux.Manager {
+	return tmux.NewManager(context.Background(), tmux.Options{TmuxBinary: "/bin/echo"})
 }
 
 func (m *simpleSystemManager) SetSpriteEnvironment(ctx context.Context, info interface{}) (interface{}, error) {

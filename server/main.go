@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/superfly/sprite-env/pkg/container"
 	"github.com/superfly/sprite-env/server/system"
 )
 
@@ -54,6 +55,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Failed to create system: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Initialize container process template once (warns if missing)
+	container.InitProcessTemplateFromEnv()
 
 	// Set system reference in crash handler for panic recovery shutdown
 	if crashHandler != nil {

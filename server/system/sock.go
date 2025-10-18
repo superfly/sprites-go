@@ -30,10 +30,9 @@ func NewSockServer(ctx context.Context, system *System, logDir string) (*SockSer
 	// Create API handlers to reuse checkpoint and service endpoint logic
 	handlersConfig := api.HandlerConfig{
 		MaxWaitTime:        30 * time.Second,
-		ExecWrapperCommand: system.config.ExecWrapperCommand,
+		ContainerEnabled:   system.config.ContainerEnabled,
 		ProxyLocalhostIPv4: system.config.ProxyLocalhostIPv4,
 		ProxyLocalhostIPv6: system.config.ProxyLocalhostIPv6,
-		TMUXManager:        system.TMUXManager,
 	}
 	apiHandlers := api.NewHandlers(ctx, system, handlersConfig)
 

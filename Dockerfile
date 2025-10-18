@@ -89,7 +89,7 @@ RUN sh autogen.sh && \
 
 # Create the sprite bin directory and copy tmux
 RUN mkdir -p /system/.sprite/bin && \
-    cp tmux /system/.sprite/bin/
+    cp tmux /system/.sprite/bin/tmux
 
 # Download and install gh CLI with appropriate architecture
 RUN ARCH=$(uname -m) && \
@@ -113,10 +113,10 @@ FROM ghcr.io/superfly/juicefs:d5c2495 as juicefs
 FROM alpine:latest AS assemble-system
 
 # First copy from utility-builder
-COPY --from=utility-builder /system /system
+COPY --from=utility-builder --chown=$UID:$UID /system /system
 
 # Then copy base-env/system from context (this will merge/overwrite)
-COPY base-env/system/ /system/
+COPY --chown=$UID:$UID base-env/system/ /system/
 
 # Final stage - based on juicedata/mount which includes juicefs
 FROM ubuntu:25.04

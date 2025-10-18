@@ -1,3 +1,5 @@
+# Exclude old/ from test/builds
+old/
 # TLA+ generated files and directories
 *.out
 *.st

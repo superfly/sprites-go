@@ -4,8 +4,11 @@ import (
 	"fmt"
 	"time"
 
+	"os/exec"
+
+	"github.com/superfly/sprite-env/pkg/container"
 	"github.com/superfly/sprite-env/pkg/services"
-	"github.com/superfly/sprite-env/pkg/terminal"
+	"github.com/superfly/sprite-env/pkg/tmux"
 )
 
 // initializeServices initializes service components
@@ -38,26 +41,23 @@ func (s *System) initializeServicesManager() error {
 		return err
 	}
 
-	// Set command prefix if configured
-	if len(s.config.ExecWrapperCommand) > 0 {
-		servicesManager.SetCmdPrefix(s.config.ExecWrapperCommand)
-	}
-
 	s.ServicesManager = servicesManager
 	return nil
 }
 
 // initializeTMUXManager creates the TMUX manager
 func (s *System) initializeTMUXManager() error {
-	// Always create TMUX manager
-	tmuxManager := terminal.NewTMUXManager(s.ctx)
-
-	// Set command prefix if configured
-	if len(s.config.ExecWrapperCommand) > 0 {
-		tmuxManager.SetCmdPrefix(s.config.ExecWrapperCommand)
+	// Always create a single tmux.Manager instance
+	if s.TMUXManager == nil {
+		opts := tmux.Options{}
+		// Wrap tmux invocations inside the container environment when enabled
+		if s.config != nil && s.config.ContainerEnabled {
+			opts.WrapCmd = func(c *exec.Cmd) *exec.Cmd {
+				return container.Wrap(c, "app", container.WithTTY(false)).Cmd
+			}
+		}
+		s.TMUXManager = tmux.NewManager(s.ctx, opts)
 	}
-
-	s.TMUXManager = tmuxManager
 	return nil
 }
 

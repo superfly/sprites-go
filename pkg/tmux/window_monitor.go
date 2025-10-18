@@ -21,11 +21,11 @@ type WindowMonitor struct {
 	activityStats  map[string]*ActivityStats // sessionID -> stats
 	mu             sync.RWMutex
 	eventChan      chan WindowMonitorEvent
-	socketPath     string        // tmux socket path
-	configPath     string        // tmux config path
-	cmdPrefix      []string      // Command prefix for container execution
-	tmuxBinary     string        // Path to tmux binary
-	closed         chan struct{} // Signal that monitor has closed
+	socketPath     string                    // tmux socket path
+	configPath     string                    // tmux config path
+	cmdPath        string                    // Path to tmux binary (unwrapped)
+	wrapCmd        func(*exec.Cmd) *exec.Cmd // Optional wrapper (e.g., container.Wrap)
+	closed         chan struct{}             // Signal that monitor has closed
 	closeOnce      sync.Once
 }
 
@@ -70,9 +70,9 @@ func NewWindowMonitor(ctx context.Context, monitorSession string) *WindowMonitor
 		linkedWindows:  make(map[string]string),
 		activityStats:  make(map[string]*ActivityStats),
 		eventChan:      make(chan WindowMonitorEvent, 1000),
-		socketPath:     "/.sprite/tmp/exec-tmux",
-		configPath:     "/.sprite/etc/tmux.conf",
-		tmuxBinary:     "tmux", // Default to tmux in PATH
+		socketPath:     "", // Must be set explicitly
+		configPath:     "", // Must be set explicitly
+		cmdPath:        "", // Must be set explicitly via WithCommand
 		closed:         make(chan struct{}),
 	}
 }
@@ -89,27 +89,40 @@ func (wm *WindowMonitor) WithConfigPath(path string) *WindowMonitor {
 	return wm
 }
 
-// WithCmdPrefix sets a command prefix for container execution
-func (wm *WindowMonitor) WithCmdPrefix(prefix []string) *WindowMonitor {
-	wm.cmdPrefix = prefix
+// WithCommand sets the base command to use for tmux execution
+// Extracts the Path and binary name for creating fresh commands
+func (wm *WindowMonitor) WithCommand(cmd *exec.Cmd) *WindowMonitor {
+	// Capture only the base executable path; wrapping is handled via wrapCmd
+	wm.cmdPath = cmd.Path
 	return wm
 }
 
-// WithTmuxBinary sets a custom tmux binary path (mainly for testing)
-func (wm *WindowMonitor) WithTmuxBinary(path string) *WindowMonitor {
-	wm.tmuxBinary = path
+// WithWrap sets a wrapper function to run tmux commands inside a container
+func (wm *WindowMonitor) WithWrap(wrap func(*exec.Cmd) *exec.Cmd) *WindowMonitor {
+	wm.wrapCmd = wrap
 	return wm
 }
 
-// buildTmuxCommand constructs an exec.Cmd for running tmux with the configured prefix
+// buildTmuxCommand constructs an exec.Cmd for running tmux with the provided args
 func (wm *WindowMonitor) buildTmuxCommand(tmuxArgs []string) *exec.Cmd {
-	if len(wm.cmdPrefix) > 0 {
-		// Use prefix for container execution (e.g., crun exec app /.sprite/bin/tmux ...)
-		allArgs := append([]string{wm.tmuxBinary}, tmuxArgs...)
-		return exec.Command(wm.cmdPrefix[0], append(wm.cmdPrefix[1:], allArgs...)...)
+	// Build raw tmux command first
+	cmd := exec.Command(wm.cmdPath, tmuxArgs...)
+	if wm.wrapCmd != nil {
+		if wrapped := wm.wrapCmd(cmd); wrapped != nil {
+			if wm.logger != nil {
+				wm.logger.Debug("WindowMonitor: wrapped tmux command",
+					"fullCommand", wrapped.String(),
+					"path", wrapped.Path,
+					"args", wrapped.Args)
+			}
+			return wrapped
+		}
+		if wm.logger != nil {
+			wm.logger.Error("WindowMonitor: wrapCmd returned nil; panicking")
+		}
+		panic("window monitor: wrapCmd returned nil for tmux command")
 	}
-	// Direct execution without prefix
-	return exec.Command(wm.tmuxBinary, tmuxArgs...)
+	return cmd
 }
 
 // Start begins monitoring all windows
@@ -130,42 +143,29 @@ func (wm *WindowMonitor) Start(ctx context.Context) error {
 		"socketPath", wm.socketPath,
 		"configPath", wm.configPath)
 
-	// First, try to create the monitor session using regular tmux command (not control mode)
+	// Step 1: Create the session detached
 	createArgs := []string{}
 	if wm.configPath != "" {
 		createArgs = append(createArgs, "-f", wm.configPath)
 	}
 	createArgs = append(createArgs, "-S", wm.socketPath, "new-session", "-d", "-s", wm.monitorSession)
 
-	// Use /.sprite/bin/tmux in production (indicated by default socket path)
-	// In test environments with custom socket paths, use the configured binary
-	if wm.tmuxBinary == "tmux" && strings.HasPrefix(wm.socketPath, "/.sprite/") {
-		wm.tmuxBinary = "/.sprite/bin/tmux"
-	}
-	wm.logger.Debug("Using tmux binary",
-		"path", wm.tmuxBinary,
-		"cmdPrefix", wm.cmdPrefix)
-
 	createCmd := wm.buildTmuxCommand(createArgs)
 
-	wm.logger.Debug("Creating tmux monitor session",
+	wm.logger.Debug("WindowMonitor: exec",
 		"fullCommand", createCmd.String(),
-		"args", createArgs)
+		"path", createCmd.Path,
+		"args", createCmd.Args)
 
 	if output, err := createCmd.CombinedOutput(); err != nil {
 		// Session might already exist, which is fine
 		wm.logger.Debug("Session creation returned error (might already exist)",
 			"session", wm.monitorSession,
 			"error", err,
-			"output", string(output),
-			"cmd", createCmd.String())
-	} else {
-		wm.logger.Debug("Created new monitor session",
-			"session", wm.monitorSession,
 			"output", string(output))
 	}
 
-	// Now attach to the session in control mode
+	// Step 2: Attach to the session in control mode
 	attachArgs := []string{}
 	if wm.configPath != "" {
 		attachArgs = append(attachArgs, "-f", wm.configPath)
@@ -174,9 +174,10 @@ func (wm *WindowMonitor) Start(ctx context.Context) error {
 
 	attachCmd := wm.buildTmuxCommand(attachArgs)
 
-	wm.logger.Info("Attaching to tmux control mode",
+	wm.logger.Debug("WindowMonitor: exec",
 		"fullCommand", attachCmd.String(),
-		"args", attachArgs)
+		"path", attachCmd.Path,
+		"args", attachCmd.Args)
 
 	parser, err := NewTmuxControlModeParser(attachCmd, wm.logger)
 	if err != nil {
@@ -186,7 +187,7 @@ func (wm *WindowMonitor) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to attach to tmux control mode: %w", err)
 	}
 
-	wm.logger.Info("Successfully created tmux control mode parser")
+	wm.logger.Debug("Successfully created tmux control mode parser")
 
 	wm.parser = parser
 
@@ -223,12 +224,18 @@ func (wm *WindowMonitor) monitorLoop(ctx context.Context) {
 		close(wm.eventChan)
 	}()
 
+	// Cache the events channel to avoid race with Close() setting parser to nil
+	events := wm.parser.Events()
+
 	for {
 		select {
 		case <-ctx.Done():
 			wm.logger.Debug("Window monitor loop stopped due to context cancellation")
 			return
-		case event, ok := <-wm.parser.Events():
+		case <-wm.closed:
+			wm.logger.Debug("Window monitor loop stopped due to close signal")
+			return
+		case event, ok := <-events:
 			if !ok {
 				// Parser events channel closed - process has exited
 				// Check if there was an error from the parser
@@ -262,12 +269,12 @@ func (wm *WindowMonitor) handleEvent(event TmuxEvent) {
 	switch e := event.(type) {
 	case SessionsChangedEvent:
 		// Sessions have changed (added/removed), discover new windows
-		wm.logger.Info("Sessions changed event received, discovering windows")
+		wm.logger.Debug("Sessions changed event received, discovering windows")
 		go wm.discoverAndLinkWindows()
 
 	case WindowAddEvent:
 		// A new window was added to some session, check if we need to link it
-		wm.logger.Info("Window added event received", "windowID", e.WindowID)
+		wm.logger.Debug("Window added event received", "windowID", e.WindowID)
 		go wm.discoverAndLinkWindows()
 
 	case PaneOutputEvent:
@@ -319,10 +326,9 @@ func (wm *WindowMonitor) handleEvent(event TmuxEvent) {
 		originalSession := wm.linkedWindows[e.WindowID]
 		delete(wm.linkedWindows, e.WindowID)
 
-		// Clean up activity stats
+		// Clean up activity stats (originalSession is already the user session ID)
 		if originalSession != "" {
-			cleanSessionID := strings.TrimPrefix(originalSession, "$")
-			delete(wm.activityStats, cleanSessionID)
+			delete(wm.activityStats, originalSession)
 		}
 		wm.mu.Unlock()
 
@@ -343,10 +349,9 @@ func (wm *WindowMonitor) handleEvent(event TmuxEvent) {
 		originalSession := wm.linkedWindows[e.WindowID]
 		delete(wm.linkedWindows, e.WindowID)
 
-		// Clean up activity stats
+		// Clean up activity stats (originalSession is already the user session ID)
 		if originalSession != "" {
-			cleanSessionID := strings.TrimPrefix(originalSession, "$")
-			delete(wm.activityStats, cleanSessionID)
+			delete(wm.activityStats, originalSession)
 		}
 		wm.mu.Unlock()
 
@@ -471,7 +476,7 @@ func (wm *WindowMonitor) discoverAndLinkWindows() {
 	}
 
 	if newWindows > 0 {
-		wm.logger.Info("Discovered and linked new windows", "count", newWindows, "totalWindows", totalWindows)
+		wm.logger.Debug("Discovered and linked new windows", "count", newWindows, "totalWindows", totalWindows)
 		// Refresh panes after linking new windows
 		if wm.parser != nil {
 			wm.parser.ListPanes()
@@ -499,7 +504,25 @@ func (wm *WindowMonitor) linkWindow(windowID, originalSessionID string) error {
 
 	// Store the mapping
 	wm.mu.Lock()
-	wm.linkedWindows[windowID] = originalSessionID
+	// Store cleaned session ID (without $ prefix) for consistency
+	cleanSessionID := strings.TrimPrefix(originalSessionID, "$")
+	wm.linkedWindows[windowID] = cleanSessionID
+
+	// Initialize activity stats for the newly linked session
+	if _, exists := wm.activityStats[cleanSessionID]; !exists {
+		now := time.Now()
+		wm.activityStats[cleanSessionID] = &ActivityStats{
+			SessionID:    cleanSessionID,
+			StartTime:    now,
+			LastActivity: now,
+			IsActive:     true, // New sessions start as active
+			dataPoints:   make([]activityDataPoint, 0, 100),
+		}
+		wm.logger.Debug("Initialized activity stats for newly linked session",
+			"sessionID", cleanSessionID,
+			"originalSessionID", originalSessionID,
+			"windowID", windowID)
+	}
 	wm.mu.Unlock()
 
 	// Send new window event
@@ -551,12 +574,13 @@ func (wm *WindowMonitor) updateActivityStats(sessionID string, byteCount int) {
 	defer wm.mu.Unlock()
 
 	// Extract session ID from format like "$1" -> "1"
+	// Defensive: handle both formats for robustness
 	cleanSessionID := strings.TrimPrefix(sessionID, "$")
 
 	now := time.Now()
 	stats, exists := wm.activityStats[cleanSessionID]
 	if !exists {
-		wm.logger.Info("Creating new activity stats for session",
+		wm.logger.Debug("Creating new activity stats for session",
 			"sessionID", cleanSessionID,
 			"originalFormat", sessionID)
 		stats = &ActivityStats{
@@ -571,7 +595,7 @@ func (wm *WindowMonitor) updateActivityStats(sessionID string, byteCount int) {
 		// Send active event for new session
 		select {
 		case wm.eventChan <- WindowMonitorEvent{
-			OriginalSession: sessionID,
+			OriginalSession: cleanSessionID,
 			EventType:       "active",
 		}:
 			wm.logger.Debug("Sent active event for new session", "sessionID", cleanSessionID)
@@ -580,7 +604,7 @@ func (wm *WindowMonitor) updateActivityStats(sessionID string, byteCount int) {
 		}
 	} else if !stats.IsActive {
 		// Session was inactive and is now active again
-		wm.logger.Info("Session became active again",
+		wm.logger.Debug("Session became active again",
 			"sessionID", cleanSessionID,
 			"wasInactive", true)
 		stats.IsActive = true
@@ -588,7 +612,7 @@ func (wm *WindowMonitor) updateActivityStats(sessionID string, byteCount int) {
 		// Send active event
 		select {
 		case wm.eventChan <- WindowMonitorEvent{
-			OriginalSession: sessionID,
+			OriginalSession: cleanSessionID,
 			EventType:       "active",
 		}:
 			wm.logger.Debug("Sent active event for reactivated session", "sessionID", cleanSessionID)
@@ -707,7 +731,7 @@ func (wm *WindowMonitor) activityTimeoutChecker(ctx context.Context) {
 				inactiveDuration := now.Sub(stats.LastActivity)
 				// Check if session has been inactive for more than 5 seconds
 				if stats.IsActive && inactiveDuration > 5*time.Second {
-					wm.logger.Info("Session became inactive due to timeout",
+					wm.logger.Debug("Session became inactive due to timeout",
 						"sessionID", sessionID,
 						"inactiveDuration", inactiveDuration,
 						"lastActivity", stats.LastActivity)

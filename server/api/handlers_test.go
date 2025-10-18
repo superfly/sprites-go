@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/superfly/sprite-env/pkg/tap"
-	"github.com/superfly/sprite-env/pkg/terminal"
 )
 
 // Test NewHandlers constructor
@@ -20,10 +19,7 @@ func TestNewHandlers(t *testing.T) {
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)
 
-	config := HandlerConfig{
-		MaxWaitTime: 30 * time.Second,
-		TMUXManager: terminal.NewTMUXManager(ctx),
-	}
+	config := HandlerConfig{MaxWaitTime: 30 * time.Second}
 	mockSys := &mockSystemManager{}
 
 	h := NewHandlers(ctx, mockSys, config)
@@ -39,7 +35,7 @@ func TestHandleCheckpointMethod(t *testing.T) {
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)
 
-	config := HandlerConfig{TMUXManager: terminal.NewTMUXManager(ctx)}
+	config := HandlerConfig{}
 	mockSys := newMockSystemManager()
 	h := NewHandlers(ctx, mockSys, config)
 
@@ -63,7 +59,7 @@ func TestHandleCheckpointRestoreMethod(t *testing.T) {
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)
 
-	config := HandlerConfig{TMUXManager: terminal.NewTMUXManager(ctx)}
+	config := HandlerConfig{}
 	mockSys := newMockSystemManager()
 	h := NewHandlers(ctx, mockSys, config)
 
@@ -87,7 +83,7 @@ func TestHandleProxyMethod(t *testing.T) {
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)
 
-	config := HandlerConfig{TMUXManager: terminal.NewTMUXManager(ctx)}
+	config := HandlerConfig{}
 	mockSys := &mockSystemManager{}
 	h := NewHandlers(ctx, mockSys, config)
 
@@ -112,7 +108,7 @@ func TestHandleProxyGetMethod(t *testing.T) {
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)
 
-	config := HandlerConfig{TMUXManager: terminal.NewTMUXManager(ctx)}
+	config := HandlerConfig{}
 	mockSys := &mockSystemManager{}
 	h := NewHandlers(ctx, mockSys, config)
 
@@ -139,7 +135,7 @@ func TestHandleDebugCreateZombieMethod(t *testing.T) {
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)
 
-	config := HandlerConfig{TMUXManager: terminal.NewTMUXManager(ctx)}
+	config := HandlerConfig{}
 	mockSys := &mockSystemManager{}
 	h := NewHandlers(ctx, mockSys, config)
 
@@ -163,7 +159,7 @@ func TestHandleDebugCheckProcessMethod(t *testing.T) {
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)
 
-	config := HandlerConfig{TMUXManager: terminal.NewTMUXManager(ctx)}
+	config := HandlerConfig{}
 	mockSys := &mockSystemManager{}
 	h := NewHandlers(ctx, mockSys, config)
 

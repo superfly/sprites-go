@@ -7,6 +7,7 @@ import (
 
 	"github.com/superfly/sprite-env/lib/api"
 	"github.com/superfly/sprite-env/pkg/services"
+	"github.com/superfly/sprite-env/pkg/tmux"
 )
 
 // SystemManager interface provides methods for managing the system (process + storage)
@@ -48,6 +49,9 @@ type SystemManager interface {
 	// Services management
 	GetServicesManager() *services.Manager
 	GetLogDir() string
+
+	// Terminal management
+	GetTMUXManager() *tmux.Manager
 
 	// Sprite environment management
 	// Takes a sprite info struct (JSON-compatible), returns a response struct (JSON-compatible)

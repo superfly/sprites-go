@@ -15,7 +15,7 @@ import (
 	"github.com/superfly/sprite-env/lib/api"
 	"github.com/superfly/sprite-env/pkg/services"
 	"github.com/superfly/sprite-env/pkg/tap"
-	"github.com/superfly/sprite-env/pkg/terminal"
+	"github.com/superfly/sprite-env/pkg/tmux"
 )
 
 // mockSystemManager implements SystemManager for testing
@@ -31,6 +31,10 @@ func newMockSystemManager() *mockSystemManager {
 		reapedProcesses: make(map[int]time.Time),
 		reapListeners:   make([]chan int, 0),
 	}
+}
+
+func (m *mockSystemManager) GetTMUXManager() *tmux.Manager {
+	return tmux.NewManager(context.Background(), tmux.Options{TmuxBinary: "/bin/echo"})
 }
 
 func (m *mockSystemManager) IsProcessRunning() bool {
@@ -201,7 +205,7 @@ func TestHandleDebugCreateZombie(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)
-	config := HandlerConfig{TMUXManager: terminal.NewTMUXManager(ctx)}
+	config := HandlerConfig{}
 	mockSys := newMockSystemManager()
 	h := NewHandlers(ctx, mockSys, config)
 
@@ -257,7 +261,7 @@ func TestHandleDebugCheckProcess(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)
-	config := HandlerConfig{TMUXManager: terminal.NewTMUXManager(ctx)}
+	config := HandlerConfig{}
 	mockSys := newMockSystemManager()
 	h := NewHandlers(ctx, mockSys, config)
 

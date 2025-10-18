@@ -82,7 +82,8 @@ func TestWindowMonitorBasic(t *testing.T) {
 	ctx = tap.WithLogger(ctx, logger)
 	wm := NewWindowMonitor(ctx, "test-monitor").
 		WithSocketPath(socketPath).
-		WithConfigPath("") // No config file for tests
+		WithConfigPath(""). // No config file for tests
+		WithCommand(exec.Command("tmux"))
 
 	// Start the monitor with modified commands
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -191,7 +192,8 @@ func TestWindowMonitorMultipleSessions(t *testing.T) {
 	ctx = tap.WithLogger(ctx, logger)
 	wm := NewWindowMonitor(ctx, "test-monitor").
 		WithSocketPath(socketPath).
-		WithConfigPath("") // No config file for tests
+		WithConfigPath(""). // No config file for tests
+		WithCommand(exec.Command("tmux"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -203,6 +205,13 @@ func TestWindowMonitorMultipleSessions(t *testing.T) {
 
 	// Wait for discovery
 	time.Sleep(1 * time.Second)
+
+	// Check if windows were linked
+	linkedWindows := wm.GetLinkedWindows()
+	t.Logf("Linked windows after discovery: %d", len(linkedWindows))
+	for windowID, sessionID := range linkedWindows {
+		t.Logf("  Window %s -> Session %s", windowID, sessionID)
+	}
 
 	// Send output to each session
 	for i, session := range sessions {
@@ -256,7 +265,8 @@ func TestWindowMonitorNewWindowDetection(t *testing.T) {
 	ctx = tap.WithLogger(ctx, logger)
 	wm := NewWindowMonitor(ctx, "test-monitor").
 		WithSocketPath(socketPath).
-		WithConfigPath("") // No config file for tests
+		WithConfigPath(""). // No config file for tests
+		WithCommand(exec.Command("tmux"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -315,7 +325,8 @@ func TestWindowMonitorWindowClose(t *testing.T) {
 	ctx = tap.WithLogger(ctx, logger)
 	wm := NewWindowMonitor(ctx, "test-monitor").
 		WithSocketPath(socketPath).
-		WithConfigPath("") // No config file for tests
+		WithConfigPath(""). // No config file for tests
+		WithCommand(exec.Command("tmux"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

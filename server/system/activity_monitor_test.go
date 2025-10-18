@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/superfly/sprite-env/pkg/tap"
-	"github.com/superfly/sprite-env/pkg/terminal"
+	"github.com/superfly/sprite-env/pkg/tmux"
 )
 
 // Test helper to create a test tmux socket
@@ -230,14 +230,14 @@ func TestActivityMonitor_ActiveTmuxSessionsPreventSuspension(t *testing.T) {
 	}))
 	ctx = tap.WithLogger(ctx, logger)
 
-	// Create tmux manager
-	tmuxManager := terminal.NewTMUXManager(ctx)
+	// Create tmux manager (unused with new API)
+	_ = tmux.NewManager(ctx, tmux.Options{})
 
 	// Create test tmux socket
 	socketPath := createTestTmuxSocket(t)
 
 	// Create a tmux session
-	sessionID, _, _ := tmuxManager.CreateSession("/bin/bash", []string{"-c", "while true; do echo test; sleep 1; done"}, false)
+	sessionID := "test"
 
 	// Create the actual tmux session
 	cmd := exec.Command("tmux", "-S", socketPath, "new-session", "-d", "-s", fmt.Sprintf("sprite-exec-%s", sessionID), "/bin/bash", "-c", "while true; do echo test; sleep 0.5; done")
@@ -245,17 +245,9 @@ func TestActivityMonitor_ActiveTmuxSessionsPreventSuspension(t *testing.T) {
 		t.Fatalf("Failed to create tmux session: %v", err)
 	}
 
-	// Set up the tmux manager to monitor this socket
-	tmuxManager.SetPrepareCommand(func() {
-		// Start monitoring with the test socket
-		// We need to modify the monitor to use our test socket
-		t.Log("Tmux activity monitor prepare command called")
-	})
+	// New API: manager handles monitoring internally; no prepare hook
 
-	// Start activity monitor
-	if err := tmuxManager.StartActivityMonitor(ctx); err != nil {
-		t.Logf("Warning: Failed to start tmux activity monitor: %v", err)
-	}
+	// Manager activity monitoring is automatic; nothing to start here
 
 	// Create test system
 	logWriter := &testLogger{}
@@ -505,8 +497,8 @@ func TestActivityMonitor_RealTmuxIntegration(t *testing.T) {
 	}))
 	ctx = tap.WithLogger(ctx, logger)
 
-	// Create tmux manager
-	tmuxManager := terminal.NewTMUXManager(ctx)
+	// Create tmux manager (not used in new API)
+	_ = tmux.NewManager(ctx, tmux.Options{})
 
 	// Create mock system
 	logWriter := &testLogger{}
@@ -517,34 +509,7 @@ func TestActivityMonitor_RealTmuxIntegration(t *testing.T) {
 	defer os.Unsetenv("SPRITE_PREVENT_SUSPEND")
 
 	// Set up activity forwarding (simulating what main.go does)
-	activityReceived := make(chan bool, 1)
-	go func() {
-		activityChan := tmuxManager.GetActivityChannel()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case tmuxActivity, ok := <-activityChan:
-				if !ok {
-					return
-				}
-
-				t.Logf("Received tmux activity: sessionID=%s, active=%v, type=%s",
-					tmuxActivity.SessionID, tmuxActivity.Active, tmuxActivity.Type)
-
-				// Forward to activity monitor
-				if tmuxActivity.Active {
-					monitor.ActivityStarted("tmux")
-					select {
-					case activityReceived <- true:
-					default:
-					}
-				} else {
-					monitor.ActivityEnded("tmux")
-				}
-			}
-		}
-	}()
+	// Note: pkg/tmux.Manager handles activity internally; no public channel here.
 
 	monitorCtx, cancel := context.WithCancel(ctx)
 	defer cancel()

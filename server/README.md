@@ -353,7 +353,7 @@ The `-config` option accepts a JSON file with the following structure:
   "process_command": ["/app/start.sh"],
   "process_working_dir": "/app",
   "process_environment": ["NODE_ENV=production"],
-  "exec_wrapper_command": ["crun", "exec", "-t", "app"],
+  "container_enabled": true,
   
   "juicefs_enabled": true,
   "juicefs_base_dir": "/var/lib/sprite/juicefs",
@@ -382,7 +382,7 @@ The `-config` option accepts a JSON file with the following structure:
 - `process_working_dir` - Working directory for the process
 - `process_environment` - Additional environment variables
 - `process_graceful_shutdown_timeout` - Timeout for graceful shutdown
-- `exec_wrapper_command` - Command wrapper for exec API
+- `container_enabled` - Enable container-based command execution via crun
 
 #### JuiceFS Configuration
 - `juicefs_enabled` - Enable JuiceFS filesystem (default: true if base_dir is set)
