@@ -69,15 +69,22 @@ func (s *Sprite) ensureControlSupport(ctx context.Context) {
 
 	// Try to establish a control connection to test support
 	pool := s.client.getOrCreatePool(s.name)
+	if url, err := pool.buildControlURL(); err == nil {
+		dbg("sprites: attempting control connect", "sprite", s.name, "url", url.String())
+	} else {
+		dbg("sprites: control url build failed", "sprite", s.name, "err", err)
+	}
 	conn, err := pool.dial(ctx)
 	if err != nil {
 		// Control connections not supported (404 or other error)
+		dbg("sprites: control not available", "sprite", s.name, "err", err)
 		s.supportsControl = false
 		return
 	}
 
 	// Success - control connections are supported
 	s.supportsControl = true
+	dbg("sprites: control supported", "sprite", s.name)
 
 	// Add this initial connection to the pool
 	conn.mu.Lock()
