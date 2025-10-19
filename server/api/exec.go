@@ -87,20 +87,20 @@ func (h *Handlers) ExecHandler(w http.ResponseWriter, r *http.Request) {
 	// Build final command considering tmux detachable/attach
 	finalCmd := baseCmd
 	var monitoredSessionID string
-    if h.system != nil {
-        if tm := h.system.GetTMUXManager(); tm != nil {
-		if sessionID != "" {
-			// Attach flow builds full command
-			finalCmd = tm.AttachCmd(sessionID, controlMode)
-			monitoredSessionID = sessionID
-		} else if detachable {
-			// New detachable session
-			cmd, newID := tm.NewSessionCmd(baseCmd, controlMode)
-			finalCmd = cmd
-			monitoredSessionID = newID
+	if h.system != nil {
+		if tm := h.system.GetTMUXManager(); tm != nil {
+			if sessionID != "" {
+				// Attach flow builds full command
+				finalCmd = tm.AttachCmd(sessionID, controlMode)
+				monitoredSessionID = sessionID
+			} else if detachable {
+				// New detachable session
+				cmd, newID := tm.NewSessionCmd(baseCmd, controlMode)
+				finalCmd = cmd
+				monitoredSessionID = newID
+			}
 		}
-        }
-    }
+	}
 
 	// Wrap for container last, and avoid double-wrapping if tmux manager already wrapped
 	var wrapped *container.WrappedCommand
@@ -208,8 +208,8 @@ func (h *Handlers) ExecHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// If tmux is engaged, wire pane PID lifecycle and seed existing panes
-    if h.system != nil && monitoredSessionID != "" && h.system.GetTMUXManager() != nil && watcher != nil {
-        tm := h.system.GetTMUXManager()
+	if h.system != nil && monitoredSessionID != "" && h.system.GetTMUXManager() != nil && watcher != nil {
+		tm := h.system.GetTMUXManager()
 		tm.SetPaneCallback(monitoredSessionID, func(_ string, panePID int, added bool) {
 			if added {
 				_ = watcher.AddPID(panePID)
@@ -226,8 +226,8 @@ func (h *Handlers) ExecHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Cleanup
 	defer func() {
-        if h.system != nil && monitoredSessionID != "" && h.system.GetTMUXManager() != nil {
-            h.system.GetTMUXManager().RemovePaneCallback(monitoredSessionID)
+		if h.system != nil && monitoredSessionID != "" && h.system.GetTMUXManager() != nil {
+			h.system.GetTMUXManager().RemovePaneCallback(monitoredSessionID)
 		}
 		if watcher != nil {
 			watcher.Stop()

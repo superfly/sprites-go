@@ -256,16 +256,21 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 	// Admin endpoints
 	mux.HandleFunc("/admin/reset-state", s.handlers.HandleAdminResetState)
 
-	// Sprite environment endpoint - POST /v1/sprites/:name/environment
-	// Waits for storage to be ready (needs JuiceFS for sprite.db)
+	// Sprite environment and control endpoints under /v1/sprites/:name/
 	mux.HandleFunc("/v1/sprites/", s.waitForStorageMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		// Only handle paths matching /v1/sprites/:name/environment
+		// Handle /v1/sprites/:name/environment and /v1/sprites/:name/control
 		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-		if len(parts) == 4 && parts[0] == "v1" && parts[1] == "sprites" && parts[3] == "environment" {
-			s.handlers.HandleSetSpriteEnvironment(w, r)
-		} else {
-			http.NotFound(w, r)
+		if len(parts) == 4 && parts[0] == "v1" && parts[1] == "sprites" {
+			switch parts[3] {
+			case "environment":
+				s.handlers.HandleSetSpriteEnvironment(w, r)
+				return
+			case "control":
+				s.handlers.HandleControl(w, r)
+				return
+			}
 		}
+		http.NotFound(w, r)
 	}))
 }
 
