@@ -213,6 +213,9 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 	// Exec endpoint - waits for process to be running
 	mux.HandleFunc("/exec", s.enrichContextMiddleware(s.waitForProcessMiddleware(s.handlers.ExecHandler)))
 
+	// Control endpoint (after stripSpritePrefix this path handles /v1/sprites/:name/control)
+	mux.HandleFunc("/control", s.enrichContextMiddleware(s.waitForProcessMiddleware(s.handlers.HandleControl)))
+
 	mux.HandleFunc("/sync", s.waitForProcessMiddleware(s.syncServer.HandleWebSocket))
 
 	// Checkpoint endpoint - waits for storage to be ready
@@ -256,19 +259,14 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 	// Admin endpoints
 	mux.HandleFunc("/admin/reset-state", s.handlers.HandleAdminResetState)
 
-	// Sprite environment and control endpoints under /v1/sprites/:name/
+	// Sprite environment endpoint under /v1/sprites/:name/
+	// Note: stripSpritePrefix will convert "/v1/sprites/:name/environment" to "/environment"; we keep this
+	// handler to catch direct (non-stripped) calls in tests or other callers.
 	mux.HandleFunc("/v1/sprites/", s.waitForStorageMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		// Handle /v1/sprites/:name/environment and /v1/sprites/:name/control
 		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-		if len(parts) == 4 && parts[0] == "v1" && parts[1] == "sprites" {
-			switch parts[3] {
-			case "environment":
-				s.handlers.HandleSetSpriteEnvironment(w, r)
-				return
-			case "control":
-				s.handlers.HandleControl(w, r)
-				return
-			}
+		if len(parts) == 4 && parts[0] == "v1" && parts[1] == "sprites" && parts[3] == "environment" {
+			s.handlers.HandleSetSpriteEnvironment(w, r)
+			return
 		}
 		http.NotFound(w, r)
 	}))
