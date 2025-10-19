@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"sync"
@@ -31,15 +30,15 @@ type controlPool struct {
 
 // controlConn represents a control WebSocket connection
 type controlConn struct {
-	ws         *websocket.Conn
-	mu         sync.Mutex
-	busy       bool
-	lastUsed   time.Time
-	ctx        context.Context
-	cancel     context.CancelFunc
-	readCh     chan controlMessage
-	closedCh   chan struct{}
-	closeOnce  sync.Once
+	ws        *websocket.Conn
+	mu        sync.Mutex
+	busy      bool
+	lastUsed  time.Time
+	ctx       context.Context
+	cancel    context.CancelFunc
+	readCh    chan controlMessage
+	closedCh  chan struct{}
+	closeOnce sync.Once
 }
 
 // controlMessage represents a message on the control connection
@@ -76,12 +75,14 @@ func (p *controlPool) checkout(ctx context.Context) (*controlConn, error) {
 				// Connection is closed, remove it
 				conn.mu.Unlock()
 				p.conns = append(p.conns[:i], p.conns[i+1:]...)
+				dbg("sprites: removed closed control conn", "sprite", p.spriteName, "pool", len(p.conns))
 				continue
 			default:
 			}
 
 			conn.busy = true
 			conn.mu.Unlock()
+			dbg("sprites: checkout control conn", "sprite", p.spriteName, "pool", len(p.conns))
 			return conn, nil
 		}
 		conn.mu.Unlock()
@@ -95,6 +96,7 @@ func (p *controlPool) checkout(ctx context.Context) (*controlConn, error) {
 		}
 		conn.busy = true
 		p.conns = append(p.conns, conn)
+		dbg("sprites: dialed new control conn", "sprite", p.spriteName, "pool", len(p.conns))
 		return conn, nil
 	}
 
@@ -112,6 +114,7 @@ func (p *controlPool) checkin(conn *controlConn) {
 
 	conn.busy = false
 	conn.lastUsed = time.Now()
+	dbg("sprites: checkin control conn", "sprite", p.spriteName, "idle_at", conn.lastUsed.Unix())
 }
 
 // dial creates a new control WebSocket connection
@@ -140,11 +143,17 @@ func (p *controlPool) dial(ctx context.Context) (*controlConn, error) {
 	header.Set("Authorization", fmt.Sprintf("Bearer %s", p.client.token))
 	header.Set("User-Agent", "sprites-go-sdk/1.0")
 
-	// Connect to WebSocket
-	ws, _, err := dialer.DialContext(ctx, wsURL.String(), header)
-	if err != nil {
-		return nil, fmt.Errorf("failed to dial control connection: %w", err)
-	}
+    // Connect to WebSocket
+    ws, resp, err := dialer.DialContext(ctx, wsURL.String(), header)
+    if err != nil {
+        // Enrich error with HTTP status/body when available
+        if resp != nil {
+            body, _ := io.ReadAll(resp.Body)
+            _ = resp.Body.Close()
+            return nil, fmt.Errorf("failed to dial control connection: %v (HTTP %d: %s)", err, resp.StatusCode, string(body))
+        }
+        return nil, fmt.Errorf("failed to dial control connection: %v", err)
+    }
 
 	connCtx, cancel := context.WithCancel(context.Background())
 
@@ -160,10 +169,7 @@ func (p *controlPool) dial(ctx context.Context) (*controlConn, error) {
 	// Start read loop
 	go conn.readLoop()
 
-	slog.Default().Debug("Created new control connection",
-		"sprite", p.spriteName,
-		"pool_size", len(p.conns)+1,
-	)
+	dbg("sprites: created control conn", "sprite", p.spriteName, "pool_size", len(p.conns)+1)
 
 	return conn, nil
 }
