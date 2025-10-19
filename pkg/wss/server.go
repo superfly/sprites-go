@@ -63,7 +63,6 @@ type controller struct {
 
 	mu        sync.Mutex
 	busy      bool
-	opDoneCh  chan struct{}
 	events    chan controlEnvelope
 	closeCh   chan struct{}
 	preOpBuf  chan inboundMsg
@@ -84,7 +83,6 @@ func newController(logger *slog.Logger, conn *gorillaws.Conn, router *Router) *c
 		logger:   logger,
 		conn:     conn,
 		router:   router,
-		opDoneCh: make(chan struct{}),
 		events:   make(chan controlEnvelope, 8),
 		closeCh:  make(chan struct{}),
 		// Bounded buffers: backpressure via readPump blocking when full
@@ -307,7 +305,6 @@ func (c *controller) startOperation(ctx context.Context, op string, args url.Val
 		c.mu.Lock()
 		c.busy = false
 		c.mu.Unlock()
-		close(c.opDoneCh)
 	}()
 	return nil
 }
