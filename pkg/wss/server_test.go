@@ -284,7 +284,7 @@ func TestSequentialOpsReuseConnection(t *testing.T) {
 	payload1 := []byte("first-payload")
 	_ = conn.WriteMessage(gorillaws.BinaryMessage, payload1)
 
-	// Expect echo of op1 payload and then op.complete
+    // Expect echo of op1 payload and then op.complete (dropped may be present but not required)
 	sawEcho1 := false
 	sawComplete1 := false
 	deadline := time.Now().Add(3 * time.Second)
@@ -298,7 +298,7 @@ func TestSequentialOpsReuseConnection(t *testing.T) {
 			sawEcho1 = true
 			continue
 		}
-		if mt == gorillaws.TextMessage && strings.HasPrefix(string(data), "control:") && strings.Contains(string(data), "op.complete") {
+        if mt == gorillaws.TextMessage && strings.HasPrefix(string(data), "control:") && strings.Contains(string(data), "op.complete") {
 			sawComplete1 = true
 			continue
 		}

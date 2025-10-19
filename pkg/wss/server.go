@@ -79,11 +79,11 @@ func newController(logger *slog.Logger, conn *gorillaws.Conn, router *Router) *c
 		router = NewRouter()
 	}
 	return &controller{
-		logger:   logger,
-		conn:     conn,
-		router:   router,
-		events:   make(chan controlEnvelope, 8),
-		closeCh:  make(chan struct{}),
+		logger:  logger,
+		conn:    conn,
+		router:  router,
+		events:  make(chan controlEnvelope, 8),
+		closeCh: make(chan struct{}),
 		// Bounded buffers: backpressure via readPump blocking when full
 		activeBuf: make(chan inboundMsg, 256),
 	}
@@ -279,15 +279,31 @@ func (c *controller) startOperation(ctx context.Context, op string, args url.Val
 	go func() {
 		defer cancel()
 		err := h(opCtx, oc, args)
-		if err != nil {
-			_ = c.sendControl(controlEnvelope{Type: "op.complete", ID: cid, Args: map[string]any{"ok": false, "error": err.Error()}})
-		} else {
-			_ = c.sendControl(controlEnvelope{Type: "op.complete", ID: cid, Args: map[string]any{"ok": true}})
-		}
-		// Mark idle
+		// Mark idle first to stop further routing to activeBuf
 		c.mu.Lock()
 		c.busy = false
 		c.mu.Unlock()
+
+		// Drain any leftover inbound messages for this op
+		dropped := 0
+		for {
+			select {
+			case <-c.activeBuf:
+				dropped++
+			default:
+				goto SEND_COMPLETE
+			}
+		}
+
+	SEND_COMPLETE:
+		resp := map[string]any{"ok": err == nil}
+		if err != nil {
+			resp["error"] = err.Error()
+		}
+		if dropped > 0 {
+			resp["dropped"] = dropped
+		}
+		_ = c.sendControl(controlEnvelope{Type: "op.complete", ID: cid, Args: resp})
 	}()
 	return nil
 }
