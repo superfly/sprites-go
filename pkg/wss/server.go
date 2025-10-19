@@ -65,7 +65,6 @@ type controller struct {
 	busy      bool
 	events    chan controlEnvelope
 	closeCh   chan struct{}
-	preOpBuf  chan inboundMsg
 	activeBuf chan inboundMsg
 	writeMu   sync.Mutex
 }
@@ -86,7 +85,6 @@ func newController(logger *slog.Logger, conn *gorillaws.Conn, router *Router) *c
 		events:   make(chan controlEnvelope, 8),
 		closeCh:  make(chan struct{}),
 		// Bounded buffers: backpressure via readPump blocking when full
-		preOpBuf:  make(chan inboundMsg, 64),
 		activeBuf: make(chan inboundMsg, 256),
 	}
 }
@@ -193,7 +191,6 @@ func (c *controller) readPump(ctx context.Context) {
 				continue
 			}
 			// Signal close by closing buffers
-			close(c.preOpBuf)
 			close(c.activeBuf)
 			return
 		}
@@ -214,7 +211,8 @@ func (c *controller) readPump(ctx context.Context) {
 		if busy {
 			c.activeBuf <- inboundMsg{msgType: mt, data: data}
 		} else {
-			c.preOpBuf <- inboundMsg{msgType: mt, data: data}
+			// No active operation: reject non-control frames
+			_ = c.sendControl(controlEnvelope{Type: "op.error", Args: map[string]any{"code": "op.not_active", "message": "no operation active; send control:op.start"}})
 		}
 	}
 }
@@ -276,21 +274,6 @@ func (c *controller) startOperation(ctx context.Context, op string, args url.Val
 	// Build op context and opConn
 	opCtx, cancel := context.WithCancel(ctx)
 	oc := &opConn{ctl: c}
-
-	// Before starting, drain any pre-op frames into active buffer to preserve order
-	drain := true
-	for drain {
-		select {
-		case m, ok := <-c.preOpBuf:
-			if !ok {
-				drain = false
-				break
-			}
-			c.activeBuf <- m
-		default:
-			drain = false
-		}
-	}
 
 	// Run handler
 	go func() {

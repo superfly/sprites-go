@@ -131,20 +131,9 @@ func TestURLParamAutoStart(t *testing.T) {
 	}
 }
 
-func TestPreOpBufferingAndEcho(t *testing.T) {
+func TestRejectFramesWhenNoOp(t *testing.T) {
 	router := NewRouter()
-	router.Handle("echo", func(ctx context.Context, c OpConn, args url.Values) error {
-		// First message should be the one sent before op.start
-		mt, data, err := c.ReadMessage()
-		if err != nil {
-			return err
-		}
-		if mt != gorillaws.TextMessage || string(data) != "hello-pre" {
-			t.Fatalf("unexpected pre-op frame: %d %q", mt, string(data))
-		}
-		// Echo back a binary response so test can assert
-		return c.WriteMessage(gorillaws.BinaryMessage, []byte{1, 'o', 'k'})
-	})
+	router.Handle("noop", func(ctx context.Context, c OpConn, args url.Values) error { return nil })
 	s := &Server{Router: router}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/control", func(w http.ResponseWriter, r *http.Request) { s.Handle(w, r) })
@@ -154,24 +143,18 @@ func TestPreOpBufferingAndEcho(t *testing.T) {
 	conn := dialWS(t, ts, "/control")
 	defer conn.Close()
 
-	// Send a normal text message before starting
+	// Send a data frame before starting any op; expect an op.error
 	_ = conn.WriteMessage(gorillaws.TextMessage, []byte("hello-pre"))
-	// Now start op
-	_ = conn.WriteMessage(gorillaws.TextMessage, []byte(`control:{"type":"op.start","id":"1","op":"echo"}`))
-
-	// Skip acks, expect binary echo
 	deadline := time.Now().Add(2 * time.Second)
 	_ = conn.SetReadDeadline(deadline)
-	for {
+	sawError := false
+	for !sawError {
 		mt, data, err := conn.ReadMessage()
 		if err != nil {
 			t.Fatalf("read failed: %v", err)
 		}
-		if mt == gorillaws.BinaryMessage {
-			if len(data) == 3 && data[0] == 1 && string(data[1:]) == "ok" {
-				return
-			}
-			t.Fatalf("unexpected binary echo: %v %q", data, string(data))
+		if mt == gorillaws.TextMessage && strings.HasPrefix(string(data), "control:") && strings.Contains(string(data), "op.error") && strings.Contains(string(data), "op.not_active") {
+			sawError = true
 		}
 	}
 }
@@ -179,13 +162,13 @@ func TestPreOpBufferingAndEcho(t *testing.T) {
 func TestMalformedControlFallsThrough(t *testing.T) {
 	router := NewRouter()
 	router.Handle("catch", func(ctx context.Context, c OpConn, args url.Values) error {
-		// Expect to first receive the malformed control text frame
+		// Expect to first receive a data frame after start
 		mt, data, err := c.ReadMessage()
 		if err != nil {
 			return err
 		}
-		if mt != gorillaws.TextMessage || !strings.HasPrefix(string(data), "control:") {
-			t.Fatalf("expected fallthrough control text, got %d %q", mt, string(data))
+		if mt != gorillaws.TextMessage || !strings.HasPrefix(string(data), "hello:") {
+			t.Fatalf("expected text data after start, got %d %q", mt, string(data))
 		}
 		return nil
 	})
@@ -198,18 +181,31 @@ func TestMalformedControlFallsThrough(t *testing.T) {
 	conn := dialWS(t, ts, "/control")
 	defer conn.Close()
 
-	// Malformed control
+	// Malformed control before any op should produce op.not_active error
 	_ = conn.WriteMessage(gorillaws.TextMessage, []byte("control: not-json"))
-	// Start op
-	_ = conn.WriteMessage(gorillaws.TextMessage, []byte(`control:{"type":"op.start","id":"1","op":"catch"}`))
-
-	// Consume acks and ensure handler returns without error
 	deadline := time.Now().Add(2 * time.Second)
+	_ = conn.SetReadDeadline(deadline)
+	sawNotActive := false
+	for !sawNotActive {
+		mt, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read failed: %v", err)
+		}
+		if mt == gorillaws.TextMessage && strings.HasPrefix(string(data), "control:") && strings.Contains(string(data), "op.not_active") {
+			sawNotActive = true
+		}
+	}
+
+	// Now start the op and send a data text frame
+	_ = conn.WriteMessage(gorillaws.TextMessage, []byte(`control:{"type":"op.start","id":"1","op":"catch"}`))
+	_ = conn.WriteMessage(gorillaws.TextMessage, []byte("hello:data"))
+
+	// Wait for op.complete
+	deadline = time.Now().Add(2 * time.Second)
 	_ = conn.SetReadDeadline(deadline)
 	for {
 		mt, data, err := conn.ReadMessage()
 		if err != nil {
-			// if connection closes or no more frames, test passes
 			return
 		}
 		if mt == gorillaws.TextMessage && strings.Contains(string(data), "op.complete") {
@@ -264,79 +260,75 @@ func TestControlDuringActiveOpNotDelivered(t *testing.T) {
 }
 
 func TestSequentialOpsReuseConnection(t *testing.T) {
-    router := NewRouter()
-    // Handler reads one message then echoes it back with same message type
-    router.Handle("bounce", func(ctx context.Context, c OpConn, args url.Values) error {
-        mt, data, err := c.ReadMessage()
-        if err != nil {
-            return err
-        }
-        return c.WriteMessage(mt, data)
-    })
-    s := &Server{Router: router}
-    mux := http.NewServeMux()
-    mux.HandleFunc("/control", func(w http.ResponseWriter, r *http.Request) { s.Handle(w, r) })
-    ts := httptest.NewServer(mux)
-    defer ts.Close()
+	router := NewRouter()
+	// Handler reads one message then echoes it back with same message type
+	router.Handle("bounce", func(ctx context.Context, c OpConn, args url.Values) error {
+		mt, data, err := c.ReadMessage()
+		if err != nil {
+			return err
+		}
+		return c.WriteMessage(mt, data)
+	})
+	s := &Server{Router: router}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/control", func(w http.ResponseWriter, r *http.Request) { s.Handle(w, r) })
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
 
-    conn := dialWS(t, ts, "/control")
-    defer conn.Close()
+	conn := dialWS(t, ts, "/control")
+	defer conn.Close()
 
-    // Start op1
-    _ = conn.WriteMessage(gorillaws.TextMessage, []byte(`control:{"type":"op.start","id":"1","op":"bounce"}`))
-    // Send binary payload for op1
-    payload1 := []byte("first-payload")
-    _ = conn.WriteMessage(gorillaws.BinaryMessage, payload1)
+	// Start op1
+	_ = conn.WriteMessage(gorillaws.TextMessage, []byte(`control:{"type":"op.start","id":"1","op":"bounce"}`))
+	// Send binary payload for op1
+	payload1 := []byte("first-payload")
+	_ = conn.WriteMessage(gorillaws.BinaryMessage, payload1)
 
-    // Expect echo of op1 payload and then op.complete
-    sawEcho1 := false
-    sawComplete1 := false
-    deadline := time.Now().Add(3 * time.Second)
-    _ = conn.SetReadDeadline(deadline)
-    for !(sawEcho1 && sawComplete1) {
-        mt, data, err := conn.ReadMessage()
-        if err != nil {
-            t.Fatalf("read failed: %v", err)
-        }
-        if mt == gorillaws.BinaryMessage && string(data) == string(payload1) {
-            sawEcho1 = true
-            continue
-        }
-        if mt == gorillaws.TextMessage && strings.HasPrefix(string(data), "control:") && strings.Contains(string(data), "op.complete") {
-            sawComplete1 = true
-            continue
-        }
-    }
+	// Expect echo of op1 payload and then op.complete
+	sawEcho1 := false
+	sawComplete1 := false
+	deadline := time.Now().Add(3 * time.Second)
+	_ = conn.SetReadDeadline(deadline)
+	for !(sawEcho1 && sawComplete1) {
+		mt, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read failed: %v", err)
+		}
+		if mt == gorillaws.BinaryMessage && string(data) == string(payload1) {
+			sawEcho1 = true
+			continue
+		}
+		if mt == gorillaws.TextMessage && strings.HasPrefix(string(data), "control:") && strings.Contains(string(data), "op.complete") {
+			sawComplete1 = true
+			continue
+		}
+	}
 
-    // While idle (no op), send a pre-op message that should be delivered first to op2
-    pre := "between-ops"
-    _ = conn.WriteMessage(gorillaws.TextMessage, []byte(pre))
+	// Start op2, then send data, expect echo
+	_ = conn.WriteMessage(gorillaws.TextMessage, []byte(`control:{"type":"op.start","id":"2","op":"bounce"}`))
+	payload2 := []byte("second")
+	_ = conn.WriteMessage(gorillaws.BinaryMessage, payload2)
+	sawEcho2 := false
+	deadline = time.Now().Add(3 * time.Second)
+	_ = conn.SetReadDeadline(deadline)
+	for !sawEcho2 {
+		mt, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read failed: %v", err)
+		}
+		if mt == gorillaws.BinaryMessage && string(data) == string(payload2) {
+			sawEcho2 = true
+			break
+		}
+	}
 
-    // Start op2
-    _ = conn.WriteMessage(gorillaws.TextMessage, []byte(`control:{"type":"op.start","id":"2","op":"bounce"}`))
-
-    // Expect the echo of the pre-op text first
-    sawEcho2 := false
-    deadline = time.Now().Add(3 * time.Second)
-    _ = conn.SetReadDeadline(deadline)
-    for !sawEcho2 {
-        mt, data, err := conn.ReadMessage()
-        if err != nil {
-            t.Fatalf("read failed: %v", err)
-        }
-        if mt == gorillaws.TextMessage && string(data) == pre {
-            sawEcho2 = true
-            break
-        }
-    }
-
-    // Ensure connection is still open by starting and completing a tiny op3 quickly
-    _ = conn.WriteMessage(gorillaws.TextMessage, []byte(`control:{"type":"op.start","id":"3","op":"bounce"}`))
-    _ = conn.WriteMessage(gorillaws.BinaryMessage, []byte("ok"))
-    // Read a couple messages to confirm activity
-    for i := 0; i < 2; i++ {
-        if _, _, err := conn.ReadMessage(); err != nil {
-            t.Fatalf("unexpected close: %v", err)
-        }
-    }
+	// Ensure connection is still open by starting and completing a tiny op3 quickly
+	_ = conn.WriteMessage(gorillaws.TextMessage, []byte(`control:{"type":"op.start","id":"3","op":"bounce"}`))
+	_ = conn.WriteMessage(gorillaws.BinaryMessage, []byte("ok"))
+	// Read a couple messages to confirm activity
+	for i := 0; i < 2; i++ {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			t.Fatalf("unexpected close: %v", err)
+		}
+	}
 }
