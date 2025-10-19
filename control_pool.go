@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"sync"
@@ -143,17 +144,17 @@ func (p *controlPool) dial(ctx context.Context) (*controlConn, error) {
 	header.Set("Authorization", fmt.Sprintf("Bearer %s", p.client.token))
 	header.Set("User-Agent", "sprites-go-sdk/1.0")
 
-    // Connect to WebSocket
-    ws, resp, err := dialer.DialContext(ctx, wsURL.String(), header)
-    if err != nil {
-        // Enrich error with HTTP status/body when available
-        if resp != nil {
-            body, _ := io.ReadAll(resp.Body)
-            _ = resp.Body.Close()
-            return nil, fmt.Errorf("failed to dial control connection: %v (HTTP %d: %s)", err, resp.StatusCode, string(body))
-        }
-        return nil, fmt.Errorf("failed to dial control connection: %v", err)
-    }
+	// Connect to WebSocket
+	ws, resp, err := dialer.DialContext(ctx, wsURL.String(), header)
+	if err != nil {
+		// Enrich error with HTTP status/body when available
+		if resp != nil {
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("failed to dial control connection: %v (HTTP %d: %s)", err, resp.StatusCode, string(body))
+		}
+		return nil, fmt.Errorf("failed to dial control connection: %v", err)
+	}
 
 	connCtx, cancel := context.WithCancel(context.Background())
 

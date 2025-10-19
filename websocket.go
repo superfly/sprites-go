@@ -133,20 +133,42 @@ func (c *wsCmd) start() {
 
 		// Send operation start message for control connections
 		if c.usingControl {
-			startMsg := map[string]interface{}{
-				"type":      "start",
-				"operation": "exec",
-				"params": map[string]interface{}{
-					"cmd":        c.Args, // Full command with args (e.g. ["echo", "hello"])
-					"path":       c.Path,
-					"env":        c.Env,
-					"dir":        c.Dir,
-					"tty":        c.Tty,
-					"stdin":      c.Stdin != nil,
-					"keep_alive": true,
-				},
+			// Build args map using strings to match server url.Values conversion
+			args := map[string]interface{}{}
+			if len(c.Args) > 0 {
+				arr := make([]interface{}, len(c.Args))
+				for i, v := range c.Args {
+					arr[i] = v
+				}
+				args["cmd"] = arr
+				args["path"] = c.Path
 			}
-			if err := conn.WriteJSON(&startMsg); err != nil {
+			if len(c.Env) > 0 {
+				env := make([]interface{}, len(c.Env))
+				for i, v := range c.Env {
+					env[i] = v
+				}
+				args["env"] = env
+			}
+			if c.Dir != "" {
+				args["dir"] = c.Dir
+			}
+			if c.Tty {
+				args["tty"] = "true"
+			}
+			if c.Stdin != nil {
+				args["stdin"] = "true"
+			}
+			// Construct control envelope
+			env := map[string]interface{}{
+				"type": "op.start",
+				"op":   "exec",
+				"args": args,
+			}
+			b, _ := json.Marshal(env)
+			payload := append([]byte("control:"), b...)
+			dbg("sprites: sending control op.start", "args_len", len(b))
+			if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
 				c.startChan <- fmt.Errorf("failed to send operation start message: %w", err)
 				return
 			}
@@ -303,12 +325,22 @@ func (c *wsCmd) runIO() {
 	// Non-PTY mode - handle stream-based I/O
 	if c.Stdin != nil {
 		go func() {
-			stdinWriter := &streamWriter{ws: adapter, streamID: StreamStdin}
-			io.Copy(stdinWriter, c.Stdin)
-			adapter.WriteStream(StreamStdinEOF, []byte{})
+			if c.usingControl && c.controlConn != nil {
+				// For control connections, send raw bytes and then a single-byte EOF marker (0x04)
+				rw := &rawWriter{ws: adapter}
+				n, _ := io.Copy(rw, c.Stdin)
+				dbg("sprites: sent stdin bytes", "n", n)
+				adapter.WriteRaw([]byte{byte(StreamStdinEOF)})
+				dbg("sprites: sent stdin EOF")
+			} else {
+				stdinWriter := &streamWriter{ws: adapter, streamID: StreamStdin}
+				n, _ := io.Copy(stdinWriter, c.Stdin)
+				dbg("sprites: sent stdin bytes (legacy)", "n", n)
+				adapter.WriteStream(StreamStdinEOF, []byte{})
+			}
 		}()
-	} else {
-		// Send EOF immediately if no stdin is provided
+	} else if !(c.usingControl && c.controlConn != nil) {
+		// For legacy direct connections, send EOF immediately if no stdin is provided
 		go func() {
 			adapter.WriteStream(StreamStdinEOF, []byte{})
 		}()
@@ -322,7 +354,11 @@ func (c *wsCmd) runIO() {
 		}
 		switch messageType {
 		case websocket.TextMessage:
-			// Handle text messages (e.g., port notifications)
+			// Handle text messages (e.g., port notifications). Ignore server control frames.
+			if len(data) >= len("control:") && string(data[:len("control:")]) == "control:" {
+				// ignore control envelope; completion is observed via exit stream
+				continue
+			}
 			if c.TextMessageHandler != nil {
 				c.TextMessageHandler(data)
 			}
@@ -340,6 +376,7 @@ func (c *wsCmd) runIO() {
 			case StreamExit:
 				if len(payload) > 0 {
 					code := int(payload[0])
+					dbg("sprites: observed exit", "code", code)
 					select {
 					case c.exitChan <- code:
 					default:
@@ -491,6 +528,18 @@ type streamWriter struct {
 func (w *streamWriter) Write(p []byte) (int, error) {
 	err := w.ws.WriteStream(w.streamID, p)
 	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+// rawWriter writes raw bytes without any stream framing
+type rawWriter struct {
+	ws *wsAdapter
+}
+
+func (w *rawWriter) Write(p []byte) (int, error) {
+	if err := w.ws.WriteRaw(p); err != nil {
 		return 0, err
 	}
 	return len(p), nil

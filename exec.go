@@ -190,6 +190,7 @@ func (c *Cmd) Start() error {
 			// Successfully got a control connection
 			usingControl = true
 			c.controlMode = true
+			dbg("sprites: using control conn for exec", "sprite", c.sprite.name)
 		}
 	}
 
@@ -308,6 +309,7 @@ func (c *Cmd) Wait() error {
 		c.controlConn.sendRelease()
 		pool := c.sprite.client.getOrCreatePool(c.sprite.name)
 		pool.checkin(c.controlConn)
+		dbg("sprites: returned control conn after exec", "sprite", c.sprite.name)
 		c.controlConn = nil
 	}
 
