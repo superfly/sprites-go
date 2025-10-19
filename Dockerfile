@@ -44,7 +44,7 @@ ARG VERSION
 # Also build the client
 RUN cd client && \
     CGO_ENABLED=0 GOOS=linux go build \
-    -ldflags="-w -s" \
+    -ldflags="-w -s -X main.Version=${VERSION}" \
     -o ../sprite .
 
 

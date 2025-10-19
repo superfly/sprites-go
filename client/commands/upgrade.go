@@ -173,10 +173,11 @@ func runUpgrade(globalCtx *GlobalContext, checkOnly, force bool, targetVersion s
 		// Keep 'v' prefix for bucket path consistency
 		selectedVersionStr = "v" + bestKey
 	} else {
-		// Get the latest version using channel-based check
-		currentVersion := cfg.GetCurrentVersion()
+		// Get the latest version using channel-based check (prefer binary version for channel detection)
+		binaryVersion := globalCtx.Version
+		currentVersion := binaryVersion
 		if currentVersion == "" {
-			currentVersion = globalCtx.Version
+			currentVersion = cfg.GetCurrentVersion()
 		}
 
 		slog.Debug("Getting latest version for channel", "currentVersion", currentVersion)
@@ -199,24 +200,27 @@ func runUpgrade(globalCtx *GlobalContext, checkOnly, force bool, targetVersion s
 
 	fmt.Printf("Latest version: %s\n", selectedVersionStr)
 
-	// Get current version - use embedded version as fallback
-	currentVersion := cfg.GetCurrentVersion()
-	if currentVersion == "" && globalCtx.Version != "" {
-		currentVersion = globalCtx.Version
-	}
-	if currentVersion != "" {
-		fmt.Printf("Current version: %s\n", currentVersion)
+	// Show current binary version (prefer embedded binary version)
+	binaryVersion := globalCtx.Version
+	if binaryVersion != "" {
+		fmt.Printf("Current version: %s\n", binaryVersion)
 	}
 
-	// Check if current version is a dev version
-	isDevVersion := strings.HasSuffix(currentVersion, "-dev")
+	// Determine if current binary is a dev build
+	isDevVersion := ExtractChannel(binaryVersion) == "dev"
 
 	if checkOnly {
-		if currentVersion != "" {
+		if binaryVersion != "" {
 			if isDevVersion {
-				fmt.Printf("You are running a development version (%s).\n", currentVersion)
-				fmt.Printf("Latest release version: %s\n", selectedVersionStr)
-			} else if currentVersion == selectedVersionStr {
+				fmt.Printf("You are running a development version (%s).\n", binaryVersion)
+				// Always show the latest release version alongside dev builds
+				releaseVersion, err := fetchVersionFromChannel("release")
+				if err != nil || releaseVersion == "" {
+					fmt.Printf("Latest available version: %s\n", selectedVersionStr)
+				} else {
+					fmt.Printf("Latest release version: %s\n", releaseVersion)
+				}
+			} else if strings.TrimPrefix(binaryVersion, "v") == strings.TrimPrefix(selectedVersionStr, "v") {
 				fmt.Println("You are running the latest version.")
 			} else {
 				fmt.Println("An update is available. Run 'sprite upgrade' to install it.")
@@ -231,9 +235,14 @@ func runUpgrade(globalCtx *GlobalContext, checkOnly, force bool, targetVersion s
 	if !force {
 		if isDevVersion {
 			// Dev versions are always considered newer than their base version
-			baseVersion := strings.TrimSuffix(currentVersion, "-dev")
-			if strings.HasPrefix(selectedVersionStr, baseVersion) {
-				fmt.Printf("You are running a development version (%s) which is newer than the latest release (%s).\n", currentVersion, selectedVersionStr)
+			normalizedCurrent := strings.TrimPrefix(binaryVersion, "v")
+			baseVersion := normalizedCurrent
+			if idx := strings.Index(normalizedCurrent, "-dev"); idx != -1 {
+				baseVersion = normalizedCurrent[:idx]
+			}
+			normalizedSelected := strings.TrimPrefix(selectedVersionStr, "v")
+			if strings.HasPrefix(normalizedSelected, baseVersion) && !strings.HasPrefix(normalizedSelected, baseVersion+"-dev") {
+				fmt.Printf("You are running a development version (%s) which is newer than the latest release (%s).\n", binaryVersion, selectedVersionStr)
 				fmt.Println("Use --force to downgrade to the release version.")
 				return nil
 			}
@@ -254,7 +263,7 @@ func runUpgrade(globalCtx *GlobalContext, checkOnly, force bool, targetVersion s
 					return nil
 				}
 			}
-		} else if currentVersion == selectedVersionStr {
+		} else if binaryVersion == selectedVersionStr {
 			// For dev builds, allow refresh if remote archive is newer than local binary timestamp
 			if strings.Contains(selectedVersionStr, "-dev") {
 				platform := getPlatform()
@@ -496,7 +505,15 @@ func ExtractChannel(version string) string {
 	matches := re.FindStringSubmatch(version)
 
 	if len(matches) > 1 {
-		return matches[1]
+		suffix := matches[1]
+		// Normalize known channel families
+		if strings.HasPrefix(suffix, "dev") {
+			return "dev"
+		}
+		if strings.HasPrefix(suffix, "rc") {
+			return "rc"
+		}
+		return suffix
 	}
 
 	// No suffix means release channel
