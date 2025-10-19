@@ -246,6 +246,10 @@ func (r *wsLikeReader) Read(p []byte) (int, error) {
 		}
 		switch mt {
 		case gorillaws.BinaryMessage:
+			// Treat a single-byte 0x04 (StreamStdinEOF) as EOF for control paths
+			if len(data) == 1 && data[0] == 4 {
+				return 0, io.EOF
+			}
 			r.buf = data
 		case gorillaws.TextMessage:
 			var msg struct {

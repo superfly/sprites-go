@@ -6,12 +6,10 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
-	"time"
 
 	gorillaws "github.com/gorilla/websocket"
 )
@@ -170,49 +168,52 @@ func (r *sliceReader) Read(p []byte) (int, error) {
 func (c *controller) readPump(ctx context.Context) {
 	defer close(c.closeCh)
 
-	for {
-		// Drain any pending internal control events first
+	type frame struct {
+		mt   int
+		data []byte
+		err  error
+	}
+	frames := make(chan frame, 1)
+	go func() {
+		defer close(frames)
 		for {
-			select {
-			case ev := <-c.events:
-				c.handleControl(ctx, ev)
-				continue
-			default:
+			mt, data, err := c.conn.ReadMessage()
+			frames <- frame{mt: mt, data: data, err: err}
+			if err != nil {
+				return
 			}
-			break
 		}
+	}()
 
-		// Set a short read deadline so we can wake to process events
-		_ = c.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-		mt, data, err := c.conn.ReadMessage()
-		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				// Timeout: loop to process events and try reading again
+	for {
+		select {
+		case ev, ok := <-c.events:
+			if !ok {
 				continue
 			}
-			// Signal close by closing buffers
-			close(c.activeBuf)
-			return
-		}
-
-		// Only text frames can be control messages
-		if mt == gorillaws.TextMessage && isControlFrame(data) {
-			var msg controlEnvelope
-			if err := json.Unmarshal(data[len("control:"):], &msg); err == nil {
-				c.handleControl(ctx, msg)
-				continue
+			c.handleControl(ctx, ev)
+		case fr, ok := <-frames:
+			if !ok || fr.err != nil {
+				close(c.activeBuf)
+				return
 			}
-			// fallthrough on decode error
-		}
-
-		c.mu.Lock()
-		busy := c.busy
-		c.mu.Unlock()
-		if busy {
-			c.activeBuf <- inboundMsg{msgType: mt, data: data}
-		} else {
-			// No active operation: reject non-control frames
-			_ = c.sendControl(controlEnvelope{Type: "op.error", Args: map[string]any{"code": "op.not_active", "message": "no operation active; send control:op.start"}})
+			mt, data := fr.mt, fr.data
+			if mt == gorillaws.TextMessage && isControlFrame(data) {
+				var msg controlEnvelope
+				if err := json.Unmarshal(data[len("control:"):], &msg); err == nil {
+					c.handleControl(ctx, msg)
+					continue
+				}
+				// fallthrough on decode error
+			}
+			c.mu.Lock()
+			busy := c.busy
+			c.mu.Unlock()
+			if busy {
+				c.activeBuf <- inboundMsg{msgType: mt, data: data}
+			} else {
+				_ = c.sendControl(controlEnvelope{Type: "op.error", Args: map[string]any{"code": "op.not_active", "message": "no operation active; send control:op.start"}})
+			}
 		}
 	}
 }

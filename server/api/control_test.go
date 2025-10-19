@@ -143,3 +143,37 @@ func TestControl_StdinNonTTY(t *testing.T) {
 		t.Fatalf("expected stdout to contain input bytes, got %q", out)
 	}
 }
+
+func TestControl_StdinHeadNonTTY(t *testing.T) {
+	h := &Handlers{logger: testLogger(t), system: &mockSystemManager{isRunning: true}}
+	ts := newControlTestServer(t, h)
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/v1/sprites/foo/control"
+	conn, _, err := gorillaws.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer conn.Close()
+
+	// Start a non-TTY exec that reads exactly 4 bytes using head -c 4
+	ctrl := `control:{"type":"op.start","id":"1","op":"exec","args":{"path":"sh","cmd":["sh","-c","head -c 4"],"stdin":"true"}}`
+	if err := conn.WriteMessage(gorillaws.TextMessage, []byte(ctrl)); err != nil {
+		t.Fatalf("send control failed: %v", err)
+	}
+
+	// Send 4 bytes of stdin
+	in := []byte("ABCD")
+	if err := conn.WriteMessage(gorillaws.BinaryMessage, in); err != nil {
+		t.Fatalf("send stdin failed: %v", err)
+	}
+
+	// Read until exit and verify stdout contains the bytes we sent
+	out, _, code := readUntilExitNonTTY(t, conn)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+	if !strings.Contains(out, "ABCD") {
+		t.Fatalf("expected stdout to contain input bytes, got %q", out)
+	}
+}
