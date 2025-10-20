@@ -70,8 +70,14 @@ func Wrap(cmd *exec.Cmd, containerName string, opts ...WrapOption) *WrappedComma
 
 	tmpl, err := CloneProcessTemplate()
 	if err != nil {
-		slog.Error("container.Wrap: process template not loaded; cannot exec", "error", err)
-		return &WrappedCommand{Cmd: exec.Command("false"), config: config}
+		// Attempt lazy initialization once in case the server started before the template existed
+		slog.Warn("container.Wrap: process template not loaded; attempting lazy init")
+		InitProcessTemplateFromEnv()
+		tmpl, err = CloneProcessTemplate()
+		if err != nil {
+			slog.Error("container.Wrap: process template still not available; cannot exec", "error", err)
+			return &WrappedCommand{Cmd: exec.Command("false"), config: config}
+		}
 	}
 
 	spec := &ProcessSpec{
