@@ -127,7 +127,7 @@ func (ac *AdminChannel) Start() error {
 
 	// Handle sprite_assigned notifications
 	ac.channel.On("sprite_assigned", func(payload any) {
-		ac.handleSpriteAssigned(payload)
+		ac.handleSpriteAssigned(payload, true)
 	})
 
 	// Join the channel - it will wait for socket connection if needed
@@ -143,6 +143,9 @@ func (ac *AdminChannel) Start() error {
 		ac.logger.Info("Successfully joined admin channel",
 			"topic", channelTopic,
 			"response", response)
+
+		// Apply any sprite assignment info included in the join reply (no reply push)
+		ac.handleSpriteAssigned(response, false)
 	})
 
 	join.Receive("error", func(reason any) {
@@ -354,16 +357,16 @@ func (ac *AdminChannel) SetSystem(system *System) {
 }
 
 // handleSpriteAssigned processes sprite_assigned events
-func (ac *AdminChannel) handleSpriteAssigned(payload any) {
+func (ac *AdminChannel) handleSpriteAssigned(payload any, sendReply bool) {
 	// Convert payload to map for logging
 	data, ok := payload.(map[string]interface{})
 	if ok {
-		ac.logger.Info("Sprite assigned",
+		ac.logger.Debug("Sprite assigned",
 			"org_id", data["org_id"],
 			"sprite_name", data["sprite_name"],
 			"sprite_id", data["sprite_id"])
 	} else {
-		ac.logger.Info("Sprite assigned", "payload", payload)
+		ac.logger.Debug("Sprite assigned", "payload", payload)
 	}
 
 	// Hand off to system for processing
@@ -386,8 +389,10 @@ func (ac *AdminChannel) handleSpriteAssigned(payload any) {
 		return
 	}
 
-	// Reply with the exact same response structure
-	ac.replyToSpriteAssigned(response)
+	// Reply with the exact same response structure (only for inbound events)
+	if sendReply {
+		ac.replyToSpriteAssigned(response)
+	}
 }
 
 // replyToSpriteAssigned sends a reply to the sprite_assigned event
