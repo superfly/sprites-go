@@ -223,6 +223,8 @@ func (h *Handlers) ServeExecWS(ctx context.Context, ws WSLike, query url.Values)
 	if !tty && mux != nil {
 		_ = mux.WriteExit(exitCode)
 	}
+
+	// For TTY: no explicit binary exit frame. Control op.complete will signal completion.
 	return nil
 }
 

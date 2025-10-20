@@ -32,6 +32,17 @@ func (h *Handlers) HandleControl(w http.ResponseWriter, r *http.Request) {
 		return h.ServeExecWS(ctx, c, q)
 	})
 
+	// Register proxy operation using ServeProxyWS
+	router.Handle("proxy", func(ctx context.Context, c wss.OpConn, args url.Values) error {
+		q := url.Values{}
+		for k, vs := range args {
+			for _, v := range vs {
+				q.Add(k, v)
+			}
+		}
+		return h.ServeProxyWS(ctx, c, q)
+	})
+
 	srv := &wss.Server{
 		Router:   router,
 		Upgrader: gorillaws.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }},
