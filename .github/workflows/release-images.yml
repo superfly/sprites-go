@@ -107,9 +107,16 @@ jobs:
     - name: Check for changes in ubuntu-devtools
       id: check
       run: |
-        # Only check for changes if we have a previous tag
+        # If no previous tag, allow retag when the current target image already exists; otherwise build
         if [[ -z "${{ needs.generate-tag.outputs.previous_tag }}" ]]; then
-          echo "No previous tag found, will build images"
+          TARGET_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.generate-tag.outputs.ubuntu_tag }}"
+          if docker buildx imagetools inspect "$TARGET_IMAGE" >/dev/null 2>&1; then
+            echo "Target image $TARGET_IMAGE already exists; will retag from current version"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "source_tag=${{ needs.generate-tag.outputs.ubuntu_tag }}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "No previous tag found and target image does not exist; will build images"
           echo "has_changes=true" >> $GITHUB_OUTPUT
           echo "source_tag=" >> $GITHUB_OUTPUT
           exit 0
@@ -145,8 +152,17 @@ jobs:
         else
           echo "Changes detected in base-env/images/ubuntu-devtools/:"
           echo "$CHANGES"
-          echo "has_changes=true" >> $GITHUB_OUTPUT
-          echo "source_tag=" >> $GITHUB_OUTPUT
+
+          # If the target image for the current version already exists, prefer retag to allow replacing a versioned release
+          TARGET_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.generate-tag.outputs.ubuntu_tag }}"
+          if docker buildx imagetools inspect "$TARGET_IMAGE" >/dev/null 2>&1; then
+            echo "Target image $TARGET_IMAGE already exists; will retag from current version"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "source_tag=${{ needs.generate-tag.outputs.ubuntu_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "source_tag=" >> $GITHUB_OUTPUT
+          fi
         fi
 
   build-or-retag-base:
