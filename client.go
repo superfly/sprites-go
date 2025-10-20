@@ -83,29 +83,13 @@ func WithControlInitTimeout(d time.Duration) Option {
 // Sprite returns a Sprite instance for the given name.
 // This doesn't create the sprite on the server, it just returns a handle to work with it.
 func (c *Client) Sprite(name string) *Sprite {
-	s := &Sprite{
-		name:   name,
-		client: c,
-	}
-	// Attempt to establish control connection upfront; block until success or timeout/404
-	ctx, cancel := context.WithTimeout(context.Background(), c.controlInitTimeout)
-	defer cancel()
-	s.ensureControlSupport(ctx)
-	return s
+	return &Sprite{name: name, client: c}
 }
 
 // SpriteWithOrg returns a Sprite instance for the given name with organization information.
 // This doesn't create the sprite on the server, it just returns a handle to work with it.
 func (c *Client) SpriteWithOrg(name string, org *OrganizationInfo) *Sprite {
-	s := &Sprite{
-		name:   name,
-		client: c,
-		org:    org,
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), c.controlInitTimeout)
-	defer cancel()
-	s.ensureControlSupport(ctx)
-	return s
+	return &Sprite{name: name, client: c, org: org}
 }
 
 // Create creates a new sprite with the given name and returns a handle to it.

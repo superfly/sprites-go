@@ -60,6 +60,11 @@ type wsCmd struct {
 	usingControl bool
 	// controlConn is the control connection wrapper (for reading from readCh)
 	controlConn *controlConn
+
+	// Exec options that need to be forwarded over control op.start
+	detachable  bool
+	controlMode bool
+	sessionID   string
 }
 
 // wsAdapter wraps a WebSocket connection for terminal communication
@@ -158,6 +163,15 @@ func (c *wsCmd) start() {
 			}
 			if c.Stdin != nil {
 				args["stdin"] = "true"
+			}
+			if c.detachable {
+				args["detachable"] = "true"
+			}
+			if c.controlMode {
+				args["cc"] = "true"
+			}
+			if c.sessionID != "" {
+				args["id"] = c.sessionID
 			}
 			// Construct control envelope
 			env := map[string]interface{}{
@@ -312,9 +326,32 @@ func (c *wsCmd) runIO() {
 			}
 			switch messageType {
 			case websocket.BinaryMessage:
+				// In PTY mode, treat binary frames as raw output; op.complete terminates via text path
 				stdout.Write(data)
 			case websocket.TextMessage:
 				// Handle text messages (e.g., port notifications)
+				if c.usingControl && len(data) >= len("control:") && string(data[:len("control:")]) == "control:" {
+					// Parse control envelope; terminate on op.complete
+					var env struct {
+						Type string         `json:"type"`
+						Args map[string]any `json:"args"`
+					}
+					_ = json.Unmarshal(data[len("control:"):], &env)
+					if env.Type == "op.complete" {
+						code := 0
+						if val, ok := env.Args["ok"].(bool); ok && !val {
+							code = 1
+						}
+						select {
+						case c.exitChan <- code:
+						default:
+						}
+						adapter.Close()
+						return
+					}
+					// Ignore other control frames (ack, etc.)
+					continue
+				}
 				if c.TextMessageHandler != nil {
 					c.TextMessageHandler(data)
 				}

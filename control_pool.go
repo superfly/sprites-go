@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,10 +16,12 @@ import (
 )
 
 const (
-	maxPoolSize     = 10
+	maxPoolSize     = 5
 	dialTimeout     = 5 * time.Second
 	keepAliveWindow = 30 * time.Second
 )
+
+var errControlNotFound = errors.New("control endpoint not found")
 
 // controlPool manages a pool of control WebSocket connections for a sprite
 type controlPool struct {
@@ -116,6 +119,23 @@ func (p *controlPool) checkin(conn *controlConn) {
 	conn.busy = false
 	conn.lastUsed = time.Now()
 	dbg("sprites: checkin control conn", "sprite", p.spriteName, "idle_at", conn.lastUsed.Unix())
+
+	// Enforce max open connections without TTL: if we have more than max, close this one
+	p.mu.Lock()
+	if len(p.conns) > maxPoolSize {
+		// remove this conn from pool and close it
+		for i, c := range p.conns {
+			if c == conn {
+				p.conns = append(p.conns[:i], p.conns[i+1:]...)
+				break
+			}
+		}
+		p.mu.Unlock()
+		conn.close()
+		dbg("sprites: closed control conn on checkin due to pool limit", "sprite", p.spriteName, "pool", len(p.conns))
+		return
+	}
+	p.mu.Unlock()
 }
 
 // dial creates a new control WebSocket connection
@@ -151,6 +171,9 @@ func (p *controlPool) dial(ctx context.Context) (*controlConn, error) {
 		if resp != nil {
 			body, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusNotFound {
+				return nil, errControlNotFound
+			}
 			return nil, fmt.Errorf("failed to dial control connection: %v (HTTP %d: %s)", err, resp.StatusCode, string(body))
 		}
 		return nil, fmt.Errorf("failed to dial control connection: %v", err)

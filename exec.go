@@ -191,6 +191,14 @@ func (c *Cmd) Start() error {
 			usingControl = true
 			c.controlMode = true
 			dbg("sprites: using control conn for exec", "sprite", c.sprite.name)
+		} else if err != nil {
+			// If checkout failed with 404-not-found from earlier probe, fall back; otherwise bubble
+			if err == errControlNotFound {
+				usingControl = false
+			} else {
+				closeDescriptors(c.closers)
+				return fmt.Errorf("control checkout failed: %w", err)
+			}
 		}
 	}
 
@@ -232,6 +240,10 @@ func (c *Cmd) Start() error {
 
 	// Set TTY mode
 	c.wsCmd.Tty = c.tty
+	// Forward detachable/control/session flags for control op.start
+	c.wsCmd.detachable = c.detachable
+	c.wsCmd.controlMode = c.controlMode
+	c.wsCmd.sessionID = c.sessionID
 
 	// Set environment and directory
 	c.wsCmd.Env = c.Env

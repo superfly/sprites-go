@@ -72,9 +72,14 @@ func (s *Sprite) ensureControlSupport(ctx context.Context) {
 	}
 	conn, err := pool.dial(ctx)
 	if err != nil {
-		// Control connections not supported (404 or other error)
-		dbg("sprites: control not available", "sprite", s.name, "err", err)
-		s.supportsControl = false
+		// Only HTTP 404 disables control; other errors bubble on use
+		if err == errControlNotFound {
+			dbg("sprites: control not available (404)", "sprite", s.name)
+			s.supportsControl = false
+			return
+		}
+		// Non-404 errors: don't mark unsupported; selection will retry and bubble errors
+		dbg("sprites: control probe error (non-404); leaving support unknown", "sprite", s.name, "err", err)
 		return
 	}
 
