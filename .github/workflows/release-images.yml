@@ -97,6 +97,13 @@ jobs:
         fetch-depth: 0  # Fetch all history for comparison
         ref: ${{ inputs.checkout_ref != '' && inputs.checkout_ref || github.ref }}
     
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    
     - name: Check for changes in ubuntu-devtools
       id: check
       run: |
@@ -127,6 +134,14 @@ jobs:
           echo "No changes detected in base-env/images/ubuntu-devtools/ since ${PREV_TAG_REF}"
           echo "has_changes=false" >> $GITHUB_OUTPUT
           echo "source_tag=25.04-${{ needs.generate-tag.outputs.previous_tag }}" >> $GITHUB_OUTPUT
+
+          # Verify the source image exists in the registry; if not, fall back to build
+          IMAGE_REF="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:25.04-${{ needs.generate-tag.outputs.previous_tag }}"
+          if ! docker buildx imagetools inspect "$IMAGE_REF" >/dev/null 2>&1; then
+            echo "Source image $IMAGE_REF does not exist; will build instead"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "source_tag=" >> $GITHUB_OUTPUT
+          fi
         else
           echo "Changes detected in base-env/images/ubuntu-devtools/:"
           echo "$CHANGES"
