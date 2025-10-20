@@ -247,9 +247,37 @@ func ExecCommand(ctx *GlobalContext, args []string) int {
 
 // handleSpriteTerminalResize monitors for terminal resize events and updates the remote TTY size
 func handleSpriteTerminalResize(cmd *sprites.Cmd) {
-	// This is a simplified version - in production you'd want to use
-	// syscall.SIGWINCH on Unix systems to detect resize events
-	// For now, this is a placeholder
+	// Only act if stdin is a terminal
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return
+	}
+
+	// Send an initial size in case the terminal changed after initial setup
+	if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
+		_ = cmd.SetTTYSize(uint16(h), uint16(w))
+	}
+
+	// Listen for window size change signals and forward to remote
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGWINCH)
+	defer signal.Stop(ch)
+
+	var lastW, lastH int
+	for {
+		<-ch
+		if !term.IsTerminal(int(os.Stdin.Fd())) {
+			continue
+		}
+		w, h, err := term.GetSize(int(os.Stdin.Fd()))
+		if err != nil {
+			continue
+		}
+		if w == lastW && h == lastH {
+			continue
+		}
+		lastW, lastH = w, h
+		_ = cmd.SetTTYSize(uint16(h), uint16(w))
+	}
 }
 
 // setPortNotificationHandler sets a TextMessageHandler to decode port notifications,

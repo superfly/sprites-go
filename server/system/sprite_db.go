@@ -143,7 +143,7 @@ func (s *System) SetSpriteInfo(ctx context.Context, info *SpriteInfo) error {
 			return fmt.Errorf("failed to insert sprite info: %w", err)
 		}
 
-	s.logger.Debug("Sprite assignment stored",
+		s.logger.Debug("Sprite assignment stored",
 			"sprite_name", info.SpriteName,
 			"sprite_url", info.SpriteURL,
 			"org_id", info.OrgID,
@@ -228,7 +228,7 @@ fdf::1      %s
 		s.logger.Warn("Failed to set container hostname (container may not be running yet)", "error", err)
 		// Don't return error - hostname will be set when container starts from /etc/hostname
 	} else {
-					s.logger.Debug("Set container hostname", "hostname", spriteName)
+		s.logger.Debug("Set container hostname", "hostname", spriteName)
 	}
 
 	return nil
@@ -289,7 +289,7 @@ func (s *System) SetSpriteEnvironment(ctx context.Context, infoAny interface{}) 
 func (s *System) handleSpriteInfoChange(info *SpriteInfo) {
 	// Only apply hostname if container is running
 	if !s.IsProcessRunning() {
-					s.logger.Debug("Sprite info changed but container not running, hostname will be applied on next boot",
+		s.logger.Debug("Sprite info changed but container not running, hostname will be applied on next boot",
 			"sprite_name", info.SpriteName)
 		return
 	}
