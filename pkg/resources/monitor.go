@@ -52,7 +52,8 @@ type Metrics struct {
 	IOPSWriteTotal     uint64  `json:"iops_write_total"`    // write operations
 
 	// Current state
-	MemoryCurrentMB uint64 `json:"memory_current_mb"`
+	MemoryCurrentMB     uint64 `json:"memory_current_mb"`
+	MemoryReclaimableMB uint64 `json:"memory_reclaimable_mb"`
 }
 
 // VMMetrics contains VM-level CPU balance information
@@ -291,7 +292,8 @@ func (mon *Monitor) emitMetrics() {
 		IOPSWriteTotal:     mon.ioWriteOpsTotal,
 
 		// Current state
-		MemoryCurrentMB: stats.MemoryCurrentBytes / 1024 / 1024,
+		MemoryCurrentMB:     stats.MemoryCurrentBytes / 1024 / 1024,
+		MemoryReclaimableMB: stats.MemoryReclaimableBytes / 1024 / 1024,
 	}
 
 	// Emit via callback

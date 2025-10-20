@@ -109,14 +109,23 @@ func (m *Manager) ReadStats() (Stats, error) {
 		// Suppress noisy warning in environments without cgroup memory controller
 		memCurrent = 0
 	}
+
+	// Calculate reclaimable memory from memory.stat
+	reclaimableBytes := uint64(0)
+	if memStat, err := m.readMemoryStat(); err == nil {
+		// Reclaimable memory includes slab_reclaimable and inactive file cache
+		reclaimableBytes = memStat.SlabReclaimable + memStat.InactiveFile
+	}
+
 	ioStats, _ := m.readIOStat()
 
 	s := Stats{
-		CPUUsageTotal:      cpu.UsageTotal,
-		MemoryCurrentBytes: memCurrent,
-		IOReadBytes:        ioStats.ReadBytes,
-		IOWriteBytes:       ioStats.WriteBytes,
-		CPUDeficit:         time.Duration(0), // CPU deficit is now tracked globally
+		CPUUsageTotal:          cpu.UsageTotal,
+		MemoryCurrentBytes:     memCurrent,
+		MemoryReclaimableBytes: reclaimableBytes,
+		IOReadBytes:            ioStats.ReadBytes,
+		IOWriteBytes:           ioStats.WriteBytes,
+		CPUDeficit:             time.Duration(0), // CPU deficit is now tracked globally
 	}
 	if p := m.memoryGBSeconds.Load(); p != nil {
 		s.MemoryGBSeconds = *p

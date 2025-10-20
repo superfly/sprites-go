@@ -11,6 +11,10 @@ type Stats struct {
 	// MemoryCurrentBytes is the current memory usage of the cgroup.
 	MemoryCurrentBytes uint64
 
+	// MemoryReclaimableBytes is the amount of memory that can be reclaimed by the kernel.
+	// This includes slab_reclaimable and the inactive file cache.
+	MemoryReclaimableBytes uint64
+
 	// MemoryGBSeconds is the integral of memory usage over time, measured in GB-seconds,
 	// accumulated by the Manager's tracker between successive Tick calls.
 	MemoryGBSeconds float64
