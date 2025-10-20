@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -72,6 +73,14 @@ func WithHTTPClient(client *http.Client) Option {
 	}
 }
 
+// WithLogger sets the slog.Logger used by the SDK. This affects debug/info/error logs emitted by the SDK.
+// If not set, a default error-level logger to stderr is used; set a different handler/level as desired.
+func WithLogger(l *slog.Logger) Option {
+	return func(c *Client) {
+		SetLogger(l)
+	}
+}
+
 // WithControlInitTimeout sets how long Sprite() will wait to establish a control connection
 // before falling back to legacy endpoint API for that Sprite. Defaults to 2s.
 func WithControlInitTimeout(d time.Duration) Option {
@@ -83,13 +92,19 @@ func WithControlInitTimeout(d time.Duration) Option {
 // Sprite returns a Sprite instance for the given name.
 // This doesn't create the sprite on the server, it just returns a handle to work with it.
 func (c *Client) Sprite(name string) *Sprite {
-	return &Sprite{name: name, client: c}
+	s := &Sprite{name: name, client: c}
+	// Eagerly probe control support; return sprite even if probe errors with 502
+	// Callers can examine errors on first operation via s.lastProbeErr
+	_ = s.probeControlSupport(context.Background())
+	return s
 }
 
 // SpriteWithOrg returns a Sprite instance for the given name with organization information.
 // This doesn't create the sprite on the server, it just returns a handle to work with it.
 func (c *Client) SpriteWithOrg(name string, org *OrganizationInfo) *Sprite {
-	return &Sprite{name: name, client: c, org: org}
+	s := &Sprite{name: name, client: c, org: org}
+	_ = s.probeControlSupport(context.Background())
+	return s
 }
 
 // Create creates a new sprite with the given name and returns a handle to it.
@@ -149,6 +164,7 @@ func CreateToken(ctx context.Context, flyMacaroon, orgSlug string, inviteCode st
 
 	// Make request
 	client := &http.Client{Timeout: 30 * time.Second}
+	spritesDbg("sprites: http request", "method", "POST", "url", url)
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return "", fmt.Errorf("failed to create token: %w", err)

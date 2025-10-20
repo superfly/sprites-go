@@ -161,15 +161,14 @@ func (ps *ProxySession) acceptLoop() {
 func (ps *ProxySession) handleConnection(localConn net.Conn) {
 	defer localConn.Close()
 
-	// Check if sprite supports control connections (lazy check on first use)
+	// Use the selected transport decided at Sprite() construction time
 	sprite := ps.client.Sprite(ps.spriteName)
-	sprite.ensureControlSupport(ps.ctx)
 
 	var wsConn *websocket.Conn
 	var controlConn *controlConn
 	usingControl := false
 
-	if sprite.supportsControl {
+	if sprite.transport == "control" {
 		// Try to use control connection
 		pool := ps.client.getOrCreatePool(ps.spriteName)
 		var err error

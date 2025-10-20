@@ -1,3 +1,5 @@
+// Package controlapi (UNSTABLE) provides low-level access to the control websocket.
+// This package is intended for advanced users and is subject to change.
 package controlapi
 
 import (
@@ -34,7 +36,6 @@ func (s *controlSession) Write(p []byte) (int, error) {
 	if s.closed {
 		return 0, io.ErrClosedPipe
 	}
-	// In control mode, stdin is a binary frame prefixed with stream id 0
 	if err := s.conn.WriteMessage(websocket.BinaryMessage, append([]byte{byte(ops.StreamStdin)}, p...)); err != nil {
 		return 0, err
 	}
@@ -57,7 +58,6 @@ func (s *controlSession) Read(ctx context.Context) (ops.StreamID, []byte, error)
 			return 0, nil, fr.err
 		}
 		if fr.mt == websocket.TextMessage && isControl(fr.data) {
-			// Parse control envelope and capture exit on op.complete
 			var env struct {
 				Type string         `json:"type"`
 				Args map[string]any `json:"args"`
@@ -67,10 +67,8 @@ func (s *controlSession) Read(ctx context.Context) (ops.StreamID, []byte, error)
 			}
 			if env.Type == "op.complete" {
 				if v, ok := env.Args["ok"].(bool); ok && v {
-					// Success without explicit code → 0
 					s.exitOnce.Do(func() { s.exitCode = 0; close(s.exitCh) })
 				} else {
-					// Error path: use exit 1 by default
 					s.exitOnce.Do(func() { s.exitCode = 1; close(s.exitCh) })
 				}
 			}
@@ -99,7 +97,6 @@ func (s *controlSession) Resize(ctx context.Context, cols, rows int) error {
 		return io.ErrClosedPipe
 	}
 	m := map[string]any{"type": "control:resize", "cols": cols, "rows": rows}
-	// Send as text frame "control:{json}" to match server control detection
 	b, _ := json.Marshal(m)
 	return s.conn.WriteMessage(websocket.TextMessage, append([]byte("control:"), b...))
 }

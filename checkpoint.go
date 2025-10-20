@@ -48,6 +48,7 @@ func (c *Client) CreateCheckpoint(ctx context.Context, spriteName string) (*Chec
 
 	// Use client with no timeout for streaming
 	client := &http.Client{Timeout: 0}
+	spritesDbg("sprites: http request", "method", "POST", "url", url)
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %w", err)
@@ -89,6 +90,7 @@ func (c *Client) ListCheckpoints(ctx context.Context, spriteName string, history
 
 	// Make request
 	client := &http.Client{Timeout: 30 * time.Second}
+	spritesDbg("sprites: http request", "method", "GET", "url", url)
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %w", err)
@@ -139,6 +141,7 @@ func (c *Client) GetCheckpoint(ctx context.Context, spriteName string, checkpoin
 
 	// Make request
 	client := &http.Client{Timeout: 30 * time.Second}
+	spritesDbg("sprites: http request", "method", "GET", "url", url)
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %w", err)
@@ -179,6 +182,7 @@ func (c *Client) RestoreCheckpoint(ctx context.Context, spriteName string, check
 
 	// Use client with no timeout for streaming
 	client := &http.Client{Timeout: 0}
+	spritesDbg("sprites: http request", "method", "POST", "url", url)
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %w", err)

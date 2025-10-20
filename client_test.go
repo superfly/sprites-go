@@ -27,16 +27,11 @@ func TestControlFallbackOn404Only(t *testing.T) {
 	client := New("test-token", WithBaseURL("http://localhost:65535")) // unreachable host to trigger non-404
 	client.controlInitTimeout = 50 * time.Millisecond
 	sp := client.Sprite("foo")
-	// Non-404 errors should not mark unsupported; supportsControl should remain default false until first use
-	if sp.supportsControl {
-		t.Fatalf("supportsControl should not be true by default")
-	}
-	// Call ensure again with a short context
+	// Non-404 errors should default transport to endpoint without failing hard
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	sp.ensureControlSupport(ctx)
-	// Still not forced to false unless explicit 404
-	if sp.supportsControl {
-		t.Fatalf("supportsControl unexpectedly true")
+	_ = sp.probeControlSupport(ctx)
+	if sp.transport != "endpoint" {
+		t.Fatalf("expected transport endpoint, got %s", sp.transport)
 	}
 }

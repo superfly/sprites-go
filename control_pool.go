@@ -22,6 +22,7 @@ const (
 )
 
 var errControlNotFound = errors.New("control endpoint not found")
+var errControlBadGateway = errors.New("control endpoint returned 502 (sprite unavailable)")
 
 // controlPool manages a pool of control WebSocket connections for a sprite
 type controlPool struct {
@@ -173,6 +174,9 @@ func (p *controlPool) dial(ctx context.Context) (*controlConn, error) {
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusNotFound {
 				return nil, errControlNotFound
+			}
+			if resp.StatusCode == http.StatusBadGateway {
+				return nil, errControlBadGateway
 			}
 			return nil, fmt.Errorf("failed to dial control connection: %v (HTTP %d: %s)", err, resp.StatusCode, string(body))
 		}

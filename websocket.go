@@ -84,9 +84,7 @@ type writeRequest struct {
 
 // newWSCmd creates a new WebSocket command
 func newWSCmd(req *http.Request, name string, arg ...string) *wsCmd {
-	if req == nil {
-		panic("sprites: newWSCmd called with nil request")
-	}
+	// Request may be nil when using an existing control connection. That's fine.
 	return &wsCmd{
 		Path:      name,
 		Args:      append([]string{name}, arg...),
@@ -163,11 +161,19 @@ func (c *wsCmd) start() {
 			}
 			if c.Stdin != nil {
 				args["stdin"] = "true"
+			} else {
+				// Explicitly indicate no stdin will be sent (mirrors legacy semantics)
+				args["stdin"] = "false"
 			}
 			if c.detachable {
 				args["detachable"] = "true"
 			}
+			// Guard cc: it is only valid when detachable or re-attaching to a session
 			if c.controlMode {
+				if !(c.detachable || c.sessionID != "") {
+					c.startChan <- fmt.Errorf("invalid control mode: cc requires detachable or session attach")
+					return
+				}
 				args["cc"] = "true"
 			}
 			if c.sessionID != "" {

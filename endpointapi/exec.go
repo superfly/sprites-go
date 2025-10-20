@@ -1,3 +1,5 @@
+// Package endpointapi (UNSTABLE) provides low-level access to the legacy /exec endpoint.
+// This package is intended for advanced users and is subject to change.
 package endpointapi
 
 import (
@@ -45,7 +47,7 @@ func (e *EndpointAPI) StartExec(ctx context.Context, opt ops.ExecOptions) (ops.E
 		return nil, fmt.Errorf("endpoint dial failed: %w", err)
 	}
 
-	s := newWSSession(conn, false /*isControl*/)
+	s := newWSSession(conn, false)
 	if !opt.HasStdin {
 		_ = s.sendStdinEOF()
 	}
@@ -56,7 +58,6 @@ func buildExecURL(base string, opt ops.ExecOptions) (string, error) {
 	if base == "" {
 		return "", fmt.Errorf("base URL required")
 	}
-	// http(s) -> ws(s)
 	if strings.HasPrefix(base, "http") {
 		base = "ws" + base[4:]
 	}
@@ -64,9 +65,6 @@ func buildExecURL(base string, opt ops.ExecOptions) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid base URL: %w", err)
 	}
-	// Path: /v1/sprites/{name}/exec is appended by caller through BaseURL including sprite path
-	// Here, BaseURL is expected to be like: https://host/v1/sprites/{name}
-	// We append /exec
 	if !strings.HasSuffix(u.Path, "/exec") {
 		u.Path = strings.TrimRight(u.Path, "/") + "/exec"
 	}

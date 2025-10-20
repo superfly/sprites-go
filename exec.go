@@ -174,13 +174,16 @@ func (c *Cmd) Start() error {
 		}
 	}
 
-	// Check if sprite supports control connections (lazy check on first use)
-	c.sprite.ensureControlSupport(c.ctx)
+	// Ensure control support was probed at Sprite() time; if a 502 was observed, surface it now
+	if c.sprite.lastProbeErr == errControlBadGateway {
+		return fmt.Errorf("sprite unavailable: %w", errControlBadGateway)
+	}
 
 	var controlConn *controlConn
 	usingControl := false
 
-	if c.sprite.supportsControl {
+	dbg("sprites: exec start", "sprite", c.sprite.name, "transport", c.sprite.transport, "lastProbeErr", fmt.Sprintf("%v", c.sprite.lastProbeErr))
+	if c.sprite.transport == "control" {
 		// Try to use control connection
 		pool := c.sprite.client.getOrCreatePool(c.sprite.name)
 		var err error
@@ -189,21 +192,29 @@ func (c *Cmd) Start() error {
 		if err == nil && controlConn != nil {
 			// Successfully got a control connection
 			usingControl = true
-			c.controlMode = true
 			dbg("sprites: using control conn for exec", "sprite", c.sprite.name)
 		} else if err != nil {
 			// If checkout failed with 404-not-found from earlier probe, fall back; otherwise bubble
 			if err == errControlNotFound {
 				usingControl = false
+				dbg("sprites: control checkout not found (fallback to endpoint)", "sprite", c.sprite.name)
 			} else {
+				dbg("sprites: control checkout error", "sprite", c.sprite.name, "error", err)
 				closeDescriptors(c.closers)
 				return fmt.Errorf("control checkout failed: %w", err)
 			}
 		}
 	}
 
-	// Build WebSocket URL (needed for Request even if using control connection)
-	wsURL, err := c.buildWebSocketURL()
+	var targetURL *url.URL
+	var err error
+	if usingControl {
+		// For control connections, we only need a base exec URL for headers; args are sent via op.start
+		targetURL, err = c.buildExecBaseURL()
+	} else {
+		// Legacy direct dial builds full URL with query arguments
+		targetURL, err = c.buildWebSocketURL()
+	}
 	if err != nil {
 		if controlConn != nil {
 			pool := c.sprite.client.getOrCreatePool(c.sprite.name)
@@ -213,19 +224,25 @@ func (c *Cmd) Start() error {
 		return err
 	}
 
-	// Create HTTP request (for Request field, even though we may not dial)
-	req, err := http.NewRequestWithContext(c.ctx, "GET", wsURL.String(), nil)
-	if err != nil {
-		if controlConn != nil {
-			pool := c.sprite.client.getOrCreatePool(c.sprite.name)
-			pool.checkin(controlConn)
+	// Create HTTP request only for legacy direct websockets
+	var req *http.Request
+	if !usingControl {
+		var rerr error
+		req, rerr = http.NewRequestWithContext(c.ctx, "GET", targetURL.String(), nil)
+		if rerr != nil {
+			if controlConn != nil {
+				pool := c.sprite.client.getOrCreatePool(c.sprite.name)
+				pool.checkin(controlConn)
+			}
+			closeDescriptors(c.closers)
+			return rerr
 		}
-		closeDescriptors(c.closers)
-		return err
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.sprite.client.token))
+		spritesDbg("sprites: ws dial", "sprite", c.sprite.name, "url", targetURL.String())
 	}
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.sprite.client.token))
 
 	// Create WebSocket command
+	// If using control, pass nil request; wsCmd will use existingConn and op.start
 	c.wsCmd = newWSCmdContext(c.ctx, req, c.Path, c.Args[1:]...)
 
 	// If using control connection, provide the existing WebSocket
@@ -552,6 +569,21 @@ func (c *Cmd) buildWebSocketURL() (*url.URL, error) {
 	}
 
 	u.RawQuery = q.Encode()
+	return u, nil
+}
+
+// buildExecBaseURL constructs the base WebSocket URL for the exec endpoint without query args.
+// Used when sending exec arguments via control op.start instead of URL query.
+func (c *Cmd) buildExecBaseURL() (*url.URL, error) {
+	baseURL := c.sprite.client.baseURL
+	if baseURL[:4] == "http" {
+		baseURL = "ws" + baseURL[4:]
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid base URL: %w", err)
+	}
+	u.Path = fmt.Sprintf("/v1/sprites/%s/exec", c.sprite.name)
 	return u, nil
 }
 

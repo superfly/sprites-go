@@ -8,3 +8,4 @@ var (
 	ErrInvalidArgs = errors.New("invalid arguments")
 	ErrInternal    = errors.New("internal error")
 )
+

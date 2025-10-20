@@ -1,3 +1,5 @@
+// Package endpointapi (UNSTABLE) provides low-level access to the legacy /exec endpoint.
+// This package is intended for advanced users and is subject to change.
 package endpointapi
 
 import (
@@ -44,11 +46,7 @@ func (s *wsSession) Read(ctx context.Context) (ops.StreamID, []byte, error) {
 		err  error
 	}
 	ch := make(chan frame, 1)
-	go func() {
-		mt, data, err := s.conn.ReadMessage()
-		ch <- frame{mt: mt, data: data, err: err}
-		close(ch)
-	}()
+	go func() { mt, data, err := s.conn.ReadMessage(); ch <- frame{mt: mt, data: data, err: err}; close(ch) }()
 	select {
 	case <-ctx.Done():
 		return 0, nil, ctx.Err()
@@ -75,15 +73,8 @@ func (s *wsSession) Read(ctx context.Context) (ops.StreamID, []byte, error) {
 	}
 }
 
-func (s *wsSession) Resize(ctx context.Context, cols, rows int) error {
-	// Legacy endpoint uses control messages in text JSON in PTY mode only; not implemented here.
-	return nil
-}
-
-func (s *wsSession) StdinEOF(ctx context.Context) error {
-	return s.sendStdinEOF()
-}
-
+func (s *wsSession) Resize(ctx context.Context, cols, rows int) error { return nil }
+func (s *wsSession) StdinEOF(ctx context.Context) error               { return s.sendStdinEOF() }
 func (s *wsSession) sendStdinEOF() error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()

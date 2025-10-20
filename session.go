@@ -29,6 +29,7 @@ func (c *Client) ListSessions(ctx context.Context, spriteName string) ([]*Sessio
 
 	// Make request
 	client := &http.Client{Timeout: 30 * time.Second}
+	spritesDbg("sprites: http request", "method", "GET", "url", url)
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list sessions: %w", err)

@@ -143,8 +143,9 @@ func TestCmdContextCancellation(t *testing.T) {
 		}
 	}()
 
-	//nolint:staticcheck // We're testing that nil context panics
-	sprite.CommandContext(nil, "echo")
+	// Intentionally pass a nil context to verify panic behavior
+	var nilCtx context.Context
+	sprite.CommandContext(nilCtx, "echo")
 }
 
 func TestExitError(t *testing.T) {

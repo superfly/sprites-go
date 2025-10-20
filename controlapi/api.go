@@ -1,3 +1,5 @@
+// Package controlapi (UNSTABLE) provides low-level access to the control websocket.
+// This package is intended for advanced users and is subject to change.
 package controlapi
 
 import (
@@ -18,8 +20,6 @@ func (a *API) StartExec(ctx context.Context, opt ops.ExecOptions) (ops.ExecSessi
 		return nil, err
 	}
 	sess, err := c.StartExec(ctx, opt)
-	// Return connection to pool on completion happens when caller closes sess.
-	// We wrap Close to checkin.
 	if err != nil {
 		a.pool.Checkin(c)
 		return nil, err

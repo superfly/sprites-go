@@ -1,3 +1,5 @@
+// Package controlapi (UNSTABLE) provides low-level access to the control websocket.
+// This package is intended for advanced users and is subject to change.
 package controlapi
 
 import (
@@ -27,13 +29,11 @@ func (p *Pool) Checkout(ctx context.Context) (*Client, error) {
 		c := p.idle[n-1]
 		p.idle = p.idle[:n-1]
 		p.mu.Unlock()
-		// ensure connected
 		if err := c.Dial(ctx); err != nil {
 			return nil, err
 		}
 		return c, nil
 	}
-	// create new
 	p.open++
 	p.mu.Unlock()
 

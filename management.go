@@ -43,6 +43,7 @@ func (c *Client) CreateSpriteWithOrg(ctx context.Context, name string, config *S
 
 	// Make request with timeout
 	client := &http.Client{Timeout: 120 * time.Second}
+	spritesDbg("sprites: http request", "method", "POST", "url", url)
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create sprite: %w", err)
@@ -97,6 +98,7 @@ func (c *Client) GetSpriteWithOrg(ctx context.Context, name string, org *Organiz
 
 	// Make request
 	client := &http.Client{Timeout: 30 * time.Second}
+	spritesDbg("sprites: http request", "method", "GET", "url", url)
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get sprite: %w", err)
@@ -175,6 +177,7 @@ func (c *Client) ListSprites(ctx context.Context, opts *ListOptions) (*SpriteLis
 
 	// Make request
 	client := &http.Client{Timeout: 30 * time.Second}
+	spritesDbg("sprites: http request", "method", "GET", "url", u.String())
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list sprites: %w", err)
@@ -267,6 +270,7 @@ func (c *Client) DeleteSprite(ctx context.Context, name string) error {
 
 	// Make request
 	client := &http.Client{Timeout: 30 * time.Second}
+	spritesDbg("sprites: http request", "method", "DELETE", "url", url)
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("failed to delete sprite: %w", err)
@@ -307,6 +311,7 @@ func (c *Client) UpgradeSprite(ctx context.Context, name string) error {
 
 	// Make request
 	client := &http.Client{Timeout: 60 * time.Second}
+	spritesDbg("sprites: http request", "method", "POST", "url", url)
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("failed to upgrade sprite: %w", err)
@@ -352,6 +357,7 @@ func (c *Client) UpdateURLSettings(ctx context.Context, spriteName string, setti
 
 	// Make request with timeout
 	client := &http.Client{Timeout: 30 * time.Second}
+	spritesDbg("sprites: http request", "method", "PUT", "url", url)
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("failed to update URL settings: %w", err)

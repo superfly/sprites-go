@@ -1,3 +1,5 @@
+// Package controlapi (UNSTABLE) provides low-level access to the control websocket.
+// This package is intended for advanced users and is subject to change.
 package controlapi
 
 import (
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	sprites "github.com/superfly/sprites-go"
 	"github.com/superfly/sprites-go/ops"
 )
 
@@ -45,6 +48,10 @@ func (c *Client) Dial(ctx context.Context) error {
 	if strings.HasPrefix(wsURL, "wss://") {
 		d.TLSClientConfig = &tls.Config{}
 	}
+	// Debug log: dialing control websocket (host/path only)
+	if u, err := url.Parse(wsURL); err == nil {
+		sprites.LogDebug("sprites: control dial", "host", u.Host, "path", u.Path)
+	}
 	conn, resp, err := d.DialContext(ctx, wsURL, req.Header)
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
@@ -56,6 +63,9 @@ func (c *Client) Dial(ctx context.Context) error {
 		return fmt.Errorf("control dial failed: %w", err)
 	}
 	c.conn = conn
+	if u, err := url.Parse(wsURL); err == nil {
+		sprites.LogDebug("sprites: control connected", "host", u.Host, "path", u.Path)
+	}
 	return nil
 }
 
@@ -72,6 +82,7 @@ func (c *Client) StartExec(ctx context.Context, opt ops.ExecOptions) (ops.ExecSe
 		"args": buildArgs(opt),
 	}
 	payload, _ := json.Marshal(env)
+	sprites.LogDebug("sprites: control op.start", "id", cid, "op", "exec", "args_len", len(payload))
 	if err := c.writeText("control:" + string(payload)); err != nil {
 		return nil, err
 	}
