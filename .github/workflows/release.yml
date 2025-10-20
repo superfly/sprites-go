@@ -76,9 +76,6 @@ jobs:
         else
           echo "tag_suffix=" >> $GITHUB_OUTPUT
         fi
-  # test:
-  #   name: Run Tests
-  #   uses: ./.github/workflows/test.yml
 
   release-images:
     name: Release Docker Images

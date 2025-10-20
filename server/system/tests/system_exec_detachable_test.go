@@ -109,6 +109,13 @@ func TestExecDetachableTTY(t *testing.T) {
 		t.Fatalf("did not see READY echo: %v", err)
 	}
 
+	// Verify we are running under tmux: parent process of this shell should be tmux
+	// Prints the parent command name; expect 'tmux' when detachable session is active
+	_, _ = stdin.Write([]byte("echo TMUXCOMM:$(ps -o comm= -p $(ps -o ppid= -p $$))\n"))
+	if err := waitFor("TMUXCOMM:tmux", 5*time.Second); err != nil {
+		t.Fatalf("shell does not appear to be under tmux: %v", err)
+	}
+
 	// Poll briefly for session to appear
 	deadline := time.Now().Add(3 * time.Second)
 	for {
