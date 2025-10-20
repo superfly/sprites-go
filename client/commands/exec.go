@@ -75,7 +75,8 @@ func ExecCommand(ctx *GlobalContext, args []string) int {
 
 	// Check if we're attaching to an existing session
 	if *sessionID != "" {
-		return attachToSession(ctx, sprite, *sessionID)
+		// No pre-fetched list here; pass empty title (will still work)
+		return attachToSession(ctx, sprite, *sessionID, "")
 	}
 
 	// Check for command to execute
@@ -429,8 +430,17 @@ func listExecSessions(ctx *GlobalContext, org *config.Organization, sprite *spri
 			return 0
 		}
 
+		// Resolve command for selected session from the already-fetched list
+		var cmdForTitle string
+		for _, s := range sessions {
+			if s.ID == selectedID {
+				cmdForTitle = s.Command
+				break
+			}
+		}
+
 		// Attach to the selected session
-		return attachToSession(ctx, sprite, selectedID)
+		return attachToSession(ctx, sprite, selectedID, cmdForTitle)
 	} else {
 		// Non-interactive mode - just list the sessions
 		return listSessionsNonInteractive(sessionItems, org, sprite)
@@ -438,26 +448,14 @@ func listExecSessions(ctx *GlobalContext, org *config.Organization, sprite *spri
 }
 
 // attachToSession attaches to an existing execution session
-func attachToSession(ctx *GlobalContext, sprite *sprites.Sprite, sessionID string) int {
+func attachToSession(ctx *GlobalContext, sprite *sprites.Sprite, sessionID string, cmdForTitle string) int {
 
 	// Print connection info
 	fmt.Printf("Attaching to session %s in sprite %s...\n",
 		format.Command(sessionID),
 		format.Sprite(sprite.Name()))
 
-	// Best-effort: lookup command for this session for the tab title
-	var cmdForTitle string
-	{
-		sessionsCtx := context.Background()
-		if sessions, err := sprite.Client().ListSessions(sessionsCtx, sprite.Name()); err == nil {
-			for _, s := range sessions {
-				if s.ID == sessionID {
-					cmdForTitle = s.Command
-					break
-				}
-			}
-		}
-	}
+	// cmdForTitle was resolved by the caller from the initial sessions listing
 
 	// Create attach command using sprite instance
 	execCtx := context.Background()

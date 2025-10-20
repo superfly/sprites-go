@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -56,7 +57,8 @@ func EnsureAuthenticated(ctx *GlobalContext, orgOverride string) (*config.Organi
 		return nil, nil, fmt.Errorf("failed to get auth token: %w", err)
 	}
 
-	client := sprites.New(token, sprites.WithBaseURL(getSpritesAPIURL(org)))
+	// Pass slog.Default for auth flow-created client
+	client := sprites.New(token, sprites.WithBaseURL(getSpritesAPIURL(org)), sprites.WithLogger(slog.Default()))
 
 	return org, client, nil
 }

@@ -442,7 +442,7 @@ func GetOrgAndClient(ctx *GlobalContext, orgOverride string) (*config.Organizati
 				// Just start the auth flow directly (don't ask y/n)
 				return SelectOrganization(ctx)
 			}
-			
+
 			// For "not found" errors, use the nice prompt
 			if strings.Contains(err.Error(), "not found") {
 				fmt.Println()
@@ -486,8 +486,12 @@ func GetOrgAndClient(ctx *GlobalContext, orgOverride string) (*config.Organizati
 		return nil, nil, fmt.Errorf("failed to get auth token: %w. Run 'sprite login' to authenticate", err)
 	}
 
-	// Create and configure sprites client
-	client := sprites.New(token, sprites.WithBaseURL(getSpritesAPIURL(org)))
+	// Create and configure sprites client (pass through CLI logger)
+	opts := []sprites.Option{sprites.WithBaseURL(getSpritesAPIURL(org))}
+	if ctx.Logger != nil {
+		opts = append(opts, sprites.WithLogger(ctx.Logger))
+	}
+	client := sprites.New(token, opts...)
 
 	return org, client, nil
 }

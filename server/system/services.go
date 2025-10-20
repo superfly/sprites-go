@@ -49,9 +49,11 @@ func (s *System) initializeServicesManager() error {
 func (s *System) initializeTMUXManager() error {
 	// Always create a single tmux.Manager instance
 	if s.TMUXManager == nil {
-		opts := tmux.Options{}
-		// Wrap tmux invocations inside the container environment when enabled
+		opts := tmux.Options{TmuxBinary: "tmux"}
+		// If using the container command wrapper, tmux lives in /.sprite/bin/tmux
+		// Otherwise, use PATH ("tmux").
 		if s.config != nil && s.config.ContainerEnabled {
+			opts.TmuxBinary = "/.sprite/bin/tmux"
 			opts.WrapCmd = func(c *exec.Cmd) *exec.Cmd {
 				return container.Wrap(c, "app", container.WithTTY(false)).Cmd
 			}
