@@ -90,7 +90,7 @@ jobs:
       packages: write
     with:
       tag_suffix: ${{ inputs.tag_suffix || needs.context.outputs.tag_suffix || github.ref_name }}
-      tag_latest: ${{ inputs.tag_latest != '' && inputs.tag_latest || needs.context.outputs.tag_latest }}
+      tag_latest: ${{ (inputs.tag_latest != null && inputs.tag_latest) || (inputs.tag_latest == null && fromJSON(needs.context.outputs.tag_latest)) }}
       checkout_ref: ${{ needs.context.outputs.sha }}
     secrets: inherit
 
