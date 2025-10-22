@@ -125,6 +125,7 @@ func (s *SockServer) setupRoutes(mux *http.ServeMux) {
 	// Checkpoint endpoints (no auth required)
 	mux.HandleFunc("GET /v1/checkpoints", s.apiHandlers.HandleListCheckpoints)
 	mux.HandleFunc("GET /v1/checkpoints/{id}", s.apiHandlers.HandleGetCheckpoint)
+	mux.HandleFunc("DELETE /v1/checkpoints/{id}", s.apiHandlers.HandleDeleteCheckpoint)
 	// Restore needs custom handling - returns immediately then triggers restore
 	mux.HandleFunc("POST /v1/checkpoints/{id}/restore", s.handleRestoreCheckpoint)
 	mux.HandleFunc("POST /v1/checkpoint", s.apiHandlers.HandleCheckpoint)

@@ -230,7 +230,11 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 			s.handlers.HandleListCheckpoints(w, r)
 		} else if len(parts) == 2 && parts[0] == "checkpoints" {
 			// GET /checkpoints/{id} - get specific checkpoint
-			s.handlers.HandleGetCheckpoint(w, r)
+			if r.Method == http.MethodDelete {
+				s.handlers.HandleDeleteCheckpoint(w, r)
+			} else {
+				s.handlers.HandleGetCheckpoint(w, r)
+			}
 		} else if len(parts) == 3 && parts[0] == "checkpoints" && parts[2] == "restore" {
 			// POST /checkpoints/{id}/restore - restore from checkpoint
 			s.handlers.HandleCheckpointRestore(w, r)

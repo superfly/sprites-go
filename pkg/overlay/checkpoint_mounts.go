@@ -226,6 +226,46 @@ func (m *Manager) isCheckpointMounted(cpName string) bool {
 	return exists
 }
 
+// UnmountCheckpoint unmounts a single checkpoint mount if present and detaches loop device
+func (m *Manager) UnmountCheckpoint(ctx context.Context, cpName string) error {
+	m.checkpointMu.Lock()
+	defer m.checkpointMu.Unlock()
+
+	// Determine mount path either from tracking map or expected location
+	mountPath, ok := m.checkpointMounts[cpName]
+	if !ok {
+		mountPath = filepath.Join(m.checkpointMountPath, cpName)
+	}
+
+	m.logger.Info("Unmounting checkpoint", "checkpoint", cpName, "path", mountPath)
+
+	// Best-effort: only unmount if actually mounted
+	if mounted, err := isMounted(mountPath); err == nil && mounted {
+		if err := unmount(mountPath); err != nil {
+			m.logger.Warn("Failed to unmount checkpoint", "checkpoint", cpName, "error", err)
+			return fmt.Errorf("unmount %s: %w", cpName, err)
+		}
+	}
+
+	// Remove empty mount directory (best-effort)
+	if err := os.RemoveAll(mountPath); err != nil {
+		m.logger.Warn("Failed to remove checkpoint mount directory", "checkpoint", cpName, "path", mountPath, "error", err)
+	}
+
+	// Detach loop device if tracked
+	if loopDevice, ok := m.checkpointLoopDevices[cpName]; ok {
+		if err := detachLoopDevice(loopDevice); err != nil {
+			m.logger.Warn("Failed to detach loop device", "checkpoint", cpName, "device", loopDevice, "error", err)
+			// Continue after warning
+		}
+		delete(m.checkpointLoopDevices, cpName)
+	}
+
+	// Clear tracking regardless
+	delete(m.checkpointMounts, cpName)
+	return nil
+}
+
 // UnmountCheckpoints unmounts all checkpoint mounts including the active checkpoint
 func (m *Manager) UnmountCheckpoints(ctx context.Context) error {
 	m.checkpointMu.Lock()

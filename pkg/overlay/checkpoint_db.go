@@ -77,6 +77,40 @@ CREATE TABLE IF NOT EXISTS sprite_checkpoints (
 	if _, err := s.db.Exec(createTable); err != nil {
 		return fmt.Errorf("create table: %w", err)
 	}
+
+	// Ensure soft-delete support exists
+	// Add deleted_at column if it does not exist
+	type column struct {
+		name string
+	}
+	cols, err := s.db.Query("PRAGMA table_info(sprite_checkpoints)")
+	if err == nil {
+		defer cols.Close()
+		var (
+			cid     int
+			name    string
+			ctype   string
+			notnull int
+			dflt    interface{}
+			pk      int
+		)
+		found := false
+		for cols.Next() {
+			// PRAGMA table_info returns: cid, name, type, notnull, dflt_value, pk
+			if err := cols.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err == nil {
+				if name == "deleted_at" {
+					found = true
+				}
+			}
+		}
+		if !found {
+			if _, err := s.db.Exec("ALTER TABLE sprite_checkpoints ADD COLUMN deleted_at TIMESTAMP"); err != nil {
+				return fmt.Errorf("add deleted_at: %w", err)
+			}
+		}
+	} else {
+		return fmt.Errorf("table info: %w", err)
+	}
 	var count int
 	if err := s.db.QueryRow("SELECT COUNT(*) FROM sprite_checkpoints").Scan(&count); err != nil {
 		return fmt.Errorf("count: %w", err)
@@ -185,7 +219,7 @@ func (s *checkpointDB) getCheckpointByID(id int64) (*CheckpointRecord, error) {
 
 func (s *checkpointDB) findCheckpointByPath(path string) (*CheckpointRecord, error) {
 	var r dbRecord
-	row := s.db.QueryRow("SELECT id, path, parent_id, created_at FROM sprite_checkpoints WHERE path = ?", path)
+	row := s.db.QueryRow("SELECT id, path, parent_id, created_at FROM sprite_checkpoints WHERE path = ? AND (deleted_at IS NULL)", path)
 	if err := row.Scan(&r.ID, &r.Path, &r.ParentID, &r.CreatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("checkpoint with path %s not found", path)
@@ -199,7 +233,7 @@ func (s *checkpointDB) listAll() ([]CheckpointRecord, error) {
 	rows, err := s.db.Query(`
         SELECT id, path, parent_id, created_at
         FROM sprite_checkpoints
-        WHERE path LIKE 'checkpoints/%'
+        WHERE path LIKE 'checkpoints/%' AND (deleted_at IS NULL)
         ORDER BY id DESC
     `)
 	if err != nil {
@@ -233,4 +267,22 @@ func (s *checkpointDB) getLatest() (*CheckpointRecord, error) {
 		return nil, fmt.Errorf("latest: %w", err)
 	}
 	return &CheckpointRecord{ID: r.ID, Path: r.Path, CreatedAt: r.CreatedAt}, nil
+}
+
+// softDeleteByID marks a checkpoint (not active) as deleted
+func (s *checkpointDB) softDeleteByID(id int64) error {
+	// Only allow soft delete for real checkpoints under checkpoints/
+	// Guard against deleting the active row by ensuring path like 'checkpoints/%'
+	res, err := s.db.Exec(`
+        UPDATE sprite_checkpoints
+        SET deleted_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND path LIKE 'checkpoints/%' AND deleted_at IS NULL
+    `, id)
+	if err != nil {
+		return fmt.Errorf("soft delete: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("not found or already deleted")
+	}
+	return nil
 }

@@ -87,6 +87,7 @@ func (h *Handlers) ExecHandler(w http.ResponseWriter, r *http.Request) {
 	// Build final command considering tmux detachable/attach
 	finalCmd := baseCmd
 	var monitoredSessionID string
+
 	var wrapped *container.WrappedCommand
 	if h.system != nil {
 		if tm := h.system.GetTMUXManager(); tm != nil {
@@ -119,12 +120,15 @@ func (h *Handlers) ExecHandler(w http.ResponseWriter, r *http.Request) {
 	if wrapped == nil && monitoredSessionID == "" && h.containerEnabled {
 		wrapped = container.Wrap(baseCmd, "app", container.WithTTY(tty))
 		if wrapped != nil {
+			// Log that we're using the container wrapper for this exec
+			h.logger.Info("using container wrapper for exec", "wrapper", "crun", "tty", tty)
 			finalCmd = wrapped.Cmd
 			if h.logger != nil {
 				h.logger.Info("using container wrapper for exec", "wrapper", "crun", "tty", tty)
 			}
 		}
 	}
+	// No tmux-provided wrapper fallback; rely on API layer wrapping only
 
 	// I/O adapters
 	wsR := &wsReader{conn: conn, wrapped: wrapped, logger: h.logger}
@@ -471,7 +475,7 @@ func (r *wsReader) Read(p []byte) (int, error) {
 					if lg == nil {
 						lg = slog.Default()
 					}
-					lg.Debug("forwarding SIGWINCH to container process",
+					lg.Info("forwarding SIGWINCH to container process",
 						"container_pid", containerPID,
 						"host_pid", hostPID,
 						"cols", msg.Cols,

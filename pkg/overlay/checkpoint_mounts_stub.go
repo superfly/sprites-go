@@ -17,6 +17,17 @@ func (m *Manager) UnmountCheckpoints(ctx context.Context) error {
 	return nil // No-op on non-Linux
 }
 
+// UnmountCheckpoint is a no-op on non-Linux; update internal maps to simulate unmount
+func (m *Manager) UnmountCheckpoint(ctx context.Context, cpName string) error {
+	if m == nil {
+		return nil
+	}
+	// Simulate successful unmount by clearing tracking maps
+	delete(m.checkpointMounts, cpName)
+	delete(m.checkpointLoopDevices, cpName)
+	return nil
+}
+
 // RefreshCheckpointMounts is not supported on non-Linux platforms
 func (m *Manager) RefreshCheckpointMounts(ctx context.Context) error {
 	return nil // No-op on non-Linux

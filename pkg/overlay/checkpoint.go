@@ -206,6 +206,43 @@ func (m *Manager) FindCheckpointByIdentifier(id string) (*CheckpointRecord, erro
 	return rec, err
 }
 
+// DeleteCheckpoint deletes a checkpoint by identifier: unmounts, removes files, and soft-deletes DB
+func (m *Manager) DeleteCheckpoint(ctx context.Context, id string) error {
+	if m.checkpointDB == nil {
+		return fmt.Errorf("checkpoint manager not initialized")
+	}
+	if id == "active" || strings.EqualFold(id, "Current") {
+		return fmt.Errorf("cannot delete active checkpoint")
+	}
+
+	// Resolve to DB record and path
+	rec, path, err := m.resolveCheckpoint(id)
+	if err != nil {
+		return err
+	}
+
+	// Derive cpName like vN from path "checkpoints/vN"
+	cpName := filepath.Base(path)
+
+	// Best-effort unmount if mounted
+	// Attempt unmount regardless of tracking; function is tolerant and idempotent
+	if err := m.UnmountCheckpoint(ctx, cpName); err != nil {
+		return err
+	}
+
+	// Remove directory on filesystem (use Rename with empty dst for remove)
+	if err := m.checkpointFS.Rename(ctx, path, ""); err != nil {
+		return fmt.Errorf("remove checkpoint data: %w", err)
+	}
+
+	// Soft delete DB record
+	if err := m.checkpointDB.softDeleteByID(rec.ID); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // Restore restores the active state from the given checkpoint identifier.
 // The identifier may be one of:
 // - "checkpoints/vN"

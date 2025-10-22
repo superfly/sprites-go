@@ -36,6 +36,7 @@ type SystemManager interface {
 	ListCheckpoints(ctx context.Context) ([]api.CheckpointInfo, error)
 	ListCheckpointsByHistory(ctx context.Context, version string) ([]string, error)
 	GetCheckpoint(ctx context.Context, checkpointID string) (*api.CheckpointInfo, error)
+	DeleteCheckpoint(ctx context.Context, checkpointID string) error
 
 	// Overlay sync for suspend
 	// Returns a function that must be called to unfreeze the filesystem

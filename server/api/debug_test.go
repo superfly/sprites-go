@@ -23,6 +23,7 @@ type mockSystemManager struct {
 	isRunning       bool
 	reapedProcesses map[int]time.Time
 	reapListeners   []chan int
+	existing        map[string]bool
 }
 
 func newMockSystemManager() *mockSystemManager {
@@ -30,6 +31,7 @@ func newMockSystemManager() *mockSystemManager {
 		isRunning:       true,
 		reapedProcesses: make(map[int]time.Time),
 		reapListeners:   make([]chan int, 0),
+		existing:        map[string]bool{"v0": true, "v1": true},
 	}
 }
 
@@ -92,18 +94,14 @@ func (m *mockSystemManager) RestoreWithStream(ctx context.Context, checkpointID 
 
 func (m *mockSystemManager) ListCheckpoints(ctx context.Context) ([]api.CheckpointInfo, error) {
 	// Return mock checkpoints
-	return []api.CheckpointInfo{
-		{
-			ID:         "v0",
-			CreateTime: time.Now().Add(-2 * time.Hour),
-			SourceID:   "",
-		},
-		{
-			ID:         "v1",
-			CreateTime: time.Now().Add(-1 * time.Hour),
-			SourceID:   "",
-		},
-	}, nil
+	out := []api.CheckpointInfo{}
+	if m.existing["v0"] {
+		out = append(out, api.CheckpointInfo{ID: "v0", CreateTime: time.Now().Add(-2 * time.Hour)})
+	}
+	if m.existing["v1"] {
+		out = append(out, api.CheckpointInfo{ID: "v1", CreateTime: time.Now().Add(-1 * time.Hour)})
+	}
+	return out, nil
 }
 
 func (m *mockSystemManager) ListCheckpointsByHistory(ctx context.Context, version string) ([]string, error) {
@@ -118,14 +116,14 @@ func (m *mockSystemManager) ListCheckpointsByHistory(ctx context.Context, versio
 
 func (m *mockSystemManager) GetCheckpoint(ctx context.Context, checkpointID string) (*api.CheckpointInfo, error) {
 	// Return mock checkpoint
-	if checkpointID == "v0" {
+	if checkpointID == "v0" && m.existing["v0"] {
 		return &api.CheckpointInfo{
 			ID:         "v0",
 			CreateTime: time.Now().Add(-2 * time.Hour),
 			SourceID:   "",
 		}, nil
 	}
-	if checkpointID == "v1" {
+	if checkpointID == "v1" && m.existing["v1"] {
 		return &api.CheckpointInfo{
 			ID:         "v1",
 			CreateTime: time.Now().Add(-1 * time.Hour),
@@ -133,6 +131,17 @@ func (m *mockSystemManager) GetCheckpoint(ctx context.Context, checkpointID stri
 		}, nil
 	}
 	return nil, fmt.Errorf("checkpoint %s does not exist", checkpointID)
+}
+
+func (m *mockSystemManager) DeleteCheckpoint(ctx context.Context, checkpointID string) error {
+	if checkpointID == "active" || checkpointID == "Current" {
+		return fmt.Errorf("cannot delete active checkpoint")
+	}
+	if _, ok := m.existing[checkpointID]; !ok || !m.existing[checkpointID] {
+		return fmt.Errorf("not found")
+	}
+	m.existing[checkpointID] = false
+	return nil
 }
 
 func (m *mockSystemManager) SubscribeToReapEvents() <-chan int {
