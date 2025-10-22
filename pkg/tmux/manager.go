@@ -62,6 +62,8 @@ type Manager struct {
 
 	paneCallbacks   map[string]PaneLifecycleCallback
 	paneCallbacksMu sync.RWMutex
+
+	// removed state for wrapped metadata; API layer handles wrappers
 }
 
 func NewManager(ctx context.Context, opts Options) *Manager {
@@ -164,84 +166,22 @@ func (m *Manager) GenerateSessionID() string {
 // NewSessionCmd builds a tmux command that creates a new session and runs base.
 // It generates a new session ID and returns the command and the ID.
 func (m *Manager) NewSessionCmd(base *exec.Cmd, controlMode bool) (*exec.Cmd, string) {
-	// Request monitor startup after first session creation
-	select {
-	case m.monitorStartCh <- struct{}{}:
-	default:
-	}
-
-	sessionID := m.GenerateSessionID()
-	tmuxArgs := []string{"-f", m.configPath, "-S", m.socketPath}
-	if controlMode {
-		tmuxArgs = append(tmuxArgs, "-CC")
-	}
-	sessionName := m.sessionName(sessionID)
-	// Create a wrapper script to set env/dir then exec the original command
-	scriptPath := fmt.Sprintf("/.sprite/tmp/exec-%s", sessionID)
-	if err := generateTmuxWrapperScript(scriptPath, base); err != nil {
-		if m.logger != nil {
-			m.logger.Warn("NewSessionCmd: wrapper script generation failed, falling back", "error", err)
-		}
-		// Fallback: direct command
-		tmuxArgs = append(tmuxArgs, "new-session", "-s", sessionName, base.Path)
-		if len(base.Args) > 1 {
-			tmuxArgs = append(tmuxArgs, base.Args[1:]...)
-		}
-	} else {
-		// Use script path directly
-		tmuxArgs = append(tmuxArgs, "new-session", "-s", sessionName, scriptPath)
-	}
-	if m.logger != nil {
-		m.logger.Debug("NewSessionCmd: building tmux new-session",
-			"sessionID", sessionID,
-			"sessionName", sessionName,
-			"args", tmuxArgs,
-			"dir", base.Dir)
-	}
-	cmd := m.buildTmuxCommand(tmuxArgs)
-	// Minimal env for tmux process (avoid leaking host env via crun)
-	// User command env is exported by the wrapper script from base.Env
-	cmd.Env = ensureDefaultEnv([]string{})
-	cmd.Stdin = base.Stdin
-	cmd.Stdout = base.Stdout
-	cmd.Stderr = base.Stderr
-	cmd.Dir = base.Dir
-	if m.logger != nil {
-		m.logger.Debug("NewSessionCmd: command built", "path", cmd.Path, "args", cmd.Args)
-	}
-	return cmd, sessionID
+	cmd, _, id := m.NewSession(base, controlMode)
+	return cmd, id
 }
 
 // AttachCmd builds a tmux command that attaches to an existing session
 func (m *Manager) AttachCmd(sessionID string, controlMode bool) *exec.Cmd {
-	// Request monitor startup (attach may be first interaction)
-	select {
-	case m.monitorStartCh <- struct{}{}:
-	default:
-	}
-
-	tmuxArgs := []string{"-f", m.configPath, "-S", m.socketPath}
-	if controlMode {
-		tmuxArgs = append(tmuxArgs, "-CC")
-	}
-	sessionName := m.sessionName(sessionID)
-	tmuxArgs = append(tmuxArgs, "attach-session", "-t", sessionName)
-	if m.logger != nil {
-		m.logger.Debug("AttachCmd: building tmux attach",
-			"sessionID", sessionID,
-			"sessionName", sessionName,
-			"args", tmuxArgs)
-	}
-	cmd := m.buildTmuxCommand(tmuxArgs)
-	if m.logger != nil {
-		m.logger.Debug("AttachCmd: command built", "path", cmd.Path, "args", cmd.Args)
-	}
+	cmd, _ := m.Attach(sessionID, controlMode)
 	return cmd
 }
 
 func (m *Manager) sessionName(id string) string {
 	return fmt.Sprintf("%s-exec-%s", m.sessionPrefix, id)
 }
+
+// WrappedForSession returns the container WrappedCommand associated with a session, if any.
+// WrappedForSession removed
 
 func (m *Manager) buildTmuxCommand(tmuxArgs []string) *exec.Cmd {
 	tmuxBinary := m.tmuxBinary
@@ -254,7 +194,7 @@ func (m *Manager) buildTmuxCommand(tmuxArgs []string) *exec.Cmd {
 	}
 	// Ensure TERM only; avoid inheriting host environment
 	cmd.Env = ensureDefaultEnv([]string{})
-	// If a wrapper is configured (container exec), wrap the command now
+	// If a wrapper is configured (container exec), wrap the command now (for non-exec utility paths)
 	if m.wrapCmd != nil {
 		if wrapped := m.wrapCmd(cmd); wrapped != nil {
 			if m.logger != nil {
@@ -271,6 +211,105 @@ func (m *Manager) buildTmuxCommand(tmuxArgs []string) *exec.Cmd {
 		panic("tmux manager: wrapCmd returned nil for tmux command")
 	}
 	return cmd
+}
+
+// NewSession builds a tmux command that creates a new session and runs base, returning
+// the command to execute, a nil container wrapper (tmux is never wrapped here), and the new session ID.
+func (m *Manager) NewSession(base *exec.Cmd, controlMode bool) (*exec.Cmd, *container.WrappedCommand, string) {
+	// Request monitor startup after first session creation
+	select {
+	case m.monitorStartCh <- struct{}{}:
+	default:
+	}
+
+	sessionID := m.GenerateSessionID()
+	tmuxArgs := []string{"-f", m.configPath, "-S", m.socketPath}
+	if controlMode {
+		tmuxArgs = append(tmuxArgs, "-CC")
+	}
+	sessionName := m.sessionName(sessionID)
+	// Create a wrapper script to set env/dir then exec the original command
+	scriptPath := fmt.Sprintf("/.sprite/tmp/exec-%s", sessionID)
+	if err := generateTmuxWrapperScript(scriptPath, base); err != nil {
+		if m.logger != nil {
+			m.logger.Warn("NewSession: wrapper script generation failed, falling back", "error", err)
+		}
+		// Fallback: direct command
+		tmuxArgs = append(tmuxArgs, "new", "-s", sessionName, base.Path)
+		if len(base.Args) > 1 {
+			tmuxArgs = append(tmuxArgs, base.Args[1:]...)
+		}
+	} else {
+		// Use script path directly
+		tmuxArgs = append(tmuxArgs, "new", "-s", sessionName, scriptPath)
+	}
+	if m.logger != nil {
+		m.logger.Debug("NewSession: building tmux new-session",
+			"sessionID", sessionID,
+			"sessionName", sessionName,
+			"args", tmuxArgs,
+			"dir", base.Dir)
+	}
+	// Build RAW tmux command (do not use buildTmuxCommand to avoid double-wrapping for exec flows)
+	tmuxBinary := m.tmuxBinary
+	cmd := exec.Command(tmuxBinary, tmuxArgs...)
+	if strings.HasPrefix(tmuxBinary, "./") || strings.HasPrefix(tmuxBinary, "../") {
+		cmd.Dir = "/.sprite/bin/"
+	}
+	// Minimal env for tmux process (avoid leaking host env)
+	// User command env is exported by the wrapper script from base.Env
+	cmd.Env = ensureDefaultEnv([]string{})
+	cmd.Stdin = base.Stdin
+	cmd.Stdout = base.Stdout
+	cmd.Stderr = base.Stderr
+	cmd.Dir = base.Dir
+	if m.logger != nil {
+		m.logger.Debug("NewSession: command built", "path", cmd.Path, "args", cmd.Args)
+	}
+	// For exec flows, if a wrapper is configured, wrap here and return the handle
+	if m.wrapCmd != nil {
+		wc := container.Wrap(cmd, "app", container.WithTTY(false))
+		return wc.Cmd, wc, sessionID
+	}
+	return cmd, nil, sessionID
+}
+
+// Attach builds a tmux command that attaches to an existing session, returning
+// the command to execute and a nil container wrapper (tmux is never wrapped here).
+func (m *Manager) Attach(sessionID string, controlMode bool) (*exec.Cmd, *container.WrappedCommand) {
+	// Request monitor startup (attach may be first interaction)
+	select {
+	case m.monitorStartCh <- struct{}{}:
+	default:
+	}
+
+	tmuxArgs := []string{"-f", m.configPath, "-S", m.socketPath}
+	if controlMode {
+		tmuxArgs = append(tmuxArgs, "-CC")
+	}
+	sessionName := m.sessionName(sessionID)
+	tmuxArgs = append(tmuxArgs, "attach", "-t", sessionName)
+	if m.logger != nil {
+		m.logger.Debug("Attach: building tmux attach",
+			"sessionID", sessionID,
+			"sessionName", sessionName,
+			"args", tmuxArgs)
+	}
+	// Build RAW tmux command (avoid buildTmuxCommand here to prevent double wrap)
+	tmuxBinary := m.tmuxBinary
+	cmd := exec.Command(tmuxBinary, tmuxArgs...)
+	if strings.HasPrefix(tmuxBinary, "./") || strings.HasPrefix(tmuxBinary, "../") {
+		cmd.Dir = "/.sprite/bin/"
+	}
+	cmd.Env = ensureDefaultEnv([]string{})
+	if m.logger != nil {
+		m.logger.Debug("Attach: command built", "path", cmd.Path, "args", cmd.Args)
+	}
+	if m.wrapCmd != nil {
+		wc := container.Wrap(cmd, "app", container.WithTTY(false))
+		return wc.Cmd, wc
+	}
+	return cmd, nil
 }
 
 // ensureDefaultEnv adds sane defaults (TERM) if not present

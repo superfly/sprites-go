@@ -239,7 +239,16 @@ func (r *Runner) Resize(cols, rows uint16) error {
 		return errors.New("no PTY allocated")
 	}
 	ws := &unix.Winsize{Row: rows, Col: cols}
-	return unix.IoctlSetWinsize(int(r.pty.Fd()), unix.TIOCSWINSZ, ws)
+	if err := unix.IoctlSetWinsize(int(r.pty.Fd()), unix.TIOCSWINSZ, ws); err != nil {
+		return err
+	}
+	// Best-effort: also notify the foreground process group with SIGWINCH.
+	// This can be necessary in some environments (e.g., containerized slaves)
+	// even though TIOCSWINSZ should normally generate SIGWINCH.
+	if pgid, err := unix.IoctlGetInt(int(r.pty.Fd()), unix.TIOCGPGRP); err == nil && pgid > 0 {
+		_ = syscall.Kill(-pgid, syscall.SIGWINCH)
+	}
+	return nil
 }
 
 // startWithoutTTY starts the process in non-TTY mode and launches stdin copier if needed.

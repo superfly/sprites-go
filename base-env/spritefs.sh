@@ -23,6 +23,11 @@ if [ -z "$SECRET_KEY" ]; then
     fi
 fi
 
+# Ensure JSON log format for JuiceFS tooling unless overridden
+if [ -z "$JUICEFS_LOG_FORMAT" ]; then
+    export JUICEFS_LOG_FORMAT="json"
+fi
+
 # Execute juicefs with all arguments passed through
 exec juicefs "$@"
 

@@ -10,8 +10,8 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	gorillaws "github.com/gorilla/websocket"
@@ -87,32 +87,47 @@ func (h *Handlers) ExecHandler(w http.ResponseWriter, r *http.Request) {
 	// Build final command considering tmux detachable/attach
 	finalCmd := baseCmd
 	var monitoredSessionID string
-    if h.system != nil {
-        if tm := h.system.GetTMUXManager(); tm != nil {
-		if sessionID != "" {
-			// Attach flow builds full command
-			finalCmd = tm.AttachCmd(sessionID, controlMode)
-			monitoredSessionID = sessionID
-		} else if detachable {
-			// New detachable session
-			cmd, newID := tm.NewSessionCmd(baseCmd, controlMode)
-			finalCmd = cmd
-			monitoredSessionID = newID
-		}
-        }
-    }
-
-	// Wrap for container last, and avoid double-wrapping if tmux manager already wrapped
 	var wrapped *container.WrappedCommand
-	if h.containerEnabled && !isAlreadyContainerWrapped(finalCmd) {
-		wrapped = container.Wrap(finalCmd, "app", container.WithTTY(tty))
+	if h.system != nil {
+		if tm := h.system.GetTMUXManager(); tm != nil {
+			if sessionID != "" {
+				// Attach flow builds full command
+				cmd, w := tm.Attach(sessionID, controlMode)
+				finalCmd = cmd
+				wrapped = w // capture for signaling (not for PTY)
+				monitoredSessionID = sessionID
+			} else if detachable {
+				// New detachable session
+				cmd, w, newID := tm.NewSession(baseCmd, controlMode)
+				finalCmd = cmd
+				wrapped = w // capture for signaling (not for PTY)
+				monitoredSessionID = newID
+			} else if h.containerEnabled {
+				// Non-tmux path: always container wrap when enabled
+				wrapped = container.Wrap(baseCmd, "app", container.WithTTY(tty))
+				if wrapped != nil {
+					finalCmd = wrapped.Cmd
+					if h.logger != nil {
+						h.logger.Info("using container wrapper for exec", "wrapper", "crun", "tty", tty)
+					}
+				}
+			}
+		}
+	}
+
+	// If not tmux and container wrapping wasn't decided above (e.g., no system manager), apply it now
+	if wrapped == nil && monitoredSessionID == "" && h.containerEnabled {
+		wrapped = container.Wrap(baseCmd, "app", container.WithTTY(tty))
 		if wrapped != nil {
 			finalCmd = wrapped.Cmd
+			if h.logger != nil {
+				h.logger.Info("using container wrapper for exec", "wrapper", "crun", "tty", tty)
+			}
 		}
 	}
 
 	// I/O adapters
-	wsR := &wsReader{conn: conn}
+	wsR := &wsReader{conn: conn, wrapped: wrapped, logger: h.logger}
 	wsW := &wsWriter{conn: conn}
 
 	// For detachable sessions, we capture stdout into a limited-size buffer
@@ -141,8 +156,11 @@ func (h *Handlers) ExecHandler(w http.ResponseWriter, r *http.Request) {
 		stderrLogger = &logWriter{logger: h.logger}
 		opts = append(opts, runner.WithStdout(stdoutWriter))
 		opts = append(opts, runner.WithStderr(stderrLogger))
-		if wrapped != nil {
-			// Use wrapped.GetPTY method to fetch PTY after Start
+		if monitoredSessionID != "" {
+			// tmux path: allocate a new PTY in the runner; do not use container console
+			opts = append(opts, runner.WithNewTTY())
+		} else if wrapped != nil {
+			// Non-tmux container path: use container console socket
 			opts = append(opts, runner.WithWaitTTY(func(ctx context.Context) (*os.File, error) { return wrapped.GetPTY() }))
 		} else {
 			opts = append(opts, runner.WithNewTTY())
@@ -208,8 +226,8 @@ func (h *Handlers) ExecHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// If tmux is engaged, wire pane PID lifecycle and seed existing panes
-    if h.system != nil && monitoredSessionID != "" && h.system.GetTMUXManager() != nil && watcher != nil {
-        tm := h.system.GetTMUXManager()
+	if h.system != nil && monitoredSessionID != "" && h.system.GetTMUXManager() != nil && watcher != nil {
+		tm := h.system.GetTMUXManager()
 		tm.SetPaneCallback(monitoredSessionID, func(_ string, panePID int, added bool) {
 			if added {
 				_ = watcher.AddPID(panePID)
@@ -226,8 +244,8 @@ func (h *Handlers) ExecHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Cleanup
 	defer func() {
-        if h.system != nil && monitoredSessionID != "" && h.system.GetTMUXManager() != nil {
-            h.system.GetTMUXManager().RemovePaneCallback(monitoredSessionID)
+		if h.system != nil && monitoredSessionID != "" && h.system.GetTMUXManager() != nil {
+			h.system.GetTMUXManager().RemovePaneCallback(monitoredSessionID)
 		}
 		if watcher != nil {
 			watcher.Stop()
@@ -292,19 +310,7 @@ func (b *limitedBuffer) Bytes() []byte {
 	return append([]byte(nil), b.buf...)
 }
 
-// isAlreadyContainerWrapped returns true if cmd appears to already be a crun exec wrapper
-func isAlreadyContainerWrapped(cmd *exec.Cmd) bool {
-	if cmd == nil {
-		return false
-	}
-	if cmd.Path == "crun" || strings.HasSuffix(cmd.Path, "/crun") {
-		// Heuristic: args should begin with "exec"
-		if len(cmd.Args) > 1 && cmd.Args[1] == "exec" {
-			return true
-		}
-	}
-	return false
-}
+// removed container wrapped heuristic; we deterministically wrap only non-tmux
 
 // logWriter writes incoming bytes to the server logger at info level as stderr lines.
 type logWriter struct {
@@ -423,9 +429,11 @@ func (h *Handlers) handleListExecSessionsNew(w http.ResponseWriter, r *http.Requ
 }
 
 type wsReader struct {
-	conn *gorillaws.Conn
-	buf  []byte
-	run  *runner.Runner
+	conn    *gorillaws.Conn
+	buf     []byte
+	run     *runner.Runner
+	wrapped *container.WrappedCommand
+	logger  *slog.Logger
 }
 
 func (r *wsReader) Read(p []byte) (int, error) {
@@ -450,6 +458,39 @@ func (r *wsReader) Read(p []byte) (int, error) {
 			}
 			if json.Unmarshal(data, &msg) == nil && msg.Type == "resize" && r.run != nil {
 				_ = r.run.Resize(msg.Cols, msg.Rows)
+				if r.wrapped != nil {
+					// Log container and host PIDs when forwarding SIGWINCH
+					containerPID, hostPID := -1, -1
+					if pid, err := r.wrapped.GetPID(); err == nil && pid > 0 {
+						containerPID = pid
+						if hp, herr := container.ResolvePID(pid); herr == nil && hp > 0 {
+							hostPID = hp
+						}
+					}
+					lg := r.logger
+					if lg == nil {
+						lg = slog.Default()
+					}
+					lg.Debug("forwarding SIGWINCH to container process",
+						"container_pid", containerPID,
+						"host_pid", hostPID,
+						"cols", msg.Cols,
+						"rows", msg.Rows,
+					)
+					_ = r.wrapped.Signal(syscall.SIGWINCH)
+				} else {
+					// No container wrapper (tmux path) - signal the runner PID directly and log
+					lg := r.logger
+					if lg == nil {
+						lg = slog.Default()
+					}
+					lg.Debug("forwarding SIGWINCH to tmux process",
+						"pid", r.run.PID(),
+						"cols", msg.Cols,
+						"rows", msg.Rows,
+					)
+					_ = syscall.Kill(r.run.PID(), syscall.SIGWINCH)
+				}
 			}
 		}
 	}
