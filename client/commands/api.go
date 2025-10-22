@@ -169,7 +169,7 @@ func ApiCommand(ctx *GlobalContext, args []string) {
 		if err == nil && spriteFile != nil && spriteFile.Sprite != "" {
 			spriteName = spriteFile.Sprite
 			if spritePath != "" && org != nil {
-				fmt.Printf("Using %s %s (from %s)\n",
+				fmt.Fprintf(os.Stderr, "Using %s %s (from %s)\n",
 					format.Org(format.GetOrgDisplayName(org.Name, org.URL)),
 					format.Sprite(spriteName),
 					format.Subtle(spritePath))
@@ -226,16 +226,16 @@ func ApiCommand(ctx *GlobalContext, args []string) {
 	// Add any additional curl arguments
 	curlCmd = append(curlCmd, curlArgs...)
 
-	// Show what we're doing
+	// Show what we're doing (stderr only; keep stdout for API response)
 	if spriteName != "" {
-		fmt.Printf("Calling API: %s %s\n",
+		fmt.Fprintf(os.Stderr, "Calling API: %s %s\n",
 			format.Org(format.GetOrgDisplayName(org.Name, org.URL)),
 			format.Sprite(spriteName))
 	} else {
-		fmt.Printf("Calling API: %s\n",
+		fmt.Fprintf(os.Stderr, "Calling API: %s\n",
 			format.Org(format.GetOrgDisplayName(org.Name, org.URL)))
 	}
-	fmt.Printf("URL: %s\n\n", fullURL)
+	fmt.Fprintf(os.Stderr, "URL: %s\n\n", fullURL)
 
 	// Execute curl
 	execCmd := exec.Command(curlCmd[0], curlCmd[1:]...)

@@ -249,6 +249,9 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 	// Suspend endpoint - wait for storage to be ready
 	mux.HandleFunc("/suspend", s.waitForStorageMiddleware(s.handlers.HandleSuspend))
 
+	// Logs endpoint - allow standard token, no special waits
+	mux.HandleFunc("/logs", s.handlers.HandleLogs)
+
 	// Debug endpoints - don't wait for process or JuiceFS
 	mux.HandleFunc("/debug/create-zombie", s.handlers.HandleDebugCreateZombie)
 	mux.HandleFunc("/debug/check-process", s.handlers.HandleDebugCheckProcess)
