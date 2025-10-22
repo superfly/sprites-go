@@ -9,6 +9,11 @@ import (
 // Shutdown gracefully shuts down the system in reverse order of startup
 // This is the main entry point for stopping the system
 func (s *System) Shutdown(shutdownCtx context.Context) error {
+	// Emit shutdown start event
+	s.emitAdminEvent("shutdown.start", map[string]interface{}{
+		"status":     "start",
+		"started_at": time.Now().UnixMilli(),
+	})
 	// Get deadline from context if available
 	deadline, hasDeadline := shutdownCtx.Deadline()
 	if hasDeadline {
@@ -22,7 +27,7 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 			"deadline", "none")
 	}
 
-    // Mark system as stopping
+	// Mark system as stopping
 	s.mu.Lock()
 	if !s.running {
 		s.mu.Unlock()
@@ -32,16 +37,16 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 	s.running = false
 	s.mu.Unlock()
 
-    // Broadcast shutdown to all goroutines that observe this channel
-    s.shutdownTriggeredOnce.Do(func() {
-        close(s.shutdownTriggeredCh)
-    })
+	// Broadcast shutdown to all goroutines that observe this channel
+	s.shutdownTriggeredOnce.Do(func() {
+		close(s.shutdownTriggeredCh)
+	})
 
-    // Wait for any in-progress Boot() step to complete before proceeding
-    // This gates Phase 2/3 so we don't race with boot continuing to mount overlay, etc.
-    s.logger.Debug("Waiting for boot to finish current step before shutdown phases")
-    <-s.bootDoneCh
-    s.logger.Debug("Boot finished; proceeding with shutdown phases")
+	// Wait for any in-progress Boot() step to complete before proceeding
+	// This gates Phase 2/3 so we don't race with boot continuing to mount overlay, etc.
+	s.logger.Debug("Waiting for boot to finish current step before shutdown phases")
+	<-s.bootDoneCh
+	s.logger.Debug("Boot finished; proceeding with shutdown phases")
 
 	// Immediately stop the activity monitor to prevent suspend during shutdown
 	if s.ActivityMonitor != nil {
@@ -64,12 +69,17 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 	// The shutdownCtx is only used for informational purposes and phase 1.
 
 	// Phase 1: Prepare container for shutdown (stop services and process)
-    if err := s.PrepareContainerForShutdown(shutdownCtx); err != nil {
-        // Log and proceed: ServicesManager may not have started yet. Only treat
-        // an actively running process that refuses to stop as fatal.
-        s.logger.Error("Phase 1 partial failure: container shutdown", "error", err)
-        // continue to next phases
-    }
+	if err := s.runTimedStep(shutdownCtx, "shutdown", "prepare_container", 10*time.Second, 30*time.Second, func() error {
+		if err := s.PrepareContainerForShutdown(shutdownCtx); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		// Log and proceed: ServicesManager may not have started yet. Only treat
+		// an actively running process that refuses to stop as fatal.
+		s.logger.Error("Phase 1 partial failure: container shutdown", "error", err)
+		// continue to next phases
+	}
 	s.logger.Info("Phase 1 complete: Container stopped")
 
 	// Phase 2: Unmount overlay filesystem (MUST happen BEFORE JuiceFS stops)
@@ -78,7 +88,12 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 	// Use Background context - this MUST complete for data integrity
 	if s.config.OverlayEnabled && s.OverlayManager != nil {
 		s.logger.Info("Phase 2: Starting overlay unmount with verification")
-		if err := s.UnmountOverlayWithVerification(context.Background()); err != nil {
+		if err := s.runTimedStep(context.Background(), "shutdown", "overlay_unmount", 10*time.Second, 30*time.Second, func() error {
+			if err := s.UnmountOverlayWithVerification(context.Background()); err != nil {
+				return err
+			}
+			return nil
+		}); err != nil {
 			s.logger.Error("Phase 2 failed: overlay unmount", "error", err)
 			return fmt.Errorf("phase 2 (overlay unmount) failed: %w", err)
 		}
@@ -93,7 +108,12 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 	juicefsStart := time.Now()
 	if s.JuiceFS != nil {
 		s.logger.Info("Phase 3: Starting JuiceFS shutdown")
-		if err := s.JuiceFS.Stop(context.Background()); err != nil {
+		if err := s.runTimedStep(context.Background(), "shutdown", "juicefs_stop", 30*time.Second, 60*time.Second, func() error {
+			if err := s.JuiceFS.Stop(context.Background()); err != nil {
+				return err
+			}
+			return nil
+		}); err != nil {
 			s.logger.Error("Phase 3 failed: JuiceFS shutdown", "error", err)
 			return fmt.Errorf("phase 3 (JuiceFS shutdown) failed: %w", err)
 		}
@@ -107,7 +127,12 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 	// Litestream can take up to 1 minute to flush data
 	dbStart := time.Now()
 	if s.DBManager != nil {
-		if err := s.DBManager.Stop(context.Background()); err != nil {
+		if err := s.runTimedStep(context.Background(), "shutdown", "db_manager_stop", 10*time.Second, 30*time.Second, func() error {
+			if err := s.DBManager.Stop(context.Background()); err != nil {
+				return err
+			}
+			return nil
+		}); err != nil {
 			s.logger.Error("Phase 4 failed: database manager shutdown", "error", err)
 			return fmt.Errorf("phase 4 (database manager shutdown) failed: %w", err)
 		}
@@ -116,9 +141,15 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 
 	// Phase 5: Stop network services
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	apiErr := s.APIServer.Stop(ctx)
+	apiErr := s.runTimedStep(ctx, "shutdown", "api_server_stop", 10*time.Second, 30*time.Second, func() error {
+		return s.APIServer.Stop(ctx)
+	})
 	cancel()
-	sockErr := s.SocketServer.Stop()
+	sockErr := func() error {
+		return s.runTimedStep(context.Background(), "shutdown", "socket_server_stop", 10*time.Second, 30*time.Second, func() error {
+			return s.SocketServer.Stop()
+		})
+	}()
 
 	if apiErr != nil || sockErr != nil {
 		s.logger.Error("Phase 5 failed: network services shutdown", "apiError", apiErr, "sockError", sockErr)
@@ -127,8 +158,14 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 	}
 
 	// Phase 6: Stop utilities
-	adminErr := s.AdminChannel.Stop()
-	reaperErr := s.Reaper.Stop(time.Second)
+	adminErr := s.runTimedStep(context.Background(), "shutdown", "admin_channel_stop", 5*time.Second, 15*time.Second, func() error {
+		return s.AdminChannel.Stop()
+	})
+	reaperErr := func() error {
+		return s.runTimedStep(context.Background(), "shutdown", "reaper_stop", 5*time.Second, 15*time.Second, func() error {
+			return s.Reaper.Stop(time.Second)
+		})
+	}()
 
 	// Stop resource monitor
 	if s.ResourceMonitor != nil {
@@ -144,6 +181,11 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 	// Signal shutdown is complete
 	close(s.shutdownCompleteCh)
 
+	// Emit shutdown completion event
+	s.emitAdminEvent("shutdown.complete", map[string]interface{}{
+		"status":      "ok",
+		"finished_at": time.Now().UnixMilli(),
+	})
 	s.logger.Info("System shutdown complete")
 	return nil
 }
@@ -217,10 +259,10 @@ func (s *System) UnmountOverlayWithVerification(shutdownCtx context.Context) err
 // This is used during restore operations to cleanly stop the container environment
 // It includes: services manager stop, process stop, and overlay unmount
 func (s *System) ShutdownContainer(shutdownCtx context.Context) error {
-    s.logger.Info("Starting container shutdown sequence")
-    // Prevent monitor-triggered full shutdown during container-only maintenance
-    s.userEnvMaintenance.Store(true)
-    defer s.userEnvMaintenance.Store(false)
+	s.logger.Info("Starting container shutdown sequence")
+	// Prevent monitor-triggered full shutdown during container-only maintenance
+	s.userEnvMaintenance.Store(true)
+	defer s.userEnvMaintenance.Store(false)
 
 	// Phase 1: Stop services manager first (must stop before container)
 	s.logger.Info("Phase 1: Stopping services manager")

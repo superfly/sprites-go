@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 )
 
 // Boot starts the system and all its modules in the correct order
@@ -22,6 +23,12 @@ func (s *System) Boot(ctx context.Context) error {
 		}
 	}()
 	s.logger.Info("Starting system boot sequence", "system_ptr", fmt.Sprintf("%p", s))
+
+	// Emit boot start event
+	s.emitAdminEvent("boot.start", map[string]interface{}{
+		"status":     "start",
+		"started_at": time.Now().UnixMilli(),
+	})
 
 	// Start activity monitor early and mark boot as active
 	s.ActivityMonitor.ActivityStarted("boot")
@@ -52,36 +59,45 @@ func (s *System) Boot(ctx context.Context) error {
 	// Phase 2: Start network services early (can accept connections while rest boots)
 	s.logger.Info("Phase 2: Starting network services")
 
-	// Start API server if configured
+	// Start API server if configured (timed informational wrapper)
 	if s.config.APIListenAddr != "" {
-		go func() {
-			if err := s.APIServer.Start(); err != nil {
-				s.logger.Error("API server error", "error", err)
-				// Just log the error, don't trigger shutdown
-				// The operator should handle this via monitoring
-			}
-		}()
-		s.logger.Info("API server started")
+		_ = s.runTimedStep(ctx, "boot", "api_server_start", 10*time.Second, 30*time.Second, func() error {
+			go func() {
+				if err := s.APIServer.Start(); err != nil {
+					s.logger.Error("API server error", "error", err)
+				}
+			}()
+			s.logger.Info("API server started")
+			return nil
+		})
 	}
 
-	// Start socket server for services API
+	// Start socket server for services API (timed informational wrapper)
 	socketPath := "/tmp/sprite.sock"
-	if err := s.SocketServer.Start(socketPath); err != nil {
-		s.logger.Error("Failed to start socket server", "error", err)
-		// Non-fatal, services API will not be available
-	} else {
+	_ = s.runTimedStep(ctx, "boot", "socket_server_start", 10*time.Second, 30*time.Second, func() error {
+		if err := s.SocketServer.Start(socketPath); err != nil {
+			s.logger.Error("Failed to start socket server", "error", err)
+			// Non-fatal, services API will not be available
+			return err
+		}
 		s.logger.Info("Socket server started", "path", socketPath)
-	}
+		return nil
+	})
 
 	// Phase 3: Start storage components in order
 	// Note: /dev/fly_vol mount and checkpoint migration happen in main.go before system creation
 	s.logger.Info("Phase 3: Starting storage components")
 
 	// Database manager
-	if err := s.DBManager.Start(s.ctx); err != nil {
-		return fmt.Errorf("failed to start database manager: %w", err)
+	if err := s.runTimedStep(ctx, "boot", "db_manager_start", 10*time.Second, 30*time.Second, func() error {
+		if err := s.DBManager.Start(s.ctx); err != nil {
+			return fmt.Errorf("failed to start database manager: %w", err)
+		}
+		s.logger.Info("Database manager started")
+		return nil
+	}); err != nil {
+		return err
 	}
-	s.logger.Info("Database manager started")
 
 	// Move litestream process to its cgroup
 	if litestreamPid := s.DBManager.GetLitestreamPid(); litestreamPid > 0 {
@@ -105,11 +121,16 @@ func (s *System) Boot(ctx context.Context) error {
 	// JuiceFS (depends on DB)
 	if s.config.JuiceFSDataPath != "" {
 		s.logger.Info("Starting JuiceFS", "juiceFS_ptr", fmt.Sprintf("%p", s.JuiceFS))
-		// JuiceFS.Start() blocks until mount is ready and verified for block device operations
-		if err := s.JuiceFS.Start(s.ctx); err != nil {
-			return fmt.Errorf("failed to start JuiceFS: %w", err)
+		if err := s.runTimedStep(ctx, "boot", "juicefs_start", 15*time.Second, 30*time.Second, func() error {
+			// JuiceFS.Start() blocks until mount is ready and verified
+			if err := s.JuiceFS.Start(s.ctx); err != nil {
+				return fmt.Errorf("failed to start JuiceFS: %w", err)
+			}
+			s.logger.Info("JuiceFS started and verified ready")
+			return nil
+		}); err != nil {
+			return err
 		}
-		s.logger.Info("JuiceFS started and verified ready")
 
 		// Move juicefs process to its cgroup
 		if juicefsPid := s.JuiceFS.GetPid(); juicefsPid > 0 {
@@ -135,13 +156,15 @@ func (s *System) Boot(ctx context.Context) error {
 	// Note: sprite.db was already added to DB manager in initializeDBManager()
 	// and litestream replication started when DB manager started above
 	// This step just creates the table schema if it doesn't exist
-	s.logger.Info("Initializing sprite database schema")
-	if err := s.InitializeSpriteDB(s.ctx); err != nil {
-		s.logger.Warn("Failed to initialize sprite database schema", "error", err)
-		// Non-fatal - sprite assignment will fail if DB can't be initialized
-	} else {
+	_ = s.runTimedStep(ctx, "boot", "sprite_db_init", 10*time.Second, 30*time.Second, func() error {
+		s.logger.Info("Initializing sprite database schema")
+		if err := s.InitializeSpriteDB(s.ctx); err != nil {
+			s.logger.Warn("Failed to initialize sprite database schema", "error", err)
+			return err
+		}
 		s.logger.Info("Sprite database schema initialized")
-	}
+		return nil
+	})
 
 	// Overlay manager (depends on JuiceFS)
 	// If shutdown triggered, stop progressing to next step
@@ -151,17 +174,20 @@ func (s *System) Boot(ctx context.Context) error {
 	default:
 	}
 	if s.config.OverlayEnabled {
-		s.logger.Info("Starting overlay manager")
-
-		// Determine checkpoint database path
-		checkpointDBDir := filepath.Join(s.config.WriteDir, "checkpoints")
-		checkpointDBPath := filepath.Join(checkpointDBDir, "checkpoints.db")
-
-		// Start overlay (mounts and initializes checkpoint manager synchronously)
-		if err := s.OverlayManager.Start(s.ctx, checkpointDBPath); err != nil {
-			return fmt.Errorf("failed to start overlay: %w", err)
+		if err := s.runTimedStep(ctx, "boot", "overlay_start", 15*time.Second, 30*time.Second, func() error {
+			s.logger.Info("Starting overlay manager")
+			// Determine checkpoint database path
+			checkpointDBDir := filepath.Join(s.config.WriteDir, "checkpoints")
+			checkpointDBPath := filepath.Join(checkpointDBDir, "checkpoints.db")
+			// Start overlay (synchronous)
+			if err := s.OverlayManager.Start(s.ctx, checkpointDBPath); err != nil {
+				return fmt.Errorf("failed to start overlay: %w", err)
+			}
+			s.logger.Info("Overlay started")
+			return nil
+		}); err != nil {
+			return err
 		}
-		s.logger.Info("Overlay started")
 	}
 
 	// Phase 4: Start process if configured
@@ -171,9 +197,14 @@ func (s *System) Boot(ctx context.Context) error {
 	default:
 	}
 	if len(s.config.ProcessCommand) > 0 {
-		s.logger.Info("Phase 4: Starting container process")
-		if err := s.StartProcess(); err != nil {
-			return fmt.Errorf("failed to start process: %w", err)
+		if err := s.runTimedStep(ctx, "boot", "process_start", 10*time.Second, 30*time.Second, func() error {
+			s.logger.Info("Phase 4: Starting container process")
+			if err := s.StartProcess(); err != nil {
+				return fmt.Errorf("failed to start process: %w", err)
+			}
+			return nil
+		}); err != nil {
+			return err
 		}
 	}
 
@@ -192,17 +223,27 @@ func (s *System) Boot(ctx context.Context) error {
 		return ErrShutdownDuringBoot
 	default:
 	}
-	s.logger.Info("Phase 5: Starting services manager")
-	if err := s.ServicesManager.Start(); err != nil {
-		return fmt.Errorf("failed to start services manager: %w", err)
+	if err := s.runTimedStep(ctx, "boot", "services_manager_start", 10*time.Second, 30*time.Second, func() error {
+		s.logger.Info("Phase 5: Starting services manager")
+		if err := s.ServicesManager.Start(); err != nil {
+			return fmt.Errorf("failed to start services manager: %w", err)
+		}
+		s.logger.Info("Services manager started")
+		return nil
+	}); err != nil {
+		return err
 	}
-	s.logger.Info("Services manager started")
 
 	// No need to set TMUXManager on API server; handlers fetch it from system on demand
 
 	// Boot complete - end boot activity
 	s.ActivityMonitor.ActivityEnded("boot")
 
+	// Emit boot completion
+	s.emitAdminEvent("boot.complete", map[string]interface{}{
+		"status":      "ok",
+		"finished_at": time.Now().UnixMilli(),
+	})
 	s.logger.Info("System boot complete")
 	return nil
 }
