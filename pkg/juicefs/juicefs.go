@@ -291,19 +291,10 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	// from being killed if the startup context is cancelled
 	j.mountCmd = exec.Command("juicefs", mountArgs...)
 
-	// Capture JuiceFS output to parse for readiness
-	stdout, err := j.mountCmd.StdoutPipe()
-	if err != nil {
-		// Close stoppedCh since monitorProcess will never run
-		close(j.stoppedCh)
-		return fmt.Errorf("failed to create stdout pipe: %w", err)
-	}
-	stderr, err := j.mountCmd.StderrPipe()
-	if err != nil {
-		// Close stoppedCh since monitorProcess will never run
-		close(j.stoppedCh)
-		return fmt.Errorf("failed to create stderr pipe: %w", err)
-	}
+	// Forward JuiceFS stdout/stderr directly to structured logger
+	structured := tap.WithStructuredLogger(tap.WithLogger(context.Background(), j.logger))
+	j.mountCmd.Stdout = structured
+	j.mountCmd.Stderr = structured
 
 	// Set JFS_SUPERVISOR=1 to enable proper signal handling
 	j.mountCmd.Env = append(os.Environ(), "JFS_SUPERVISOR=1", "JUICEFS_LOG_FORMAT=json")
@@ -324,12 +315,7 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	}
 	j.logger.Debug("JuiceFS mount command startup completed", "duration", time.Since(stepStart).Seconds())
 
-	// Start monitoring stdout/stderr for ready signal
-	// Forward child output to structured logger as JSON lines
-	structured := tap.WithStructuredLogger(tap.WithLogger(context.Background(), j.logger))
-	tap.Go(j.logger, j.errCh, func() {
-		j.parseLogsForReady(stdout, stderr, mountPath, time.Now(), structured)
-	})
+	// Logs are forwarded via Stdout/Stderr to the structured writer; no analysis
 
 	// Do not Wait() here; monitorProcess handles Wait().
 	// NOTE: Signal handling removed - the System component will handle signals
@@ -339,26 +325,24 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	tap.Go(j.logger, j.errCh, j.monitorProcess)
 	j.logger.Debug("Process monitor setup completed", "duration", time.Since(time.Now()).Seconds())
 
-	// Wait for mount to be ready using context (shorter in test containers)
-	waitTimeout := getJuiceFSReadyTimeout()
-	waitCtx, waitCancel := context.WithTimeout(ctx, waitTimeout)
-	defer waitCancel()
+	// Start readiness polling without timeouts; will honor ctx cancellation and emit warnings
+	tap.Go(j.logger, j.errCh, func() {
+		j.waitForJuiceFSReady(ctx, mountPath, time.Now())
+	})
 
 	j.logger.Debug("Waiting for JuiceFS mount to be ready...")
 	waitStart := time.Now()
 
-	if err := j.WhenReady(waitCtx); err != nil {
+	// Wait indefinitely for readiness (bounded only by ctx)
+	if err := j.WhenReady(ctx); err != nil {
 		// Kill mount process if it's still running
 		if j.mountCmd != nil && j.mountCmd.Process != nil {
 			j.mountCmd.Process.Kill()
 		}
-		// Don't call Wait() here - monitorProcess will handle it
-
 		// Check if we have a more specific error from mount
 		j.mountErrorMu.RLock()
 		mountErr := j.mountError
 		j.mountErrorMu.RUnlock()
-
 		if mountErr != nil {
 			return mountErr
 		}
@@ -537,6 +521,8 @@ func (j *JuiceFS) monitorProcess() {
 			if j.mountCmd != nil && j.mountCmd.Process != nil {
 				_ = j.mountCmd.Process.Kill()
 			}
+			// Unblock Start waiters with cancellation
+			j.signalMountError(context.Canceled)
 			// Stop watcher if it was started
 			if j.writebackWatcher != nil {
 				j.logger.Info("Stopping writeback watcher (pre-ready)")
@@ -1120,39 +1106,7 @@ func (j *JuiceFS) WaitForMount(ctx context.Context) error {
 
 // parseLogsForReady monitors JuiceFS stdout/stderr for ready signals
 func (j *JuiceFS) parseLogsForReady(stdout, stderr io.ReadCloser, mountPath string, startTime time.Time, structured io.Writer) {
-	// Create output watcher
-	watcher := NewOutputWatcher(j.logger, mountPath, structured)
-	watcher.Watch(stdout, stderr)
-
-	// Create context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	// Wait for ready signal
-	err := watcher.WaitForReady(ctx, func() bool {
-		return j.isMountReady(mountPath)
-	})
-
-	if err != nil {
-		// Store the error
-		j.signalMountError(err)
-		return
-	}
-
-	// Mount is ready, perform post-mount setup
-	j.logger.Debug("Mount verified as ready",
-		"timeSinceStart", time.Since(startTime).Seconds())
-
-	if err := j.performPostMountSetup(mountPath, startTime); err != nil {
-		j.mountErrorMu.Lock()
-		j.mountError = err
-		j.mountErrorMu.Unlock()
-	}
-
-	// Close the channel to signal ready
-	close(j.mountReady)
-
-	// structured writer is owned by caller; do not close here
+	// No-op: logs are already wired via Cmd.Stdout/Stderr to structured writer
 }
 
 // isMountReady checks if the mount point is ready
@@ -1174,6 +1128,99 @@ func (j *JuiceFS) isMountReady(mountPath string) bool {
 	}
 
 	return strings.Contains(string(mountsData), mountPath)
+}
+
+// isJuiceFSMounted checks /proc/self/mountinfo for a JuiceFS mount at mountPath
+func (j *JuiceFS) isJuiceFSMounted(mountPath string) bool {
+	data, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return false
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		parts := strings.Split(line, " - ")
+		if len(parts) != 2 {
+			continue
+		}
+		left := strings.Fields(parts[0])
+		right := strings.Fields(parts[1])
+		if len(left) < 5 || len(right) < 2 {
+			continue
+		}
+		mp := left[4]
+		fstype := right[0]
+		// source := right[1] // may be "SpriteFS" depending on fuse version
+		// superopts := strings.Join(right[2:], " ")
+		if mp == mountPath && (fstype == "fuse.juicefs" || fstype == "juicefs") {
+			return true
+		}
+	}
+	return false
+}
+
+// verifyMountReadiness performs minimal, decisive checks:
+// 1) kernel reports a JuiceFS mount at mountPath (via /proc/self/mountinfo)
+// 2) the JuiceFS control file exists and opens RW
+func (j *JuiceFS) verifyMountReadiness(mountPath string) bool {
+	if !j.isJuiceFSMounted(mountPath) {
+		return false
+	}
+	controlFile := filepath.Join(mountPath, ".control")
+	if _, err := os.Stat(controlFile); err != nil {
+		return false
+	}
+	f, err := os.OpenFile(controlFile, os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	_ = f.Close()
+	return true
+}
+
+// waitForJuiceFSReady polls for mount readiness every 100ms, emits periodic warnings,
+// and signals readiness when thorough verification passes.
+func (j *JuiceFS) waitForJuiceFSReady(ctx context.Context, mountPath string, startTime time.Time) {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	firstWarn10s := false
+	firstWarn30s := false
+	lastMinuteWarn := time.Time{}
+
+	for {
+		select {
+		case <-ticker.C:
+			if j.verifyMountReadiness(mountPath) {
+				j.logger.Debug("Mount verified as ready", "timeSinceStart", time.Since(startTime).Seconds())
+				if err := j.performPostMountSetup(mountPath, startTime); err != nil {
+					j.mountErrorMu.Lock()
+					j.mountError = err
+					j.mountErrorMu.Unlock()
+				}
+				close(j.mountReady)
+				return
+			}
+			elapsed := time.Since(startTime)
+			if !firstWarn10s && elapsed >= 10*time.Second {
+				j.logger.Warn("JuiceFS mount is taking longer than expected (10s)... waiting")
+				firstWarn10s = true
+			} else if !firstWarn30s && elapsed >= 30*time.Second {
+				j.logger.Warn("JuiceFS mount is taking longer than expected (30s)... waiting")
+				firstWarn30s = true
+			} else if elapsed >= 30*time.Second {
+				if lastMinuteWarn.IsZero() || time.Since(lastMinuteWarn) >= time.Minute {
+					j.logger.Warn("JuiceFS mount still not ready... continuing to wait", "elapsed", elapsed.String())
+					lastMinuteWarn = time.Now()
+				}
+			}
+		case <-ctx.Done():
+			j.signalMountError(ctx.Err())
+			return
+		}
+	}
 }
 
 // performPostMountSetup handles the tasks that need to be done after mount is ready
