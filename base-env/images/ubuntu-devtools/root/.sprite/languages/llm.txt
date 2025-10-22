@@ -1,82 +1,73 @@
 =======================================================
-Ubuntu DevTools Container Documentation
+Sprite Environment Documentation
 =======================================================
 
-This container provides a clean Ubuntu 25.04 development environment
-with experimental filesystem architecture for experimentation.
+This document describes features provided by the Sprite server across environments.
 
-FILESYSTEM ARCHITECTURE
-========================
+CHECKPOINTS AND RESTORES (SOCKET API)
+=====================================
 
-This system uses a dual-layer storage approach:
+Create, list, and restore checkpoints via the local socket API at `/.sprite/api.sock`.
+Use the `curl-sprite-api` helper for convenience (it talks to the socket with auth):
 
-/data/ - DURABLE FILESYSTEM
-- Backed by object storage
-- Data persists across container restarts and deployments
-- Use this for important files, projects, and persistent data
-- Recommended for: source code, databases, configuration files
+  curl-sprite-api -X POST /checkpoint                    # Create checkpoint (NDJSON stream)
+  curl-sprite-api -X GET  /checkpoints                   # List checkpoints (JSON)
+  curl-sprite-api -X GET  /checkpoints/<id>              # Get checkpoint details (JSON)
+  curl-sprite-api -X POST /checkpoints/<id>/restore      # Restore (NDJSON stream)
 
-/ (Root) - EXPERIMENTAL OVERLAY
-- Uses experimental overlay setup with top layer backed by object storage
-- Semi-durable: changes may persist but not guaranteed
-- Top layer modifications are stored in object storage
-- Consider this experimental and potentially volatile
-- Use for: temporary files, system experiments, reproducible package installations
+Notes
+-----
+- All requests require a valid token; the helper injects it automatically.
+- Endpoints stream progress as NDJSON for create/restore operations.
+- Restores affect the entire sprite state.
 
-STORAGE RECOMMENDATIONS
-=======================
+SPRITE API SOCKET
+=================
 
-Store persistent data in /data/:
-  mkdir -p /data/projects
-  cd /data/projects
-  git clone <your-repo>
+A local API socket is mounted inside the sprite at:
 
-System experiments in /:
-  sudo apt install <experimental-package>
-  # Changes may persist but treat as temporary
+  /.sprite/api.sock
 
-USER CONFIGURATION
-==================
+This Unix domain socket is used by Sprite tooling for authenticated, local API calls to the sprite server.
 
-User: sprite
-- Full passwordless sudo access via sudoers configuration
-- Home directory: /home/sprite (on experimental overlay)
-- Default shell: /bin/bash
-- Member of sudo group
 
-Sudo Access:
-- No password required for any sudo command
-- Can install packages: sudo apt install <package>
-- Can modify system files: sudo nano /etc/hosts
-- Can become root: sudo -s
-- Can run any privileged command without authentication
+SPRITE URLS AND PUBLIC ACCESS
+=============================
 
-SYSTEM TOOLS
-============
+If your sprite has a public URL (e.g., <name>-<rand>.sprites.app), it forwards HTTP traffic to a service inside your sprite. To use URL-based access:
 
-Pre-installed tools:
-- build-essential (gcc, make, libc6-dev, etc.)
-- git (distributed version control)
-- curl (data transfer tool)
-- sudo (privilege escalation)
+1) Run a web service on port 8080
+   - For quick tests: start your app manually and bind to 0.0.0.0:8080
+   - Example:
+     - Node: npm start (ensure it listens on 0.0.0.0:8080)
+     - Python: python -m http.server 8080 --bind 0.0.0.0
 
-USAGE PATTERNS
-==============
+2) Register a service so it restarts automatically
+   - Register a long-running process so it starts on boot and restarts on failure.
+   - Minimal contract: give it a name, command, and args; it should listen on port 8080.
 
-For persistent work:
-  cd /data
-  # Your work here will survive container lifecycle
+Authenticated access
+--------------------
+By default, sprite URLs require an Authorization header with your sprite org token.
 
-For system experimentation:
-  sudo apt update
-  sudo apt install <experimental-tools>
-  # May persist but not guaranteed - use /data for important results
+  Authorization: Bearer <token>
 
-IMPORTANT NOTES
-===============
+This is especially useful for programmatic access (curl, fetch, etc.).
 
-1. /data/ is your safe space for persistent storage
-2. / overlay is experimental - backup important system changes to /data/
-3. sprite user has unrestricted system access via sudo
-4. This environment is designed for rapid iteration
-5. Always consider data durability when choosing storage location 
+Managing the public URL externally
+----------------------------------
+From your local machine (outside the sprite), you can manage the public URL settings:
+
+  - Show URL for the current sprite:
+    sprite url
+
+  - Make the URL publicly accessible (no auth required):
+    sprite url update --auth public
+
+  - Require authentication (default behavior):
+    sprite url update --auth default
+
+Notes
+-----
+- The URL points to port 8080 in your sprite. Ensure a process is listening there.
+- Registering the service ensures it comes back if the sprite restarts.
