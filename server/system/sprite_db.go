@@ -57,6 +57,10 @@ func (s *System) InitializeSpriteDB(ctx context.Context) error {
 	}
 
 	s.logger.Info("Sprite database initialized", "path", dbPath)
+
+	// Mark DB as ready and flush any queued assignments
+	s.spriteDBReady.Store(true)
+	s.flushQueuedSpriteAssignments(ctx)
 	return nil
 }
 
@@ -267,6 +271,20 @@ func (s *System) SetSpriteEnvironment(ctx context.Context, infoAny interface{}) 
 		info.AssignedAt = time.Now().UTC()
 	}
 
+	// If DB not ready yet, queue the assignment to be applied after initialization
+	if !s.spriteDBReady.Load() {
+		s.spriteAssignMu.Lock()
+		s.spriteAssignQueue = append(s.spriteAssignQueue, info)
+		s.spriteAssignMu.Unlock()
+		s.logger.Info("Sprite assignment queued until DB is ready",
+			"sprite_name", info.SpriteName,
+			"sprite_url", info.SpriteURL)
+		return &SpriteEnvironmentResponse{
+			Status:  "queued",
+			Message: "sprite environment queued until DB is initialized",
+		}, nil
+	}
+
 	// Store in database (this will trigger the change callback)
 	if err := s.SetSpriteInfo(ctx, &info); err != nil {
 		return nil, err
@@ -308,4 +326,25 @@ var writeHostsFile = func(path string, data []byte, perm uint32) error {
 	// In production, this writes to the actual filesystem
 	// In tests, this can be mocked
 	return os.WriteFile(path, data, os.FileMode(perm))
+}
+
+// flushQueuedSpriteAssignments applies any queued sprite assignments after DB init
+func (s *System) flushQueuedSpriteAssignments(ctx context.Context) {
+	s.spriteAssignMu.Lock()
+	queued := make([]SpriteInfo, len(s.spriteAssignQueue))
+	copy(queued, s.spriteAssignQueue)
+	s.spriteAssignQueue = nil
+	s.spriteAssignMu.Unlock()
+
+	for _, info := range queued {
+		if err := s.SetSpriteInfo(ctx, &info); err != nil {
+			s.logger.Error("Failed to apply queued sprite assignment", "error", err,
+				"sprite_name", info.SpriteName,
+				"sprite_url", info.SpriteURL)
+			continue
+		}
+		s.logger.Info("Applied queued sprite assignment",
+			"sprite_name", info.SpriteName,
+			"sprite_url", info.SpriteURL)
+	}
 }

@@ -84,6 +84,12 @@ type System struct {
 	// bootDoneCh is open while Boot() is in progress and closed when Boot() returns
 	// This allows Shutdown() to block until the current boot step completes
 	bootDoneCh chan struct{}
+
+	// Sprite DB coordination
+	// Queue sprite assignment updates that may arrive before the DB schema is initialized
+	spriteDBReady     atomic.Bool
+	spriteAssignMu    sync.Mutex
+	spriteAssignQueue []SpriteInfo
 }
 
 // ErrShutdownDuringBoot is returned by Boot when shutdown is triggered mid-boot.
