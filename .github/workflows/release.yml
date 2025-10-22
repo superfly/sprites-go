@@ -2,6 +2,9 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
+      - dev-release
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
       - 'v[0-9]+.[0-9]+.[0-9]+-*'
@@ -31,6 +34,25 @@ jobs:
       ref_name: ${{ steps.ref.outputs.ref_name }}
       tag_suffix: ${{ steps.suffix.outputs.tag_suffix }}
       tag_latest: ${{ steps.flags.outputs.tag_latest }}
+      # releaser context
+      ubuntu_tag: ${{ steps.ctx.outputs.ubuntu_tag }}
+      sprite_env_tag: ${{ steps.ctx.outputs.sprite_env_tag }}
+      is_version_tag: ${{ steps.ctx.outputs.is_version_tag }}
+      previous_tag: ${{ steps.ctx.outputs.previous_tag }}
+      tag_latest_server: ${{ steps.ctx.outputs.tag_latest_server }}
+      client_upload_prefix: ${{ steps.ctx.outputs.client_upload_prefix }}
+      client_channel_file: ${{ steps.ctx.outputs.client_channel_file }}
+      client_channel_value: ${{ steps.ctx.outputs.client_channel_value }}
+      # images plan
+      base_action: ${{ steps.pl.outputs.base_action }}
+      base_source_tag: ${{ steps.pl.outputs.base_source_tag }}
+      base_target_tag: ${{ steps.pl.outputs.base_target_tag }}
+      base_latest_tag: ${{ steps.pl.outputs.base_latest_tag }}
+      languages_action: ${{ steps.pl.outputs.languages_action }}
+      languages_source_tag: ${{ steps.pl.outputs.languages_source_tag }}
+      languages_target_tag: ${{ steps.pl.outputs.languages_target_tag }}
+      languages_latest_tag: ${{ steps.pl.outputs.languages_latest_tag }}
+      server_tag: ${{ steps.pl.outputs.server_tag }}
     steps:
     - name: Determine triggering context
       id: flags
@@ -38,7 +60,10 @@ jobs:
         if [[ "${{ github.event_name }}" == "workflow_run" ]] && \
            [[ "${{ github.event.workflow_run.name }}" == "Tests" ]] && \
            [[ "${{ github.event.workflow_run.conclusion }}" == "success" ]] && \
-           [[ "${{ github.event.workflow_run.head_branch }}" == "main" ]]; then
+           { [[ "${{ github.event.workflow_run.head_branch }}" == "main" ]] || [[ "${{ github.event.workflow_run.head_branch }}" == "dev-release" ]]; }; then
+          echo "is_main_run=true" >> $GITHUB_OUTPUT
+          echo "tag_latest=false" >> $GITHUB_OUTPUT
+        elif [[ "${{ github.event_name }}" == "push" ]] && [[ "${{ github.ref_type }}" == "branch" ]] && { [[ "${{ github.ref_name }}" == "main" ]] || [[ "${{ github.ref_name }}" == "dev-release" ]]; }; then
           echo "is_main_run=true" >> $GITHUB_OUTPUT
           echo "tag_latest=false" >> $GITHUB_OUTPUT
         else
@@ -69,6 +94,28 @@ jobs:
     - name: Compute tag suffix
       id: suffix
       run: |
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        token: ${{ secrets.GH_PAT || github.token }}
+        fetch-depth: 0
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+    - name: Prepare modules (populate go.sum)
+      run: |
+        go env -w GOFLAGS=
+        go mod tidy
+    - name: Derive release context (releaser)
+      id: ctx
+      run: |
+        go run ./tools/releaser context --gha-outputs --distro 25.04
+    - name: Plan images (releaser)
+      id: pl
+      run: |
+        go run ./tools/releaser images plan --gha-outputs --registry ghcr.io --ubuntu-image superfly/sprite-ubuntu --distro 25.04
         if [[ "${{ github.ref_type }}" == "tag" ]]; then
           echo "tag_suffix=${{ github.ref_name }}" >> $GITHUB_OUTPUT
         elif [[ "${{ steps.flags.outputs.is_main_run }}" == "true" ]]; then
@@ -88,10 +135,26 @@ jobs:
     permissions:
       contents: read
       packages: write
+    secrets: inherit
+
+  release-server-image:
+    name: Release Docker Images / build-sprite-env
+    needs: [context]
+    if: ${{ github.ref_type == 'tag' || needs.context.outputs.is_main_run == 'true' }}
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker-publish.yml
     with:
-      tag_suffix: ${{ inputs.tag_suffix || needs.context.outputs.tag_suffix || github.ref_name }}
-      tag_latest: ${{ (inputs.tag_latest != null && inputs.tag_latest) || (inputs.tag_latest == null && fromJSON(needs.context.outputs.tag_latest)) }}
-      checkout_ref: ${{ needs.context.outputs.sha }}
+      context_dir: .
+      dockerfile: ./Dockerfile
+      tag: ${{ needs.context.outputs.server_tag }}
+      image_name: superfly/sprite-env
+      cache_tag: latest
+      latest_tag: latest
+      tag_latest: ${{ needs.context.outputs.tag_latest_server == 'true' }}
+      version: ${{ needs.context.outputs.is_version_tag == 'true' && github.ref_name || '' }}
+      git_sha: ${{ needs.context.outputs.is_version_tag == 'false' && needs.context.outputs.short_sha || '' }}
     secrets: inherit
 
   release-client:
@@ -101,4 +164,8 @@ jobs:
     permissions:
       contents: write 
     secrets: inherit
-    if: ${{ github.ref_type == 'tag' }}
+    if: ${{ github.ref_type == 'tag' || needs.context.outputs.is_main_run == 'true' }}
+    with:
+      upload_prefix: ${{ needs.context.outputs.client_upload_prefix }}
+      channel_file: ${{ needs.context.outputs.client_channel_file }}
+      channel_value: ${{ needs.context.outputs.client_channel_value }}

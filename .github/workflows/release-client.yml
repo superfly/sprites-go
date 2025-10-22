@@ -3,6 +3,19 @@ name: Release Client
 on:
   workflow_dispatch:
   workflow_call:
+    inputs:
+      upload_prefix:
+        description: "S3 upload prefix (e.g., client/vX.Y.Z/ or client/dev-latest/)"
+        required: false
+        type: string
+      channel_file:
+        description: "Channel file name (e.g., release.txt, rc.txt, dev.txt)"
+        required: false
+        type: string
+      channel_value:
+        description: "Channel file contents (e.g., vX.Y.Z or X.Y.Z-dev-<sha>)"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -196,31 +209,34 @@ jobs:
     
     - name: Create channel version file
       run: |
-        # Extract tag name
+        mkdir -p channel-files
+        if [[ -n "${{ inputs.channel_file }}" && -n "${{ inputs.channel_value }}" ]]; then
+          echo "${{ inputs.channel_value }}" > "channel-files/${{ inputs.channel_file }}"
+          echo "Created ${{ inputs.channel_file }} with value ${{ inputs.channel_value }}"
+          exit 0
+        fi
+        # Fallback to tag-derived behavior
         TAG_NAME="${{ github.ref_name }}"
-        
-        # Determine channel from tag name
         if [[ "$TAG_NAME" =~ -([a-zA-Z]+) ]]; then
-          # Extract the channel from the tag (e.g., rc from v0.0.1-rc1, dev from v0.0.1-dev1)
           CHANNEL="${BASH_REMATCH[1]}"
         else
-          # No suffix means release channel
           CHANNEL="release"
         fi
-        
-        # Create the channel version file
-        mkdir -p channel-files
         echo "$TAG_NAME" > "channel-files/${CHANNEL}.txt"
-        
         echo "Created ${CHANNEL}.txt with version $TAG_NAME"
     
     - name: Upload binaries to S3
       env:
         AWS_ENDPOINT_URL_S3: https://t3.storage.dev
       run: |
-        # Extract tag name
-        TAG_NAME="${{ github.ref_name }}"
-        
+        # Determine upload prefix
+        if [[ -n "${{ inputs.upload_prefix }}" ]]; then
+          PREFIX="${{ inputs.upload_prefix }}"
+        else
+          TAG_NAME="${{ github.ref_name }}"
+          PREFIX="client/${TAG_NAME}/"
+        fi
+        echo "Using upload prefix: $PREFIX"
         # Upload all binary archives and checksums to S3
         cd artifacts
         find . -name "*.tar.gz" -o -name "*.zip" -o -name "*.sha256" | while read file; do
@@ -229,8 +245,8 @@ jobs:
           # Get just the filename from the full path
           filename=$(basename "$clean_file")
           
-          echo "Uploading $filename to s3://sprites-binaries/client/$TAG_NAME/"
-          aws s3 cp "$clean_file" "s3://sprites-binaries/client/$TAG_NAME/$filename" \
+          echo "Uploading $filename to s3://sprites-binaries/$PREFIX"
+          aws s3 cp "$clean_file" "s3://sprites-binaries/${PREFIX}$filename" \
             --endpoint-url "$AWS_ENDPOINT_URL_S3"
         done
         cd ..
@@ -245,6 +261,7 @@ jobs:
         cd ..
     
     - name: Create Release
+      if: ${{ github.ref_type == 'tag' }}
       uses: softprops/action-gh-release@v1
       with:
         tag_name: ${{ github.ref_name }}

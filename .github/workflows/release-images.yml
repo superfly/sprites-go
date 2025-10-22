@@ -36,161 +36,79 @@ env:
   IMAGE_NAME: superfly/sprite-ubuntu
 
 jobs:
-  generate-tag:
+  plan:
     runs-on: ubuntu-latest
     outputs:
-      ubuntu_tag: ${{ steps.tag.outputs.ubuntu_tag }}
-      sprite_env_tag: ${{ steps.tag.outputs.sprite_env_tag }}
-      is_version_tag: ${{ steps.tag.outputs.is_version_tag }}
-      previous_tag: ${{ steps.tag.outputs.previous_tag }}
-      short_sha: ${{ steps.short-sha.outputs.short-sha }}
+      ubuntu_tag: ${{ steps.ctx.outputs.ubuntu_tag }}
+      sprite_env_tag: ${{ steps.ctx.outputs.sprite_env_tag }}
+      is_version_tag: ${{ steps.ctx.outputs.is_version_tag }}
+      previous_tag: ${{ steps.ctx.outputs.previous_tag }}
+      short_sha: ${{ steps.ctx.outputs.short-sha }}
+      tag_latest_server: ${{ steps.ctx.outputs.tag_latest_server }}
+      base_action: ${{ steps.pl.outputs.base_action }}
+      base_source_tag: ${{ steps.pl.outputs.base_source_tag }}
+      base_target_tag: ${{ steps.pl.outputs.base_target_tag }}
+      base_latest_tag: ${{ steps.pl.outputs.base_latest_tag }}
+      languages_action: ${{ steps.pl.outputs.languages_action }}
+      languages_source_tag: ${{ steps.pl.outputs.languages_source_tag }}
+      languages_target_tag: ${{ steps.pl.outputs.languages_target_tag }}
+      languages_latest_tag: ${{ steps.pl.outputs.languages_latest_tag }}
+      server_tag: ${{ steps.pl.outputs.server_tag }}
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
         submodules: recursive
         token: ${{ secrets.GH_PAT || github.token }}
-        fetch-depth: 0  # Fetch all history for tags
+        fetch-depth: 0
         ref: ${{ inputs.checkout_ref != '' && inputs.checkout_ref || github.ref }}
-    
-    - name: Generate short SHA
-      id: short-sha
-      run: echo "short-sha=${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
-    
-    - name: Generate tags
-      id: tag
-      run: |
-        if [[ "${{ github.ref_type }}" == "tag" ]]; then
-          # Strip the 'v' prefix from version tags
-          TAG="${{ github.ref_name }}"
-          TAG="${TAG#v}"
-          echo "ubuntu_tag=25.04-${TAG}" >> $GITHUB_OUTPUT
-          echo "sprite_env_tag=${TAG}" >> $GITHUB_OUTPUT
-          echo "is_version_tag=true" >> $GITHUB_OUTPUT
-          
-          # Get previous tag for comparison
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          if [[ ! -z "$PREV_TAG" ]]; then
-            PREV_TAG="${PREV_TAG#v}"
-          fi
-          echo "previous_tag=${PREV_TAG}" >> $GITHUB_OUTPUT
-        else
-          SUFFIX="${{ inputs.tag_suffix || steps.short-sha.outputs.short-sha }}"
-          echo "ubuntu_tag=25.04-${SUFFIX}" >> $GITHUB_OUTPUT
-          echo "sprite_env_tag=${SUFFIX}" >> $GITHUB_OUTPUT
-          echo "is_version_tag=false" >> $GITHUB_OUTPUT
-          echo "previous_tag=" >> $GITHUB_OUTPUT
-        fi
 
-  check-ubuntu-changes:
-    needs: generate-tag
-    runs-on: ubuntu-latest
-    outputs:
-      has_changes: ${{ steps.check.outputs.has_changes }}
-      source_tag: ${{ steps.check.outputs.source_tag }}
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+    - name: Set up Go
+      uses: actions/setup-go@v5
       with:
-        submodules: recursive
-        token: ${{ secrets.GH_PAT || github.token }}
-        fetch-depth: 0  # Fetch all history for comparison
-        ref: ${{ inputs.checkout_ref != '' && inputs.checkout_ref || github.ref }}
-    
-    - name: Log in to GitHub Container Registry
-      uses: docker/login-action@v3
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    
-    - name: Check for changes in ubuntu-devtools
-      id: check
+        go-version: '1.22'
+
+    - name: Prepare modules (populate go.sum)
       run: |
-        # If no previous tag, allow retag when the current target image already exists; otherwise build
-        if [[ -z "${{ needs.generate-tag.outputs.previous_tag }}" ]]; then
-          TARGET_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.generate-tag.outputs.ubuntu_tag }}"
-          if docker buildx imagetools inspect "$TARGET_IMAGE" >/dev/null 2>&1; then
-            echo "Target image $TARGET_IMAGE already exists; will retag from current version"
-            echo "has_changes=false" >> $GITHUB_OUTPUT
-            echo "source_tag=${{ needs.generate-tag.outputs.ubuntu_tag }}" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          echo "No previous tag found and target image does not exist; will build images"
-          echo "has_changes=true" >> $GITHUB_OUTPUT
-          echo "source_tag=" >> $GITHUB_OUTPUT
-          exit 0
-        fi
-        
-        # Compare changes since the previous tag
-        PREV_TAG_REF="v${{ needs.generate-tag.outputs.previous_tag }}"
-        echo "Checking for changes since ${PREV_TAG_REF}..."
-        
-        # Check if the previous tag exists
-        if ! git rev-parse "${PREV_TAG_REF}" >/dev/null 2>&1; then
-          echo "Previous tag ${PREV_TAG_REF} not found, will build images"
-          echo "has_changes=true" >> $GITHUB_OUTPUT
-          echo "source_tag=" >> $GITHUB_OUTPUT
-          exit 0
-        fi
-        
-        # Check for changes in the ubuntu-devtools directory
-        CHANGES=$(git diff --name-only "${PREV_TAG_REF}" HEAD -- base-env/images/ubuntu-devtools/ || true)
-        
-        if [[ -z "$CHANGES" ]]; then
-          echo "No changes detected in base-env/images/ubuntu-devtools/ since ${PREV_TAG_REF}"
-          echo "has_changes=false" >> $GITHUB_OUTPUT
-          echo "source_tag=25.04-${{ needs.generate-tag.outputs.previous_tag }}" >> $GITHUB_OUTPUT
+        go env -w GOFLAGS=
+        go mod tidy
 
-          # Verify the source image exists in the registry; if not, fall back to build
-          IMAGE_REF="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:25.04-${{ needs.generate-tag.outputs.previous_tag }}"
-          if ! docker buildx imagetools inspect "$IMAGE_REF" >/dev/null 2>&1; then
-            echo "Source image $IMAGE_REF does not exist; will build instead"
-            echo "has_changes=true" >> $GITHUB_OUTPUT
-            echo "source_tag=" >> $GITHUB_OUTPUT
-          fi
-        else
-          echo "Changes detected in base-env/images/ubuntu-devtools/:"
-          echo "$CHANGES"
+    - name: Compute context
+      id: ctx
+      run: |
+        go run ./tools/releaser context --gha-outputs --distro 25.04
 
-          # If the target image for the current version already exists, prefer retag to allow replacing a versioned release
-          TARGET_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.generate-tag.outputs.ubuntu_tag }}"
-          if docker buildx imagetools inspect "$TARGET_IMAGE" >/dev/null 2>&1; then
-            echo "Target image $TARGET_IMAGE already exists; will retag from current version"
-            echo "has_changes=false" >> $GITHUB_OUTPUT
-            echo "source_tag=${{ needs.generate-tag.outputs.ubuntu_tag }}" >> $GITHUB_OUTPUT
-          else
-            echo "has_changes=true" >> $GITHUB_OUTPUT
-            echo "source_tag=" >> $GITHUB_OUTPUT
-          fi
-        fi
+    - name: Plan images
+      id: pl
+      run: |
+        go run ./tools/releaser images plan --gha-outputs --registry ghcr.io --ubuntu-image superfly/sprite-ubuntu --distro 25.04
 
   build-or-retag-base:
-    needs: [generate-tag, check-ubuntu-changes]
+    needs: [plan]
     permissions:
       contents: read
       packages: write
-    if: needs.check-ubuntu-changes.outputs.has_changes == 'true'
+    if: needs.plan.outputs.base_action == 'build'
     uses: ./.github/workflows/docker-publish.yml
     with:
       context_dir: base-env/images/ubuntu-devtools
       dockerfile: base-env/images/ubuntu-devtools/Dockerfile
-      tag: ${{ needs.generate-tag.outputs.ubuntu_tag }}
+      tag: ${{ needs.plan.outputs.base_target_tag }}
       image_name: superfly/sprite-ubuntu
-      version: ${{ needs.generate-tag.outputs.is_version_tag == 'true' && github.ref_name || '' }}
-      git_sha: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && needs.generate-tag.outputs.short_sha || '' }}
+      version: ${{ needs.plan.outputs.is_version_tag == 'true' && github.ref_name || '' }}
+      git_sha: ${{ needs.plan.outputs.is_version_tag == 'false' && needs.plan.outputs.short_sha || '' }}
       cache_tag: 25.04-latest
       latest_tag: 25.04-latest
-      tag_latest: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && (inputs.tag_latest == true || inputs.tag_latest == null) }}
+      tag_latest: ${{ needs.plan.outputs.base_latest_tag != '' }}
     secrets: inherit
 
   retag-base:
-    needs: [generate-tag, check-ubuntu-changes]
+    needs: [plan]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-    if: needs.check-ubuntu-changes.outputs.has_changes == 'false'
+    if: needs.plan.outputs.base_action == 'retag'
     steps:
     - name: Log in to GitHub Container Registry
       uses: docker/login-action@v3
@@ -201,20 +119,20 @@ jobs:
     
     - name: Retag existing image
       run: |
-        SOURCE_TAG="${{ needs.check-ubuntu-changes.outputs.source_tag }}"
-        TARGET_TAG="${{ needs.generate-tag.outputs.ubuntu_tag }}"
+        SOURCE_TAG="${{ needs.plan.outputs.base_source_tag }}"
+        TARGET_TAG="${{ needs.plan.outputs.base_target_tag }}"
         
         echo "Retagging ${SOURCE_TAG} as ${TARGET_TAG}..."
         
         # Create manifest for multi-arch retagging
         docker buildx imagetools create \
           -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TARGET_TAG} \
-          ${{ needs.generate-tag.outputs.is_version_tag == 'false' && (inputs.tag_latest == true || inputs.tag_latest == null) && format('-t {0}/{1}:25.04-latest', env.REGISTRY, env.IMAGE_NAME) || '' }} \
+          ${{ needs.plan.outputs.base_latest_tag != '' && format('-t {0}/{1}:{2}', env.REGISTRY, env.IMAGE_NAME, needs.plan.outputs.base_latest_tag) || '' }} \
           ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${SOURCE_TAG}
 
   build-or-retag-languages:
-    needs: [generate-tag, check-ubuntu-changes, build-or-retag-base, retag-base]
-    if: always() && (needs.build-or-retag-base.result == 'success' || needs.retag-base.result == 'success') && needs.check-ubuntu-changes.outputs.has_changes == 'true'
+    needs: [plan, build-or-retag-base, retag-base]
+    if: always() && (needs.build-or-retag-base.result == 'success' || needs.retag-base.result == 'success') && needs.plan.outputs.languages_action == 'build'
     permissions:
       contents: read
       packages: write
@@ -222,23 +140,23 @@ jobs:
     with:
       context_dir: base-env/images/ubuntu-devtools
       dockerfile: base-env/images/ubuntu-devtools/Dockerfile
-      tag: ${{ needs.generate-tag.outputs.ubuntu_tag }}-languages
+      tag: ${{ needs.plan.outputs.languages_target_tag }}
       image_name: superfly/sprite-ubuntu
       target: languages
       cache_tag: 25.04-languages-latest
       latest_tag: 25.04-languages-latest
-      tag_latest: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && (inputs.tag_latest == true || inputs.tag_latest == null) }}
-      version: ${{ needs.generate-tag.outputs.is_version_tag == 'true' && github.ref_name || '' }}
-      git_sha: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && needs.generate-tag.outputs.short_sha || '' }}
+      tag_latest: ${{ needs.plan.outputs.languages_latest_tag != '' }}
+      version: ${{ needs.plan.outputs.is_version_tag == 'true' && github.ref_name || '' }}
+      git_sha: ${{ needs.plan.outputs.is_version_tag == 'false' && needs.plan.outputs.short_sha || '' }}
     secrets: inherit
 
   retag-languages:
-    needs: [generate-tag, check-ubuntu-changes, build-or-retag-base, retag-base]
+    needs: [plan, build-or-retag-base, retag-base]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-    if: always() && (needs.build-or-retag-base.result == 'success' || needs.retag-base.result == 'success') && needs.check-ubuntu-changes.outputs.has_changes == 'false'
+    if: always() && (needs.build-or-retag-base.result == 'success' || needs.retag-base.result == 'success') && needs.plan.outputs.languages_action == 'retag'
     steps:
     - name: Log in to GitHub Container Registry
       uses: docker/login-action@v3
@@ -249,19 +167,19 @@ jobs:
     
     - name: Retag existing languages image
       run: |
-        SOURCE_TAG="${{ needs.check-ubuntu-changes.outputs.source_tag }}-languages"
-        TARGET_TAG="${{ needs.generate-tag.outputs.ubuntu_tag }}-languages"
+        SOURCE_TAG="${{ needs.plan.outputs.languages_source_tag }}"
+        TARGET_TAG="${{ needs.plan.outputs.languages_target_tag }}"
         
         echo "Retagging ${SOURCE_TAG} as ${TARGET_TAG}..."
         
         # Create manifest for multi-arch retagging
         docker buildx imagetools create \
           -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TARGET_TAG} \
-          ${{ needs.generate-tag.outputs.is_version_tag == 'false' && (inputs.tag_latest == true || inputs.tag_latest == null) && format('-t {0}/{1}:25.04-languages-latest', env.REGISTRY, env.IMAGE_NAME) || '' }} \
+          ${{ needs.plan.outputs.languages_latest_tag != '' && format('-t {0}/{1}:{2}', env.REGISTRY, env.IMAGE_NAME, needs.plan.outputs.languages_latest_tag) || '' }} \
           ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${SOURCE_TAG}
 
   build-sprite-env:
-    needs: generate-tag
+    needs: plan
     permissions:
       contents: read
       packages: write
@@ -269,11 +187,11 @@ jobs:
     with:
       context_dir: .
       dockerfile: ./Dockerfile
-      tag: ${{ needs.generate-tag.outputs.sprite_env_tag }}
+      tag: ${{ needs.plan.outputs.server_tag }}
       image_name: superfly/sprite-env
       cache_tag: latest
       latest_tag: latest
-      tag_latest: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && (inputs.tag_latest == true || inputs.tag_latest == null) }}
-      version: ${{ needs.generate-tag.outputs.is_version_tag == 'true' && github.ref_name || '' }}
-      git_sha: ${{ needs.generate-tag.outputs.is_version_tag == 'false' && needs.generate-tag.outputs.short_sha || '' }}
+      tag_latest: ${{ needs.plan.outputs.tag_latest_server == 'true' }}
+      version: ${{ needs.plan.outputs.is_version_tag == 'true' && github.ref_name || '' }}
+      git_sha: ${{ needs.plan.outputs.is_version_tag == 'false' && needs.plan.outputs.short_sha || '' }}
     secrets: inherit
