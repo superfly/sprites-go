@@ -229,7 +229,7 @@ fdf::1      %s
 
 	// Set the hostname in the container's UTS namespace if container is running
 	if err := setContainerHostname(spriteName); err != nil {
-		s.logger.Warn("Failed to set container hostname (container may not be running yet)", "error", err)
+		s.logger.Debug("Container hostname will be applied on next boot (container not running yet)", "error", err)
 		// Don't return error - hostname will be set when container starts from /etc/hostname
 	} else {
 		s.logger.Debug("Set container hostname", "hostname", spriteName)
