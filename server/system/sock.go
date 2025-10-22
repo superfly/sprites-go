@@ -73,8 +73,18 @@ func (s *SockServer) Start(socketPath string) error {
 	mux := http.NewServeMux()
 	s.setupRoutes(mux)
 
+	// Wrap handler with activity tracking middleware
+	var handler http.Handler = mux
+	handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.system != nil && s.system.ActivityMonitor != nil {
+			s.system.ActivityMonitor.ActivityStarted("socket")
+			defer s.system.ActivityMonitor.ActivityEnded("socket")
+		}
+		mux.ServeHTTP(w, r)
+	})
+
 	s.server = &http.Server{
-		Handler:     mux,
+		Handler:     handler,
 		ReadTimeout: 30 * time.Second,
 	}
 

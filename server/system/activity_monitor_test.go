@@ -719,3 +719,46 @@ func TestActivityMonitor_RapidSuspendCycles(t *testing.T) {
 
 	// Verify no panics or deadlocks occurred
 }
+
+// Test that boot activity prevents suspension during boot
+func TestActivityMonitor_BootActivityPreventsEarlySuspension(t *testing.T) {
+	resetSuspendTracker()
+
+	logWriter := &testLogger{}
+	logger := slog.New(slog.NewTextHandler(logWriter, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, logger)
+
+	sys := createTestSystem(t, logWriter)
+	monitor := NewActivityMonitor(ctx, sys, 500*time.Millisecond)
+
+	os.Setenv("SPRITE_PREVENT_SUSPEND", "true")
+	defer os.Unsetenv("SPRITE_PREVENT_SUSPEND")
+
+	// Simulate early boot scenario: start monitor and mark boot active immediately
+	monitor.ActivityStarted("boot")
+	monitorCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	monitor.Start(monitorCtx)
+
+	// Wait for longer than idle timeout while boot is active
+	time.Sleep(1 * time.Second)
+
+	// Should not have suspended yet because boot is active
+	if logWriter.hasSuspended() {
+		t.Error("Monitor suspended during boot activity")
+	}
+
+	// End boot activity
+	monitor.ActivityEnded("boot")
+
+	// Now wait for idle timeout
+	time.Sleep(700 * time.Millisecond)
+
+	// Should have suspended now
+	if !logWriter.hasSuspended() {
+		t.Error("Monitor did not suspend after boot ended and idle timeout")
+	}
+}

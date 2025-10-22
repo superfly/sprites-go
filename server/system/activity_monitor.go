@@ -1,15 +1,15 @@
 package system
 
 import (
-    "context"
-    "log/slog"
-    "os"
-    "sync"
-    "sync/atomic"
-    "time"
+	"context"
+	"log/slog"
+	"os"
+	"sync"
+	"sync/atomic"
+	"time"
 
-    "github.com/superfly/sprite-env/pkg/fly"
-    "github.com/superfly/sprite-env/pkg/tap"
+	"github.com/superfly/sprite-env/pkg/fly"
+	"github.com/superfly/sprite-env/pkg/tap"
 )
 
 // Context key for storing activity monitor
@@ -134,20 +134,7 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 	var idleTimer *time.Timer
 	var idleTimerCh <-chan time.Time
 
-	// If a main process is configured, wait until it's started before
-	// enabling the idle timer. This avoids suspend attempts during boot.
-	if m.system != nil && m.system.config != nil && len(m.system.config.ProcessCommand) > 0 {
-		// Poll until process is running or context is cancelled
-		for !m.system.IsProcessRunning() {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(100 * time.Millisecond):
-			}
-		}
-	}
-
-	// Start idle timer if there is no active activity after process start (if any)
+	// Start idle timer if there is no active activity
 	currentCount := atomic.LoadInt64(&m.activeCount)
 	if currentCount == 0 {
 		idleTimer = time.NewTimer(m.idleAfter)
@@ -395,18 +382,18 @@ func (m *ActivityMonitor) suspend(ctx context.Context, inactive time.Duration) {
 	initialSystemTime := time.Now()
 	m.logger.Debug("Starting suspend process", "initial_time", initialSystemTime.Format(time.RFC3339Nano))
 
-    // Call fly suspend API
-    m.logger.Info("Calling Fly suspend API")
+	// Call fly suspend API
+	m.logger.Info("Calling Fly suspend API")
 
-    apiStart := time.Now()
-    err = fly.Suspend(apiCtx)
-    apiDuration := time.Since(apiStart)
+	apiStart := time.Now()
+	err = fly.Suspend(apiCtx)
+	apiDuration := time.Since(apiStart)
 
-    if err != nil {
-        m.logger.Error("Failed to call suspend API", "error", err, "duration", apiDuration)
-    } else {
-        m.logger.Info("Suspend API completed successfully", "duration", apiDuration)
-    }
+	if err != nil {
+		m.logger.Error("Failed to call suspend API", "error", err, "duration", apiDuration)
+	} else {
+		m.logger.Info("Suspend API completed successfully", "duration", apiDuration)
+	}
 
 	// Start loop after suspend API call for resume detection
 	const sleepInterval = 500 * time.Millisecond

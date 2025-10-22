@@ -87,6 +87,15 @@ func (s *System) initializeAPIServer() error {
 		apiServer.SetAdminChannel(s.AdminChannel)
 	}
 
+	// Wire HTTP activity observation immediately
+	apiServer.SetActivityObserver(func(start bool) {
+		if start {
+			s.ActivityMonitor.ActivityStarted("http")
+		} else {
+			s.ActivityMonitor.ActivityEnded("http")
+		}
+	})
+
 	s.APIServer = apiServer
 
 	// Do not create tmux manager here; it is initialized in initializeServices()

@@ -23,6 +23,11 @@ func (s *System) Boot(ctx context.Context) error {
 	}()
 	s.logger.Info("Starting system boot sequence", "system_ptr", fmt.Sprintf("%p", s))
 
+	// Start activity monitor early and mark boot as active
+	s.ActivityMonitor.ActivityStarted("boot")
+	s.ActivityMonitor.Start(s.ctx)
+	s.logger.Info("Activity monitor started")
+
 	// Mark system as running
 	s.mu.Lock()
 	if s.running {
@@ -195,24 +200,8 @@ func (s *System) Boot(ctx context.Context) error {
 
 	// No need to set TMUXManager on API server; handlers fetch it from system on demand
 
-	// Phase 6: Start activity monitor (after process starts)
-	s.logger.Info("Phase 6: Starting activity monitor")
-	s.ActivityMonitor.Start(s.ctx)
-
-	// Configure activity monitoring for API server
-	if s.config.APIListenAddr != "" {
-		s.APIServer.SetActivityObserver(func(start bool) {
-			if start {
-				s.ActivityMonitor.ActivityStarted("http")
-			} else {
-				s.ActivityMonitor.ActivityEnded("http")
-			}
-		})
-	}
-
-	// Set up tmux activity monitoring (no-op: manager handles monitoring internally)
-
-	s.logger.Info("Activity monitor started")
+	// Boot complete - end boot activity
+	s.ActivityMonitor.ActivityEnded("boot")
 
 	s.logger.Info("System boot complete")
 	return nil
