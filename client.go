@@ -102,12 +102,15 @@ func (c *Client) List() ([]*Sprite, error) {
 //
 // This method is typically used during initial setup to exchange Fly.io credentials
 // for sprite-specific access tokens.
-func CreateToken(ctx context.Context, flyMacaroon, orgSlug string, inviteCode string) (string, error) {
-	// Default API URL
-	apiURL := "https://api.sprites.dev"
+func CreateToken(ctx context.Context, flyMacaroon, orgSlug string, inviteCode string, apiURL ...string) (string, error) {
+	// Default API URL if not provided
+	baseURL := "https://api.sprites.dev"
+	if len(apiURL) > 0 && apiURL[0] != "" {
+		baseURL = apiURL[0]
+	}
 
 	// Build request URL
-	url := fmt.Sprintf("%s/v1/organizations/%s/tokens", apiURL, orgSlug)
+	url := fmt.Sprintf("%s/v1/organizations/%s/tokens", baseURL, orgSlug)
 
 	// Create request body
 	reqBody := struct {
