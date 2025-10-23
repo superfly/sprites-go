@@ -41,29 +41,47 @@ func (o *Organization) GetToken() (string, error) {
 		// Try user-scoped keyring first
 		activeUser := o.manager.GetActiveUser()
 		if activeUser != nil {
+			keyringService := fmt.Sprintf("%s:%s", KeyringService, activeUser.ID)
+
+			// Try with the keyring key from config
 			slog.Debug("Attempting to get token from user-scoped keyring",
-				"service", fmt.Sprintf("%s:%s", KeyringService, activeUser.ID),
+				"service", keyringService,
 				"key", o.keyringKey)
-			token, err := keyring.Get(fmt.Sprintf("%s:%s", KeyringService, activeUser.ID), o.keyringKey)
+			token, err := keyring.Get(keyringService, o.keyringKey)
 			if err == nil && token != "" {
 				slog.Debug("Successfully retrieved token from user-scoped keyring",
 					"org", o.Name, "tokenLen", len(token))
 				return token, nil
 			}
-			slog.Debug("Failed to get token from user-scoped keyring", "error", err)
+			slog.Debug("Failed to get token from user-scoped keyring with config key", "error", err)
+
+			// Try with legacy key format (sprites:org:<orgname>) for backwards compatibility
+			legacyKey := fmt.Sprintf("sprites:org:%s", o.Name)
+			if legacyKey != o.keyringKey {
+				slog.Debug("Attempting to get token with legacy key format",
+					"service", keyringService,
+					"key", legacyKey)
+				token, err = keyring.Get(keyringService, legacyKey)
+				if err == nil && token != "" {
+					slog.Debug("Successfully retrieved token with legacy key format",
+						"org", o.Name, "tokenLen", len(token))
+					return token, nil
+				}
+				slog.Debug("Failed to get token with legacy key format", "error", err)
+			}
 		}
 
-		// Fall back to legacy keyring format
-		slog.Debug("Attempting to get token from legacy keyring",
+		// Fall back to legacy keyring format (global service)
+		slog.Debug("Attempting to get token from legacy global keyring",
 			"service", KeyringService,
 			"key", o.keyringKey)
 		token, err := keyring.Get(KeyringService, o.keyringKey)
 		if err == nil && token != "" {
-			slog.Debug("Successfully retrieved token from legacy keyring",
+			slog.Debug("Successfully retrieved token from legacy global keyring",
 				"org", o.Name, "tokenLen", len(token))
 			return token, nil
 		}
-		slog.Debug("Failed to get token from legacy keyring", "error", err)
+		slog.Debug("Failed to get token from legacy global keyring", "error", err)
 	}
 
 	// Check for SPRITE_TOKEN environment variable as fallback
