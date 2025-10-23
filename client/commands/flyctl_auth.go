@@ -203,15 +203,15 @@ func FetchFlyOrganizations(token string) ([]FlyOrganization, error) {
 }
 
 // CreateSpriteToken creates a sprite token for the selected organization
-func CreateSpriteToken(flyToken string, orgSlug string) (string, error) {
+func CreateSpriteToken(flyToken string, orgSlug string, apiURL string) (string, error) {
 	ctx := context.Background()
-	
+
 	// First attempt without invite code
-	token, err := sprites.CreateToken(ctx, flyToken, orgSlug, "")
+	token, err := sprites.CreateToken(ctx, flyToken, orgSlug, "", apiURL)
 	if err != nil {
 		// Check if the error indicates sprites not enabled or forbidden
 		errStr := err.Error()
-		if strings.Contains(errStr, "401") || strings.Contains(errStr, "403") || 
+		if strings.Contains(errStr, "401") || strings.Contains(errStr, "403") ||
 		   strings.Contains(errStr, "Sprites not enabled") || strings.Contains(errStr, "Forbidden") {
 			slog.Debug("Organization requires invite code", "error", err)
 
@@ -222,7 +222,7 @@ func CreateSpriteToken(flyToken string, orgSlug string) (string, error) {
 			}
 
 			// Retry with invite code
-			token, err = sprites.CreateToken(ctx, flyToken, orgSlug, inviteCode)
+			token, err = sprites.CreateToken(ctx, flyToken, orgSlug, inviteCode, apiURL)
 			if err != nil {
 				return "", fmt.Errorf("failed to create token with invite code: %w", err)
 			}

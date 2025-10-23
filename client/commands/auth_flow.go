@@ -33,8 +33,8 @@ func EnsureAuthenticated(ctx *GlobalContext, orgOverride string) (*config.Organi
 	// Check if we have a current user
 	activeUser := ctx.ConfigMgr.GetActiveUser()
 
-	// If no active user or org override is provided, try to get org from existing config
-	if activeUser != nil && orgOverride == "" {
+	// If we have an active user, try to use existing auth first (regardless of override)
+	if activeUser != nil {
 		// Try to use existing org
 		org, client, err := GetOrgAndClient(ctx, orgOverride)
 		if err == nil {
@@ -43,9 +43,19 @@ func EnsureAuthenticated(ctx *GlobalContext, orgOverride string) (*config.Organi
 		// If we couldn't get org/client, fall through to login flow
 	}
 
+	// Parse alias from org override if present
+	var aliasOverride string
+	if orgOverride != "" {
+		orgName, alias, hasAlias := ctx.ConfigMgr.ParseOrgWithAlias(orgOverride)
+		if hasAlias {
+			orgOverride = orgName
+			aliasOverride = alias
+		}
+	}
+
 	// Need to authenticate
 	fmt.Println("Authentication required...")
-	org, err := AuthenticateWithFly(ctx.ConfigMgr, orgOverride, "", "")
+	org, err := AuthenticateWithFly(ctx.ConfigMgr, orgOverride, aliasOverride, "")
 	if err != nil {
 		return nil, nil, fmt.Errorf("authentication failed: %w", err)
 	}
@@ -186,8 +196,8 @@ func SelectOrganization(ctx *GlobalContext) (*config.Organization, *sprites.Clie
 
 	fmt.Printf("✓ Using API URL: %s\n", format.URL(apiURL))
 
-	// Add the organization with user-scoped token storage
-	if err := ctx.ConfigMgr.AddOrgWithUser(selectedOrg.Slug, spriteToken, apiURL, user.ID, user.Email); err != nil {
+	// Add the organization with user-scoped token storage (no alias in this flow)
+	if err := ctx.ConfigMgr.AddOrgWithUser(selectedOrg.Slug, spriteToken, apiURL, user.ID, user.Email, ""); err != nil {
 		return nil, nil, fmt.Errorf("failed to save organization: %w", err)
 	}
 
