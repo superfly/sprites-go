@@ -496,3 +496,6 @@ func getVersion() string {
 
 // version is set at build time via ldflags
 var version = "dev"
+
+// Exported accessor for API server to include version in headers
+func Version() string { return getVersion() }

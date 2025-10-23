@@ -181,6 +181,10 @@ func NewServer(config Config, system SystemManager, ctx context.Context) (*Serve
 	s.server = &http.Server{
 		Addr: config.ListenAddr,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            // Include sprite version for API responses (not proxy)
+            if s.config.SpriteVersion != "" {
+                w.Header().Set("Sprite-Version", s.config.SpriteVersion)
+            }
 			// Check if this is a proxy request and include that in the log
 			if proxyInfo := r.Context().Value(proxyInfoKey{}); proxyInfo != nil {
 				s.logger.Info("request", "url", r.URL.String(), "type", proxyInfo)
@@ -211,7 +215,16 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 	// Note: All endpoints have global authentication applied at the top level
 
 	// Exec endpoint - waits for process to be running
-	mux.HandleFunc("/exec", s.enrichContextMiddleware(s.waitForProcessMiddleware(s.handlers.ExecHandler)))
+	mux.HandleFunc("/exec", s.enrichContextMiddleware(s.waitForProcessMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			s.handlers.ExecHandler(w, r)
+		case http.MethodPost:
+			s.handlers.ExecHTTPHandler(w, r)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
 
 	mux.HandleFunc("/sync", s.waitForProcessMiddleware(s.syncServer.HandleWebSocket))
 
