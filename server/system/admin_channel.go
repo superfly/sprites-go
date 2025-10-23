@@ -166,17 +166,23 @@ func (ac *AdminChannel) Start() error {
 
 // Stop disconnects from the channel
 func (ac *AdminChannel) Stop() error {
-
-	// Leave channel and disconnect
-	if ac.channel != nil {
-		ac.channel.Leave()
-	}
-
+	// Disconnect without waiting for channel leave; best-effort shutdown
 	if ac.socket != nil {
 		ac.socket.Disconnect()
 	}
 
 	return nil
+}
+
+// LeaveAsync initiates a channel leave without waiting for any response.
+// Errors and timeouts are ignored; shutdown proceeds regardless.
+func (ac *AdminChannel) LeaveAsync() {
+	if ac == nil || ac.channel == nil {
+		return
+	}
+	go func() {
+		_, _ = ac.channel.Leave()
+	}()
 }
 
 // Push sends a message to the admin channel with automatic nil checking and payload conversion.

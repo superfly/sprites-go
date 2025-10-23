@@ -118,6 +118,10 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 			return fmt.Errorf("phase 3 (JuiceFS shutdown) failed: %w", err)
 		}
 		s.logger.Info("Phase 3 complete: JuiceFS stopped successfully", "duration", time.Since(juicefsStart))
+		// Kick off admin channel leave without blocking; can overlap with lease release
+		if s.AdminChannel != nil {
+			s.AdminChannel.LeaveAsync()
+		}
 	} else {
 		s.logger.Info("Phase 3: Skipping JuiceFS shutdown (not available)")
 	}
@@ -134,6 +138,8 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 			return nil
 		}); err != nil {
 			s.logger.Error("Phase 4 failed: database manager shutdown", "error", err)
+			// After JuiceFS has stopped, exit immediately on any subsequent error
+			close(s.shutdownCompleteCh)
 			return fmt.Errorf("phase 4 (database manager shutdown) failed: %w", err)
 		}
 		s.logger.Info("Phase 4 complete: Database manager stopped", "duration", time.Since(dbStart))
@@ -152,7 +158,10 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 	}()
 
 	if apiErr != nil || sockErr != nil {
+		// After JuiceFS has stopped, exit immediately on any subsequent error
 		s.logger.Error("Phase 5 failed: network services shutdown", "apiError", apiErr, "sockError", sockErr)
+		close(s.shutdownCompleteCh)
+		return nil
 	} else {
 		s.logger.Info("Phase 5 complete: Network services stopped")
 	}
@@ -173,7 +182,10 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 	}
 
 	if adminErr != nil || reaperErr != nil {
+		// After JuiceFS has stopped, exit immediately on any subsequent error
 		s.logger.Warn("Phase 6 failed: utilities shutdown", "adminError", adminErr, "reaperError", reaperErr)
+		close(s.shutdownCompleteCh)
+		return nil
 	} else {
 		s.logger.Info("Phase 6 complete: Utilities stopped")
 	}
