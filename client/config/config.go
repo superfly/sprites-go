@@ -785,6 +785,7 @@ func (m *Manager) AddUser(userID, email string) error {
 // GetUser returns a user by ID
 func (m *Manager) GetUser(userID string) *v1.UserInfo {
 	for _, u := range m.config.Users {
+		slog.Debug("GetUser", "userID", u.ID, "userConfigPath", u.ConfigPath, "userTokenPath", u.TokenPath)
 		if u.ID == userID {
 			return u
 		}

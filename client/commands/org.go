@@ -279,18 +279,7 @@ func AuthenticateWithFly(cfg *config.Manager, orgOverride string, aliasOverride 
 		slog.Debug("Organization selected", "slug", selectedOrg.Slug, "name", selectedOrg.Name)
 	}
 
-	fmt.Printf("\nCreating Sprite token for organization %s...", format.Org(selectedOrg.Slug))
-
-	// Create sprite token
-	spriteToken, err := CreateSpriteToken(flyToken, selectedOrg.Slug)
-	if err != nil {
-		fmt.Print("\r\033[K") // Clear the line
-		slog.Debug("Failed to create sprite token", "error", err)
-		return nil, fmt.Errorf("failed to create Sprite token: %w", err)
-	}
-	fmt.Print("\r\033[K") // Clear the line
-
-	// Store the organization
+	// Determine API URL before creating token
 	// Priority: command-line arg > environment variable > default
 	apiURL := "https://api.sprites.dev"
 	if envURL := os.Getenv("SPRITES_API_URL"); envURL != "" {
@@ -331,6 +320,17 @@ func AuthenticateWithFly(cfg *config.Manager, orgOverride string, aliasOverride 
 
 	// Print the API URL being used
 	fmt.Printf("Using API URL: %s\n", format.URL(apiURL))
+
+	fmt.Printf("\nCreating Sprite token for organization %s...", format.Org(selectedOrg.Slug))
+
+	// Create sprite token with the correct API URL
+	spriteToken, err := CreateSpriteToken(flyToken, selectedOrg.Slug, apiURL)
+	if err != nil {
+		fmt.Print("\r\033[K") // Clear the line
+		slog.Debug("Failed to create sprite token", "error", err)
+		return nil, fmt.Errorf("failed to create Sprite token: %w", err)
+	}
+	fmt.Print("\r\033[K") // Clear the line
 
 	// Add the organization with user-scoped token storage
 	slog.Debug("Saving organization", "name", selectedOrg.Slug, "url", apiURL, "userID", user.ID)
