@@ -244,7 +244,7 @@ func LoginCommand(ctx *GlobalContext, args []string) {
 	fmt.Printf("✓ Using API URL: %s\n", format.URL(apiURL))
 
 	// Add the organization with user-scoped token storage
-	if err := ctx.ConfigMgr.AddOrgWithUser(selectedOrg.Slug, spriteToken, apiURL, user.ID, user.Email); err != nil {
+	if err := ctx.ConfigMgr.AddOrgWithUser(selectedOrg.Slug, spriteToken, apiURL, user.ID, user.Email, aliasOverride); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to save credentials: %v\n", err)
 		os.Exit(1)
 	}

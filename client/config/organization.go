@@ -200,10 +200,16 @@ func (m *Manager) SetCurrentOrg(orgName string) error {
 }
 
 // AddOrgWithUser adds an organization with user-scoped keyring storage
-func (m *Manager) AddOrgWithUser(name, token, url, userID, userEmail string) error {
+func (m *Manager) AddOrgWithUser(name, token, url, userID, userEmail, alias string) error {
 	// Build user-scoped keyring service and key for Sprite token only
+	// Include alias (or URL if no alias) in the key to avoid collisions when the same org exists on multiple environments
 	keyringService := fmt.Sprintf("%s:%s", KeyringService, userID)
-	keyringKey := fmt.Sprintf("sprites:org:%s", name)
+	var keyringKey string
+	if alias != "" {
+		keyringKey = fmt.Sprintf("sprites:org:%s:%s", alias, name)
+	} else {
+		keyringKey = fmt.Sprintf("sprites:org:%s:%s", url, name)
+	}
 
 	slog.Debug("Adding org with user-scoped keyring",
 		"org", name,
@@ -396,9 +402,11 @@ func (m *Manager) AddOrgMetadataOnly(name, url string) error {
 		}
 
 		urlConfig := m.userConfig.URLs[url]
+		// Include URL in keyring key to avoid collisions when the same org exists on multiple environments
+		keyringKey := fmt.Sprintf("sprites:org:%s:%s", url, name)
 		orgConfig := &v1.OrgConfig{
 			Name:       name,
-			KeyringKey: name,
+			KeyringKey: keyringKey,
 			UseKeyring: true,
 			Sprites:    make(map[string]*v1.SpriteConfig),
 		}
@@ -425,10 +433,12 @@ func (m *Manager) AddOrgMetadataOnly(name, url string) error {
 	}
 
 	// Add org without token
+	// Include URL in keyring key to avoid collisions when the same org exists on multiple environments
+	keyringKey := fmt.Sprintf("sprites:org:%s:%s", url, name)
 	orgConfig := &v1.OrgConfig{
 		Name:       name,
-		KeyringKey: name, // Use legacy keyring key format for discovered orgs
-		UseKeyring: true, // Use keyring for discovered orgs
+		KeyringKey: keyringKey,
+		UseKeyring: true,
 		Sprites:    make(map[string]*v1.SpriteConfig),
 	}
 
@@ -437,7 +447,7 @@ func (m *Manager) AddOrgMetadataOnly(name, url string) error {
 		Name: name,
 	}
 
-	m.userConfig.URLs[url].Orgs[name] = orgConfig
+	m.config.URLs[url].Orgs[name] = orgConfig
 
 	return m.Save()
 }

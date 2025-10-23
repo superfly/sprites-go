@@ -172,14 +172,14 @@ func TestUserScopedKeyringIntegration(t *testing.T) {
 	org1Token := "sprite-token-user1"
 	apiURL := "https://api.sprites.dev"
 
-	err = mgr.AddOrgWithUser(org1Name, org1Token, apiURL, user1ID, user1Email)
+	err = mgr.AddOrgWithUser(org1Name, org1Token, apiURL, user1ID, user1Email, "")
 	if err != nil {
 		t.Fatalf("Failed to add org for user1: %v", err)
 	}
 
 	// Test 2: Add same org name for user2 (should be isolated)
 	org2Token := "sprite-token-user2"
-	err = mgr.AddOrgWithUser(org1Name, org2Token, apiURL, user2ID, user2Email)
+	err = mgr.AddOrgWithUser(org1Name, org2Token, apiURL, user2ID, user2Email, "")
 	if err != nil {
 		t.Fatalf("Failed to add org for user2: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestUserScopedKeyringIntegration(t *testing.T) {
 	// Test 3: Verify tokens are stored in separate keyring services
 	user1Service := "sprites-cli:user1-123"
 	user2Service := "sprites-cli:user2-456"
-	keyringKey := "sprites:org:test-org-1"
+	keyringKey := "sprites:org:" + apiURL + ":test-org-1"
 
 	// Get token for user1
 	token1, err := keyring.Get(user1Service, keyringKey)
@@ -308,16 +308,16 @@ func TestUserLogoutCleanupIntegration(t *testing.T) {
 	}
 
 	for _, org := range orgs {
-		err = mgr.AddOrgWithUser(org.name, org.token, apiURL, userID, userEmail)
+		err = mgr.AddOrgWithUser(org.name, org.token, apiURL, userID, userEmail, "")
 		if err != nil {
 			t.Fatalf("Failed to add org %s: %v", org.name, err)
 		}
 	}
 
-	// Verify tokens are stored in keyring
+	// Verify tokens are stored in keyring (with URL in key since no alias)
 	keyringService := "sprites-cli:user-123"
 	for _, org := range orgs {
-		token, err := keyring.Get(keyringService, "sprites:org:"+org.name)
+		token, err := keyring.Get(keyringService, "sprites:org:"+apiURL+":"+org.name)
 		if err != nil {
 			t.Fatalf("Failed to get token for %s: %v", org.name, err)
 		}
@@ -410,13 +410,13 @@ func TestMultipleUsersSameOrgIntegration(t *testing.T) {
 	apiURL := "https://api.sprites.dev"
 
 	// Add org for user1
-	err = mgr.AddOrgWithUser(orgName, user1Token, apiURL, user1ID, user1Email)
+	err = mgr.AddOrgWithUser(orgName, user1Token, apiURL, user1ID, user1Email, "")
 	if err != nil {
 		t.Fatalf("Failed to add org for user1: %v", err)
 	}
 
 	// Add same org for user2
-	err = mgr.AddOrgWithUser(orgName, user2Token, apiURL, user2ID, user2Email)
+	err = mgr.AddOrgWithUser(orgName, user2Token, apiURL, user2ID, user2Email, "")
 	if err != nil {
 		t.Fatalf("Failed to add org for user2: %v", err)
 	}
@@ -424,7 +424,7 @@ func TestMultipleUsersSameOrgIntegration(t *testing.T) {
 	// Verify both users can access their own tokens
 	user1Service := "sprites-cli:user1-123"
 	user2Service := "sprites-cli:user2-456"
-	keyringKey := "sprites:org:shared-org"
+	keyringKey := "sprites:org:" + apiURL + ":shared-org"
 
 	// User1's token
 	token1, err := keyring.Get(user1Service, keyringKey)

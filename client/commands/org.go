@@ -333,8 +333,8 @@ func AuthenticateWithFly(cfg *config.Manager, orgOverride string, aliasOverride 
 	fmt.Print("\r\033[K") // Clear the line
 
 	// Add the organization with user-scoped token storage
-	slog.Debug("Saving organization", "name", selectedOrg.Slug, "url", apiURL, "userID", user.ID)
-	if err := cfg.AddOrgWithUser(selectedOrg.Slug, spriteToken, apiURL, user.ID, user.Email); err != nil {
+	slog.Debug("Saving organization", "name", selectedOrg.Slug, "url", apiURL, "userID", user.ID, "alias", aliasOverride)
+	if err := cfg.AddOrgWithUser(selectedOrg.Slug, spriteToken, apiURL, user.ID, user.Email, aliasOverride); err != nil {
 		slog.Debug("Failed to save organization", "error", err)
 		return nil, fmt.Errorf("failed to save credentials: %w", err)
 	}

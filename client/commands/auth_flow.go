@@ -186,8 +186,8 @@ func SelectOrganization(ctx *GlobalContext) (*config.Organization, *sprites.Clie
 
 	fmt.Printf("✓ Using API URL: %s\n", format.URL(apiURL))
 
-	// Add the organization with user-scoped token storage
-	if err := ctx.ConfigMgr.AddOrgWithUser(selectedOrg.Slug, spriteToken, apiURL, user.ID, user.Email); err != nil {
+	// Add the organization with user-scoped token storage (no alias in this flow)
+	if err := ctx.ConfigMgr.AddOrgWithUser(selectedOrg.Slug, spriteToken, apiURL, user.ID, user.Email, ""); err != nil {
 		return nil, nil, fmt.Errorf("failed to save organization: %w", err)
 	}
 
