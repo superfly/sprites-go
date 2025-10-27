@@ -42,8 +42,8 @@ type Metrics struct {
 	IOPSWrite     uint64  `json:"iops_write"`    // write operations
 
 	// Billable counters (delta since last flush, with minimums applied)
-	BillableCPU    float64 `json:"billable_cpu_s"` // billed CPU seconds (min 6.25% per second of runtime)
-	BillableMemory float64 `json:"billable_mem_s"` // billed memory GB-seconds (min 0.250 GB per second of runtime)
+	BillableCPUSeconds    float64 `json:"billable_cpu_s"` // billed CPU seconds (min 6.25% per second of runtime)
+	BillableMemorySeconds float64 `json:"billable_mem_s"` // billed memory GB-seconds (min 0.250 GB per second of runtime)
 
 	// Monotonic counters (cumulative totals)
 	CPUSecondsTotal    float64 `json:"cpu_s_total"`
@@ -305,8 +305,8 @@ func (mon *Monitor) emitMetrics() {
 		IOPSWrite:     mon.ioWriteOps,
 
 		// Billable deltas (with minimums applied)
-		BillableCPU:    billableCPU,
-		BillableMemory: billableMemory,
+		BillableCPUSeconds:    billableCPU,
+		BillableMemorySeconds: billableMemory,
 
 		// Cumulative totals
 		CPUSecondsTotal:    mon.cpuSecondsTotal,
