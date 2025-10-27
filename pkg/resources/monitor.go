@@ -32,6 +32,9 @@ type Metrics struct {
 	// Type identifies the metrics source (e.g., "sprite")
 	Type string `json:"type"`
 
+	// Timestamp of when the metrics were collected (ISO 8601 format)
+	Timestamp string `json:"timestamp"`
+
 	// Monotonic counters (delta since last flush)
 	CPUSeconds    float64 `json:"cpu_s"`
 	MemorySeconds float64 `json:"memory_s"`      // memory GB-seconds
@@ -297,7 +300,8 @@ func (mon *Monitor) emitMetrics() {
 
 	// Build metrics
 	metrics := Metrics{
-		Type: mon.opts.Type,
+		Type:      mon.opts.Type,
+		Timestamp: now.Format(time.RFC3339),
 
 		// Deltas since last flush
 		CPUSeconds:    mon.cpuSecondsUsed,
