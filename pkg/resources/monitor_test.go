@@ -49,14 +49,17 @@ func TestMonitorBasic(t *testing.T) {
 
 func TestMonitorJSON(t *testing.T) {
 	m := Metrics{
-		Type:               "test",
-		CPUSeconds:         12.3,
-		CPUSecondsTotal:    123.456,
-		MemorySeconds:      78.9,
-		MemorySecondsTotal: 789.012,
-		CPUDeficit:         0.05,
-		CPUDeficitTotal:    0.5,
-		MemoryCurrentMB:    512,
+		Type:                  "test",
+		Timestamp:             "2025-10-27T15:04:05Z",
+		CPUSeconds:            12.3,
+		CPUSecondsTotal:       123.456,
+		MemorySeconds:         78.9,
+		MemorySecondsTotal:    789.012,
+		CPUDeficit:            0.05,
+		CPUDeficitTotal:       0.5,
+		BillableCPUSeconds:    15.0,
+		BillableMemorySeconds: 80.0,
+		MemoryCurrentMB:       512,
 	}
 
 	data, err := json.Marshal(m)
@@ -74,6 +77,7 @@ func TestMonitorJSON(t *testing.T) {
 
 	expectedKeys := []string{
 		"type",
+		"timestamp",
 		"cpu_s",
 		"cpu_s_total",
 		"runtime_s",
@@ -81,6 +85,8 @@ func TestMonitorJSON(t *testing.T) {
 		"memory_s_total",
 		"cpu_deficit_s",
 		"cpu_deficit_s_total",
+		"billable_cpu_s",
+		"billable_mem_s",
 		"io_read_gb",
 		"io_write_gb",
 		"iops_read",
@@ -495,4 +501,144 @@ func TestMonitorRuntimeMultiplePauseResume(t *testing.T) {
 
 	t.Logf("✓ Runtime correctly excluded ~%.0fms of suspended time across %d cycles",
 		totalSuspendTime*1000, cycles)
+}
+
+func TestCalculateBillableMetrics(t *testing.T) {
+	tests := []struct {
+		name           string
+		runtimeDelta   float64
+		cpuUsed        float64
+		memoryUsed     float64
+		expectedCPU    float64
+		expectedMemory float64
+	}{
+		{
+			name:           "actual usage exceeds minimums",
+			runtimeDelta:   1.0,   // 1 second
+			cpuUsed:        0.500, // 500ms CPU (50%)
+			memoryUsed:     1.0,   // 1 GB-second
+			expectedCPU:    0.500, // actual usage
+			expectedMemory: 1.0,   // actual usage
+		},
+		{
+			name:           "actual usage below minimums",
+			runtimeDelta:   1.0,    // 1 second
+			cpuUsed:        0.050,  // 50ms CPU (5%)
+			memoryUsed:     0.100,  // 100MB-seconds (0.1 GB-s)
+			expectedCPU:    0.0625, // minimum 6.25%
+			expectedMemory: 0.250,  // minimum 250MB
+		},
+		{
+			name:           "zero usage applies minimums",
+			runtimeDelta:   1.0, // 1 second
+			cpuUsed:        0.0,
+			memoryUsed:     0.0,
+			expectedCPU:    0.0625, // minimum 6.25%
+			expectedMemory: 0.250,  // minimum 250MB
+		},
+		{
+			name:           "minimums scale with runtime",
+			runtimeDelta:   2.0,   // 2 seconds
+			cpuUsed:        0.050, // 50ms CPU
+			memoryUsed:     0.100, // 100MB-seconds
+			expectedCPU:    0.125, // 2 * 0.0625
+			expectedMemory: 0.500, // 2 * 0.250
+		},
+		{
+			name:           "mixed - CPU below minimum, memory above",
+			runtimeDelta:   1.0,
+			cpuUsed:        0.030,  // 30ms CPU (below 6.25%)
+			memoryUsed:     0.500,  // 500MB-seconds (above 250MB)
+			expectedCPU:    0.0625, // minimum
+			expectedMemory: 0.500,  // actual
+		},
+		{
+			name:           "mixed - CPU above minimum, memory below",
+			runtimeDelta:   1.0,
+			cpuUsed:        0.200, // 200ms CPU (above 6.25%)
+			memoryUsed:     0.100, // 100MB-seconds (below 250MB)
+			expectedCPU:    0.200, // actual
+			expectedMemory: 0.250, // minimum
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cpu, mem := calculateBillableMetrics(tt.runtimeDelta, tt.cpuUsed, tt.memoryUsed)
+
+			if cpu != tt.expectedCPU {
+				t.Errorf("CPU: expected %.4f, got %.4f", tt.expectedCPU, cpu)
+			}
+			if mem != tt.expectedMemory {
+				t.Errorf("Memory: expected %.4f, got %.4f", tt.expectedMemory, mem)
+			}
+
+			t.Logf("Runtime: %.1fs, Used: CPU=%.3fs MEM=%.3fGB-s → Billable: CPU=%.4fs MEM=%.3fGB-s",
+				tt.runtimeDelta, tt.cpuUsed, tt.memoryUsed, cpu, mem)
+		})
+	}
+}
+
+func TestMonitorTimestampIsUTC(t *testing.T) {
+	mock := newMockManager()
+
+	var metrics []Metrics
+	var mu sync.Mutex
+
+	opts := MonitorOptions{
+		Interval: 50 * time.Millisecond,
+		Type:     "test",
+		MetricsCallback: func(m interface{}) {
+			mu.Lock()
+			defer mu.Unlock()
+			if metric, ok := m.(Metrics); ok {
+				metrics = append(metrics, metric)
+			}
+		},
+	}
+
+	mon := NewMonitorWithManager(mock, opts)
+	time.Sleep(100 * time.Millisecond)
+	mon.Stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(metrics) == 0 {
+		t.Fatal("Expected at least 1 metric emission")
+	}
+
+	for i, m := range metrics {
+		// Verify timestamp is not empty
+		if m.Timestamp == "" {
+			t.Errorf("Metric %d: timestamp is empty", i)
+			continue
+		}
+
+		// Parse the timestamp
+		ts, err := time.Parse(time.RFC3339, m.Timestamp)
+		if err != nil {
+			t.Errorf("Metric %d: failed to parse timestamp %q: %v", i, m.Timestamp, err)
+			continue
+		}
+
+		// Verify it's in UTC (zone name should be "UTC")
+		if ts.Location() != time.UTC {
+			t.Errorf("Metric %d: timestamp %q is not in UTC, got zone: %v", i, m.Timestamp, ts.Location())
+		}
+
+		// Verify the timestamp string ends with 'Z' (UTC indicator in RFC3339)
+		if m.Timestamp[len(m.Timestamp)-1] != 'Z' {
+			t.Errorf("Metric %d: timestamp %q does not end with 'Z' (UTC indicator)", i, m.Timestamp)
+		}
+
+		// Verify timestamp is recent (within last minute)
+		now := time.Now().UTC()
+		age := now.Sub(ts)
+		if age < 0 || age > time.Minute {
+			t.Errorf("Metric %d: timestamp %q is not recent (age: %v)", i, m.Timestamp, age)
+		}
+
+		t.Logf("Metric %d: timestamp=%s (UTC, age: %v)", i, m.Timestamp, age)
+	}
 }
