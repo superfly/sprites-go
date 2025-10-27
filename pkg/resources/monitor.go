@@ -41,6 +41,10 @@ type Metrics struct {
 	IOPSRead      uint64  `json:"iops_read"`     // read operations
 	IOPSWrite     uint64  `json:"iops_write"`    // write operations
 
+	// Billable counters (delta since last flush, with minimums applied)
+	BillableCPU    float64 `json:"billable_cpu_s"` // billed CPU seconds (min 6.25% per second of runtime)
+	BillableMemory float64 `json:"billable_mem_s"` // billed memory GB-seconds (min 0.250 GB per second of runtime)
+
 	// Monotonic counters (cumulative totals)
 	CPUSecondsTotal    float64 `json:"cpu_s_total"`
 	RuntimeSeconds     float64 `json:"runtime_s"`           // wall clock time (monotonic, excluding suspended time)
@@ -268,6 +272,25 @@ func (mon *Monitor) emitMetrics() {
 	mon.ioReadOpsTotal += ioReadOpsDelta
 	mon.ioWriteOpsTotal += ioWriteOpsDelta
 
+	// Calculate billable amounts with minimums
+	// Minimum billing: 6.25% CPU (0.0625 s/s) and 250MB (0.250 GB-s/s) per second of runtime
+	runtimeDelta := 0.0
+	if !mon.lastRuntimeCheck.IsZero() {
+		runtimeDelta = now.Sub(mon.lastRuntimeCheck).Seconds()
+	}
+	minCPU := runtimeDelta * 0.0625   // 6.25% CPU
+	minMemory := runtimeDelta * 0.250 // 0.250 GB-seconds
+
+	billableCPU := mon.cpuSecondsUsed
+	if billableCPU < minCPU {
+		billableCPU = minCPU
+	}
+
+	billableMemory := mon.memoryGBSeconds
+	if billableMemory < minMemory {
+		billableMemory = minMemory
+	}
+
 	// Build metrics
 	metrics := Metrics{
 		Type: mon.opts.Type,
@@ -280,6 +303,10 @@ func (mon *Monitor) emitMetrics() {
 		IOWriteGB:     mon.ioWriteGB,
 		IOPSRead:      mon.ioReadOps,
 		IOPSWrite:     mon.ioWriteOps,
+
+		// Billable deltas (with minimums applied)
+		BillableCPU:    billableCPU,
+		BillableMemory: billableMemory,
 
 		// Cumulative totals
 		CPUSecondsTotal:    mon.cpuSecondsTotal,
