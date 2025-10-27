@@ -257,9 +257,10 @@ func (mon *Monitor) emitMetrics() {
 	}
 
 	// Calculate runtime delta (wall clock time, excluding suspended periods)
+	runtimeDelta := 0.0
 	now := time.Now()
 	if !mon.lastRuntimeCheck.IsZero() {
-		runtimeDelta := now.Sub(mon.lastRuntimeCheck).Seconds()
+		runtimeDelta = now.Sub(mon.lastRuntimeCheck).Seconds()
 		mon.runtimeSeconds += runtimeDelta
 	}
 	mon.lastRuntimeCheck = now
@@ -292,10 +293,6 @@ func (mon *Monitor) emitMetrics() {
 	mon.ioWriteOpsTotal += ioWriteOpsDelta
 
 	// Calculate billable amounts with minimums
-	runtimeDelta := 0.0
-	if !mon.lastRuntimeCheck.IsZero() {
-		runtimeDelta = now.Sub(mon.lastRuntimeCheck).Seconds()
-	}
 	billableCPU, billableMemory := calculateBillableMetrics(runtimeDelta, mon.cpuSecondsUsed, mon.memoryGBSeconds)
 
 	// Build metrics
