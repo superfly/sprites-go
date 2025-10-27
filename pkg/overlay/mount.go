@@ -128,8 +128,19 @@ func (m *Manager) PrepareAndMount(ctx context.Context) error {
 		return nil
 	}
 
-	// Not a corruption error, return original error
-	return err
+	// Not a corruption error: perform simple recovery by backing up current image and recreating
+	// in case the failure is due to a bad image that didn't match classic corruption strings.
+	ts := time.Now().Format("20060102-150405")
+	backupPath := fmt.Sprintf("%s.fail-%s.bak", strings.TrimSuffix(m.imagePath, ".img"), ts)
+	m.logger.Warn("Mount failed, backing up image and recreating from scratch", "error", err, "backup", backupPath)
+	_ = os.Rename(m.imagePath, backupPath)
+	if createErr := m.EnsureImage(); createErr != nil {
+		return fmt.Errorf("failed to recreate overlay image after mount error: %w (orig: %v)", createErr, err)
+	}
+	if retryErr := m.Mount(ctx); retryErr != nil {
+		return fmt.Errorf("mount failed after image recreation: %w (orig: %v)", retryErr, err)
+	}
+	return nil
 }
 
 // Mount mounts the overlay image
@@ -356,7 +367,7 @@ func (m *Manager) mountOverlayFS(ctx context.Context) error {
 // Unmount unmounts the overlay
 func (m *Manager) Unmount(ctx context.Context) error {
 	m.logger.Info("Starting overlay unmount sequence")
-	
+
 	// Signal shutdown
 	select {
 	case <-m.stopCh:

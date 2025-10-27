@@ -3,11 +3,14 @@ package system
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/superfly/sprite-env/pkg/policy"
 )
 
 // Boot starts the system and all its modules in the correct order
@@ -197,6 +200,48 @@ func (s *System) Boot(ctx context.Context) error {
 	default:
 	}
 	if len(s.config.ProcessCommand) > 0 {
+		// Ensure network policy manager is started before container process
+		if s.config.ContainerEnabled {
+			// Configure basic link addressing; values could be made configurable later
+			ifIPv4 := net.ParseIP("10.10.0.1")
+			peerIPv4 := net.ParseIP("10.10.0.2")
+			ifIPv6 := net.ParseIP("fd00::1")
+			peerIPv6 := net.ParseIP("fd00::2")
+			ifName := "spr0-host"
+			peerIf := "spr0"
+			// Policy config directory with examples and network.json
+			configDir := filepath.Join(s.config.WriteDir, "policy")
+			_ = os.MkdirAll(configDir, 0755)
+
+			bootCfg := policy.BootConfig{
+				ContainerNS:    "sprite",
+				OpsNetns:       "", // default host ns
+				IfName:         ifName,
+				PeerIfName:     peerIf,
+				IfIPv4:         ifIPv4,
+				IfIPv6:         ifIPv6,
+				PeerIPv4:       peerIPv4,
+				PeerIPv6:       peerIPv6,
+				IPv4MaskLen:    24,
+				IPv6MaskLen:    64,
+				DnsPort:        53,
+				HostResolvPath: "",
+				ConfigDir:      configDir,
+				Mode:           policy.Unrestricted, // fallback when no network.json
+				ExtraAllow:     nil,
+				EnableIPv6:     true,
+				TableName:      "sprite_egress",
+				SetV4:          "allowed_v4",
+				SetV6:          "allowed_v6",
+			}
+			s.logger.Info("Starting network policy manager (Boot)", "configDir", configDir)
+			pm := policy.NewManager(bootCfg)
+			if err := pm.Start(ctx); err != nil {
+				return fmt.Errorf("failed to start network policy before process: %w", err)
+			}
+			// s.PolicyManager = pm
+		}
+
 		if err := s.runTimedStep(ctx, "boot", "process_start", 10*time.Second, 30*time.Second, func() error {
 			s.logger.Info("Phase 4: Starting container process")
 			if err := s.StartProcess(); err != nil {
@@ -293,7 +338,52 @@ func (s *System) BootContainer(ctx context.Context) error {
 		s.logger.Info("Checkpoints mounted successfully")
 	}
 
-	// Phase 2: Start process if configured
+	// Phase 2: Start policy networking before container process
+	// Build and start network policy manager (observe-only by default)
+	if s.config.ContainerEnabled {
+		// Configure basic link addressing; values could be made configurable later
+		ifIPv4 := net.ParseIP("10.10.0.1")
+		peerIPv4 := net.ParseIP("10.10.0.2")
+		ifIPv6 := net.ParseIP("fd00::1")
+		peerIPv6 := net.ParseIP("fd00::2")
+		ifName := "spr0-host"
+		peerIf := "spr0"
+		// Host resolv path bind-mounted by launch.sh config
+		hostResolv := filepath.Join(s.config.WriteDir, "container", "resolv.conf")
+		// Policy config directory with examples and network.json
+		configDir := filepath.Join(s.config.WriteDir, "policy")
+		_ = os.MkdirAll(configDir, 0755)
+
+		bootCfg := policy.BootConfig{
+			ContainerNS:    "sprite",
+			OpsNetns:       "", // default host ns
+			IfName:         ifName,
+			PeerIfName:     peerIf,
+			IfIPv4:         ifIPv4,
+			IfIPv6:         ifIPv6,
+			PeerIPv4:       peerIPv4,
+			PeerIPv6:       peerIPv6,
+			IPv4MaskLen:    24,
+			IPv6MaskLen:    64,
+			DnsPort:        53,
+			HostResolvPath: hostResolv,
+			ConfigDir:      configDir,
+			Mode:           policy.Unrestricted, // fallback when no network.json
+			ExtraAllow:     nil,
+			EnableIPv6:     true,
+			TableName:      "sprite_egress",
+			SetV4:          "allowed_v4",
+			SetV6:          "allowed_v6",
+		}
+		s.logger.Info("Starting network policy manager", "configDir", configDir)
+		pm := policy.NewManager(bootCfg)
+		if err := pm.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start network policy: %w", err)
+		}
+		// s.PolicyManager = pm
+	}
+
+	// Phase 3: Start process if configured
 	if len(s.config.ProcessCommand) > 0 {
 		s.logger.Info("Phase 2: Starting container process")
 		if err := s.StartProcess(); err != nil {

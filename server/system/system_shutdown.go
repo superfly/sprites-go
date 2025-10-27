@@ -3,12 +3,20 @@ package system
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 )
 
 // Shutdown gracefully shuts down the system in reverse order of startup
 // This is the main entry point for stopping the system
 func (s *System) Shutdown(shutdownCtx context.Context) error {
+	// Ensure any safety timer is stopped when Shutdown returns
+	var safetyTimer *time.Timer
+	defer func() {
+		if safetyTimer != nil {
+			safetyTimer.Stop()
+		}
+	}()
 	// Emit shutdown start event
 	s.emitAdminEvent("shutdown.start", map[string]interface{}{
 		"status":     "start",
@@ -143,6 +151,13 @@ func (s *System) Shutdown(shutdownCtx context.Context) error {
 			return fmt.Errorf("phase 4 (database manager shutdown) failed: %w", err)
 		}
 		s.logger.Info("Phase 4 complete: Database manager stopped", "duration", time.Since(dbStart))
+
+		// Safety valve: if subsequent shutdown phases hang, force exit after 5s.
+		// This timer is cancelled when Shutdown returns.
+		safetyTimer = time.AfterFunc(5*time.Second, func() {
+			s.logger.Info("Forcing process exit after DB manager stop grace period")
+			os.Exit(0)
+		})
 	}
 
 	// Phase 5: Stop network services

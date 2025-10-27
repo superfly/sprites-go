@@ -16,7 +16,7 @@ function debug() {
 
 # Cgroup setup is now handled by the server at startup
 
-# Run network setup
+# Run host-side network setup (NAT only). Policy manager creates netns/veth/dns synchronously before process start.
 /home/sprite/network-setup.sh
 
 mkdir -p /dev/fly_vol/local-storage/var/lib/docker
@@ -231,7 +231,7 @@ CONFIG_JSON='{
     {
       "destination": "/etc/resolv.conf",
       "type": "bind",
-      "source": "/dev/fly_vol/container/resolv.conf",
+      "source": "/system/etc/resolv.conf",
       "options": ["ro", "nosuid", "noexec", "nodev", "bind"]
     },
     {

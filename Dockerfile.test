@@ -83,17 +83,21 @@ COPY base-env/system/ /system/
 FROM ubuntu:25.04
 
 # Install same packages as production plus test dependencies
+ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && \
     apt-get install -y sqlite3 bash e2fsprogs fio jq nano coreutils \
     lvm2 thin-provisioning-tools drbd-utils \
-    parted gdisk util-linux fdisk xfsprogs fuse3 curl iproute2 nftables iputils-ping vim rsync \
+    parted gdisk util-linux fdisk xfsprogs fuse3 curl iproute2 nftables iputils-ping vim rsync dnsmasq dnsmasq-base socat libcap2-bin \
     # Additional packages for testing
-    build-essential git make ca-certificates wget procps netcat-openbsd tmux util-linux \
+    build-essential git make ca-certificates wget procps netcat-openbsd tmux util-linux dnsutils \
     && apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+# Explicitly ensure dnsmasq binary exists (some mirrors omit it on first pass)
+RUN apt-get update && apt-get install -y dnsmasq dnsmasq-base && command -v dnsmasq
+
 # Install Go early to maximize caching (before COPY commands that might change)
-ARG GO_VERSION=1.24.0
+ARG GO_VERSION=1.24.4
 ARG TARGETARCH
 RUN set -e; \
     case ${TARGETARCH} in \
@@ -124,7 +128,9 @@ COPY --from=assemble-system /system /system
 
 # Create symlink for sprite environment (tests expect /.sprite)
 RUN ln -sf /system/.sprite /.sprite && \
-    mkdir -p /.sprite/tmp
+    mkdir -p /.sprite/tmp && \
+    useradd -r -s /usr/sbin/nologin sprite-net && \
+    setcap 'cap_net_bind_service,cap_net_admin+ep' /usr/sbin/dnsmasq || true
 
 # Set up environment
 ENV SPRITE_WRITE_DIR=/tmp/sprite-test \

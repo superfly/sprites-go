@@ -43,7 +43,11 @@ func (s *System) initializeDBManager() error {
 
 	// JuiceFS metadata database if configured
 	if s.config.JuiceFSDataPath != "" {
-		juicefsDBPath := filepath.Join(s.config.JuiceFSDataPath, "metadata.db")
+		metaName := os.Getenv("SPRITE_JUICEFS_META_NAME")
+		if metaName == "" {
+			metaName = "metadata.db"
+		}
+		juicefsDBPath := filepath.Join(s.config.JuiceFSDataPath, metaName)
 		dbPaths = append(dbPaths, juicefsDBPath)
 	}
 

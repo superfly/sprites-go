@@ -41,7 +41,7 @@ func (s *System) InitializeSpriteDB(ctx context.Context) error {
 	}
 	defer db.Close()
 
-	// Create table with single-row constraint
+	// Create sprite_info table
 	_, err = db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS sprite_info (
 			id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -50,7 +50,7 @@ func (s *System) InitializeSpriteDB(ctx context.Context) error {
 			org_id TEXT NOT NULL,
 			sprite_id TEXT NOT NULL,
 			assigned_at TIMESTAMP NOT NULL
-		)
+        );
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to create sprite_info table: %w", err)
@@ -63,6 +63,8 @@ func (s *System) InitializeSpriteDB(ctx context.Context) error {
 	s.flushQueuedSpriteAssignments(ctx)
 	return nil
 }
+
+// No network policy state is stored in sprite_db; policy is read from JSON on disk.
 
 // GetSpriteDBPath returns the path to the sprite database
 func (s *System) GetSpriteDBPath() string {
