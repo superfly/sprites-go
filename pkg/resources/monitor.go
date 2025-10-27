@@ -301,7 +301,7 @@ func (mon *Monitor) emitMetrics() {
 	// Build metrics
 	metrics := Metrics{
 		Type:      mon.opts.Type,
-		Timestamp: now.Format(time.RFC3339),
+		Timestamp: now.UTC().Format(time.RFC3339),
 
 		// Deltas since last flush
 		CPUSeconds:    mon.cpuSecondsUsed,
