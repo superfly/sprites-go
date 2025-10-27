@@ -226,6 +226,25 @@ func (mon *Monitor) run(ctx context.Context) {
 	}
 }
 
+// calculateBillableMetrics applies minimum billing rates to actual usage.
+// Minimum billing: 6.25% CPU (0.0625 s/s) and 250MB (0.250 GB-s/s) per second of runtime.
+func calculateBillableMetrics(runtimeDelta, cpuSecondsUsed, memoryGBSeconds float64) (billableCPU, billableMemory float64) {
+	minCPU := runtimeDelta * 0.0625   // 6.25% CPU
+	minMemory := runtimeDelta * 0.250 // 0.250 GB-seconds
+
+	billableCPU = cpuSecondsUsed
+	if billableCPU < minCPU {
+		billableCPU = minCPU
+	}
+
+	billableMemory = memoryGBSeconds
+	if billableMemory < minMemory {
+		billableMemory = minMemory
+	}
+
+	return billableCPU, billableMemory
+}
+
 // emitMetrics calculates and emits accumulated metrics, then resets delta counters
 func (mon *Monitor) emitMetrics() {
 	mon.mu.Lock()
@@ -273,23 +292,11 @@ func (mon *Monitor) emitMetrics() {
 	mon.ioWriteOpsTotal += ioWriteOpsDelta
 
 	// Calculate billable amounts with minimums
-	// Minimum billing: 6.25% CPU (0.0625 s/s) and 250MB (0.250 GB-s/s) per second of runtime
 	runtimeDelta := 0.0
 	if !mon.lastRuntimeCheck.IsZero() {
 		runtimeDelta = now.Sub(mon.lastRuntimeCheck).Seconds()
 	}
-	minCPU := runtimeDelta * 0.0625   // 6.25% CPU
-	minMemory := runtimeDelta * 0.250 // 0.250 GB-seconds
-
-	billableCPU := mon.cpuSecondsUsed
-	if billableCPU < minCPU {
-		billableCPU = minCPU
-	}
-
-	billableMemory := mon.memoryGBSeconds
-	if billableMemory < minMemory {
-		billableMemory = minMemory
-	}
+	billableCPU, billableMemory := calculateBillableMetrics(runtimeDelta, mon.cpuSecondsUsed, mon.memoryGBSeconds)
 
 	// Build metrics
 	metrics := Metrics{
