@@ -32,6 +32,7 @@ jobs:
   test-lib:
     name: "Tests"
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: ${{ !contains(github.event.pull_request.title, '[skip ci]') && !contains(github.event.pull_request.title, '[ci skip]') }}
     permissions:
       contents: read
@@ -48,19 +49,6 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Cache Go modules and build cache
-      uses: actions/cache@v4
-      with:
-        path: |
-          .cache/go-pkg
-          .cache/go-build
-        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}-${{ hashFiles('**/*.go') }}
-        restore-keys: |
-          ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}-
-          ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
-          ${{ runner.os }}-go-
-          ${{ runner.os }}-go-mod-
-
     - name: Build test Docker image
       uses: docker/build-push-action@v6
       with:
@@ -69,12 +57,7 @@ jobs:
         push: false
         load: true
         tags: sprite-env-tests:latest
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
 
-    - name: Create cache directories
-      run: |
-        mkdir -p .cache/go-pkg .cache/go-build
 
     - name: Run tests in Docker
       id: run_tests
@@ -82,11 +65,7 @@ jobs:
         docker run --rm --privileged \
           -e SPRITE_TEST_DOCKER=1 \
           -e CI=true \
-          -e GOMODCACHE=/go/pkg/mod \
-          -e GOCACHE=/root/.cache/go-build \
           -v "$(pwd)":/workspace \
-          -v "$(pwd)/.cache/go-pkg:/go/pkg" \
-          -v "$(pwd)/.cache/go-build:/root/.cache/go-build" \
           -w /workspace \
           sprite-env-tests \
           ./scripts/run-tests.sh
