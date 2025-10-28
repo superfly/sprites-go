@@ -188,6 +188,7 @@ func (nm *NamespaceMonitor) scanNamespace(watcher *namespaceWatcher) {
 		return
 	}
 
+	log.Printf("Port watcher: scanning namespace %s", watcher.namespace)
 	cmd := exec.Command("nsenter", "--net=/var/run/netns/"+watcher.namespace, "ss", "-ltnp")
 	output, err := cmd.Output()
 	if err != nil {
@@ -195,7 +196,9 @@ func (nm *NamespaceMonitor) scanNamespace(watcher *namespaceWatcher) {
 		return
 	}
 
+	log.Printf("Port watcher: ss output for namespace %s:\n%s", watcher.namespace, string(output))
 	allSeenPorts := nm.parseSSOutput(string(output), watcher)
+	log.Printf("Port watcher: parsed %d ports from namespace %s", len(allSeenPorts), watcher.namespace)
 
 	// Now update currentPorts based on ALL seen ports
 	// Remove ports that are no longer present
@@ -496,15 +499,23 @@ func (nm *NamespaceMonitor) notifySubscribers(port Port) {
 	nm.mu.RLock()
 	defer nm.mu.RUnlock()
 
+	log.Printf("Port watcher: notifySubscribers called for port %s:%d pid=%d state=%s", port.Address, port.Port, port.PID, port.State)
+	log.Printf("Port watcher: current subscribers: %v", nm.subscribers)
+
 	// Check all subscriptions to see if this port's PID is in their tree
+	notifiedCount := 0
 	for rootPID, subs := range nm.subscribers {
-		if isPIDInTree(port.PID, rootPID) {
+		isInTree := isPIDInTree(port.PID, rootPID)
+		log.Printf("Port watcher: checking if PID %d is in tree of rootPID %d: %v", port.PID, rootPID, isInTree)
+		if isInTree {
 			for _, sub := range subs {
+				notifiedCount++
 				// Call the callback in a goroutine to avoid blocking
 				go sub.callback(port)
 			}
 		}
 	}
+	log.Printf("Port watcher: notified %d subscribers for port %s:%d", notifiedCount, port.Address, port.Port)
 }
 
 // getNetworkNamespace returns the network namespace inode for a PID
