@@ -135,14 +135,9 @@ func (w *WritebackWatcher) Start(ctx context.Context) error {
 			close(w.stoppedCh)
 			return fmt.Errorf("failed to watch writeback directory: %w", err)
 		}
-		w.logger.Info("Started watching writeback directory recursively", "path", w.rawstagingPath)
+		w.logger.Debug("Started watching writeback directory recursively", "path", w.rawstagingPath)
 
-		// Count any existing files in the directory tree
-		if err := w.scanExistingFiles(); err != nil {
-			w.logger.Warn("Failed to scan existing files", "error", err)
-		}
-
-		// Signal that watcher is ready
+		// Signal that watcher is ready immediately - scanning happens in background
 		close(w.readyCh)
 	} else {
 		// If not found, also watch the cache directory so we can detect when rawstaging appears
@@ -151,7 +146,7 @@ func (w *WritebackWatcher) Start(ctx context.Context) error {
 			close(w.stoppedCh)
 			return fmt.Errorf("failed to watch cache directory: %w", err)
 		}
-		w.logger.Info("Watching cache directory for rawstaging creation", "cacheDir", w.cacheDir)
+		w.logger.Debug("Watching cache directory for rawstaging creation", "cacheDir", w.cacheDir)
 	}
 	// processEvents will signal ready when rawstaging is found
 
@@ -160,6 +155,17 @@ func (w *WritebackWatcher) Start(ctx context.Context) error {
 
 	// Start the event processing goroutine
 	go w.processEvents(ctx)
+
+	// Scan existing files in background (don't block Start)
+	if w.rawstagingPath != "" {
+		go func() {
+			w.logger.Debug("Scanning existing files in background")
+			if err := w.scanExistingFiles(); err != nil {
+				w.logger.Debug("Background scan of existing files failed", "error", err)
+			}
+			w.logger.Debug("Background scan completed")
+		}()
+	}
 
 	return nil
 }

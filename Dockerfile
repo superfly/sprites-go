@@ -107,7 +107,7 @@ RUN ARCH=$(uname -m) && \
 # Get litestream binary
 FROM litestream/litestream:0.3 AS litestream
 
-FROM ghcr.io/superfly/juicefs:6bfa417 as juicefs
+FROM ghcr.io/superfly/juicefs:fa0d61a as juicefs
 
 # Assemble system files from multiple sources
 FROM alpine:latest AS assemble-system
