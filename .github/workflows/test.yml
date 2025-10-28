@@ -32,7 +32,6 @@ jobs:
   test-lib:
     name: "Tests"
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     if: ${{ !contains(github.event.pull_request.title, '[skip ci]') && !contains(github.event.pull_request.title, '[ci skip]') }}
     permissions:
       contents: read
@@ -49,7 +48,8 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Build test Docker image
+    - name: Build test Docker image (non-main)
+      if: ${{ github.ref != 'refs/heads/main' }}
       uses: docker/build-push-action@v6
       with:
         context: .
@@ -57,7 +57,19 @@ jobs:
         push: false
         load: true
         tags: sprite-env-tests:latest
+        cache-from: type=gha,scope=main
 
+    - name: Build test Docker image (main, cache save)
+      if: ${{ github.ref == 'refs/heads/main' }}
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: ./Dockerfile.test
+        push: false
+        load: true
+        tags: sprite-env-tests:latest
+        cache-from: type=gha,scope=main
+        cache-to: type=gha,mode=max,scope=main
 
     - name: Run tests in Docker
       id: run_tests
