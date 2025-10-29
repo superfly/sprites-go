@@ -21,138 +21,296 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build Client
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            goos: linux
-            goarch: amd64
-            binary_name: sprite
-          - os: ubuntu-22.04-arm64
-            goos: linux
-            goarch: arm64
-            binary_name: sprite
-          - os: macos-13
-            goos: darwin
-            goarch: amd64
-            binary_name: sprite
-          - os: macos-latest
-            goos: darwin
-            goarch: arm64
-            binary_name: sprite
-          - os: windows-latest
-            goos: windows
-            goarch: amd64
-            binary_name: sprite.exe
-          - os: windows-latest
-            goos: windows
-            goarch: arm64
-            binary_name: sprite.exe
-    
+  build-linux-amd64:
+    name: Build Client (Linux AMD64)
+    runs-on: ubuntu-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        submodules: recursive
-        token: ${{ secrets.GH_PAT || github.token }}
-    
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.22'
-    
-    - name: Build Windows binary
-      if: matrix.goos == 'windows'
-      working-directory: ./client
-      run: go build -tags clientonly -ldflags="-s -w -X 'main.Version=${{ github.ref_name }}'" -o ${{ matrix.binary_name }}
-      env:
-        GOOS: ${{ matrix.goos }}
-        GOARCH: ${{ matrix.goarch }}
-    
-    - name: Build Unix binary
-      if: matrix.goos != 'windows'
-      working-directory: ./client
-      run: go build -ldflags="-s -w -X 'main.Version=${{ github.ref_name }}'" -o ${{ matrix.binary_name }}
-      env:
-        GOOS: ${{ matrix.goos }}
-        GOARCH: ${{ matrix.goarch }}
-    
-    - name: Install macOS certificate
-      if: matrix.goos == 'darwin'
-      run: |
-        # Create keychain
-        security create-keychain -p "" build.keychain
-        security list-keychains -s build.keychain
-        security default-keychain -s build.keychain
-        security unlock-keychain -p "" build.keychain
-        security set-keychain-settings build.keychain
-        
-        # Import certificate
-        echo "${{ secrets.MACOS_CERTIFICATE_P12 }}" | base64 -d > certificate.p12
-        security import certificate.p12 -k build.keychain -P "${{ secrets.MACOS_CERTIFICATE_PASSWORD }}" -T /usr/bin/codesign
-        security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" build.keychain
-        
-        # Clean up
-        rm certificate.p12
-    
-    - name: Code sign macOS binary
-      if: matrix.goos == 'darwin'
-      working-directory: ./client
-      run: |
-        codesign --force --options runtime --sign "Developer ID Application: Fly.io, Inc (8SC5V44846)" ${{ matrix.binary_name }}
-    
-    - name: Notarize macOS binary
-      if: matrix.goos == 'darwin'
-      working-directory: ./client
-      run: |
-        # Create temporary zip for notarization
-        ditto -c -k --keepParent ${{ matrix.binary_name }} sprite-notarize.zip
-        
-        # Submit for notarization
-        xcrun notarytool submit sprite-notarize.zip \
-          --apple-id ${{ secrets.APPLE_ID }} \
-          --password ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }} \
-          --team-id 8SC5V44846 \
-          --wait
-        
-        # Staple the notarization ticket (with better error handling)
-        sleep 5  # Wait a moment for notarization to fully process
-        xcrun stapler staple ${{ matrix.binary_name }} || {
-          echo "Stapling failed, but notarization succeeded"
-          echo "The binary is notarized but not stapled"
-          echo "This is acceptable for distribution"
-        }
-        
-        # Clean up
-        rm sprite-notarize.zip
-    
-    - name: Create Windows archive
-      if: matrix.goos == 'windows'
-      working-directory: ./client
-      run: |
-        Compress-Archive -Path ${{ matrix.binary_name }} -DestinationPath sprite-${{ matrix.goos }}-${{ matrix.goarch }}.zip
-      shell: pwsh
-    
-    - name: Create Unix archive
-      if: matrix.goos != 'windows'
-      working-directory: ./client
-      run: tar -czf sprite-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz ${{ matrix.binary_name }}
-    
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: sprite-${{ matrix.goos }}-${{ matrix.goarch }}
-        path: |
-          client/sprite-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
-          client/sprite-${{ matrix.goos }}-${{ matrix.goarch }}.zip
-        if-no-files-found: error
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.GH_PAT || github.token }}
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      
+      - name: Build binary
+        working-directory: ./client
+        run: go build -ldflags="-s -w -X 'main.Version=${{ github.ref_name }}'" -o sprite
+        env:
+          GOOS: linux
+          GOARCH: amd64
+      
+      - name: Create archive
+        working-directory: ./client
+        run: tar -czf sprite-linux-amd64.tar.gz sprite
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprite-linux-amd64
+          path: client/sprite-linux-amd64.tar.gz
+
+  build-linux-arm64:
+    name: Build Client (Linux ARM64)
+    runs-on:
+      group: sprite-env-arm64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.GH_PAT || github.token }}
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      
+      - name: Build binary
+        working-directory: ./client
+        run: go build -ldflags="-s -w -X 'main.Version=${{ github.ref_name }}'" -o sprite
+        env:
+          GOOS: linux
+          GOARCH: arm64
+      
+      - name: Create archive
+        working-directory: ./client
+        run: tar -czf sprite-linux-arm64.tar.gz sprite
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprite-linux-arm64
+          path: client/sprite-linux-arm64.tar.gz
+
+  build-macos-intel:
+    name: Build Client (macOS Intel)
+    runs-on: macos-13
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.GH_PAT || github.token }}
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      
+      - name: Build binary
+        working-directory: ./client
+        run: go build -ldflags="-s -w -X 'main.Version=${{ github.ref_name }}'" -o sprite
+        env:
+          GOOS: darwin
+          GOARCH: amd64
+      
+      - name: Install macOS certificate
+        run: |
+          # Create keychain
+          security create-keychain -p "" build.keychain
+          security list-keychains -s build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "" build.keychain
+          security set-keychain-settings build.keychain
+          
+          # Import certificate
+          echo "${{ secrets.MACOS_CERTIFICATE_P12 }}" | base64 -d > certificate.p12
+          security import certificate.p12 -k build.keychain -P "${{ secrets.MACOS_CERTIFICATE_PASSWORD }}" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" build.keychain
+          
+          # Clean up
+          rm certificate.p12
+      
+      - name: Code sign macOS binary
+        working-directory: ./client
+        run: |
+          codesign --force --options runtime --sign "Developer ID Application: Fly.io, Inc (8SC5V44846)" sprite
+      
+      - name: Notarize macOS binary
+        working-directory: ./client
+        run: |
+          # Create temporary zip for notarization
+          ditto -c -k --keepParent sprite sprite-notarize.zip
+          
+          # Submit for notarization
+          xcrun notarytool submit sprite-notarize.zip \
+            --apple-id ${{ secrets.APPLE_ID }} \
+            --password ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }} \
+            --team-id 8SC5V44846 \
+            --wait
+          
+          # Staple the notarization ticket (with better error handling)
+          sleep 5  # Wait a moment for notarization to fully process
+          xcrun stapler staple sprite || {
+            echo "Stapling failed, but notarization succeeded"
+            echo "The binary is notarized but not stapled"
+            echo "This is acceptable for distribution"
+          }
+          
+          # Clean up
+          rm sprite-notarize.zip
+      
+      - name: Create archive
+        working-directory: ./client
+        run: tar -czf sprite-darwin-amd64.tar.gz sprite
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprite-darwin-amd64
+          path: client/sprite-darwin-amd64.tar.gz
+
+  build-macos-arm64:
+    name: Build Client (macOS ARM64)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.GH_PAT || github.token }}
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      
+      - name: Build binary
+        working-directory: ./client
+        run: go build -ldflags="-s -w -X 'main.Version=${{ github.ref_name }}'" -o sprite
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+      
+      - name: Install macOS certificate
+        run: |
+          # Create keychain
+          security create-keychain -p "" build.keychain
+          security list-keychains -s build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "" build.keychain
+          security set-keychain-settings build.keychain
+          
+          # Import certificate
+          echo "${{ secrets.MACOS_CERTIFICATE_P12 }}" | base64 -d > certificate.p12
+          security import certificate.p12 -k build.keychain -P "${{ secrets.MACOS_CERTIFICATE_PASSWORD }}" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" build.keychain
+          
+          # Clean up
+          rm certificate.p12
+      
+      - name: Code sign macOS binary
+        working-directory: ./client
+        run: |
+          codesign --force --options runtime --sign "Developer ID Application: Fly.io, Inc (8SC5V44846)" sprite
+      
+      - name: Notarize macOS binary
+        working-directory: ./client
+        run: |
+          # Create temporary zip for notarization
+          ditto -c -k --keepParent sprite sprite-notarize.zip
+          
+          # Submit for notarization
+          xcrun notarytool submit sprite-notarize.zip \
+            --apple-id ${{ secrets.APPLE_ID }} \
+            --password ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }} \
+            --team-id 8SC5V44846 \
+            --wait
+          
+          # Staple the notarization ticket (with better error handling)
+          sleep 5  # Wait a moment for notarization to fully process
+          xcrun stapler staple sprite || {
+            echo "Stapling failed, but notarization succeeded"
+            echo "The binary is notarized but not stapled"
+            echo "This is acceptable for distribution"
+          }
+          
+          # Clean up
+          rm sprite-notarize.zip
+      
+      - name: Create archive
+        working-directory: ./client
+        run: tar -czf sprite-darwin-arm64.tar.gz sprite
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprite-darwin-arm64
+          path: client/sprite-darwin-arm64.tar.gz
+
+  build-windows-amd64:
+    name: Build Client (Windows AMD64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.GH_PAT || github.token }}
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      
+      - name: Build binary
+        working-directory: ./client
+        run: go build -tags clientonly -ldflags="-s -w -X 'main.Version=${{ github.ref_name }}'" -o sprite.exe
+        env:
+          GOOS: windows
+          GOARCH: amd64
+      
+      - name: Create archive
+        working-directory: ./client
+        run: Compress-Archive -Path sprite.exe -DestinationPath sprite-windows-amd64.zip
+        shell: pwsh
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprite-windows-amd64
+          path: client/sprite-windows-amd64.zip
+
+  build-windows-arm64:
+    name: Build Client (Windows ARM64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.GH_PAT || github.token }}
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      
+      - name: Build binary
+        working-directory: ./client
+        run: go build -tags clientonly -ldflags="-s -w -X 'main.Version=${{ github.ref_name }}'" -o sprite.exe
+        env:
+          GOOS: windows
+          GOARCH: arm64
+      
+      - name: Create archive
+        working-directory: ./client
+        run: Compress-Archive -Path sprite.exe -DestinationPath sprite-windows-arm64.zip
+        shell: pwsh
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprite-windows-arm64
+          path: client/sprite-windows-arm64.zip
 
   release:
     name: Create Release
-    needs: build
+    needs: [build-linux-amd64, build-linux-arm64, build-macos-intel, build-macos-arm64, build-windows-amd64, build-windows-arm64]
     runs-on: ubuntu-latest
     
     steps:
