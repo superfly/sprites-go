@@ -27,7 +27,9 @@ jobs:
   context:
     name: Compute context
     runs-on:
-      group: sprite-env-amd64
+      - codebuild-sprite-env-${{ github.run_id }}-${{ github.run_attempt }}
+        image:latest
+        instance-size:large
     outputs:
       is_main_run: ${{ steps.flags.outputs.is_main_run }}
       sha: ${{ steps.sha.outputs.sha }}

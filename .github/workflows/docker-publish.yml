@@ -50,9 +50,10 @@ env:
 
 jobs:
   build-amd64:
-    runs-on: ubuntu-latest
-    # runs-on:
-    #   group: sprite-env-amd64
+    runs-on:
+      - codebuild-sprite-env-${{ github.run_id }}-${{ github.run_attempt }}
+        image:latest
+        instance-size:large
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     
@@ -92,9 +93,10 @@ jobs:
         cache-to: type=gha,mode=max,scope=amd64
 
   build-arm64:
-    runs-on: ubuntu-22.04-arm64
-    # runs-on:
-    #   group: sprite-env-arm64
+    runs-on:
+      - codebuild-sprite-env-${{ github.run_id }}-${{ github.run_attempt }}
+        image:arm-latest
+        instance-size:large
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     
@@ -135,7 +137,9 @@ jobs:
 
   manifest:
     runs-on:
-      group: sprite-env-amd64
+      - codebuild-sprite-env-${{ github.run_id }}-${{ github.run_attempt }}
+        image:latest
+        instance-size:large
     needs: [build-amd64, build-arm64]
 
     steps:

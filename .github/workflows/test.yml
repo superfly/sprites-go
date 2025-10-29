@@ -31,9 +31,10 @@ on:
 jobs:
   test-lib:
     name: "Tests"
-    runs-on: ubuntu-latest
-    # runs-on:
-    #   group: sprite-env-amd64
+    runs-on:
+      - codebuild-sprite-env-${{ github.run_id }}-${{ github.run_attempt }}
+        image:latest
+        instance-size:large
     if: ${{ !contains(github.event.pull_request.title, '[skip ci]') && !contains(github.event.pull_request.title, '[ci skip]') }}
     permissions:
       contents: read
@@ -92,7 +93,9 @@ jobs:
   short-sha:
     name: Compute short SHA
     runs-on:
-      group: sprite-env-amd64
+      - codebuild-sprite-env-${{ github.run_id }}-${{ github.run_attempt }}
+        image:latest
+        instance-size:large
     outputs:
       short: ${{ steps.s.outputs.short }}
     steps:

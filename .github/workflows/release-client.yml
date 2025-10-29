@@ -27,11 +27,15 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: codebuild-sprite-env-${{ github.run_id }}-${{ github.run_attempt }}
+            image: latest
+            instance-size: large
             goos: linux
             goarch: amd64
             binary_name: sprite
-          - os: ubuntu-22.04-arm64
+          - os: codebuild-sprite-env-${{ github.run_id }}-${{ github.run_attempt }}
+            image: arm-latest
+            instance-size: large
             goos: linux
             goarch: arm64
             binary_name: sprite
@@ -153,7 +157,10 @@ jobs:
   release:
     name: Create Release
     needs: build
-    runs-on: ubuntu-latest
+    runs-on:
+      - codebuild-sprite-env-${{ github.run_id }}-${{ github.run_attempt }}
+        image:latest
+        instance-size:large
     
     steps:
     - name: Checkout code

@@ -13,9 +13,10 @@ on:
 
 jobs:
   test-go-sdk:
-    runs-on: ubuntu-latest
-    # runs-on:
-    #   group: sprite-env-amd64
+    runs-on:
+      - codebuild-sprite-env-${{ github.run_id }}-${{ github.run_attempt }}
+        image:latest
+        instance-size:large
     name: Test Go SDK
     
     steps:
@@ -49,9 +50,10 @@ jobs:
       continue-on-error: false
 
   test-js-sdk:
-    runs-on: ubuntu-latest
-    # runs-on:
-    #   group: sprite-env-amd64
+    runs-on:
+      - codebuild-sprite-env-${{ github.run_id }}-${{ github.run_attempt }}
+        image:latest
+        instance-size:large
     name: Test JavaScript SDK
     
     steps:
