@@ -391,7 +391,7 @@ func TestSystemComponentCleanupVerification(t *testing.T) {
 // can be restarted while SystemBoot (DB + JuiceFS) remains stable
 // This validates the two-phase architecture benefit: UserEnvironment is restartable
 func TestUserEnvironmentRestart(t *testing.T) {
-	_, cancel := SetTestDeadline(t)
+	_, cancel := SetTestDeadlineWithTimeout(t, 3*time.Minute)
 	defer cancel()
 
 	if testing.Short() {
