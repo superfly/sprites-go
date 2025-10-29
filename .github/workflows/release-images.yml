@@ -38,9 +38,7 @@ env:
 jobs:
   plan:
     runs-on:
-      - codebuild-sprite-env-${{ github.run_id }}-${{ github.run_attempt }}
-        image:latest
-        instance-size:large
+      group: sprite-env-amd64
     outputs:
       ubuntu_tag: ${{ steps.ctx.outputs.ubuntu_tag }}
       sprite_env_tag: ${{ steps.ctx.outputs.sprite_env_tag }}
@@ -108,9 +106,7 @@ jobs:
   retag-base:
     needs: [plan]
     runs-on:
-      - codebuild-sprite-env-${{ github.run_id }}-${{ github.run_attempt }}
-        image:latest
-        instance-size:large
+      group: sprite-env-amd64
     permissions:
       contents: read
       packages: write
@@ -159,9 +155,7 @@ jobs:
   retag-languages:
     needs: [plan, build-or-retag-base, retag-base]
     runs-on:
-      - codebuild-sprite-env-${{ github.run_id }}-${{ github.run_attempt }}
-        image:latest
-        instance-size:large
+      group: sprite-env-amd64
     permissions:
       contents: read
       packages: write
