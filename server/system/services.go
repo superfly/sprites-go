@@ -66,6 +66,9 @@ func (s *System) initializeTMUXManager() error {
 			}
 		}
 		s.TMUXManager = tmux.NewManager(s.ctx, opts)
+		
+		// Bridge tmux activity events to activity monitor
+		go s.bridgeTmuxActivityEvents()
 	}
 	return nil
 }
@@ -422,4 +425,48 @@ func (s *System) registerSystemServices() error {
 
 	s.logger.Info("All system services registered with unified manager")
 	return nil
+}
+
+// bridgeTmuxActivityEvents bridges tmux active/inactive events to the activity monitor
+func (s *System) bridgeTmuxActivityEvents() {
+	if s.TMUXManager == nil || s.ActivityMonitor == nil {
+		return
+	}
+	
+	eventChan := s.TMUXManager.GetWindowMonitorEvents()
+	if eventChan == nil {
+		// Window monitor not started yet, wait a bit and retry
+		time.Sleep(1 * time.Second)
+		eventChan = s.TMUXManager.GetWindowMonitorEvents()
+		if eventChan == nil {
+			s.logger.Debug("Tmux window monitor not available, skipping activity bridging")
+			return
+		}
+	}
+	
+	s.logger.Debug("Starting tmux activity event bridge")
+	
+	for {
+		select {
+		case <-s.ctx.Done():
+			s.logger.Debug("Tmux activity bridge stopped due to context cancellation")
+			return
+		case event, ok := <-eventChan:
+			if !ok {
+				s.logger.Debug("Tmux activity bridge stopped due to channel closure")
+				return
+			}
+			
+			// Only process active/inactive events
+			if event.EventType == "active" {
+				source := "tmux:" + event.OriginalSession
+				s.ActivityMonitor.ActivityStarted(source)
+				s.logger.Debug("Tmux session became active", "session", event.OriginalSession)
+			} else if event.EventType == "inactive" {
+				source := "tmux:" + event.OriginalSession
+				s.ActivityMonitor.ActivityEnded(source)
+				s.logger.Debug("Tmux session became inactive", "session", event.OriginalSession)
+			}
+		}
+	}
 }

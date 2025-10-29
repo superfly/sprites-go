@@ -617,5 +617,14 @@ func (m *Manager) paneMonitor(ctx context.Context) {
 	}
 }
 
+// GetWindowMonitorEvents returns the event channel from the window monitor
+// Returns nil if the window monitor is not started
+func (m *Manager) GetWindowMonitorEvents() <-chan WindowMonitorEvent {
+	if m.windowMonitor == nil {
+		return nil
+	}
+	return m.windowMonitor.GetEventChannel()
+}
+
 // SetWrapCmd sets the command wrapper function
 func (m *Manager) SetWrapCmd(wrap func(*exec.Cmd) *exec.Cmd) { m.wrapCmd = wrap }
