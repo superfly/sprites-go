@@ -132,7 +132,8 @@ jobs:
         cache-to: type=gha,mode=max,scope=arm64
 
   manifest:
-    runs-on: ubuntu-latest
+    runs-on:
+      group: sprite-env-amd64
     needs: [build-amd64, build-arm64]
 
     steps:

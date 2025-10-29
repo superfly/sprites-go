@@ -37,7 +37,8 @@ env:
 
 jobs:
   plan:
-    runs-on: ubuntu-latest
+    runs-on:
+      group: sprite-env-amd64
     outputs:
       ubuntu_tag: ${{ steps.ctx.outputs.ubuntu_tag }}
       sprite_env_tag: ${{ steps.ctx.outputs.sprite_env_tag }}
@@ -104,7 +105,8 @@ jobs:
 
   retag-base:
     needs: [plan]
-    runs-on: ubuntu-latest
+    runs-on:
+      group: sprite-env-amd64
     permissions:
       contents: read
       packages: write
@@ -152,7 +154,8 @@ jobs:
 
   retag-languages:
     needs: [plan, build-or-retag-base, retag-base]
-    runs-on: ubuntu-latest
+    runs-on:
+      group: sprite-env-amd64
     permissions:
       contents: read
       packages: write

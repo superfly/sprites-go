@@ -93,7 +93,7 @@ func (s *System) initializeResourceMonitor() {
 	}
 
 	// This will only compile on Linux due to build tags in resource_monitor files
-	resourceMonitor, err := NewResourceMonitor(s.ctx, metricsCallback)
+	resourceMonitor, spriteManager, err := NewResourceMonitor(s.ctx, metricsCallback)
 	if err != nil {
 		s.logger.Warn("Failed to initialize resource monitor", "error", err)
 		// Create a no-op resource monitor to prevent nil pointer dereferences
@@ -102,6 +102,7 @@ func (s *System) initializeResourceMonitor() {
 		return
 	}
 	s.ResourceMonitor = resourceMonitor
+	s.SpriteManager = spriteManager
 	s.logger.Info("Resource monitor initialized")
 }
 

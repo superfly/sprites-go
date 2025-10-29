@@ -362,9 +362,7 @@ func prepareCheckpoint(om *Manager, next PrepFunc) PrepFunc {
 
 		nextResume, err := next(ctx)
 		if err != nil {
-			if om != nil {
-				_ = om.UnfreezeAfterCheckpoint(ctx)
-			}
+			// Note: Unfreeze is now handled by ActivityMonitor via cgroup.freeze
 			return nil, err
 		}
 
@@ -375,11 +373,7 @@ func prepareCheckpoint(om *Manager, next PrepFunc) PrepFunc {
 					firstErr = e
 				}
 			}
-			if om != nil {
-				if e := om.UnfreezeAfterCheckpoint(ctx); e != nil && firstErr == nil {
-					firstErr = e
-				}
-			}
+			// Note: Unfreeze is now handled by ActivityMonitor via cgroup.freeze
 			return firstErr
 		}, nil
 	}
@@ -398,9 +392,9 @@ func prepareRestore(om *Manager, next PrepFunc) PrepFunc {
 				}
 			}
 
-			// Best-effort sync/freeze/unfreeze to flush outstanding writes
+			// Best-effort sync to flush outstanding writes
+			// Note: Freeze/thaw is now handled by ActivityMonitor via cgroup.freeze
 			_ = om.PrepareForCheckpoint(ctx)
-			_ = om.UnfreezeAfterCheckpoint(ctx)
 
 			// Only unmount if it's still mounted (restoreContainerPrep may have already unmounted)
 			if om.IsOverlayFSMounted() {

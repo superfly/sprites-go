@@ -90,7 +90,8 @@ jobs:
 
   short-sha:
     name: Compute short SHA
-    runs-on: ubuntu-latest
+    runs-on:
+      group: sprite-env-amd64
     outputs:
       short: ${{ steps.s.outputs.short }}
     steps:

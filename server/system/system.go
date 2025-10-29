@@ -20,6 +20,7 @@ import (
 	"github.com/superfly/sprite-env/pkg/db"
 	"github.com/superfly/sprite-env/pkg/juicefs"
 	"github.com/superfly/sprite-env/pkg/overlay"
+	"github.com/superfly/sprite-env/pkg/resources"
 	"github.com/superfly/sprite-env/pkg/services"
 	"github.com/superfly/sprite-env/pkg/tap"
 	"github.com/superfly/sprite-env/pkg/tmux"
@@ -55,6 +56,7 @@ type System struct {
 	// Utilities
 	Reaper          *Reaper
 	ResourceMonitor *ResourceMonitor
+	SpriteManager   *resources.Manager // Manager for the sprite/containers cgroup (for freeze/thaw)
 	CrashReporter   *tap.CrashReporter
 
 	// State
@@ -458,7 +460,9 @@ func (s *System) GetOverlayManager() *overlay.Manager {
 	return s.OverlayManager
 }
 
-// SyncOverlay syncs the overlay filesystem and returns an unfreeze function
+// SyncOverlay syncs the overlay filesystem (sync-only, no freeze/thaw).
+// Returns a no-op cleanup function for backward compatibility.
+// Note: Freeze/thaw is now handled by ActivityMonitor using cgroup.freeze.
 func (s *System) SyncOverlay(ctx context.Context) (func() error, error) {
 	// If no overlay manager, nothing to sync
 	if s.OverlayManager == nil {
@@ -466,24 +470,14 @@ func (s *System) SyncOverlay(ctx context.Context) (func() error, error) {
 		return func() error { return nil }, nil
 	}
 
-	// Use the same logic as checkpointing to prepare the filesystem
-	s.logger.Info("Preparing filesystem for suspension")
-
-	// This will:
-	// 1. Sync the overlayfs filesystem (flush pending writes)
-	// 2. Freeze the underlying ext4 filesystem
-	// 3. Sync the loopback mount and fsync the image file
+	// Sync the overlay filesystem (no freeze - just data sync)
+	s.logger.Info("Syncing overlay filesystem")
 	if err := s.OverlayManager.PrepareForCheckpoint(ctx); err != nil {
-		return nil, fmt.Errorf("failed to prepare overlay for suspension: %w", err)
+		return nil, fmt.Errorf("failed to sync overlay: %w", err)
 	}
 
-	// Return the unfreeze function to be called after resume
-	unfreezeFunc := func() error {
-		s.logger.Debug("Unfreezing filesystem after resume")
-		return s.OverlayManager.UnfreezeAfterCheckpoint(ctx)
-	}
-
-	return unfreezeFunc, nil
+	// Return a no-op cleanup function for backward compatibility
+	return func() error { return nil }, nil
 }
 
 // getVersion returns the version string

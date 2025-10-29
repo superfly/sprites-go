@@ -98,14 +98,9 @@ func TestPrepareCheckpointLinuxOnly(t *testing.T) {
 		t.Fatalf("failed to mount: %v", err)
 	}
 
-	// Test freeze/unfreeze
+	// Test sync functionality
 	if err := m.PrepareForCheckpoint(ctx); err != nil {
-		t.Fatalf("failed to prepare: %v", err)
-	}
-
-	// Should be frozen now
-	if err := m.UnfreezeAfterCheckpoint(ctx); err != nil {
-		t.Fatalf("failed to unfreeze: %v", err)
+		t.Fatalf("failed to sync: %v", err)
 	}
 
 	// Cleanup

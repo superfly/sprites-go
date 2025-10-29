@@ -2,6 +2,7 @@ package resources
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,6 +47,18 @@ func (m *Manager) readIOStat() (IOStats, error) {
 	}
 
 	return stats, nil
+}
+
+// SetIOWeight sets io.weight default line (cgroup v2) to adjust IO priority.
+// Weight is clamped to [1,10000].
+func (m *Manager) SetIOWeight(weight int) error {
+	if weight < 1 {
+		weight = 1
+	}
+	if weight > 10000 {
+		weight = 10000
+	}
+	return m.writeFile("io.weight", fmt.Sprintf("default %d\n", weight))
 }
 
 // tickIO records IO stats to timeseries and accumulates totals

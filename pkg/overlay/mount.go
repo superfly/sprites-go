@@ -547,10 +547,11 @@ func (m *Manager) Unmount(ctx context.Context) error {
 	return nil
 }
 
-// PrepareForCheckpoint prepares the overlay for checkpointing by syncing and freezing
+// PrepareForCheckpoint prepares the overlay for checkpointing by syncing filesystems.
+// This performs data sync operations only - the caller is responsible for freezing
+// processes (via cgroup.freeze) before calling this if needed.
 func (m *Manager) PrepareForCheckpoint(ctx context.Context) error {
 	if m.isOverlayFSMounted() {
-
 		// 1) Sync the overlayfs filesystem (where actual writes occur)
 		m.logger.Debug("Syncing OverlayFS filesystem", "path", m.overlayTargetPath)
 		syncCmd := exec.Command("sync", "-f", m.overlayTargetPath)
@@ -560,20 +561,13 @@ func (m *Manager) PrepareForCheckpoint(ctx context.Context) error {
 		m.logger.Debug("OverlayFS sync completed")
 	}
 
-	// 2) Freeze the underlying ext4 filesystem to prevent new writes
-	m.logger.Debug("Freezing underlying ext4 filesystem", "path", m.mountPath)
-	freezeCmd := exec.Command("fsfreeze", "--freeze", m.mountPath)
-	if output, err := freezeCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to freeze ext4 filesystem: %w, output: %s", err, string(output))
-	}
-	m.logger.Debug("Filesystem frozen successfully")
-
-	// 3) Sync the loopback mount while frozen
-	m.logger.Debug("Syncing loopback mount after freeze", "path", m.mountPath)
+	// 2) Sync the loopback mount
+	m.logger.Debug("Syncing loopback mount", "path", m.mountPath)
 	if err := m.sync(ctx); err != nil {
-		return fmt.Errorf("failed to sync loopback mount after freeze: %w", err)
+		return fmt.Errorf("failed to sync loopback mount: %w", err)
 	}
 
+	// 3) Fsync the image file
 	f2, err := os.Open(m.imagePath)
 	if err != nil {
 		m.logger.Warn("Image open failed for fsync", "error", err, "path", m.imagePath)
@@ -584,30 +578,6 @@ func (m *Manager) PrepareForCheckpoint(ctx context.Context) error {
 			m.logger.Warn("Image fsync failed", "error", e, "path", m.imagePath)
 		}
 	}
-
-	return nil
-}
-
-// UnfreezeAfterCheckpoint unfreezes the overlay after checkpointing
-func (m *Manager) UnfreezeAfterCheckpoint(ctx context.Context) error {
-	if !m.isMounted() {
-		return nil // Not an error if not mounted
-	}
-
-	m.logger.Debug("Unfreezing underlying ext4 filesystem", "path", m.mountPath)
-	unfreezeCmd := exec.Command("fsfreeze", "--unfreeze", m.mountPath)
-	if output, err := unfreezeCmd.CombinedOutput(); err != nil {
-		// Check if it's already unfrozen by trying to write to the underlying mount
-		testFile := filepath.Join(m.mountPath, ".freeze_test")
-		if testErr := os.WriteFile(testFile, []byte("test"), 0644); testErr == nil {
-			// Successfully wrote, so it's not frozen
-			os.Remove(testFile)
-			m.logger.Debug("Filesystem was already unfrozen")
-			return nil
-		}
-		return fmt.Errorf("failed to unfreeze ext4 filesystem: %w, output: %s", err, string(output))
-	}
-	m.logger.Debug("Filesystem unfrozen successfully")
 
 	return nil
 }

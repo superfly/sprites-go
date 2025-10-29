@@ -26,7 +26,8 @@ on:
 jobs:
   context:
     name: Compute context
-    runs-on: ubuntu-latest
+    runs-on:
+      group: sprite-env-amd64
     outputs:
       is_main_run: ${{ steps.flags.outputs.is_main_run }}
       sha: ${{ steps.sha.outputs.sha }}

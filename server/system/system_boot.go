@@ -90,6 +90,12 @@ func (s *System) Boot(ctx context.Context) error {
 		}
 	}
 
+	// Mark end of boot activity so idle detection can begin
+	if s.ActivityMonitor != nil {
+		s.logger.Info("Ending boot activity for ActivityMonitor")
+		s.ActivityMonitor.ActivityEnded("boot")
+	}
+
 	// Emit boot completion
 	s.emitAdminEvent("boot.complete", map[string]interface{}{
 		"status":      "ok",

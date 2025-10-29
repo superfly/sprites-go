@@ -76,6 +76,8 @@ func NewActivityMonitor(ctx context.Context, sys *System, idleAfter time.Duratio
 }
 
 func (m *ActivityMonitor) Start(ctx context.Context) {
+	// Quiet by default – use Debug for startup visibility
+	m.logger.Debug("ActivityMonitor: starting", "idle_after", m.idleAfter)
 	tap.Go(m.logger, m.errCh, func() {
 		m.run(ctx)
 	})
@@ -98,6 +100,10 @@ func (m *ActivityMonitor) ActivityStarted(source string) {
 	// Increment monotonic counter
 	atomic.AddInt64(&m.startCount, 1)
 
+	// Quiet default: debug-level activity traces
+	m.logger.Debug("ActivityMonitor: activity started", "source", source, "active_count",
+		atomic.LoadInt64(&m.startCount)-atomic.LoadInt64(&m.endCount))
+
 	// Non-blocking notify
 	select {
 	case m.activityNotify <- struct{}{}:
@@ -117,6 +123,10 @@ func (m *ActivityMonitor) ActivityEnded(source string) {
 
 	// Increment monotonic counter
 	atomic.AddInt64(&m.endCount, 1)
+
+	// Quiet default: debug-level activity traces
+	m.logger.Debug("ActivityMonitor: activity ended", "source", source, "active_count",
+		atomic.LoadInt64(&m.startCount)-atomic.LoadInt64(&m.endCount))
 
 	// Non-blocking notify so run loop can restart idle timer if needed
 	select {
@@ -172,7 +182,8 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 	if atomic.LoadInt64(&m.startCount)-atomic.LoadInt64(&m.endCount) == 0 {
 		idleTimer = time.NewTimer(m.idleAfter)
 		idleTimerCh = idleTimer.C
-		m.logger.Debug("Starting idle timer", "duration", m.idleAfter)
+		// Quiet default – debug-level
+		m.logger.Debug("ActivityMonitor: starting idle timer", "duration", m.idleAfter)
 	}
 
 	for {
@@ -193,6 +204,7 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 			// Recompute active count and update last activity timestamp
 			currentCount := atomic.LoadInt64(&m.startCount) - atomic.LoadInt64(&m.endCount)
 			m.lastActivity = m.now()
+			m.logger.Debug("ActivityMonitor: activity notify", "active_count", currentCount)
 
 			if currentCount > 0 {
 				// Any activity present cancels idle timer and any pending suspend
@@ -230,14 +242,16 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 				if idleTimer == nil {
 					idleTimer = time.NewTimer(m.idleAfter)
 					idleTimerCh = idleTimer.C
-					m.logger.Debug("Started idle timer", "duration", m.idleAfter)
+					// Quiet default – debug-level
+					m.logger.Debug("ActivityMonitor: started idle timer", "duration", m.idleAfter)
 				}
 			}
 
 		case <-idleTimerCh:
 			// Timer expired, check if still idle
 			currentCount := atomic.LoadInt64(&m.startCount) - atomic.LoadInt64(&m.endCount)
-			m.logger.Debug("Idle timer expired", "active_count", currentCount)
+			// Quiet default – debug-level
+			m.logger.Debug("ActivityMonitor: idle timer expired", "active_count", currentCount)
 
 			if currentCount == 0 {
 				// Begin suspend flow
@@ -316,25 +330,42 @@ func (m *ActivityMonitor) prepSuspend(ctx context.Context) (cleanup func(), canc
 		})
 	}
 
-	// Sync filesystem and get unfreeze function
-	start := time.Now()
-	syncCtx, syncCancel := context.WithTimeout(ctx, 10*time.Second)
-	defer syncCancel()
-
-	unfreezeFunc, syncErr := m.system.SyncOverlay(syncCtx)
-	if syncErr != nil {
-		if ctx.Err() != nil {
-			m.logger.Info("Overlay sync cancelled", "error", syncErr)
-			return cleanup, true, ctx.Err()
+	// Freeze the container cgroup before sync
+	if m.system.SpriteManager != nil {
+		m.logger.Debug("Freezing container cgroup")
+		if freezeErr := m.system.SpriteManager.Freeze(5 * time.Second); freezeErr != nil {
+			m.logger.Error("Failed to freeze container cgroup", "error", freezeErr)
+			// Non-fatal - continue with sync but without freeze
+		} else {
+			// Add cleanup to thaw the cgroup (runs on both cancel and resume)
+			cleanupFuncs = append(cleanupFuncs, func() error {
+				m.logger.Debug("Thawing container cgroup")
+				thawStart := time.Now()
+				if thawErr := m.system.SpriteManager.Thaw(5 * time.Second); thawErr != nil {
+					m.logger.Error("Failed to thaw container cgroup", "error", thawErr)
+					return thawErr
+				}
+				m.logger.Debug("Container cgroup thawed", "duration_s", time.Since(thawStart).Seconds())
+				return nil
+			})
 		}
-		m.logger.Error("Overlay sync failed", "error", syncErr)
-		return cleanup, false, syncErr
 	}
-	m.logger.Debug("Overlay sync completed", "duration_s", time.Since(start).Seconds())
 
-	// Add cleanup to unfreeze filesystem
-	if unfreezeFunc != nil {
-		cleanupFuncs = append(cleanupFuncs, unfreezeFunc)
+	// Sync overlay filesystem (sync-only, no freeze)
+	if m.system.OverlayManager != nil {
+		start := time.Now()
+		syncCtx, syncCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer syncCancel()
+
+		if syncErr := m.system.OverlayManager.PrepareForCheckpoint(syncCtx); syncErr != nil {
+			if ctx.Err() != nil {
+				m.logger.Info("Overlay sync cancelled", "error", syncErr)
+				return cleanup, true, ctx.Err()
+			}
+			m.logger.Error("Overlay sync failed", "error", syncErr)
+			return cleanup, false, syncErr
+		}
+		m.logger.Debug("Overlay sync completed", "duration_s", time.Since(start).Seconds())
 	}
 
 	// Wait for JuiceFS writeback flush before suspend

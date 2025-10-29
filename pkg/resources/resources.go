@@ -1,7 +1,10 @@
 package resources
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -317,4 +320,60 @@ func (m *Manager) CPUDeficit() time.Duration {
 // This should be set to true when multiple managers are aggregating CPU usage externally.
 func (m *Manager) SetSkipGlobalCPUBalance(skip bool) {
 	m.skipGlobalCPUBalance = skip
+}
+
+// Freeze freezes all processes in the cgroup by writing "1" to cgroup.freeze.
+// The write blocks until the cgroup is frozen or the timeout is reached.
+// This is used during checkpoint/suspend to stop all container processes.
+func (m *Manager) Freeze(timeout time.Duration) error {
+	freezePath := filepath.Join(m.cgroupPath, "cgroup.freeze")
+
+	// Open for reading the state; write will be done via os.WriteFile
+	f, err := os.Open(freezePath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	// Trigger freeze
+	if err := os.WriteFile(freezePath, []byte("1"), 0o644); err != nil {
+		return err
+	}
+
+	// Tight loop: check for "(freezing)" state to clear
+	buf := make([]byte, 64)
+	start := time.Now()
+	for {
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		n, err := f.Read(buf)
+		if err != nil && err != io.EOF {
+			return err
+		}
+		s := buf[:n]
+		if !bytes.Contains(s, []byte("(freezing)")) {
+			break
+		}
+		time.Sleep(10 * time.Microsecond)
+	}
+
+	elapsed := time.Since(start)
+	// Single-line info with nicely formatted microseconds
+	slog.Default().Info(fmt.Sprintf("Cgroup freeze complete in %dµs", elapsed.Microseconds()), "path", m.cgroupPath)
+	return nil
+}
+
+// Thaw unfreezes all processes in the cgroup by writing "0" to cgroup.freeze.
+// This is used after resume or when suspend is cancelled.
+func (m *Manager) Thaw(timeout time.Duration) error {
+	freezePath := filepath.Join(m.cgroupPath, "cgroup.freeze")
+
+	// Write "0" to unfreeze the cgroup (no timing/blocking beyond write)
+	if err := os.WriteFile(freezePath, []byte("0"), 0o644); err != nil {
+		return err
+	}
+
+	slog.Default().Info("Cgroup thawed", "path", m.cgroupPath)
+	return nil
 }
