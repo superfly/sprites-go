@@ -479,18 +479,33 @@ func (m *Manager) Unmount(ctx context.Context) error {
 		cmd = exec.Command("umount", "-f", m.mountPath)
 		m.logger.Debug("Step 3: Running force umount command", "command", "umount -f", "path", m.mountPath)
 		if output2, err2 := cmd.CombinedOutput(); err2 != nil {
-			m.logger.Error("Step 3: Force loopback umount also failed", "error", err2, "output", string(output2))
-			return fmt.Errorf("failed to unmount overlay: %w, outputs: %s, %s", err2, string(output), string(output2))
+			m.logger.Warn("Step 3: Force loopback umount failed, trying lazy unmount", "error", err2, "output", string(output2))
+			// Final fallback: lazy unmount to break references, then verify
+			cmd = exec.Command("umount", "-l", m.mountPath)
+			m.logger.Debug("Step 3: Running lazy umount command", "command", "umount -l", "path", m.mountPath)
+			if output3, err3 := cmd.CombinedOutput(); err3 != nil {
+				m.logger.Error("Step 3: Lazy loopback umount also failed", "error", err3, "output", string(output3))
+				return fmt.Errorf("failed to unmount overlay: %w, outputs: %s, %s, %s", err3, string(output), string(output2), string(output3))
+			}
+			m.logger.Info("Step 3: Lazy loopback umount succeeded")
+		} else {
+			m.logger.Info("Step 3: Force loopback umount succeeded")
 		}
-		m.logger.Info("Step 3: Force loopback umount succeeded")
 	} else {
 		m.logger.Info("Step 3: Normal loopback umount succeeded")
 	}
 
-	// Verify loopback mount is actually unmounted
+	// Verify loopback mount is actually unmounted (allow brief grace period)
+	verifyStart := time.Now()
+	for i := 0; i < 20; i++ { // up to ~2s
+		if !m.isMounted() {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	if m.isMounted() {
-		m.logger.Error("Step 3: Loopback mount still mounted after umount command")
-		return fmt.Errorf("loopback mount still mounted after umount command")
+		m.logger.Error("Step 3: Loopback mount still mounted after unmount attempts", "waited", time.Since(verifyStart))
+		return fmt.Errorf("loopback mount still mounted after unmount attempts")
 	}
 	m.logger.Info("Step 3: Loopback mount verified as unmounted")
 
@@ -503,6 +518,15 @@ func (m *Manager) Unmount(ctx context.Context) error {
 			return fmt.Errorf("failed to detach loop device %s: %w", m.loopDevice, err)
 		}
 		m.logger.Info("Step 3: Loop device detached successfully after unmount")
+		// Verify loop device is no longer attached to the backing image
+		// Some kernels may take a brief moment to release the mapping
+		for i := 0; i < 20; i++ { // up to ~2s
+			out, _ := exec.Command("losetup", "-a").CombinedOutput()
+			if !strings.Contains(string(out), m.imagePath) && !strings.Contains(string(out), m.loopDevice+":") {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
 		m.loopDevice = ""
 	} else {
 		m.logger.Info("Step 3: No loop device to detach after unmount")

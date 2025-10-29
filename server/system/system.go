@@ -40,8 +40,9 @@ type System struct {
 	OverlayManager *overlay.Manager
 
 	// Process modules
-	ServicesManager *services.Manager
-	ActivityMonitor *ActivityMonitor
+	ServicesManager       *services.Manager     // Process-based services (for user services) - with DB
+	UnifiedServiceManager *services.BaseManager // System services - in-memory only, no DB
+	ActivityMonitor       *ActivityMonitor
 
 	// Network modules
 	APIServer    *api.Server

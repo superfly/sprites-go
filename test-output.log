@@ -1,0 +1,4 @@
+bash ./scripts/run-tests-docker.sh  
+ERROR: Found running test container for this workspace: sprite-env-tests-1761595185070-f833f9-164b22ae10
+  docker stop 6c27fa6332ca
+make: *** [test] Error 1

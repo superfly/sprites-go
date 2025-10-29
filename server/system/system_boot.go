@@ -3,14 +3,7 @@ package system
 import (
 	"context"
 	"fmt"
-	"net"
-	"os"
-	"os/signal"
-	"path/filepath"
-	"syscall"
 	"time"
-
-	"github.com/superfly/sprite-env/pkg/policy"
 )
 
 // Boot starts the system and all its modules in the correct order
@@ -25,18 +18,13 @@ func (s *System) Boot(ctx context.Context) error {
 			close(s.bootDoneCh)
 		}
 	}()
-	s.logger.Info("Starting system boot sequence", "system_ptr", fmt.Sprintf("%p", s))
+	s.logger.Info("Starting system boot sequence using unified service manager", "system_ptr", fmt.Sprintf("%p", s))
 
 	// Emit boot start event
 	s.emitAdminEvent("boot.start", map[string]interface{}{
 		"status":     "start",
 		"started_at": time.Now().UnixMilli(),
 	})
-
-	// Start activity monitor early and mark boot as active
-	s.ActivityMonitor.ActivityStarted("boot")
-	s.ActivityMonitor.Start(s.ctx)
-	s.logger.Info("Activity monitor started")
 
 	// Mark system as running
 	s.mu.Lock()
@@ -47,95 +35,32 @@ func (s *System) Boot(ctx context.Context) error {
 	s.running = true
 	s.mu.Unlock()
 
-	// Phase 1: Start utilities (no dependencies)
-	s.logger.Info("Phase 1: Starting utilities")
-	s.Reaper.Start()
-	s.logger.Info("Zombie reaper started")
-
-	if err := s.AdminChannel.Start(); err != nil {
-		s.logger.Error("Failed to start admin channel", "error", err)
-		// Non-fatal, continue without admin channel
-	} else {
-		s.logger.Info("Admin channel started")
+	// Register all system services with the unified manager
+	s.logger.Info("Registering system services")
+	if err := s.registerSystemServices(); err != nil {
+		return fmt.Errorf("failed to register system services: %w", err)
 	}
 
-	// Phase 2: Start network services early (can accept connections while rest boots)
-	s.logger.Info("Phase 2: Starting network services")
-
-	// Start API server if configured (timed informational wrapper)
-	if s.config.APIListenAddr != "" {
-		_ = s.runTimedStep(ctx, "boot", "api_server_start", 10*time.Second, 30*time.Second, func() error {
-			go func() {
-				if err := s.APIServer.Start(); err != nil {
-					s.logger.Error("API server error", "error", err)
-				}
-			}()
-			s.logger.Info("API server started")
-			return nil
-		})
+	// Start all services in parallel by dependency level
+	s.logger.Info("Starting all services using unified service manager")
+	if err := s.UnifiedServiceManager.StartAll(); err != nil {
+		return fmt.Errorf("failed to start services: %w", err)
 	}
 
-	// Start socket server for services API (timed informational wrapper)
-	socketPath := "/tmp/sprite.sock"
-	_ = s.runTimedStep(ctx, "boot", "socket_server_start", 10*time.Second, 30*time.Second, func() error {
-		if err := s.SocketServer.Start(socketPath); err != nil {
-			s.logger.Error("Failed to start socket server", "error", err)
-			// Non-fatal, services API will not be available
-			return err
-		}
-		s.logger.Info("Socket server started", "path", socketPath)
-		return nil
-	})
-
-	// Phase 3: Start storage components in order
-	// Note: /dev/fly_vol mount and checkpoint migration happen in main.go before system creation
-	s.logger.Info("Phase 3: Starting storage components")
-
-	// Database manager
-	if err := s.runTimedStep(ctx, "boot", "db_manager_start", 10*time.Second, 30*time.Second, func() error {
-		if err := s.DBManager.Start(s.ctx); err != nil {
-			return fmt.Errorf("failed to start database manager: %w", err)
-		}
-		s.logger.Info("Database manager started")
-		return nil
-	}); err != nil {
-		return err
-	}
-
-	// Move litestream process to its cgroup
-	if litestreamPid := s.DBManager.GetLitestreamPid(); litestreamPid > 0 {
-		if err := MovePid(litestreamPid, "litestream"); err != nil {
-			s.logger.Warn("Failed to move litestream process to cgroup", "error", err, "pid", litestreamPid)
-		} else {
-			s.logger.Info("Moved litestream process to cgroup", "pid", litestreamPid)
-		}
-	}
-
-	// Wait for boot signal if configured (after DB manager, before JuiceFS)
-	if os.Getenv("WAIT_FOR_BOOT") == "true" {
-		s.logger.Info("WAIT_FOR_BOOT enabled, DB manager is running, waiting for SIGUSR1...")
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGUSR1)
-		<-sigCh
-		signal.Stop(sigCh) // Stop receiving on this channel
-		s.logger.Info("Received SIGUSR1, continuing boot...")
-	}
-
-	// JuiceFS (depends on DB)
-	if s.config.JuiceFSDataPath != "" {
-		s.logger.Info("Starting JuiceFS", "juiceFS_ptr", fmt.Sprintf("%p", s.JuiceFS))
-		if err := s.runTimedStep(ctx, "boot", "juicefs_start", 15*time.Second, 30*time.Second, func() error {
-			// JuiceFS.Start() blocks until mount is ready and verified
-			if err := s.JuiceFS.Start(s.ctx); err != nil {
-				return fmt.Errorf("failed to start JuiceFS: %w", err)
+	// Post-boot hooks that need to run after specific services
+	// Move litestream process to its cgroup (after db_manager starts)
+	if s.DBManager != nil {
+		if litestreamPid := s.DBManager.GetLitestreamPid(); litestreamPid > 0 {
+			if err := MovePid(litestreamPid, "litestream"); err != nil {
+				s.logger.Warn("Failed to move litestream process to cgroup", "error", err, "pid", litestreamPid)
+			} else {
+				s.logger.Info("Moved litestream process to cgroup", "pid", litestreamPid)
 			}
-			s.logger.Info("JuiceFS started and verified ready")
-			return nil
-		}); err != nil {
-			return err
 		}
+	}
 
-		// Move juicefs process to its cgroup
+	// Move juicefs process to its cgroup (after juicefs starts)
+	if s.JuiceFS != nil {
 		if juicefsPid := s.JuiceFS.GetPid(); juicefsPid > 0 {
 			if err := MovePid(juicefsPid, "juicefs"); err != nil {
 				s.logger.Warn("Failed to move juicefs process to cgroup", "error", err, "pid", juicefsPid)
@@ -143,146 +68,27 @@ func (s *System) Boot(ctx context.Context) error {
 				s.logger.Info("Moved juicefs process to cgroup", "pid", juicefsPid)
 			}
 		}
-
-		// Special wait point after JuiceFS is ready
-		if os.Getenv("WAIT_FOR_JUICEFS_READY") == "true" {
-			s.logger.Info("WAIT_FOR_JUICEFS_READY enabled, JuiceFS is ready, waiting for SIGUSR1...")
-			sigCh := make(chan os.Signal, 1)
-			signal.Notify(sigCh, syscall.SIGUSR1)
-			<-sigCh
-			signal.Stop(sigCh)
-			s.logger.Info("Received SIGUSR1, continuing...")
-		}
 	}
 
-	// Initialize sprite database table schema
-	// Note: sprite.db was already added to DB manager in initializeDBManager()
-	// and litestream replication started when DB manager started above
-	// This step just creates the table schema if it doesn't exist
-	_ = s.runTimedStep(ctx, "boot", "sprite_db_init", 10*time.Second, 30*time.Second, func() error {
-		s.logger.Info("Initializing sprite database schema")
-		if err := s.InitializeSpriteDB(s.ctx); err != nil {
-			s.logger.Warn("Failed to initialize sprite database schema", "error", err)
-			return err
-		}
+	// Initialize sprite database schema (after db_manager starts)
+	s.logger.Info("Initializing sprite database schema")
+	if err := s.InitializeSpriteDB(s.ctx); err != nil {
+		s.logger.Warn("Failed to initialize sprite database schema", "error", err)
+		// Non-fatal
+	} else {
 		s.logger.Info("Sprite database schema initialized")
-		return nil
-	})
-
-	// Overlay manager (depends on JuiceFS)
-	// If shutdown triggered, stop progressing to next step
-	select {
-	case <-s.shutdownTriggeredCh:
-		return ErrShutdownDuringBoot
-	default:
-	}
-	if s.config.OverlayEnabled {
-		if err := s.runTimedStep(ctx, "boot", "overlay_start", 15*time.Second, 30*time.Second, func() error {
-			s.logger.Info("Starting overlay manager")
-			// Determine checkpoint database path
-			checkpointDBDir := filepath.Join(s.config.WriteDir, "checkpoints")
-			checkpointDBPath := filepath.Join(checkpointDBDir, "checkpoints.db")
-			// Start overlay (synchronous)
-			if err := s.OverlayManager.Start(s.ctx, checkpointDBPath); err != nil {
-				return fmt.Errorf("failed to start overlay: %w", err)
-			}
-			s.logger.Info("Overlay started")
-			return nil
-		}); err != nil {
-			return err
-		}
 	}
 
-	// Phase 4: Start process if configured
-	select {
-	case <-s.shutdownTriggeredCh:
-		return ErrShutdownDuringBoot
-	default:
-	}
-	if len(s.config.ProcessCommand) > 0 {
-		// Ensure network policy manager is started before container process
-		if s.config.ContainerEnabled {
-			// Configure basic link addressing; values could be made configurable later
-			ifIPv4 := net.ParseIP("10.10.0.1")
-			peerIPv4 := net.ParseIP("10.10.0.2")
-			ifIPv6 := net.ParseIP("fd00::1")
-			peerIPv6 := net.ParseIP("fd00::2")
-			ifName := "spr0-host"
-			peerIf := "spr0"
-			// Policy config directory with examples and network.json
-			configDir := filepath.Join(s.config.WriteDir, "policy")
-			_ = os.MkdirAll(configDir, 0755)
-
-			bootCfg := policy.BootConfig{
-				ContainerNS:    "sprite",
-				OpsNetns:       "", // default host ns
-				IfName:         ifName,
-				PeerIfName:     peerIf,
-				IfIPv4:         ifIPv4,
-				IfIPv6:         ifIPv6,
-				PeerIPv4:       peerIPv4,
-				PeerIPv6:       peerIPv6,
-				IPv4MaskLen:    24,
-				IPv6MaskLen:    64,
-				DnsPort:        53,
-				HostResolvPath: "",
-				ConfigDir:      configDir,
-				Mode:           policy.Unrestricted, // fallback when no network.json
-				ExtraAllow:     nil,
-				EnableIPv6:     true,
-				TableName:      "sprite_egress",
-				SetV4:          "allowed_v4",
-				SetV6:          "allowed_v6",
-			}
-			s.logger.Info("Starting network policy manager (Boot)", "configDir", configDir)
-			pm := policy.NewManager(bootCfg)
-			if err := pm.Start(ctx); err != nil {
-				return fmt.Errorf("failed to start network policy before process: %w", err)
-			}
-			// s.PolicyManager = pm
-		}
-
-		if err := s.runTimedStep(ctx, "boot", "process_start", 10*time.Second, 30*time.Second, func() error {
-			s.logger.Info("Phase 4: Starting container process")
-			if err := s.StartProcess(); err != nil {
-				return fmt.Errorf("failed to start process: %w", err)
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
-	}
+	// Network policy is now managed by the unified service manager
 
 	// Apply sprite hostname if assigned (after container is running)
 	if info, err := s.GetSpriteInfo(s.ctx); err == nil && info != nil {
-		s.logger.Info("Applying sprite hostname during boot", "sprite_name", info.SpriteName)
+		s.logger.Info("Applying sprite hostname", "sprite_name", info.SpriteName)
 		if err := s.ApplySpriteHostname(s.ctx, info.SpriteName); err != nil {
-			s.logger.Warn("Failed to apply sprite hostname during boot", "error", err)
-			// Non-fatal - hostname setting is best-effort
+			s.logger.Warn("Failed to apply sprite hostname", "error", err)
+			// Non-fatal
 		}
 	}
-
-	// Phase 5: Start services manager (depends on container being running)
-	select {
-	case <-s.shutdownTriggeredCh:
-		return ErrShutdownDuringBoot
-	default:
-	}
-	if err := s.runTimedStep(ctx, "boot", "services_manager_start", 10*time.Second, 30*time.Second, func() error {
-		s.logger.Info("Phase 5: Starting services manager")
-		if err := s.ServicesManager.Start(); err != nil {
-			return fmt.Errorf("failed to start services manager: %w", err)
-		}
-		s.logger.Info("Services manager started")
-		return nil
-	}); err != nil {
-		return err
-	}
-
-	// No need to set TMUXManager on API server; handlers fetch it from system on demand
-
-	// Boot complete - end boot activity
-	s.ActivityMonitor.ActivityEnded("boot")
 
 	// Emit boot completion
 	s.emitAdminEvent("boot.complete", map[string]interface{}{
@@ -293,131 +99,37 @@ func (s *System) Boot(ctx context.Context) error {
 	return nil
 }
 
-// setupTmuxActivityMonitoring configures tmux activity tracking
-func (s *System) setupTmuxActivityMonitoring() {
-	// No-op: pkg/tmux.Manager manages its own monitoring; activity tracking is
-	// handled via other signals (HTTP requests, process tracking, etc.).
-}
-
 // BootContainer starts the container-specific components after JuiceFS is ready
 // This is used during restore operations to boot the container environment
-// It includes: overlay mount, process start, and services manager start
+// Uses UnifiedServiceManager to restart the container service tree
 // PREREQUISITE: SystemBoot must be running (JuiceFS, DBManager) - call Start() first
 func (s *System) BootContainer(ctx context.Context) error {
-	s.logger.Info("Starting container boot sequence")
+	s.logger.Info("Starting container boot sequence using unified service manager")
 	// Prevent monitor-triggered full shutdown during container-only maintenance
 	s.userEnvMaintenance.Store(true)
 	defer s.userEnvMaintenance.Store(false)
 
 	// Validate that SystemBoot is running
-	// BootContainer expects SystemBoot (JuiceFS, DBManager) to be already initialized
 	if s.JuiceFS != nil && !s.JuiceFS.IsMounted() {
-		return fmt.Errorf("cannot boot container: JuiceFS is not mounted (call Start() first to initialize SystemBoot)")
+		return fmt.Errorf("cannot boot container: JuiceFS is not mounted")
 	}
 	if s.DBManager == nil {
-		return fmt.Errorf("cannot boot container: DBManager is not initialized (call Start() first to initialize SystemBoot)")
+		return fmt.Errorf("cannot boot container: DBManager is not initialized")
 	}
 
-	// Phase 1: Mount overlay filesystem (depends on JuiceFS)
-	// Note: JuiceFS is already verified ready during initial Start()
-	if s.config.OverlayEnabled {
-		s.logger.Info("Phase 1: Mounting overlay filesystem")
-		// Update the image path to point to the restored active directory
-		s.OverlayManager.UpdateImagePath()
-
-		// PrepareAndMount() creates image if needed, mounts, and handles corruption
-		if err := s.OverlayManager.PrepareAndMount(ctx); err != nil {
-			return fmt.Errorf("failed to mount overlay: %w", err)
-		}
-		s.logger.Info("Overlay mounted successfully")
-
-		// Mount checkpoints - blocks until all parallel mounts complete
-		if err := s.OverlayManager.MountCheckpoints(ctx); err != nil {
-			return fmt.Errorf("failed to mount checkpoints: %w", err)
-		}
-		s.logger.Info("Checkpoints mounted successfully")
+	// Start the container service tree via UnifiedServiceManager
+	// StartServiceTree will start overlay → container → services_manager in correct order
+	s.logger.Info("Restarting container services via StartServiceTree")
+	if err := s.UnifiedServiceManager.StartServiceTree("services_manager"); err != nil {
+		return fmt.Errorf("failed to start container services: %w", err)
 	}
 
-	// Phase 2: Start policy networking before container process
-	// Build and start network policy manager (observe-only by default)
-	if s.config.ContainerEnabled {
-		// Configure basic link addressing; values could be made configurable later
-		ifIPv4 := net.ParseIP("10.10.0.1")
-		peerIPv4 := net.ParseIP("10.10.0.2")
-		ifIPv6 := net.ParseIP("fd00::1")
-		peerIPv6 := net.ParseIP("fd00::2")
-		ifName := "spr0-host"
-		peerIf := "spr0"
-		// Host resolv path bind-mounted by launch.sh config
-		hostResolv := filepath.Join(s.config.WriteDir, "container", "resolv.conf")
-		// Policy config directory with examples and network.json
-		configDir := filepath.Join(s.config.WriteDir, "policy")
-		_ = os.MkdirAll(configDir, 0755)
-
-		bootCfg := policy.BootConfig{
-			ContainerNS:    "sprite",
-			OpsNetns:       "", // default host ns
-			IfName:         ifName,
-			PeerIfName:     peerIf,
-			IfIPv4:         ifIPv4,
-			IfIPv6:         ifIPv6,
-			PeerIPv4:       peerIPv4,
-			PeerIPv6:       peerIPv6,
-			IPv4MaskLen:    24,
-			IPv6MaskLen:    64,
-			DnsPort:        53,
-			HostResolvPath: hostResolv,
-			ConfigDir:      configDir,
-			Mode:           policy.Unrestricted, // fallback when no network.json
-			ExtraAllow:     nil,
-			EnableIPv6:     true,
-			TableName:      "sprite_egress",
-			SetV4:          "allowed_v4",
-			SetV6:          "allowed_v6",
-		}
-		s.logger.Info("Starting network policy manager", "configDir", configDir)
-		pm := policy.NewManager(bootCfg)
-		if err := pm.Start(ctx); err != nil {
-			return fmt.Errorf("failed to start network policy: %w", err)
-		}
-		// s.PolicyManager = pm
-	}
-
-	// Phase 3: Start process if configured
-	if len(s.config.ProcessCommand) > 0 {
-		s.logger.Info("Phase 2: Starting container process")
-		if err := s.StartProcess(); err != nil {
-			return fmt.Errorf("failed to start process: %w", err)
-		}
-		s.logger.Info("Container process started")
-	}
-
-	// Apply sprite hostname if assigned (after container is running)
+	// Apply sprite hostname if needed
 	if info, err := s.GetSpriteInfo(ctx); err == nil && info != nil {
-		s.logger.Info("Applying sprite hostname during container boot", "sprite_name", info.SpriteName)
+		s.logger.Info("Applying sprite hostname", "sprite_name", info.SpriteName)
 		if err := s.ApplySpriteHostname(ctx, info.SpriteName); err != nil {
-			s.logger.Warn("Failed to apply sprite hostname during container boot", "error", err)
-			// Non-fatal - hostname setting is best-effort
+			s.logger.Warn("Failed to apply sprite hostname", "error", err)
 		}
-	}
-
-	// Phase 3: Start services manager (depends on container being running)
-	s.logger.Info("Phase 3: Starting services manager")
-	if err := s.ServicesManager.Start(); err != nil {
-		return fmt.Errorf("failed to start services manager: %w", err)
-	}
-	s.logger.Info("Services manager started")
-
-	// Flip services manager stopped channel to running (open channel)
-	s.servicesManagerStoppedCh = make(chan struct{})
-
-	// Phase 4: Start all services automatically
-	s.logger.Info("Phase 4: Starting all services")
-	if err := s.ServicesManager.StartAll(); err != nil {
-		s.logger.Error("Failed to start services", "error", err)
-		// Non-fatal error, container boot is still successful
-	} else {
-		s.logger.Info("All services started successfully")
 	}
 
 	s.logger.Info("Container boot sequence completed")

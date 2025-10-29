@@ -100,12 +100,20 @@ func (m *Manager) stopService(name string, states map[string]*ServiceState, proc
 			continue
 		}
 		if svcState.Status == StatusRunning || svcState.Status == StatusStarting {
-			// Get the service to check its dependencies
-			svc, err := m.db.GetService(svcName)
-			if err != nil {
-				continue
+			// Check dependencies from serviceDefs first
+			var dependencies []string
+			if svcDef, ok := m.serviceDefs[svcName]; ok {
+				dependencies = svcDef.Dependencies
+			} else if m.db != nil {
+				// Fall back to database
+				svc, err := m.db.GetService(svcName)
+				if err == nil {
+					dependencies = svc.Needs
+				}
 			}
-			for _, dep := range svc.Needs {
+			
+			// Check if this service depends on the one we're trying to stop
+			for _, dep := range dependencies {
 				if dep == name {
 					return fmt.Errorf("cannot stop service %s: service %s depends on it and is running", name, svcName)
 				}
@@ -113,6 +121,33 @@ func (m *Manager) stopService(name string, states map[string]*ServiceState, proc
 		}
 	}
 
+	// Check if this is a managed service
+    if svcDef, ok := m.serviceDefs[name]; ok {
+		// Managed service - call Stop directly (we're in the event loop, can't use monitoring wrapper)
+		tap.Logger(m.ctx).Info("stopping managed service", "name", name)
+		
+		// Create progress reporter
+		progress := newProgressReporter(name, tap.Logger(m.ctx))
+		
+		// Call Stop directly to avoid deadlock
+        var stopErr error
+        if svcDef.Hooks != nil && svcDef.Hooks.Stop != nil {
+            stopErr = svcDef.Hooks.Stop(m.ctx, progress)
+        } else if svcDef.ManagedService != nil {
+            stopErr = svcDef.ManagedService.Stop(m.ctx, progress)
+        } else {
+            stopErr = fmt.Errorf("service %s has no Stop hook or ManagedService", name)
+        }
+        if stopErr != nil {
+            return fmt.Errorf("failed to stop managed service: %w", stopErr)
+		}
+		state.Status = StatusStopped
+		state.PID = 0
+		tap.Logger(m.ctx).Info("managed service stopped", "name", name)
+		return nil
+	}
+
+	// Process service handling
 	handle, exists := processes[name]
 	if !exists {
 		// Process handle missing, mark as stopped
