@@ -20,61 +20,77 @@ func VerifyNoTestOverlays(t *testing.T, m *Manager) {
 		return
 	}
 
-	// Allow brief settling time in CI where losetup/mount state can lag
-	// Retry for up to ~3s before declaring failure
 	var failures []string
-	for attempt := 0; attempt < 60; attempt++ {
-		failures = failures[:0]
 
-		// Check if overlay is still mounted
-		if m.IsOverlayFSMounted() {
-			failures = append(failures, fmt.Sprintf("OverlayFS still mounted at %s", m.overlayTargetPath))
-		}
+	// Check if overlay is still mounted
+	if m.IsOverlayFSMounted() {
+		failures = append(failures, fmt.Sprintf("OverlayFS still mounted at %s", m.overlayTargetPath))
+	}
 
-		// Check if loop device mount is still present
-		if m.IsMounted() {
-			failures = append(failures, fmt.Sprintf("Loop device still mounted at %s", m.mountPath))
-		}
+	// Check if loop device mount is still present
+	if m.IsMounted() {
+		failures = append(failures, fmt.Sprintf("Loop device still mounted at %s", m.mountPath))
+	}
 
-		// Check for our specific loop devices by checking if our image file is attached
-		imagePath := m.GetImagePath()
+	// Check for our specific loop devices by checking if our image file is attached
+	imagePath := m.GetImagePath()
+	// Allow a brief grace period for the kernel to release loop mappings
+	for i := 0; i < 10; i++ { // up to ~1s
 		if output, err := exec.Command("losetup", "-a").Output(); err == nil {
+			leak := false
 			loopList := string(output)
 			for _, line := range strings.Split(loopList, "\n") {
 				if line == "" {
 					continue
 				}
 				if strings.Contains(line, imagePath) {
-					failures = append(failures, fmt.Sprintf("Loop device still attached to our image: %s", line))
+					leak = true
+					break
 				}
 			}
+			if !leak {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		} else {
+			break
 		}
-
-		// Check for mount entries for our paths
-		if output, err := exec.Command("mount").Output(); err == nil {
-			mountOutput := string(output)
-			for _, line := range strings.Split(mountOutput, "\n") {
-				if line == "" {
-					continue
-				}
-				if strings.Contains(line, " on "+m.overlayTargetPath+" type ") {
-					failures = append(failures, fmt.Sprintf("Mount still present: %s", line))
-				}
-				if strings.Contains(line, " on "+m.mountPath+" type ") {
-					failures = append(failures, fmt.Sprintf("Mount still present: %s", line))
-				}
+	}
+	if output, err := exec.Command("losetup", "-a").Output(); err == nil {
+		loopList := string(output)
+		for _, line := range strings.Split(loopList, "\n") {
+			if line == "" {
+				continue
+			}
+			if strings.Contains(line, imagePath) {
+				failures = append(failures, fmt.Sprintf("Loop device still attached to our image: %s", line))
 			}
 		}
-
-		if len(failures) == 0 {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Fail the test if any issues remain after retries
-	t.Errorf("Overlay cleanup verification FAILED:")
-	for _, failure := range failures {
-		t.Errorf("  - %s", failure)
+	// Check for mount entries for our paths
+	if output, err := exec.Command("mount").Output(); err == nil {
+		mountOutput := string(output)
+		for _, line := range strings.Split(mountOutput, "\n") {
+			if line == "" {
+				continue
+			}
+			// Check for our overlay target path
+			if strings.Contains(line, " on "+m.overlayTargetPath+" type ") {
+				failures = append(failures, fmt.Sprintf("Mount still present: %s", line))
+			}
+			// Check for our mount path
+			if strings.Contains(line, " on "+m.mountPath+" type ") {
+				failures = append(failures, fmt.Sprintf("Mount still present: %s", line))
+			}
+		}
+	}
+
+	// Fail the test if any issues found
+	if len(failures) > 0 {
+		t.Errorf("Overlay cleanup verification FAILED:")
+		for _, failure := range failures {
+			t.Errorf("  - %s", failure)
+		}
 	}
 }

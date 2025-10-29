@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestOverlayFullLifecycle tests the complete overlay lifecycle with real overlayfs
@@ -242,10 +243,11 @@ func TestOverlayWithMultipleLowers(t *testing.T) {
 		}
 	}
 
-	// Cleanup
+	// Cleanup: graceful stop and verify no leaks
 	if err := m.Unmount(ctx); err != nil {
 		t.Fatalf("failed to unmount: %v", err)
 	}
+	VerifyNoTestOverlays(t, m)
 }
 
 // TestOverlayErrorHandling tests error conditions
@@ -389,10 +391,11 @@ func TestOverlayConcurrentOperations(t *testing.T) {
 		}
 	}
 
-	// Cleanup
+	// Cleanup: graceful stop and verify no leaks
 	if err := m.Unmount(ctx); err != nil {
 		t.Fatalf("failed to unmount: %v", err)
 	}
+	VerifyNoTestOverlays(t, m)
 }
 
 // TestOverlayImageGrowth tests that the image file grows as needed
@@ -461,8 +464,6 @@ func TestOverlayImageGrowth(t *testing.T) {
 }
 
 // TestFreezeUnfreezeStress tests multiple freeze/unfreeze cycles
-// TODO: Disabled - we're going to do something other than freeze sometime
-/*
 func TestFreezeUnfreezeStress(t *testing.T) {
 	// Overlay tests always run as root in Docker environment
 
@@ -530,4 +531,3 @@ func TestFreezeUnfreezeStress(t *testing.T) {
 		t.Fatalf("failed to unmount: %v", err)
 	}
 }
-*/

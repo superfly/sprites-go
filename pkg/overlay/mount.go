@@ -10,6 +10,10 @@ import (
 	"time"
 )
 
+// Test seam: allow tests to override mount functions
+var mountExt4Func = mountExt4
+var mountOverlayFSFunc = mountOverlayFS
+
 // EnsureImage creates the sparse image if it doesn't exist
 func (m *Manager) EnsureImage() error {
 	// Ensure the directory exists first (even if image exists, to prevent races)
@@ -96,13 +100,15 @@ func (m *Manager) PrepareAndMount(ctx context.Context) error {
 
 	// Check if it's a corruption error
 	errStr := err.Error()
-	if strings.Contains(errStr, "I/O error") || strings.Contains(errStr, "can't read superblock") {
+	if strings.Contains(errStr, "I/O error") || strings.Contains(errStr, "input/output error") || strings.Contains(errStr, "can't read superblock") {
 		m.logger.Error("Mount failed with corruption indicators, attempting recovery", "error", err)
 
 		// Backup the corrupted image
 		timestamp := time.Now().Format("20060102-150405")
 		backupPath := fmt.Sprintf("%s.corrupt-%s.bak", strings.TrimSuffix(m.imagePath, ".img"), timestamp)
 		m.logger.Warn("Backing up corrupted image", "from", m.imagePath, "to", backupPath)
+
+		// Error is logged above; admin forwarding happens via tap error callback
 
 		if backupErr := os.Rename(m.imagePath, backupPath); backupErr != nil {
 			m.logger.Warn("Failed to backup corrupted image, attempting removal", "error", backupErr)
@@ -121,9 +127,12 @@ func (m *Manager) PrepareAndMount(ctx context.Context) error {
 
 		// Retry mount
 		m.logger.Info("Retrying mount after recreating image")
+		recoveryStart := time.Now()
 		if retryErr := m.Mount(ctx); retryErr != nil {
 			return fmt.Errorf("mount failed after recreation: %w", retryErr)
 		}
+
+		_ = recoveryStart // retained for potential future metrics
 
 		return nil
 	}
@@ -198,7 +207,7 @@ func (m *Manager) Mount(ctx context.Context) error {
 
 	m.logger.Info("Mounting loop device to overlay mount path", "device", m.loopDevice, "target", m.mountPath, "options", "discard,noatime,lazytime,commit=30,delalloc,data=ordered")
 	mountStart := time.Now()
-	err = mountExt4(m.loopDevice, m.mountPath, "discard,noatime,lazytime,commit=30,delalloc,data=ordered")
+	err = mountExt4Func(m.loopDevice, m.mountPath, "discard,noatime,lazytime,commit=30,delalloc,data=ordered")
 	mountDuration := time.Since(mountStart)
 
 	if err != nil {
@@ -334,7 +343,7 @@ func (m *Manager) mountOverlayFS(ctx context.Context) error {
 	m.logger.Info("Mounting overlayfs using syscall", "target", m.overlayTargetPath, "lowerdir", lowerDirs, "upperdir", upperDir, "workdir", workDir)
 
 	mountStart := time.Now()
-	err := mountOverlayFS(m.overlayTargetPath, lowerDirs, upperDir, workDir)
+	err := mountOverlayFSFunc(m.overlayTargetPath, lowerDirs, upperDir, workDir)
 	mountDuration := time.Since(mountStart)
 
 	if err != nil {

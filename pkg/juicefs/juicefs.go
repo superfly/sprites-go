@@ -259,15 +259,17 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 			j.logger.Info("Started writeback watcher before mount for directory detection")
 		}
 	}
-	j.logger.Debug("Writeback watcher setup completed", "duration", time.Since(stepStart).Seconds())
+	j.logger.Info("Writeback watcher setup completed", "duration", time.Since(stepStart).Seconds())
 
 	// Mount JuiceFS
 	stepStart = time.Now()
+
 	// Determine upload delay
 	uploadDelay := j.config.UploadDelay
 	if uploadDelay == 0 {
 		uploadDelay = time.Minute
 	}
+	// uploadDelay configured
 
 	mountArgs := []string{
 		"mount",
@@ -311,9 +313,10 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	if err := j.mountCmd.Start(); err != nil {
 		// Close stoppedCh since monitorProcess will never run
 		close(j.stoppedCh)
+		j.logger.Error("Failed to start JuiceFS mount command", "error", err)
 		return fmt.Errorf("failed to start JuiceFS mount: %w", err)
 	}
-	j.logger.Debug("JuiceFS mount command startup completed", "duration", time.Since(stepStart).Seconds())
+	j.logger.Debug("JuiceFS mount command started", "pid", j.mountCmd.Process.Pid, "elapsed", time.Since(stepStart))
 
 	// Logs are forwarded via Stdout/Stderr to the structured writer; no analysis
 
@@ -473,13 +476,24 @@ func (j *JuiceFS) monitorProcess() {
 	processDone := make(chan error, 1)
 	tap.Go(j.logger, j.errCh, func() {
 		if j.mountCmd != nil {
-			processDone <- j.mountCmd.Wait()
+			err := j.mountCmd.Wait()
+			if err != nil {
+				j.logger.Error("JuiceFS mount process exited with error", "error", err, "exitCode", j.mountCmd.ProcessState.ExitCode())
+			} else {
+				j.logger.Info("JuiceFS mount process exited cleanly", "exitCode", j.mountCmd.ProcessState.ExitCode())
+			}
+			processDone <- err
 		} else {
 			processDone <- nil
 		}
 	})
 
 	select {
+	case err := <-processDone:
+		// Process exited unexpectedly before stop signal
+		j.logger.Error("JuiceFS mount process exited before stop signal", "error", err, "elapsed", time.Since(start))
+		j.signalMountError(fmt.Errorf("mount process exited unexpectedly: %w", err))
+		return
 	case <-j.stopCh:
 		// Stop requested, check for dependent mounts
 		j.logger.Debug("Checking for dependent mounts before JuiceFS umount")
