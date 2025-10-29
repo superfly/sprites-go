@@ -13,9 +13,8 @@ on:
 
 jobs:
   test-go-sdk:
-    runs-on: ubuntu-latest
-    # runs-on:
-    #   group: sprite-env-amd64
+    runs-on:
+      group: sprite-env-amd64
     name: Test Go SDK
     
     steps:
@@ -49,9 +48,8 @@ jobs:
       continue-on-error: false
 
   test-js-sdk:
-    runs-on: ubuntu-latest
-    # runs-on:
-    #   group: sprite-env-amd64
+    runs-on:
+      group: sprite-env-amd64
     name: Test JavaScript SDK
     
     steps:
