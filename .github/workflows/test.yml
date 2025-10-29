@@ -31,7 +31,8 @@ on:
 jobs:
   test-lib:
     name: "Tests"
-    runs-on: ubuntu-latest
+    runs-on:
+      group: sprite-env-amd64
     if: ${{ !contains(github.event.pull_request.title, '[skip ci]') && !contains(github.event.pull_request.title, '[ci skip]') }}
     permissions:
       contents: read

@@ -50,7 +50,8 @@ env:
 
 jobs:
   build-amd64:
-    runs-on: ubuntu-big
+    runs-on:
+      group: sprite-env-amd64
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     
@@ -90,7 +91,8 @@ jobs:
         cache-to: type=gha,mode=max,scope=amd64
 
   build-arm64:
-    runs-on: ubuntu-big-arm64
+    runs-on:
+      group: sprite-env-arm64
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     

@@ -27,11 +27,11 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-big
+          - os: ubuntu-latest
             goos: linux
             goarch: amd64
             binary_name: sprite
-          - os: ubuntu-big-arm64
+          - os: ubuntu-22.04-arm64
             goos: linux
             goarch: arm64
             binary_name: sprite

@@ -5,17 +5,16 @@ on:
     branches: [ main, go-sdk, js-sdk ]
     paths:
       - 'sdks/**'
-      - '.github/workflows/sdk-tests.yml'
   pull_request:
     branches: [ main, go-sdk, js-sdk ]
     paths:
       - 'sdks/**'
-      - '.github/workflows/sdk-tests.yml'
   workflow_dispatch:
 
 jobs:
   test-go-sdk:
-    runs-on: ubuntu-latest
+    runs-on:
+      group: sprite-env-amd64
     name: Test Go SDK
     
     steps:
@@ -49,7 +48,8 @@ jobs:
       continue-on-error: false
 
   test-js-sdk:
-    runs-on: ubuntu-latest
+    runs-on:
+      group: sprite-env-amd64
     name: Test JavaScript SDK
     
     steps:
