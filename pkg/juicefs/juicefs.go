@@ -491,9 +491,9 @@ func (j *JuiceFS) monitorProcess() {
 	select {
 	case err := <-processDone:
 		// Process exited unexpectedly before stop signal
-		j.logger.Error("JuiceFS mount process exited before stop signal", "error", err, "elapsed", time.Since(start))
+		j.logger.Error("JuiceFS mount process exited unexpectedly, exiting immediately", "error", err, "elapsed", time.Since(start), "exit_code", 1)
 		j.signalMountError(fmt.Errorf("mount process exited unexpectedly: %w", err))
-		return
+		os.Exit(1)
 	case <-j.stopCh:
 		// Stop requested, check for dependent mounts
 		j.logger.Debug("Checking for dependent mounts before JuiceFS umount")
@@ -700,6 +700,10 @@ func (j *JuiceFS) monitorProcess() {
 				j.logger.Info("No recent kernel messages found")
 			}
 		}
+
+		// Process exited unexpectedly after mount was ready - exit immediately
+		j.logger.Error("JuiceFS mount process exited unexpectedly, exiting immediately", "error", err, "exit_code", 1)
+		os.Exit(1)
 
 		// Litestream replication is now managed by the DB manager; nothing to stop here
 	}
