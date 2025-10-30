@@ -23,6 +23,12 @@ mkdir -p /dev/fly_vol/local-storage/var/lib/docker
 mkdir -p /dev/fly_vol/local-storage/tmp
 mkdir -p /dev/fly_vol/logs
 
+# Ensure system sprite dir exists and write version file at startup
+mkdir -p /system/.sprite
+if [ -n "${SPRITE_VERSION:-}" ]; then
+    echo "${SPRITE_VERSION}" > /system/.sprite/version.txt
+fi
+
 mkdir -p /.sprite/tmp
 mount -t tmpfs -o size=64M tmpfs /.sprite/tmp
 
