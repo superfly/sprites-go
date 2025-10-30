@@ -3,7 +3,6 @@ package portwatcher
 
 import (
 	"fmt"
-	"log"
 	"sync"
 )
 
@@ -42,8 +41,6 @@ func New(pid int, namespace string, callback PortCallback) (*PortWatcher, error)
 		monitor:   GetGlobalMonitor(),
 	}
 
-	log.Printf("Port watcher: creating watcher for PID %d in namespace %s\n", pid, namespace)
-
 	return pw, nil
 }
 
@@ -60,7 +57,6 @@ func (pw *PortWatcher) Start() error {
 	// Subscribe all PIDs to the global namespace monitor
 	for _, pid := range pw.pids {
 		if err := pw.monitor.SubscribeInNamespace(pid, pw.namespace, pw.callback); err != nil {
-			log.Printf("Port watcher: failed to subscribe PID %d: %v\n", pid, err)
 			// Continue with other PIDs even if one fails
 		}
 	}
@@ -101,8 +97,6 @@ func (pw *PortWatcher) AddPID(pid int) error {
 		}
 	}
 
-	log.Printf("Port watcher: adding PID %d to monitoring\n", pid)
-
 	// Subscribe the new PID
 	if err := pw.monitor.SubscribeInNamespace(pid, pw.namespace, pw.callback); err != nil {
 		return err
@@ -125,8 +119,6 @@ func (pw *PortWatcher) RemovePID(pid int) {
 	// Find and remove the PID
 	for i, existingPID := range pw.pids {
 		if existingPID == pid {
-			log.Printf("Port watcher: removing PID %d from monitoring\n", pid)
-
 			// Unsubscribe from monitor
 			pw.monitor.Unsubscribe(pid)
 
