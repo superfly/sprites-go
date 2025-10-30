@@ -101,7 +101,6 @@ func (s *System) Boot(ctx context.Context) error {
 		"status":      "ok",
 		"finished_at": time.Now().UnixMilli(),
 	})
-	s.ActivityMonitor.ActivityEnded("boot")
 	s.logger.Info("System boot complete")
 	return nil
 }

@@ -32,6 +32,9 @@ type ActivityMonitor struct {
 	activities map[string]int
 	mu         sync.Mutex
 
+	// Non-negative active count for gating idle logic
+	activeCount int64
+
 	// Notification channel for new activity (signal-only, capacity 1)
 	activityNotify chan struct{}
 
@@ -81,6 +84,55 @@ func (m *ActivityMonitor) Start(ctx context.Context) {
 	tap.Go(m.logger, m.errCh, func() {
 		m.run(ctx)
 	})
+	// Periodic status reporter at info level while not suspended
+	tap.Go(m.logger, m.errCh, func() {
+		m.statusReporter(ctx)
+	})
+}
+
+// statusReporter periodically logs an info-level summary while no suspend has occurred
+func (m *ActivityMonitor) statusReporter(ctx context.Context) {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-m.stopCh:
+			return
+		case <-ticker.C:
+			// Only report if we haven't suspended yet
+			if !m.suspendedAt.IsZero() {
+				continue
+			}
+
+			currentCount := atomic.LoadInt64(&m.startCount) - atomic.LoadInt64(&m.endCount)
+
+			m.mu.Lock()
+			sources := make([]string, 0, len(m.activities))
+			for source, count := range m.activities {
+				if count > 0 {
+					sources = append(sources, source)
+				}
+			}
+			m.mu.Unlock()
+
+			since := m.now().Sub(m.lastActivity)
+			remaining := m.idleAfter - since
+			if remaining < 0 {
+				remaining = 0
+			}
+
+			m.logger.Info("ActivityMonitor: idle status",
+				"active_count", currentCount,
+				"sources", sources,
+				"since_last_activity_s", since.Seconds(),
+				"idle_after_s", m.idleAfter.Seconds(),
+				"time_until_suspend_s", remaining.Seconds(),
+			)
+		}
+	}
 }
 
 // Stop immediately stops the activity monitor loop to prevent further suspend attempts
@@ -99,10 +151,12 @@ func (m *ActivityMonitor) ActivityStarted(source string) {
 
 	// Increment monotonic counter
 	atomic.AddInt64(&m.startCount, 1)
+	// Increment current active count (non-negative invariant)
+	atomic.AddInt64(&m.activeCount, 1)
 
 	// Quiet default: debug-level activity traces
 	m.logger.Debug("ActivityMonitor: activity started", "source", source, "active_count",
-		atomic.LoadInt64(&m.startCount)-atomic.LoadInt64(&m.endCount))
+		atomic.LoadInt64(&m.activeCount))
 
 	// Non-blocking notify
 	select {
@@ -123,10 +177,20 @@ func (m *ActivityMonitor) ActivityEnded(source string) {
 
 	// Increment monotonic counter
 	atomic.AddInt64(&m.endCount, 1)
+	// Decrement active count but never below zero
+	for {
+		cur := atomic.LoadInt64(&m.activeCount)
+		if cur == 0 {
+			break
+		}
+		if atomic.CompareAndSwapInt64(&m.activeCount, cur, cur-1) {
+			break
+		}
+	}
 
 	// Quiet default: debug-level activity traces
 	m.logger.Debug("ActivityMonitor: activity ended", "source", source, "active_count",
-		atomic.LoadInt64(&m.startCount)-atomic.LoadInt64(&m.endCount))
+		atomic.LoadInt64(&m.activeCount))
 
 	// Non-blocking notify so run loop can restart idle timer if needed
 	select {
@@ -179,11 +243,11 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 	var suspendInProgress bool
 
 	// Start idle timer if there is no active activity
-	if atomic.LoadInt64(&m.startCount)-atomic.LoadInt64(&m.endCount) == 0 {
+	if atomic.LoadInt64(&m.activeCount) == 0 {
 		idleTimer = time.NewTimer(m.idleAfter)
 		idleTimerCh = idleTimer.C
-		// Quiet default – debug-level
-		m.logger.Debug("ActivityMonitor: starting idle timer", "duration", m.idleAfter)
+		// Log timer start at info level for visibility
+		m.logger.Info("ActivityMonitor: starting idle timer", "duration", m.idleAfter)
 	}
 
 	for {
@@ -202,7 +266,7 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 
 		case <-m.activityNotify:
 			// Recompute active count and update last activity timestamp
-			currentCount := atomic.LoadInt64(&m.startCount) - atomic.LoadInt64(&m.endCount)
+			currentCount := atomic.LoadInt64(&m.activeCount)
 			m.lastActivity = m.now()
 			m.logger.Debug("ActivityMonitor: activity notify", "active_count", currentCount)
 
@@ -242,14 +306,14 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 				if idleTimer == nil {
 					idleTimer = time.NewTimer(m.idleAfter)
 					idleTimerCh = idleTimer.C
-					// Quiet default – debug-level
-					m.logger.Debug("ActivityMonitor: started idle timer", "duration", m.idleAfter)
+					// Log timer start at info level for visibility
+					m.logger.Info("ActivityMonitor: started idle timer", "duration", m.idleAfter)
 				}
 			}
 
 		case <-idleTimerCh:
 			// Timer expired, check if still idle
-			currentCount := atomic.LoadInt64(&m.startCount) - atomic.LoadInt64(&m.endCount)
+			currentCount := atomic.LoadInt64(&m.activeCount)
 			// Quiet default – debug-level
 			m.logger.Debug("ActivityMonitor: idle timer expired", "active_count", currentCount)
 
@@ -293,7 +357,7 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 			suspendInProgress = false
 
 			// Restart idle timer if still idle
-			if atomic.LoadInt64(&m.startCount)-atomic.LoadInt64(&m.endCount) == 0 {
+			if atomic.LoadInt64(&m.activeCount) == 0 {
 				m.lastActivity = m.now()
 				idleTimer = time.NewTimer(m.idleAfter)
 				idleTimerCh = idleTimer.C
