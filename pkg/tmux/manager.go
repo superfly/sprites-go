@@ -45,6 +45,9 @@ type Options struct {
 	// WrapCmd is an optional function to wrap commands (e.g., container exec)
 	WrapCmd func(*exec.Cmd) *exec.Cmd
 	Logger  *slog.Logger
+    // EventCallback, if set, will be invoked for each WindowMonitorEvent emitted
+    // by the internal WindowMonitor. Only a single callback is supported.
+    EventCallback func(WindowMonitorEvent)
 }
 
 // Manager provides a configurable tmux session manager
@@ -64,6 +67,9 @@ type Manager struct {
 	paneCallbacksMu sync.RWMutex
 
 	// removed state for wrapped metadata; API layer handles wrappers
+
+    // Optional single subscriber for window events
+    eventCallback func(WindowMonitorEvent)
 }
 
 func NewManager(ctx context.Context, opts Options) *Manager {
@@ -87,6 +93,7 @@ func NewManager(ctx context.Context, opts Options) *Manager {
 		wrapCmd:        opts.WrapCmd,
 		monitorStartCh: make(chan struct{}, 1),
 		paneCallbacks:  make(map[string]PaneLifecycleCallback),
+        eventCallback:  opts.EventCallback,
 	}
 
 	m.initializeNextID()
@@ -136,6 +143,26 @@ func (m *Manager) monitorManager(ctx context.Context) {
 				} else if m.logger != nil {
 					m.logger.Debug("monitorManager: window monitor started")
 				}
+
+                // If an event callback is configured, attach a pump that forwards
+                // window monitor events to the callback. This avoids exposing
+                // the raw channel to consumers.
+                if m.windowMonitor != nil && m.eventCallback != nil {
+                    evCh := m.windowMonitor.GetEventChannel()
+                    go func(ch <-chan WindowMonitorEvent, cb func(WindowMonitorEvent)) {
+                        for ev := range ch {
+                            // Deliver in a safe goroutine to avoid blocking the pump
+                            go func(e WindowMonitorEvent) {
+                                defer func() {
+                                    if r := recover(); r != nil && m.logger != nil {
+                                        m.logger.Warn("window event callback panicked", "panic", r)
+                                    }
+                                }()
+                                cb(e)
+                            }(ev)
+                        }
+                    }(evCh, m.eventCallback)
+                }
 			}
 		}
 	}

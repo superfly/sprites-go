@@ -22,21 +22,14 @@ type ActivityMonitor struct {
 	admin     *AdminChannel
 
 	// Activity tracking
-	// Monotonic counters (detect all activity; active = startCount - endCount)
-	startCount   int64
-	endCount     int64
 	lastActivity time.Time
 	suspendedAt  time.Time // timestamp when suspend occurred
 
-	// Registry of active sources
-	activities map[string]int
-	mu         sync.Mutex
+	// Registry of active sources (only accessed by run loop)
+	activities map[string]struct{}
 
-	// Non-negative active count for gating idle logic
-	activeCount int64
-
-	// Notification channel for new activity (signal-only, capacity 1)
-	activityNotify chan struct{}
+	// Activity event channel for coordinating with run loop
+	activityEventCh chan activityEvent
 
 	// Internal channels
 	stopCh chan struct{}
@@ -44,6 +37,9 @@ type ActivityMonitor struct {
 
 	// Ensure Stop() is idempotent
 	stopOnce sync.Once
+
+	// started indicates whether the run loop is active; used to gate event APIs
+	started atomic.Bool
 
 	// Injection seams for testing
 	prepSuspendFn func(ctx context.Context) (cleanup func(), cancelled bool, err error)
@@ -56,19 +52,19 @@ type ActivityMonitor struct {
 
 type activityEvent struct {
 	isStart bool
-	source  string // "http" or "exec" for debugging
+	source  string // "http:<id>", "tmux:<session>", "boot", "socket", etc.
 }
 
 func NewActivityMonitor(ctx context.Context, sys *System, idleAfter time.Duration) *ActivityMonitor {
 	m := &ActivityMonitor{
-		logger:         tap.Logger(ctx),
-		system:         sys,
-		idleAfter:      idleAfter,
-		activities:     make(map[string]int),
-		activityNotify: make(chan struct{}, 1),
-		stopCh:         make(chan struct{}),
-		errCh:          make(chan error, 1), // Buffered to avoid blocking on panic
-		lastActivity:   time.Now(),
+		logger:          tap.Logger(ctx),
+		system:          sys,
+		idleAfter:       idleAfter,
+		activities:      make(map[string]struct{}),
+		activityEventCh: make(chan activityEvent, 100), // Buffered for burst handling
+		stopCh:          make(chan struct{}),
+		errCh:           make(chan error, 1), // Buffered to avoid blocking on panic
+		lastActivity:    time.Now(),
 	}
 	// Set default injection seams
 	m.prepSuspendFn = m.prepSuspend
@@ -81,121 +77,51 @@ func NewActivityMonitor(ctx context.Context, sys *System, idleAfter time.Duratio
 func (m *ActivityMonitor) Start(ctx context.Context) {
 	// Quiet by default – use Debug for startup visibility
 	m.logger.Debug("ActivityMonitor: starting", "idle_after", m.idleAfter)
+	// Mark as started before launching the run loop so producers can proceed
+	m.started.Store(true)
 	tap.Go(m.logger, m.errCh, func() {
 		m.run(ctx)
 	})
-	// Periodic status reporter at info level while not suspended
-	tap.Go(m.logger, m.errCh, func() {
-		m.statusReporter(ctx)
-	})
-}
-
-// statusReporter periodically logs an info-level summary while no suspend has occurred
-func (m *ActivityMonitor) statusReporter(ctx context.Context) {
-	ticker := time.NewTicker(60 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-m.stopCh:
-			return
-		case <-ticker.C:
-			// Only report if we haven't suspended yet
-			if !m.suspendedAt.IsZero() {
-				continue
-			}
-
-			currentCount := atomic.LoadInt64(&m.startCount) - atomic.LoadInt64(&m.endCount)
-
-			m.mu.Lock()
-			sources := make([]string, 0, len(m.activities))
-			for source, count := range m.activities {
-				if count > 0 {
-					sources = append(sources, source)
-				}
-			}
-			m.mu.Unlock()
-
-			since := m.now().Sub(m.lastActivity)
-			remaining := m.idleAfter - since
-			if remaining < 0 {
-				remaining = 0
-			}
-
-			m.logger.Info("ActivityMonitor: idle status",
-				"active_count", currentCount,
-				"sources", sources,
-				"since_last_activity_s", since.Seconds(),
-				"idle_after_s", m.idleAfter.Seconds(),
-				"time_until_suspend_s", remaining.Seconds(),
-			)
-		}
-	}
 }
 
 // Stop immediately stops the activity monitor loop to prevent further suspend attempts
 func (m *ActivityMonitor) Stop() {
 	m.stopOnce.Do(func() {
+		// Prevent new events from enqueueing; non-blocking APIs will drop
+		m.started.Store(false)
 		close(m.stopCh)
 	})
 }
 
 // ActivityStarted records the start of an activity and signals the monitor
 func (m *ActivityMonitor) ActivityStarted(source string) {
-	// Update registry (protected by mutex)
-	m.mu.Lock()
-	m.activities[source]++
-	m.mu.Unlock()
-
-	// Increment monotonic counter
-	atomic.AddInt64(&m.startCount, 1)
-	// Increment current active count (non-negative invariant)
-	atomic.AddInt64(&m.activeCount, 1)
-
-	// Quiet default: debug-level activity traces
-	m.logger.Debug("ActivityMonitor: activity started", "source", source, "active_count",
-		atomic.LoadInt64(&m.activeCount))
-
-	// Non-blocking notify
+	// Reject events if the monitor isn't running
+	if !m.started.Load() {
+		m.logger.Info("ActivityMonitor: drop event - not started", "source", source)
+		return
+	}
+	// Non-blocking send to avoid deadlocks/backpressure cascades
 	select {
-	case m.activityNotify <- struct{}{}:
+	case m.activityEventCh <- activityEvent{isStart: true, source: source}:
+		m.logger.Debug("ActivityMonitor: activity started", "source", source)
 	default:
+		m.logger.Warn("ActivityMonitor: drop event - buffer full", "source", source)
 	}
 }
 
 // ActivityEnded records the end of an activity
 func (m *ActivityMonitor) ActivityEnded(source string) {
-	// Update registry (protected by mutex)
-	m.mu.Lock()
-	m.activities[source]--
-	if m.activities[source] <= 0 {
-		delete(m.activities, source)
+	// Reject events if the monitor isn't running
+	if !m.started.Load() {
+		m.logger.Info("ActivityMonitor: drop event - not started", "source", source)
+		return
 	}
-	m.mu.Unlock()
-
-	// Increment monotonic counter
-	atomic.AddInt64(&m.endCount, 1)
-	// Decrement active count but never below zero
-	for {
-		cur := atomic.LoadInt64(&m.activeCount)
-		if cur == 0 {
-			break
-		}
-		if atomic.CompareAndSwapInt64(&m.activeCount, cur, cur-1) {
-			break
-		}
-	}
-
-	// Quiet default: debug-level activity traces
-	m.logger.Debug("ActivityMonitor: activity ended", "source", source, "active_count",
-		atomic.LoadInt64(&m.activeCount))
-
-	// Non-blocking notify so run loop can restart idle timer if needed
+	// Non-blocking send to avoid deadlocks/backpressure cascades
 	select {
-	case m.activityNotify <- struct{}{}:
+	case m.activityEventCh <- activityEvent{isStart: false, source: source}:
+		m.logger.Debug("ActivityMonitor: activity ended", "source", source)
 	default:
+		m.logger.Warn("ActivityMonitor: drop event - buffer full", "source", source)
 	}
 }
 
@@ -232,8 +158,6 @@ func (m *ActivityMonitor) EnrichContext(ctx context.Context) context.Context {
 // activityTrackerKey matches the one used in handlers package
 type activityTrackerKey struct{}
 
-// handleActivityEvent removed; registry and counters are updated directly by ActivityStarted/Ended
-
 func (m *ActivityMonitor) run(ctx context.Context) {
 	var idleTimer *time.Timer
 	var idleTimerCh <-chan time.Time
@@ -242,8 +166,12 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 	var suspendCommitCh chan struct{}
 	var suspendInProgress bool
 
+	// Status reporter ticker
+	statusTicker := time.NewTicker(60 * time.Second)
+	defer statusTicker.Stop()
+
 	// Start idle timer if there is no active activity
-	if atomic.LoadInt64(&m.activeCount) == 0 {
+	if len(m.activities) == 0 {
 		idleTimer = time.NewTimer(m.idleAfter)
 		idleTimerCh = idleTimer.C
 		// Log timer start at info level for visibility
@@ -264,15 +192,38 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 			}
 			return
 
-		case <-m.activityNotify:
-			// Recompute active count and update last activity timestamp
-			currentCount := atomic.LoadInt64(&m.activeCount)
-			m.lastActivity = m.now()
-			m.logger.Debug("ActivityMonitor: activity notify", "active_count", currentCount)
+		case <-statusTicker.C:
+			// Only report if we haven't suspended yet
+			if m.suspendedAt.IsZero() {
+				currentCount := len(m.activities)
+				sources := make([]string, 0, len(m.activities))
+				for source := range m.activities {
+					sources = append(sources, source)
+				}
 
-			if currentCount > 0 {
-				// Any activity present cancels idle timer and any pending suspend
-				if idleTimer != nil {
+				since := m.now().Sub(m.lastActivity)
+				remaining := m.idleAfter - since
+				if remaining < 0 {
+					remaining = 0
+				}
+
+				m.logger.Info("ActivityMonitor: idle status",
+					"active_count", currentCount,
+					"sources", sources,
+					"since_last_activity_s", since.Seconds(),
+					"idle_after_s", m.idleAfter.Seconds(),
+					"time_until_suspend_s", remaining.Seconds(),
+				)
+			}
+
+		case event := <-m.activityEventCh:
+			if event.isStart {
+				// Add to registry
+				wasEmpty := len(m.activities) == 0
+				m.activities[event.source] = struct{}{}
+
+				// If we had no activity and now we do, cancel idle timer
+				if wasEmpty && idleTimer != nil {
 					if !idleTimer.Stop() {
 						select {
 						case <-idleTimer.C:
@@ -281,10 +232,11 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 					}
 					idleTimer = nil
 					idleTimerCh = nil
+					m.logger.Info("Activity detected, cancelling idle timer")
 				}
 
+				// Cancel suspend if in progress
 				if suspendCancel != nil {
-					// Cancel suspend before point of no return
 					m.logger.Info("Activity detected, cancelling suspend")
 					suspendCancel()
 					suspendCancel = nil
@@ -294,26 +246,31 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 						})
 					}
 				} else if suspendInProgress {
-					// After API call; notify coordinator for external wake up
 					if m.admin != nil {
 						m.admin.SendActivityEvent("activity_during_suspend", map[string]interface{}{
 							"timestamp": m.now().Unix(),
 						})
 					}
 				}
+
+				m.lastActivity = m.now()
 			} else {
-				// No activity present; ensure idle timer is running
-				if idleTimer == nil {
+				// Remove from registry
+				delete(m.activities, event.source)
+
+				// If registry is now empty, start idle timer
+				if len(m.activities) == 0 && idleTimer == nil {
 					idleTimer = time.NewTimer(m.idleAfter)
 					idleTimerCh = idleTimer.C
-					// Log timer start at info level for visibility
 					m.logger.Info("ActivityMonitor: started idle timer", "duration", m.idleAfter)
 				}
+
+				m.lastActivity = m.now()
 			}
 
 		case <-idleTimerCh:
 			// Timer expired, check if still idle
-			currentCount := atomic.LoadInt64(&m.activeCount)
+			currentCount := len(m.activities)
 			// Quiet default – debug-level
 			m.logger.Debug("ActivityMonitor: idle timer expired", "active_count", currentCount)
 
@@ -357,7 +314,7 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 			suspendInProgress = false
 
 			// Restart idle timer if still idle
-			if atomic.LoadInt64(&m.activeCount) == 0 {
+			if len(m.activities) == 0 {
 				m.lastActivity = m.now()
 				idleTimer = time.NewTimer(m.idleAfter)
 				idleTimerCh = idleTimer.C

@@ -197,9 +197,9 @@ func (wm *WindowMonitor) Start(ctx context.Context) error {
 	// Start the activity timeout checker
 	go wm.activityTimeoutChecker(ctx)
 
-	// Do initial discovery after starting the monitor
+	// Do initial discovery after a small delay to ensure control mode is connected
+	// If there's a race and output arrives before discovery completes, linkWindowFromPane handles it
 	go func() {
-		// Small delay to ensure control mode is fully connected
 		time.Sleep(100 * time.Millisecond)
 		wm.logger.Debug("Starting initial window discovery")
 		wm.discoverAndLinkWindows()
@@ -289,11 +289,11 @@ func (wm *WindowMonitor) handleEvent(event TmuxEvent) {
 			// Update activity stats
 			wm.updateActivityStats(originalSession, len(e.Data))
 
-			// Send event
+			// Send event (add $ prefix for consistency with new/inactive events)
 			select {
 			case wm.eventChan <- WindowMonitorEvent{
 				WindowID:        windowID,
-				OriginalSession: originalSession,
+				OriginalSession: "$" + originalSession,
 				EventType:       "activity",
 				PaneID:          e.PaneID,
 				Data:            []byte(e.Data),
@@ -304,10 +304,12 @@ func (wm *WindowMonitor) handleEvent(event TmuxEvent) {
 					"originalSession", originalSession)
 			}
 		} else {
-			wm.logger.Warn("Pane output for unlinked window",
+			wm.logger.Debug("Pane output for unlinked window, attempting to link",
 				"paneID", e.PaneID,
 				"windowID", windowID,
 				"linkedWindows", linkedWindowsCount)
+			// Try to link this specific window
+			go wm.linkWindowFromPane(e.PaneID, windowID)
 		}
 
 	case WindowUnlinkEvent:
@@ -326,7 +328,7 @@ func (wm *WindowMonitor) handleEvent(event TmuxEvent) {
 		originalSession := wm.linkedWindows[e.WindowID]
 		delete(wm.linkedWindows, e.WindowID)
 
-		// Clean up activity stats (originalSession is already the user session ID)
+		// Clean up activity stats (originalSession is already the user session ID without $ prefix)
 		if originalSession != "" {
 			delete(wm.activityStats, originalSession)
 		}
@@ -336,7 +338,7 @@ func (wm *WindowMonitor) handleEvent(event TmuxEvent) {
 			select {
 			case wm.eventChan <- WindowMonitorEvent{
 				WindowID:        e.WindowID,
-				OriginalSession: originalSession,
+				OriginalSession: "$" + originalSession, // Add $ prefix for consistency
 				EventType:       "closed",
 			}:
 			default:
@@ -349,7 +351,7 @@ func (wm *WindowMonitor) handleEvent(event TmuxEvent) {
 		originalSession := wm.linkedWindows[e.WindowID]
 		delete(wm.linkedWindows, e.WindowID)
 
-		// Clean up activity stats (originalSession is already the user session ID)
+		// Clean up activity stats (originalSession is already the user session ID without $ prefix)
 		if originalSession != "" {
 			delete(wm.activityStats, originalSession)
 		}
@@ -359,7 +361,7 @@ func (wm *WindowMonitor) handleEvent(event TmuxEvent) {
 			select {
 			case wm.eventChan <- WindowMonitorEvent{
 				WindowID:        e.WindowID,
-				OriginalSession: originalSession,
+				OriginalSession: "$" + originalSession, // Add $ prefix for consistency
 				EventType:       "closed",
 			}:
 			default:
@@ -489,6 +491,99 @@ func (wm *WindowMonitor) discoverAndLinkWindows() {
 	}
 }
 
+// linkWindowFromPane attempts to link a window to the monitor session based on its pane
+func (wm *WindowMonitor) linkWindowFromPane(paneID, windowID string) {
+	if windowID == "" {
+		wm.logger.Warn("Cannot link window from pane: empty window ID", "paneID", paneID)
+		return
+	}
+
+	// Check if window is already linked (might have been linked by another goroutine)
+	wm.mu.RLock()
+	_, alreadyLinked := wm.linkedWindows[windowID]
+	wm.mu.RUnlock()
+
+	if alreadyLinked {
+		wm.logger.Info("Window already linked, skipping",
+			"windowID", windowID,
+			"paneID", paneID)
+		return
+	}
+
+	// Get session information for this window
+	args := []string{}
+	if wm.configPath != "" {
+		args = append(args, "-f", wm.configPath)
+	}
+	args = append(args, "-S", wm.socketPath, "display-message", "-p", "-t", windowID,
+		"#{session_id}:#{session_name}")
+
+	cmd := wm.buildTmuxCommand(args)
+	output, err := cmd.Output()
+	if err != nil {
+		wm.logger.Warn("Failed to get session info for window",
+			"windowID", windowID,
+			"paneID", paneID,
+			"error", err)
+		return
+	}
+
+	parts := strings.Split(strings.TrimSpace(string(output)), ":")
+	if len(parts) < 2 {
+		wm.logger.Warn("Invalid session info format",
+			"windowID", windowID,
+			"output", string(output))
+		return
+	}
+
+	sessionID := parts[0]
+	sessionName := parts[1]
+
+	// Skip if this is the monitor session itself
+	if sessionName == wm.monitorSession {
+		wm.logger.Debug("Skipping monitor session's own window (not a user session)",
+			"windowID", windowID,
+			"paneID", paneID,
+			"sessionName", sessionName)
+		return
+	}
+
+	// Only link windows from sprite-exec sessions
+	if !strings.HasPrefix(sessionName, "sprite-exec-") {
+		wm.logger.Warn("Skipping non-sprite-exec window - unexpected output source",
+			"windowID", windowID,
+			"sessionName", sessionName,
+			"paneID", paneID)
+		return
+	}
+
+	// Link the window
+	wm.logger.Debug("Attempting to link window",
+		"windowID", windowID,
+		"paneID", paneID,
+		"sessionID", sessionID,
+		"sessionName", sessionName)
+
+	if err := wm.linkWindow(windowID, sessionID); err != nil {
+		wm.logger.Warn("❌ Failed to link window",
+			"windowID", windowID,
+			"paneID", paneID,
+			"sessionID", sessionID,
+			"sessionName", sessionName,
+			"error", err)
+	} else {
+		wm.logger.Info("✓ Successfully linked window",
+			"windowID", windowID,
+			"paneID", paneID,
+			"sessionID", sessionID,
+			"sessionName", sessionName)
+		// Refresh panes after linking to start monitoring
+		if wm.parser != nil {
+			wm.parser.ListPanes()
+		}
+	}
+}
+
 // linkWindow links a window to the monitor session
 func (wm *WindowMonitor) linkWindow(windowID, originalSessionID string) error {
 	// Check if parser is still valid
@@ -524,6 +619,27 @@ func (wm *WindowMonitor) linkWindow(windowID, originalSessionID string) error {
 			"windowID", windowID)
 	}
 	wm.mu.Unlock()
+
+	// Send active event to indicate the session is considered active upon linking
+	select {
+	case wm.eventChan <- WindowMonitorEvent{
+		OriginalSession: "$" + cleanSessionID,
+		EventType:       "active",
+	}:
+	default:
+	}
+
+	// Also send an initial activity event on link to emulate immediate output
+	select {
+	case wm.eventChan <- WindowMonitorEvent{
+		WindowID:        windowID,
+		OriginalSession: "$" + cleanSessionID,
+		EventType:       "activity",
+		PaneID:          "",
+		Data:            nil,
+	}:
+	default:
+	}
 
 	// Send new window event
 	select {
@@ -592,10 +708,10 @@ func (wm *WindowMonitor) updateActivityStats(sessionID string, byteCount int) {
 		}
 		wm.activityStats[cleanSessionID] = stats
 
-		// Send active event for new session
+		// Send active event for new session (add $ prefix for consistency)
 		select {
 		case wm.eventChan <- WindowMonitorEvent{
-			OriginalSession: cleanSessionID,
+			OriginalSession: "$" + cleanSessionID,
 			EventType:       "active",
 		}:
 			wm.logger.Debug("Sent active event for new session", "sessionID", cleanSessionID)
@@ -609,10 +725,10 @@ func (wm *WindowMonitor) updateActivityStats(sessionID string, byteCount int) {
 			"wasInactive", true)
 		stats.IsActive = true
 
-		// Send active event
+		// Send active event (add $ prefix for consistency)
 		select {
 		case wm.eventChan <- WindowMonitorEvent{
-			OriginalSession: cleanSessionID,
+			OriginalSession: "$" + cleanSessionID,
 			EventType:       "active",
 		}:
 			wm.logger.Debug("Sent active event for reactivated session", "sessionID", cleanSessionID)

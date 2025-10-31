@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/superfly/sprite-env/pkg/sync"
 	"github.com/superfly/sprite-env/pkg/tap"
 )
@@ -27,7 +28,7 @@ type Server struct {
 	syncServer      *sync.Server
 	authManager     *AuthManager
 	contextEnricher ContextEnricher
-	activityObs     func(start bool)
+	activityObs     func(start bool, source string)
 	proxyHandler    *ProxyHandler
 }
 
@@ -139,8 +140,10 @@ func NewServer(config Config, system SystemManager, ctx context.Context) (*Serve
 		next := handler
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if s.activityObs != nil {
-				s.activityObs(true)
-				defer s.activityObs(false)
+				requestID := uuid.New().String()
+				source := "http:" + requestID
+				s.activityObs(true, source)
+				defer s.activityObs(false, source)
 			}
 			next.ServeHTTP(w, r)
 		})
@@ -206,7 +209,7 @@ func (s *Server) SetAdminChannel(enricher ContextEnricher) {
 // (tmux manager obtained on-demand from system; no setter needed)
 
 // SetActivityObserver sets a callback to observe request start/end
-func (s *Server) SetActivityObserver(observe func(start bool)) {
+func (s *Server) SetActivityObserver(observe func(start bool, source string)) {
 	s.activityObs = observe
 }
 
