@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         procps htop tree \
         zip gzip bzip2 locales iproute2 \
         libffi-dev libyaml-dev gosu xdg-utils \
-        tmux rsync zsh fish tcsh ksh \
+        tmux rsync zsh fish tcsh ksh dnsutils vim iputils-ping net-tools\
     && locale-gen en_US.UTF-8 \
     && apt-get clean \
     && curl -L https://sw.kovidgoyal.net/kitty/installer.sh | sh /dev/stdin launch=n dest=/.sprite/bin/

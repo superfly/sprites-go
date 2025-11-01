@@ -552,13 +552,12 @@ func (m *Manager) Unmount(ctx context.Context) error {
 // processes (via cgroup.freeze) before calling this if needed.
 func (m *Manager) PrepareForCheckpoint(ctx context.Context) error {
 	if m.isOverlayFSMounted() {
-		// 1) Sync the overlayfs filesystem (where actual writes occur)
-		m.logger.Debug("Syncing OverlayFS filesystem", "path", m.overlayTargetPath)
-		syncCmd := exec.Command("sync", "-f", m.overlayTargetPath)
-		if output, err := syncCmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("failed to sync overlayfs: %w, output: %s", err, string(output))
-		}
-		m.logger.Debug("OverlayFS sync completed")
+    // 1) Sync the overlayfs filesystem (where actual writes occur)
+    m.logger.Debug("Syncing OverlayFS filesystem via syncfs", "path", m.overlayTargetPath)
+    if err := syncFilesystemByFD(m.overlayTargetPath); err != nil {
+        return fmt.Errorf("failed to sync overlayfs via syncfs: %w", err)
+    }
+    m.logger.Debug("OverlayFS sync completed")
 	}
 
 	// 2) Sync the loopback mount
@@ -625,12 +624,8 @@ func (m *Manager) sync(ctx context.Context) error {
 	m.logger.Debug("Starting filesystem sync", "path", m.mountPath)
 	syncStart := time.Now()
 
-	syncCmd := exec.Command("sync", "-f", m.mountPath)
-	if output, err := syncCmd.CombinedOutput(); err != nil {
-		if len(output) > 0 {
-			return fmt.Errorf("sync failed: %w, output: %s", err, string(output))
-		}
-		return fmt.Errorf("sync failed: %w", err)
+	if err := syncFilesystemByFD(m.mountPath); err != nil {
+		return fmt.Errorf("syncfs failed: %w", err)
 	}
 
 	m.logger.Debug("Filesystem sync completed", "path", m.mountPath, "duration", time.Since(syncStart))
