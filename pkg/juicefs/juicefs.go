@@ -1446,6 +1446,7 @@ func (j *JuiceFS) monitorStatsProgress(ctx context.Context, mountPath string, ph
     var lastChange time.Time
     var lastNoChangeReport time.Time
     consecutiveErrors := 0
+    var prevData []byte
 
     for {
         select {
@@ -1467,11 +1468,23 @@ func (j *JuiceFS) monitorStatsProgress(ctx context.Context, mountPath string, ph
             consecutiveErrors = 0
             sum := sha256.Sum256(data)
             if !haveHash || sum != lastHash {
-                snippet := data
-                if len(snippet) > 200 {
-                    snippet = snippet[:200]
-                }
-                j.logger.Info("JuiceFS .stats changed", "phase", phase, "bytes", len(data), "sinceLastChange", time.Since(lastChange), "snippet", string(snippet))
+                // Compute a simple diff around the change region and log a truncated view
+                const maxOut = 300
+                changeType, changeAt, oldDiff, newDiff := ComputeByteDelta(prevData, data)
+                j.logger.Info(
+                    "JuiceFS .stats changed",
+                    "phase", phase,
+                    "bytes", len(data),
+                    "sinceLastChange", time.Since(lastChange),
+                    "changeType", changeType,
+                    "changeAt", changeAt,
+                    "oldDeltaLen", len(oldDiff),
+                    "newDeltaLen", len(newDiff),
+                    "oldDelta", TruncateBytes(oldDiff, maxOut),
+                    "newDelta", TruncateBytes(newDiff, maxOut),
+                )
+
+                // Update trackers
                 lastHash = sum
                 haveHash = true
                 lastChange = time.Now()
@@ -1479,6 +1492,8 @@ func (j *JuiceFS) monitorStatsProgress(ctx context.Context, mountPath string, ph
                 j.statsLastChange = lastChange
                 j.statsMu.Unlock()
                 lastNoChangeReport = time.Time{}
+                // Keep a copy of current data for next diff
+                prevData = append(prevData[:0], data...)
             } else {
                 // Log an occasional heartbeat if no changes for a while
                 if lastNoChangeReport.IsZero() || time.Since(lastNoChangeReport) >= 10*time.Second {

@@ -1,15 +1,15 @@
 package tmux
 
 import (
-	"context"
-	"fmt"
-	"os"
-	"os/exec"
-	"strings"
-	"testing"
-	"time"
+    "context"
+    "fmt"
+    "os"
+    "os/exec"
+    "strings"
+    "testing"
+    "time"
 
-	"github.com/superfly/sprite-env/pkg/tap"
+    "github.com/superfly/sprite-env/pkg/tap"
 )
 
 // Helper to create a test tmux socket
@@ -25,39 +25,49 @@ func createTestSocket(t *testing.T) string {
 
 // Helper to kill tmux server
 func killTmuxServer(socketPath string) {
-	cmd := exec.Command("tmux", "-S", socketPath, "kill-server")
-	cmd.Run()
+    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+    defer cancel()
+    _ = exec.CommandContext(ctx, "tmux", "-S", socketPath, "kill-server").Run()
 }
 
 // Helper to create a tmux session
 func createTmuxSession(t *testing.T, socketPath, sessionName string) {
-	// First try to kill any existing session with this name
-	killCmd := exec.Command("tmux", "-S", socketPath, "kill-session", "-t", sessionName)
-	killCmd.Run() // Ignore error - session might not exist
+    t.Helper()
+    // First try to kill any existing session with this name (short timeout)
+    ctxKill, cancelKill := context.WithTimeout(context.Background(), 1*time.Second)
+    _ = exec.CommandContext(ctxKill, "tmux", "-S", socketPath, "kill-session", "-t", sessionName).Run()
+    cancelKill()
 
-	cmd := exec.Command("tmux", "-S", socketPath, "new-session", "-d", "-s", sessionName)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("Failed to create session %s: %v (output: %s)", sessionName, err, string(output))
-	}
+    // Create a detached session and return immediately (short timeout)
+    ctxCreate, cancelCreate := context.WithTimeout(context.Background(), 3*time.Second)
+    defer cancelCreate()
+    cmd := exec.CommandContext(ctxCreate, "tmux", "-S", socketPath, "new-session", "-d", "-s", sessionName)
+    if err := cmd.Run(); err != nil {
+        t.Fatalf("Failed to create session %s: %v", sessionName, err)
+    }
 }
 
 // Helper to send keys to a tmux pane
 func sendKeysToPane(t *testing.T, socketPath, target, keys string) {
-	cmd := exec.Command("tmux", "-S", socketPath, "send-keys", "-t", target, keys)
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("Failed to send keys to %s: %v", target, err)
-	}
+    t.Helper()
+    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+    defer cancel()
+    if err := exec.CommandContext(ctx, "tmux", "-S", socketPath, "send-keys", "-t", target, keys).Run(); err != nil {
+        t.Fatalf("Failed to send keys to %s: %v", target, err)
+    }
 }
 
 // Helper to create a window in a session
 func createWindow(t *testing.T, socketPath, sessionName, windowName string) string {
-	cmd := exec.Command("tmux", "-S", socketPath, "new-window", "-t", sessionName, "-n", windowName, "-P", "-F", "#{window_id}")
-	output, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("Failed to create window: %v", err)
-	}
-	return strings.TrimSpace(string(output))
+    t.Helper()
+    ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+    defer cancel()
+    cmd := exec.CommandContext(ctx, "tmux", "-S", socketPath, "new-window", "-t", sessionName, "-n", windowName, "-P", "-F", "#{window_id}")
+    output, err := cmd.Output()
+    if err != nil {
+        t.Fatalf("Failed to create window: %v", err)
+    }
+    return strings.TrimSpace(string(output))
 }
 
 func TestWindowMonitorBasic(t *testing.T) {
