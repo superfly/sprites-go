@@ -41,9 +41,6 @@ type ActivityMonitor struct {
 	// started indicates whether the run loop is active; used to gate event APIs
 	started atomic.Bool
 
-    // stopped indicates Stop() was called; used to drop events after shutdown
-    stopped atomic.Bool
-
 	// Injection seams for testing
 	prepSuspendFn func(ctx context.Context) (cleanup func(), cancelled bool, err error)
 	suspendAPIFn  func(ctx context.Context) error
@@ -85,33 +82,47 @@ func (m *ActivityMonitor) Start(ctx context.Context) {
 	tap.Go(m.logger, m.errCh, func() {
 		m.run(ctx)
 	})
+
+	// Emit an immediate idle status snapshot for visibility without waiting 60s
+	currentCount := len(m.activities)
+	sources := make([]string, 0, len(m.activities))
+	for source := range m.activities {
+		sources = append(sources, source)
+	}
+	since := m.now().Sub(m.lastActivity)
+	remaining := m.idleAfter - since
+	if remaining < 0 {
+		remaining = 0
+	}
+	m.logger.Info("ActivityMonitor: idle status",
+		"active_count", currentCount,
+		"sources", sources,
+		"since_last_activity_s", since.Seconds(),
+		"idle_after_s", m.idleAfter.Seconds(),
+		"time_until_suspend_s", remaining.Seconds(),
+	)
 }
 
 // Stop immediately stops the activity monitor loop to prevent further suspend attempts
 func (m *ActivityMonitor) Stop() {
 	m.stopOnce.Do(func() {
 		// Prevent new events from enqueueing; non-blocking APIs will drop
-        m.started.Store(false)
-        m.stopped.Store(true)
+		m.started.Store(false)
 		close(m.stopCh)
 	})
 }
 
 // ActivityStarted records the start of an activity and signals the monitor
 func (m *ActivityMonitor) ActivityStarted(source string) {
-    // Drop events only after Stop() to avoid leaking into a dead monitor
-    if m.stopped.Load() {
-        m.logger.Info("ActivityMonitor: drop event - stopped", "source", source)
-        return
-    }
+	// Reject events if the monitor isn't running
+	if !m.started.Load() {
+		m.logger.Info("ActivityMonitor: drop event - not started", "source", source)
+		return
+	}
 	// Non-blocking send to avoid deadlocks/backpressure cascades
 	select {
 	case m.activityEventCh <- activityEvent{isStart: true, source: source}:
-        if m.started.Load() {
-            m.logger.Debug("ActivityMonitor: activity started", "source", source)
-        } else {
-            m.logger.Debug("ActivityMonitor: queued start before run loop", "source", source)
-        }
+		m.logger.Debug("ActivityMonitor: activity started", "source", source)
 	default:
 		m.logger.Warn("ActivityMonitor: drop event - buffer full", "source", source)
 	}
@@ -119,19 +130,15 @@ func (m *ActivityMonitor) ActivityStarted(source string) {
 
 // ActivityEnded records the end of an activity
 func (m *ActivityMonitor) ActivityEnded(source string) {
-    // Drop events only after Stop() to avoid leaking into a dead monitor
-    if m.stopped.Load() {
-        m.logger.Info("ActivityMonitor: drop event - stopped", "source", source)
-        return
-    }
+	// Reject events if the monitor isn't running
+	if !m.started.Load() {
+		m.logger.Info("ActivityMonitor: drop event - not started", "source", source)
+		return
+	}
 	// Non-blocking send to avoid deadlocks/backpressure cascades
 	select {
 	case m.activityEventCh <- activityEvent{isStart: false, source: source}:
-        if m.started.Load() {
-            m.logger.Debug("ActivityMonitor: activity ended", "source", source)
-        } else {
-            m.logger.Debug("ActivityMonitor: queued end before run loop", "source", source)
-        }
+		m.logger.Debug("ActivityMonitor: activity ended", "source", source)
 	default:
 		m.logger.Warn("ActivityMonitor: drop event - buffer full", "source", source)
 	}
@@ -268,7 +275,12 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 				m.lastActivity = m.now()
 			} else {
 				// Remove from registry
-				delete(m.activities, event.source)
+				if _, ok := m.activities[event.source]; !ok {
+					// Received an end event for an unknown source – log a warning for diagnosis
+					m.logger.Warn("ActivityMonitor: end for unknown source", "source", event.source)
+				} else {
+					delete(m.activities, event.source)
+				}
 
 				// If registry is now empty, start idle timer
 				if len(m.activities) == 0 && idleTimer == nil {

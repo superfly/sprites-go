@@ -74,7 +74,7 @@ func (s *System) initializeAPIServer() error {
 		SyncTargetPath:     syncTargetPath,
 		ProxyLocalhostIPv4: s.config.ProxyLocalhostIPv4,
 		ProxyLocalhostIPv6: s.config.ProxyLocalhostIPv6,
-        SpriteVersion:      getVersion(),
+		SpriteVersion:      getVersion(),
 	}
 
 	// API server will be no-op if ListenAddr is empty

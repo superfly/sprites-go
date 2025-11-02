@@ -1,15 +1,15 @@
 package tmux
 
 import (
-    "context"
-    "fmt"
-    "os"
-    "os/exec"
-    "strings"
-    "testing"
-    "time"
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+	"testing"
+	"time"
 
-    "github.com/superfly/sprite-env/pkg/tap"
+	"github.com/superfly/sprite-env/pkg/tap"
 )
 
 // Helper to create a test tmux socket
@@ -25,49 +25,68 @@ func createTestSocket(t *testing.T) string {
 
 // Helper to kill tmux server
 func killTmuxServer(socketPath string) {
-    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-    defer cancel()
-    _ = exec.CommandContext(ctx, "tmux", "-S", socketPath, "kill-server").Run()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = exec.CommandContext(ctx, "tmux", "-S", socketPath, "kill-server").Run()
 }
 
 // Helper to create a tmux session
 func createTmuxSession(t *testing.T, socketPath, sessionName string) {
-    t.Helper()
-    // First try to kill any existing session with this name (short timeout)
-    ctxKill, cancelKill := context.WithTimeout(context.Background(), 1*time.Second)
-    _ = exec.CommandContext(ctxKill, "tmux", "-S", socketPath, "kill-session", "-t", sessionName).Run()
-    cancelKill()
+	t.Helper()
+	// First try to kill any existing session with this name (short timeout)
+	ctxKill, cancelKill := context.WithTimeout(context.Background(), 1*time.Second)
+	_ = exec.CommandContext(ctxKill, "tmux", "-S", socketPath, "kill-session", "-t", sessionName).Run()
+	cancelKill()
 
-    // Create a detached session and return immediately (short timeout)
-    ctxCreate, cancelCreate := context.WithTimeout(context.Background(), 3*time.Second)
-    defer cancelCreate()
-    cmd := exec.CommandContext(ctxCreate, "tmux", "-S", socketPath, "new-session", "-d", "-s", sessionName)
-    if err := cmd.Run(); err != nil {
-        t.Fatalf("Failed to create session %s: %v", sessionName, err)
-    }
+	// Create a detached session and return immediately (short timeout)
+	ctxCreate, cancelCreate := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancelCreate()
+	cmd := exec.CommandContext(ctxCreate, "tmux", "-S", socketPath, "new-session", "-d", "-s", sessionName)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Failed to create session %s: %v", sessionName, err)
+	}
 }
 
 // Helper to send keys to a tmux pane
 func sendKeysToPane(t *testing.T, socketPath, target, keys string) {
-    t.Helper()
-    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-    defer cancel()
-    if err := exec.CommandContext(ctx, "tmux", "-S", socketPath, "send-keys", "-t", target, keys).Run(); err != nil {
-        t.Fatalf("Failed to send keys to %s: %v", target, err)
-    }
+	t.Helper()
+	// Ensure the session/window exists before sending
+	if err := waitForSessionReady(socketPath, target, 2*time.Second); err != nil {
+		t.Fatalf("tmux target %q not ready: %v", target, err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "tmux", "-S", socketPath, "send-keys", "-t", target, keys)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Failed to send keys to %s: %v", target, err)
+	}
+}
+
+// waitForSessionReady polls "tmux has-session" for the given target for up to maxWait.
+// Target is a session name in these tests (e.g., sprite-exec-777).
+func waitForSessionReady(socketPath, target string, maxWait time.Duration) error {
+	deadline := time.Now().Add(maxWait)
+	for time.Now().Before(deadline) {
+		if exec.Command("tmux", "-S", socketPath, "has-session", "-t", target).Run() == nil {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("tmux has-session did not succeed for %s within %s", target, maxWait)
 }
 
 // Helper to create a window in a session
 func createWindow(t *testing.T, socketPath, sessionName, windowName string) string {
-    t.Helper()
-    ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-    defer cancel()
-    cmd := exec.CommandContext(ctx, "tmux", "-S", socketPath, "new-window", "-t", sessionName, "-n", windowName, "-P", "-F", "#{window_id}")
-    output, err := cmd.Output()
-    if err != nil {
-        t.Fatalf("Failed to create window: %v", err)
-    }
-    return strings.TrimSpace(string(output))
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "tmux", "-S", socketPath, "new-window", "-t", sessionName, "-n", windowName, "-P", "-F", "#{window_id}")
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("Failed to create window: %v", err)
+	}
+	return strings.TrimSpace(string(output))
 }
 
 func TestWindowMonitorBasic(t *testing.T) {
@@ -90,14 +109,13 @@ func TestWindowMonitorBasic(t *testing.T) {
 	// Create window monitor with test socket
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
 	wm := NewWindowMonitor(ctx, "test-monitor").
 		WithSocketPath(socketPath).
 		WithConfigPath(""). // No config file for tests
 		WithCommand(exec.Command("tmux"))
-
-	// Start the monitor with modified commands
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 
 	// We need to override the command creation in the monitor
 	// For this test, we'll create a modified version that accepts socket path
@@ -200,13 +218,13 @@ func TestWindowMonitorMultipleSessions(t *testing.T) {
 
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
 	wm := NewWindowMonitor(ctx, "test-monitor").
 		WithSocketPath(socketPath).
 		WithConfigPath(""). // No config file for tests
 		WithCommand(exec.Command("tmux"))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
 
 	// Start the monitor
 	if err := wm.Start(ctx); err != nil {
@@ -273,13 +291,13 @@ func TestWindowMonitorNewWindowDetection(t *testing.T) {
 
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
 	wm := NewWindowMonitor(ctx, "test-monitor").
 		WithSocketPath(socketPath).
 		WithConfigPath(""). // No config file for tests
 		WithCommand(exec.Command("tmux"))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 
 	// Start monitor
 	if err := wm.Start(ctx); err != nil {
@@ -333,13 +351,13 @@ func TestWindowMonitorWindowClose(t *testing.T) {
 
 	ctx := context.Background()
 	ctx = tap.WithLogger(ctx, logger)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
 	wm := NewWindowMonitor(ctx, "test-monitor").
 		WithSocketPath(socketPath).
 		WithConfigPath(""). // No config file for tests
 		WithCommand(exec.Command("tmux"))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 
 	// Start the monitor
 	if err := wm.Start(ctx); err != nil {

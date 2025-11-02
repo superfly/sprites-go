@@ -45,9 +45,9 @@ type Options struct {
 	// WrapCmd is an optional function to wrap commands (e.g., container exec)
 	WrapCmd func(*exec.Cmd) *exec.Cmd
 	Logger  *slog.Logger
-    // EventCallback, if set, will be invoked for each WindowMonitorEvent emitted
-    // by the internal WindowMonitor. Only a single callback is supported.
-    EventCallback func(WindowMonitorEvent)
+	// EventCallback, if set, will be invoked for each WindowMonitorEvent emitted
+	// by the internal WindowMonitor. Only a single callback is supported.
+	EventCallback func(WindowMonitorEvent)
 }
 
 // Manager provides a configurable tmux session manager
@@ -68,8 +68,8 @@ type Manager struct {
 
 	// removed state for wrapped metadata; API layer handles wrappers
 
-    // Optional single subscriber for window events
-    eventCallback func(WindowMonitorEvent)
+	// Optional single subscriber for window events
+	eventCallback func(WindowMonitorEvent)
 }
 
 func NewManager(ctx context.Context, opts Options) *Manager {
@@ -93,12 +93,16 @@ func NewManager(ctx context.Context, opts Options) *Manager {
 		wrapCmd:        opts.WrapCmd,
 		monitorStartCh: make(chan struct{}, 1),
 		paneCallbacks:  make(map[string]PaneLifecycleCallback),
-        eventCallback:  opts.EventCallback,
+		eventCallback:  opts.EventCallback,
 	}
 
 	m.initializeNextID()
 	go m.monitorManager(ctx)
 	go m.paneMonitor(ctx)
+	// Start persistent window events pump to ensure callbacks are never lost
+	if m.eventCallback != nil {
+		go m.windowEventsPump(ctx)
+	}
 
 	return m
 }
@@ -144,27 +148,46 @@ func (m *Manager) monitorManager(ctx context.Context) {
 					m.logger.Debug("monitorManager: window monitor started")
 				}
 
-                // If an event callback is configured, attach a pump that forwards
-                // window monitor events to the callback. This avoids exposing
-                // the raw channel to consumers.
-                if m.windowMonitor != nil && m.eventCallback != nil {
-                    evCh := m.windowMonitor.GetEventChannel()
-                    go func(ch <-chan WindowMonitorEvent, cb func(WindowMonitorEvent)) {
-                        for ev := range ch {
-                            // Deliver in a safe goroutine to avoid blocking the pump
-                            go func(e WindowMonitorEvent) {
-                                defer func() {
-                                    if r := recover(); r != nil && m.logger != nil {
-                                        m.logger.Warn("window event callback panicked", "panic", r)
-                                    }
-                                }()
-                                cb(e)
-                            }(ev)
-                        }
-                    }(evCh, m.eventCallback)
-                }
+				// Event pump runs persistently via windowEventsPump()
 			}
 		}
+	}
+}
+
+// windowEventsPump persistently attaches to the window monitor events channel
+// and forwards events to the configured eventCallback, reattaching if the
+// monitor restarts or its channel closes.
+func (m *Manager) windowEventsPump(ctx context.Context) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if m.eventCallback == nil {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		if m.windowMonitor == nil {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		ch := m.windowMonitor.GetEventChannel()
+		if ch == nil {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		// Range until channel closes, then loop to reattach
+		for ev := range ch {
+			e := ev
+			go func() {
+				defer func() {
+					if r := recover(); r != nil && m.logger != nil {
+						m.logger.Warn("window event callback panicked", "panic", r)
+					}
+				}()
+				m.eventCallback(e)
+			}()
+		}
+		// Channel closed; reattach on next iteration
 	}
 }
 

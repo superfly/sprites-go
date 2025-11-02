@@ -372,7 +372,14 @@ func (wm *WindowMonitor) handleEvent(event TmuxEvent) {
 
 // getWindowIDFromPane queries tmux to find the window ID for a pane
 func (wm *WindowMonitor) getWindowIDFromPane(paneID string) string {
-	// Use display-message to get window ID
+	// Prefer control-mode parser state to avoid spawning subprocesses
+	if wm.parser != nil {
+		if wid := wm.parser.LookupWindowIDForPane(paneID); wid != "" {
+			return wid
+		}
+	}
+
+	// Fallback: use a one-shot tmux query (legacy path)
 	args := []string{}
 	if wm.configPath != "" {
 		args = append(args, "-f", wm.configPath)
@@ -382,7 +389,7 @@ func (wm *WindowMonitor) getWindowIDFromPane(paneID string) string {
 	cmd := wm.buildTmuxCommand(args)
 	output, err := cmd.Output()
 	if err != nil {
-		wm.logger.Debug("Failed to get window ID for pane", "paneID", paneID, "error", err)
+		wm.logger.Debug("Failed to get window ID for pane (fallback)", "paneID", paneID, "error", err)
 		return ""
 	}
 
@@ -494,7 +501,9 @@ func (wm *WindowMonitor) discoverAndLinkWindows() {
 // linkWindowFromPane attempts to link a window to the monitor session based on its pane
 func (wm *WindowMonitor) linkWindowFromPane(paneID, windowID string) {
 	if windowID == "" {
-		wm.logger.Warn("Cannot link window from pane: empty window ID", "paneID", paneID)
+		// During shutdown/close events tmux may emit pane output after the window is gone
+		// Avoid noisy logs and simply drop the attempt.
+		wm.logger.Debug("Cannot link window from pane: empty window ID", "paneID", paneID)
 		return
 	}
 

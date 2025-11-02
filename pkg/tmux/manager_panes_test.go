@@ -3,7 +3,6 @@ package tmux
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"testing"
 	"time"
@@ -21,16 +20,15 @@ func TestManager_GetSessionPanePIDs_Integration(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not found")
 	}
-	if _, err := os.Stat("/.sprite/bin/tmux"); err != nil {
-		t.Skip("sprite tmux not available")
-	}
+	socketPath := createTestSocket(t)
+	defer killTmuxServer(socketPath)
 
 	ctx := context.Background()
-	m := NewManager(ctx, Options{})
+	m := NewManager(ctx, Options{SocketPath: socketPath, TmuxBinary: "tmux", ConfigPath: ""})
 
 	sessionID := "test-pane-0"
 	sessionName := fmt.Sprintf("sprite-exec-%s", sessionID)
-	cmd := exec.Command("/.sprite/bin/tmux", "-f", "/.sprite/etc/tmux.conf", "-S", "/.sprite/tmp/mux",
+	cmd := exec.Command("tmux", "-S", socketPath,
 		"new-session", "-d", "-s", sessionName, "/bin/sh", "-c", "sleep 300")
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("create tmux session: %v", err)

@@ -213,3 +213,16 @@ func (p *TmuxControlModeParser) RefreshWindowsAndPanes() error {
 	}
 	return p.ListPanes()
 }
+
+// LookupWindowIDForPane returns the window ID for a given pane ID using
+// the parser's in-memory state. It checks both mapped and unmapped panes.
+// Returns empty string if unknown.
+func (p *TmuxControlModeParser) LookupWindowIDForPane(paneID string) string {
+	if pane, ok := p.panes[paneID]; ok && pane != nil {
+		return pane.WindowID
+	}
+	if pane, ok := p.unmappedPanes[paneID]; ok && pane != nil {
+		return pane.WindowID
+	}
+	return ""
+}

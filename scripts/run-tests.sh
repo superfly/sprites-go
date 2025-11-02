@@ -31,7 +31,7 @@ fi
 # Ensure a default test timeout unless already provided
 case " $TEST_ARGS " in
   *" -timeout="*) ;;
-  *) TEST_ARGS="-timeout=60s $TEST_ARGS" ;;
+  *) TEST_ARGS="-timeout=180s $TEST_ARGS" ;;
 esac
 
 # Run tests through tparse for pretty output

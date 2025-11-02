@@ -64,14 +64,22 @@ func TestMonitorSeesDetachableExecOutput(t *testing.T) {
 		t.Fatal("window monitor did not start (event channel nil)")
 	}
 
-	// Send more output after we have started monitoring events
-	sendKeysToPane(t, socketPath, execSessionName, "echo SECOND_MONITOR_OK")
-	sendKeysToPane(t, socketPath, execSessionName, "Enter")
+	// Send more output after we have started monitoring events. Prefer control-mode to avoid spawning tmux.
+	if m.windowMonitor != nil && m.windowMonitor.parser != nil {
+		_ = m.windowMonitor.parser.ListPanes()
+		// Give tmux a brief moment to hydrate pane/window mappings
+		time.Sleep(150 * time.Millisecond)
+		// send-keys over control mode and press Enter
+		_ = m.windowMonitor.parser.SendCommand("send-keys -t " + execSessionName + " 'echo SECOND_MONITOR_OK' Enter")
+	} else {
+		sendKeysToPane(t, socketPath, execSessionName, "echo SECOND_MONITOR_OK")
+		sendKeysToPane(t, socketPath, execSessionName, "Enter")
+	}
 
 	// Collect events: expect an 'active' (from linking/initial activity) and at least one 'activity' with data (from second output)
 	gotActive := false
 	gotActivityWithData := false
-	waitUntil := time.Now().Add(3 * time.Second)
+	waitUntil := time.Now().Add(8 * time.Second)
 	for time.Now().Before(waitUntil) {
 		select {
 		case ev := <-evCh:

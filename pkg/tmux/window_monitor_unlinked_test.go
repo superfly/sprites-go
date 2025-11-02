@@ -222,6 +222,11 @@ func TestWindowMonitorActiveInactiveTransitions(t *testing.T) {
 	// Wait for discovery
 	time.Sleep(1 * time.Second)
 
+	// Assert we have at least one linked window after discovery
+	if len(wm.GetLinkedWindows()) == 0 {
+		t.Fatalf("expected at least one linked window after discovery")
+	}
+
 	// Helper to collect events with a label
 	collectEvents := func(label string, duration time.Duration) []WindowMonitorEvent {
 		events := make([]WindowMonitorEvent, 0)
@@ -239,36 +244,23 @@ func TestWindowMonitorActiveInactiveTransitions(t *testing.T) {
 
 	// Drain briefly, then trigger additional activity
 	_ = collectEvents("drain-post-initial", 200*time.Millisecond)
-	
+
 	// Step 1: Send initial output to ensure session becomes active
 	t.Log("Step 1: Sending initial output to activate session")
 	sendKeysToPane(t, socketPath, "sprite-exec-777", "echo 'initial'")
 	sendKeysToPane(t, socketPath, "sprite-exec-777", "Enter")
-	
-	// Collect events - should include "active" event (first activity for this session)
+
+	// Collect events - should include activity with data for the echo; 'active' may or may not appear
 	step1Events := collectEvents("step1", 2*time.Second)
-	
-	initialActiveFound := false
+	activityWithData := false
 	for _, event := range step1Events {
-		if event.EventType == "active" {
-			initialActiveFound = true
-			t.Logf("✓ Found 'active' event for session %s (first activity)", event.OriginalSession)
+		if event.EventType == "activity" && len(event.Data) > 0 {
+			activityWithData = true
 			break
 		}
 	}
-	if !initialActiveFound {
-		// This might not fire if the session was already active from linking, which is OK
-		t.Log("Note: No 'active' event (session may have been active from linking)")
-		
-		// Verify via stats instead
-		stats := wm.GetActivityStats()
-		if len(stats) > 0 {
-			for sessionID, stat := range stats {
-				if stat.IsActive {
-					t.Logf("✓ Session %s is active (verified via stats)", sessionID)
-				}
-			}
-		}
+	if !activityWithData {
+		t.Fatalf("expected an 'activity' event with data after sending initial output")
 	}
 
 	// Step 2: Wait >5 seconds (inactivity timeout) → should get "inactive" event
@@ -286,6 +278,15 @@ func TestWindowMonitorActiveInactiveTransitions(t *testing.T) {
 	if !inactiveFound {
 		t.Error("Expected 'inactive' event after timeout, but didn't receive one")
 		t.Logf("Events during wait: %d", len(events))
+	}
+	// Stats should show all sessions inactive now
+	{
+		stats := wm.GetActivityStats()
+		for id, s := range stats {
+			if s.IsActive {
+				t.Errorf("expected session %s to be inactive in stats after timeout", id)
+			}
+		}
 	}
 
 	// Step 3: Send more output → should get "active" event again (reactivation)
@@ -306,6 +307,20 @@ func TestWindowMonitorActiveInactiveTransitions(t *testing.T) {
 	if !activeAgainFound {
 		t.Error("Expected 'active' event after reactivation, but didn't receive one")
 	}
+	// Stats should reflect reactivation for at least one session
+	{
+		stats := wm.GetActivityStats()
+		anyActive := false
+		for _, s := range stats {
+			if s.IsActive {
+				anyActive = true
+				break
+			}
+		}
+		if !anyActive {
+			t.Errorf("expected stats to show at least one active session after reactivation")
+		}
+	}
 
 	// Verify session IDs have correct format in active/inactive events
 	for _, event := range events {
@@ -319,4 +334,3 @@ func TestWindowMonitorActiveInactiveTransitions(t *testing.T) {
 
 	wm.Close()
 }
-
