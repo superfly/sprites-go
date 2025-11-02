@@ -96,20 +96,36 @@ func (nm *NamespaceMonitor) SubscribeInNamespace(pid int, namespace string, call
 
 	log.Printf("Port watcher: subscribed to PID %d in namespace %s (will monitor this PID and its children)", pid, namespace)
 
+	// Immediately notify about any ports that are already open for this PID
+	// Check the namespace watcher's currentPorts map
+	watcher := nm.monitors[namespace]
+	for portKey, portPID := range watcher.currentPorts {
+		// Check if this port belongs to the subscribed PID or its children
+		if isPIDInTree(portPID, pid) {
+			// Parse the portKey "addr:port" to extract address and port
+			parts := strings.Split(portKey, ":")
+			if len(parts) >= 2 {
+				portStr := parts[len(parts)-1]
+				port, err := strconv.Atoi(portStr)
+				if err == nil {
+					addr := strings.Join(parts[:len(parts)-1], ":")
+					// Send open event in a goroutine to avoid blocking
+					go callback(Port{
+						Port:    port,
+						PID:     portPID,
+						Address: addr,
+						State:   "open",
+					})
+				}
+			}
+		}
+	}
+
 	// Start ticker if this is the first subscription
-	startedTicker := false
 	if nm.tickerCancel == nil {
 		tickerCtx, tickerCancel := context.WithCancel(context.Background())
 		nm.tickerCancel = tickerCancel
-		startedTicker = true
 		go nm.run(tickerCtx)
-	}
-
-	// Trigger an immediate scan for new subscriptions to avoid waiting for first tick
-	// This is especially important in tests and when subscribing to already-listening ports
-	if startedTicker {
-		// Run scan in background to avoid blocking subscription
-		go nm.scanAllNamespaces()
 	}
 
 	return nil

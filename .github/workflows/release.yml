@@ -2,26 +2,10 @@ name: Release
 
 on:
   push:
-    branches:
-      - main
-      - dev-release
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
       - 'v[0-9]+.[0-9]+.[0-9]+-*'
   workflow_dispatch:
-  workflow_run:
-    workflows: ["Tests"]
-    types: ["completed"]
-  workflow_call:
-    inputs:
-      tag_suffix:
-        description: "Tag suffix or full tag to use for release (e.g., dev-<sha>)"
-        required: true
-        type: string
-      tag_latest:
-        description: "Whether to also tag as latest"
-        required: false
-        type: boolean
 
 jobs:
   context:
@@ -58,40 +42,30 @@ jobs:
     - name: Determine triggering context
       id: flags
       run: |
-        if [[ "${{ github.event_name }}" == "workflow_run" ]] && \
-           [[ "${{ github.event.workflow_run.name }}" == "Tests" ]] && \
-           [[ "${{ github.event.workflow_run.conclusion }}" == "success" ]] && \
-           { [[ "${{ github.event.workflow_run.head_branch }}" == "main" ]] || [[ "${{ github.event.workflow_run.head_branch }}" == "dev-release" ]]; }; then
+        # workflow_dispatch on main/dev-release means triggered by Tests workflow
+        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]] && \
+           { [[ "${{ github.ref_name }}" == "main" ]] || [[ "${{ github.ref_name }}" == "dev-release" ]]; }; then
           echo "is_main_run=true" >> $GITHUB_OUTPUT
           echo "tag_latest=false" >> $GITHUB_OUTPUT
-        elif [[ "${{ github.event_name }}" == "push" ]] && [[ "${{ github.ref_type }}" == "branch" ]] && { [[ "${{ github.ref_name }}" == "main" ]] || [[ "${{ github.ref_name }}" == "dev-release" ]]; }; then
-          echo "is_main_run=true" >> $GITHUB_OUTPUT
-          echo "tag_latest=false" >> $GITHUB_OUTPUT
+        # Push with tag (version release)
+        elif [[ "${{ github.ref_type }}" == "tag" ]]; then
+          echo "is_main_run=false" >> $GITHUB_OUTPUT
+          # Tag latest on true version tags without suffix (e.g., v1.2.3, not v1.2.3-beta)
+          echo "tag_latest=${{ !contains(github.ref_name, '-') }}" >> $GITHUB_OUTPUT
+        # Manual workflow_dispatch on non-main/dev-release branches
         else
           echo "is_main_run=false" >> $GITHUB_OUTPUT
-          # default: tag latest on true version tags without suffix
-          echo "tag_latest=${{ !contains(github.ref_name, '-') }}" >> $GITHUB_OUTPUT
+          echo "tag_latest=false" >> $GITHUB_OUTPUT
         fi
     - name: Compute SHA and ref
       id: sha
       run: |
-        if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
-          echo "sha=${{ github.event.workflow_run.head_sha }}" >> $GITHUB_OUTPUT
-          echo "short_sha=${{ github.event.workflow_run.head_sha }}" | sed -E 's/^short_sha=([a-f0-9]{7}).*/short_sha=\1/' >> $GITHUB_OUTPUT
-        else
-          echo "sha=${GITHUB_SHA}" >> $GITHUB_OUTPUT
-          echo "short_sha=${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
-        fi
+        echo "sha=${GITHUB_SHA}" >> $GITHUB_OUTPUT
+        echo "short_sha=${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
     - name: Compute ref name
       id: ref
       run: |
-        if [[ "${{ github.ref_type }}" == "tag" ]]; then
-          echo "ref_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-        elif [[ "${{ github.event_name }}" == "workflow_run" ]]; then
-          echo "ref_name=${{ github.event.workflow_run.head_branch }}" >> $GITHUB_OUTPUT
-        else
-          echo "ref_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-        fi
+        echo "ref_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
     - name: Compute tag suffix
       id: suffix
       run: |

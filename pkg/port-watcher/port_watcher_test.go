@@ -170,28 +170,31 @@ func TestPortWatcherIntegration(t *testing.T) {
 
 	// Start a process inside the sprite namespace that will open a port
 	// Use a fixed port for simplicity since we control the namespace
+	// Use socat instead of nc for a more reliable persistent listener
 	expectedPort := 12346
-	cmd = exec.Command("ip", "netns", "exec", "sprite", "nc", "-l", "127.0.0.1", fmt.Sprintf("%d", expectedPort))
+	cmd = exec.Command("ip", "netns", "exec", "sprite", "socat",
+		fmt.Sprintf("TCP-LISTEN:%d,bind=127.0.0.1,reuseaddr,fork", expectedPort),
+		"/dev/null")
 
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("Failed to start listener in namespace: %v", err)
 	}
 	defer cmd.Process.Kill()
 
-	// The actual process inside the namespace is nc, not the ip command
-	// We need to find the PID of nc inside the namespace
-	time.Sleep(100 * time.Millisecond) // Give nc time to start
+	// The actual process inside the namespace is socat, not the ip command
+	// We need to find the PID of socat inside the namespace
+	time.Sleep(200 * time.Millisecond) // Give socat time to start and bind
 
-	// Find the nc process
-	findCmd := exec.Command("ip", "netns", "exec", "sprite", "pidof", "nc")
+	// Find the socat process
+	findCmd := exec.Command("ip", "netns", "exec", "sprite", "pidof", "socat")
 	output, err := findCmd.Output()
 	if err != nil {
-		t.Fatalf("Failed to find nc process: %v", err)
+		t.Fatalf("Failed to find socat process: %v", err)
 	}
 
 	var pid int
 	if _, err := fmt.Sscanf(strings.TrimSpace(string(output)), "%d", &pid); err != nil {
-		t.Fatalf("Failed to parse nc PID: %v", err)
+		t.Fatalf("Failed to parse socat PID: %v", err)
 	}
 
 	t.Logf("Started listener in sprite namespace on port %d (PID: %d)", expectedPort, pid)

@@ -100,5 +100,20 @@ jobs:
       id: s
       run: echo "short=${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
 
-  
+  trigger-release:
+    name: Trigger Release
+    needs: [test-lib]
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev-release')
+    permissions:
+      actions: write
+    steps:
+    - name: Trigger Release Workflow
+      run: |
+        gh workflow run release.yml --ref ${{ github.ref_name }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
 
