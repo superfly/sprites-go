@@ -47,11 +47,32 @@ jobs:
         submodules: recursive
         token: ${{ secrets.GH_PAT || github.token }}
 
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: 'go.mod'
+        cache-dependency-path: go.sum
+
+    - name: Cache workspace Go build cache
+      uses: actions/cache@v4
+      with:
+        path: tmp/go-build
+        key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-build-
+
+    - name: Cache workspace Go module cache
+      uses: actions/cache@v4
+      with:
+        path: tmp/go-mod
+        key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-mod-
+
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Build test Docker image (non-main)
-      if: ${{ github.ref != 'refs/heads/main' }}
+    - name: Build test Docker image
       uses: docker/build-push-action@v6
       with:
         context: .
@@ -59,23 +80,17 @@ jobs:
         push: false
         load: true
         tags: sprite-env-tests:latest
-        cache-from: type=gha,scope=main
-
-    - name: Build test Docker image (main, cache save)
-      if: ${{ github.ref == 'refs/heads/main' }}
-      uses: docker/build-push-action@v6
-      with:
-        context: .
-        file: ./Dockerfile.test
-        push: false
-        load: true
-        tags: sprite-env-tests:latest
-        cache-from: type=gha,scope=main
-        cache-to: type=gha,mode=max,scope=main
+        # Cache configuration: shared cache across all branches for test builds
+        # All branches benefit from the same Docker layer cache since Dockerfile is the same
+        cache-from: type=gha,scope=test
+        cache-to: type=gha,mode=max,scope=test
 
     - name: Run tests in Docker
       id: run_tests
       run: |
+        # Ensure workspace-local Go cache directories exist
+        mkdir -p tmp/go-build tmp/go-mod
+        
         docker run --rm --privileged \
           -e SPRITE_TEST_DOCKER=1 \
           -e CI=true \
@@ -88,17 +103,6 @@ jobs:
       if: always() && steps.run_tests.outcome != 'skipped' && hashFiles('test-results/test-summary.md') != ''
       run: |
         cat test-results/test-summary.md >> $GITHUB_STEP_SUMMARY
-
-  short-sha:
-    name: Compute short SHA
-    runs-on:
-      group: sprite-env-amd64
-    outputs:
-      short: ${{ steps.s.outputs.short }}
-    steps:
-    - name: Compute
-      id: s
-      run: echo "short=${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
 
   trigger-release:
     name: Trigger Release

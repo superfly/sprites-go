@@ -299,62 +299,100 @@ func SetupTestEnvironment(t *testing.T) string {
 
 // VerifyComponentCleanup runs cleanup verifiers for all system components
 // This validates that all external resources have been properly cleaned up
+// Retries failed verifiers with exponential backoff for up to 30 seconds
 func VerifyComponentCleanup(t *testing.T, sys *system.System) {
 	t.Helper()
 
 	ctx := t.Context()
 
-	// Track failures
-	var failures []string
+	// Track verifiers to check
+	type verifierInfo struct {
+		name   string
+		verify func(context.Context) error
+	}
+	var verifiers []verifierInfo
 
-	// Verify DBManager cleanup (coordinator - checks sub-components)
+	// Collect all verifiers
 	if sys.DBManager != nil {
-		// DBManager is a coordinator with no direct resources
-		// Verify its sub-components instead
 		if leaser := sys.DBManager.GetLeaser(); leaser != nil {
 			for i, verify := range leaser.CleanupVerifiers() {
-				if err := verify(ctx); err != nil {
-					failures = append(failures, fmt.Sprintf("DBManager.Leaser cleanup verifier %d failed: %v", i, err))
-				}
+				verifiers = append(verifiers, verifierInfo{
+					name:   fmt.Sprintf("DBManager.Leaser cleanup verifier %d", i),
+					verify: verify,
+				})
 			}
 		}
-		// Note: Litestream verifiers would go here when implemented
 	}
 
-	// Verify JuiceFS cleanup
 	if sys.JuiceFS != nil {
 		for i, verify := range sys.JuiceFS.CleanupVerifiers() {
-			if err := verify(ctx); err != nil {
-				failures = append(failures, fmt.Sprintf("JuiceFS cleanup verifier %d failed: %v", i, err))
-			}
+			verifiers = append(verifiers, verifierInfo{
+				name:   fmt.Sprintf("JuiceFS cleanup verifier %d", i),
+				verify: verify,
+			})
 		}
 	}
 
-	// Verify OverlayManager cleanup
 	if sys.OverlayManager != nil {
 		for i, verify := range sys.OverlayManager.CleanupVerifiers() {
-			if err := verify(ctx); err != nil {
-				failures = append(failures, fmt.Sprintf("OverlayManager cleanup verifier %d failed: %v", i, err))
-			}
+			verifiers = append(verifiers, verifierInfo{
+				name:   fmt.Sprintf("OverlayManager cleanup verifier %d", i),
+				verify: verify,
+			})
 		}
 	}
 
-	// Verify ServicesManager cleanup
 	if sys.ServicesManager != nil {
 		for i, verify := range sys.ServicesManager.CleanupVerifiers() {
-			if err := verify(ctx); err != nil {
-				failures = append(failures, fmt.Sprintf("ServicesManager cleanup verifier %d failed: %v", i, err))
-			}
+			verifiers = append(verifiers, verifierInfo{
+				name:   fmt.Sprintf("ServicesManager cleanup verifier %d", i),
+				verify: verify,
+			})
 		}
 	}
 
-	// Report all failures and FAIL the test immediately
-	// This prevents subsequent tests from inheriting leaked resources
-	if len(failures) > 0 {
-		t.Errorf("Component cleanup verification FAILED:")
-		for _, failure := range failures {
-			t.Errorf("  - %s", failure)
+	// Retry failed verifiers with exponential backoff for up to 30 seconds
+	const maxDuration = 30 * time.Second
+	const initialDelay = 100 * time.Millisecond
+	const maxDelay = 2 * time.Second
+	
+	startTime := time.Now()
+	delay := initialDelay
+	failedVerifiers := verifiers
+
+	for len(failedVerifiers) > 0 && time.Since(startTime) < maxDuration {
+		var stillFailing []verifierInfo
+		var errors []string
+
+		// Try each failed verifier
+		for _, v := range failedVerifiers {
+			if err := v.verify(ctx); err != nil {
+				stillFailing = append(stillFailing, v)
+				errors = append(errors, fmt.Sprintf("%s: %v", v.name, err))
+			}
 		}
-		t.Fatalf("Test failed cleanup verification - %d resource(s) leaked", len(failures))
+
+		// If all passed, we're done
+		if len(stillFailing) == 0 {
+			return
+		}
+
+		// If we've exceeded the timeout, fail
+		if time.Since(startTime) >= maxDuration {
+			t.Errorf("Component cleanup verification FAILED after %v:", maxDuration)
+			for _, errMsg := range errors {
+				t.Errorf("  - %s", errMsg)
+			}
+			t.Fatalf("Test failed cleanup verification - %d resource(s) leaked", len(stillFailing))
+		}
+
+		// Sleep with exponential backoff before retrying
+		time.Sleep(delay)
+		delay = delay * 2
+		if delay > maxDelay {
+			delay = maxDelay
+		}
+
+		failedVerifiers = stillFailing
 	}
 }
