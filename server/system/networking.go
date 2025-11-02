@@ -89,11 +89,11 @@ func (s *System) initializeAPIServer() error {
 	}
 
 	// Wire HTTP activity observation immediately
-	apiServer.SetActivityObserver(func(start bool, source string) {
+	apiServer.SetActivityObserver(func(start bool) {
 		if start {
-			s.ActivityMonitor.ActivityStarted(source)
+			s.ActivityMonitor.ActivityStarted("http")
 		} else {
-			s.ActivityMonitor.ActivityEnded(source)
+			s.ActivityMonitor.ActivityEnded("http")
 		}
 	})
 

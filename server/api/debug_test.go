@@ -177,6 +177,15 @@ func (m *mockSystemManager) WhenStorageReady(ctx context.Context) error {
 	return nil
 }
 
+func (m *mockSystemManager) WhenPolicyRunning(ctx context.Context) error {
+    // Mock always returns immediately as if policy manager is ready
+    return nil
+}
+
+func (m *mockSystemManager) GetPolicyConfigDir() string {
+    return os.TempDir()
+}
+
 func (m *mockSystemManager) SyncOverlay(ctx context.Context) (func() error, error) {
 	return func() error { return nil }, nil
 }

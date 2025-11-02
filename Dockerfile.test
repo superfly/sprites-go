@@ -87,7 +87,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && \
     apt-get install -y sqlite3 bash e2fsprogs fio jq nano coreutils \
     lvm2 thin-provisioning-tools drbd-utils \
-    parted gdisk util-linux fdisk xfsprogs fuse3 curl iproute2 nftables iputils-ping vim rsync dnsmasq dnsmasq-base socat libcap2-bin \
+    parted gdisk util-linux fdisk xfsprogs fuse3 curl iproute2 nftables conntrack iputils-ping vim rsync dnsmasq dnsmasq-base socat libcap2-bin \
     # Additional packages for testing
     build-essential git make ca-certificates wget procps netcat-openbsd tmux util-linux dnsutils \
     && apt-get clean && \

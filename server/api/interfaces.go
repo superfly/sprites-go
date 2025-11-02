@@ -58,6 +58,10 @@ type SystemManager interface {
 	// Takes a sprite info struct (JSON-compatible), returns a response struct (JSON-compatible)
 	// Uses interface{} to avoid import cycles between server/api and server/system
 	SetSpriteEnvironment(ctx context.Context, info interface{}) (interface{}, error)
+
+    // Policy manager readiness and configuration
+    WhenPolicyRunning(ctx context.Context) error
+    GetPolicyConfigDir() string
 }
 
 // ProcessManager interface for process operations

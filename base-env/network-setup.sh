@@ -16,13 +16,13 @@ fi
 NS_NAME=sprite
 VETH_HOST=spr0-host
 VETH_CONT=spr0
-IPV4_CIDR=10.10.0.0/24
-IPV4_HOST=10.10.0.1
-IPV4_CONT=10.10.0.2
+IPV4_CIDR=10.0.0.0/30
+IPV4_HOST=10.0.0.2
+IPV4_CONT=10.0.0.1
 
-IPV6_CIDR=fd00::/64
-IPV6_HOST=fd00::1
-IPV6_CONT=fd00::2
+IPV6_CIDR=fdf::/120
+IPV6_HOST=fdf::2
+IPV6_CONT=fdf::1
 
 OUT_IF=eth0  # change if your uplink is different
 
@@ -58,7 +58,12 @@ cleanup_nftables() {
     if ! command -v nft &>/dev/null; then
         return 0
     fi
+    # Clean up host namespace NAT
     nft delete table inet sprite_nat 2>/dev/null || true
+    # Clean up container namespace NAT
+    if ip netns list | grep -q "^${NS_NAME}\s"; then
+        ip netns exec $NS_NAME nft delete table ip nat 2>/dev/null || true
+    fi
 }
 
 # Full cleanup function - removes all network configuration
@@ -148,10 +153,12 @@ cleanup() {
     echo "✅ Network namespace '$NS_NAME' cleanup completed"
 }
 
-# Setup NAT (masquerade) using nftables. Forward filter and DNAT are handled elsewhere.
+# Setup NAT (masquerade) using nftables. Forward filter is handled by policy manager.
 setup_nat() {
     # Clean up any existing rules first
     cleanup_nftables
+    
+    # === Host namespace NAT ===
     # Create NAT table
     nft add table inet sprite_nat
 
@@ -169,6 +176,21 @@ setup_nat() {
     ip6 saddr $IPV6_CIDR \
     ip6 daddr != { fd00::/8, fe80::/10, ::1/128, ff00::/8 } \
     oifname "$OUT_IF" masquerade
+
+    # === Container namespace NAT (DNAT to localhost) ===
+    # IPv4 NAT - redirect container IP to localhost for services
+    ip netns exec $NS_NAME nft add table ip nat
+    ip netns exec $NS_NAME nft add chain ip nat prerouting { type nat hook prerouting priority -100 \; }
+    ip netns exec $NS_NAME nft add chain ip nat output { type nat hook output priority -100 \; }
+
+    # DNAT: host→container traffic to 10.10.0.2 → 127.0.0.1 (for port forwarding)
+    ip netns exec $NS_NAME nft add rule ip nat prerouting iifname "$VETH_CONT" ip daddr $IPV4_CONT tcp dport != 0 dnat to 127.0.0.1
+
+    # DNAT: local container traffic to 10.10.0.2 → 127.0.0.1 (for localhost access)
+    ip netns exec $NS_NAME nft add rule ip nat output ip daddr $IPV4_CONT tcp dport != 0 dnat to 127.0.0.1
+
+    # IPv6: No DNAT needed - fd00::2 is bound directly to the interface
+    # Applications can bind to fd00::2 and it will be routable from the host
 }
 
 # resolv.conf is now written by the policy manager via HostResolvPath.

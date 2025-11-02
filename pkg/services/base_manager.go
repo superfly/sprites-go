@@ -545,6 +545,13 @@ func (m *BaseManager) handleStartAll(states map[string]*ServiceState, processes 
 		for _, name := range servicesAtLevel {
 			go func(svcName string) {
 				svcDef := m.serviceDefs[svcName]
+				
+				// Guard against nil service definition (dependency graph inconsistency)
+				if svcDef == nil {
+					tap.Logger(m.ctx).Error("service definition not found", "name", svcName)
+					errChan <- fmt.Errorf("service %s: definition not found (dependency graph inconsistency)", svcName)
+					return
+				}
 
 				// Start based on type
 				if svcDef.Hooks != nil && svcDef.Hooks.Start != nil {

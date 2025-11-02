@@ -349,3 +349,7 @@ func (m *simpleSystemManager) SetSpriteEnvironment(ctx context.Context, info int
 		"message": "Mock sprite environment set",
 	}, nil
 }
+
+// New methods for policy
+func (m *simpleSystemManager) WhenPolicyRunning(ctx context.Context) error { return nil }
+func (m *simpleSystemManager) GetPolicyConfigDir() string { return "/tmp" }

@@ -1,0 +1,13 @@
+{
+  "rules": [
+    { "domain": "github.com", "action": "allow" },
+    { "domain": "*.example.com", "action": "allow" },
+    { "domain": "api.sprites.dev", "action": "allow" }
+  ]
+}
+
+
+
+
+
+

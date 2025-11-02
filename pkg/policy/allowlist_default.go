@@ -5,10 +5,26 @@ package policy
 // Source: https://docs.claude.com/en/docs/claude-code/claude-code-on-the-web#default-allowed-domains
 func DefaultAllowedDomains() []string {
 	return []string{
-		// Anthropic Services
+		// AI Services - Anthropic/Claude
 		"api.anthropic.com",
 		"statsig.anthropic.com",
 		"claude.ai",
+		
+		// AI Services - OpenAI
+		"api.openai.com",
+		"platform.openai.com",
+		"chat.openai.com",
+		"openai.com",
+		
+		// AI Services - GitHub Copilot
+		"copilot-proxy.githubusercontent.com",
+		"api.githubcopilot.com",
+		"copilot.github.com",
+		
+		// AI Services - Other
+		"gemini.google.com",
+		"generativelanguage.googleapis.com",
+		"ai.google.dev",
 
 		// Version Control
 		"github.com", "www.github.com", "api.github.com",

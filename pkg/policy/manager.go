@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+    "time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/superfly/sprite-env/pkg/tap"
@@ -180,6 +181,9 @@ func (m *Manager) ensureVeth(ctx context.Context) error {
 	if m.cfg.PeerIPv6 != nil && m.cfg.IPv6MaskLen > 0 {
 		_ = exec.Command("sh", "-lc", fmt.Sprintf("ip netns exec %s ip -6 addr show dev %s | grep -q %s/%d || ip netns exec %s ip -6 addr add %s/%d dev %s", m.cfg.ContainerNS, m.cfg.PeerIfName, m.cfg.PeerIPv6.String(), m.cfg.IPv6MaskLen, m.cfg.ContainerNS, m.cfg.PeerIPv6.String(), m.cfg.IPv6MaskLen, m.cfg.PeerIfName)).Run()
 	}
+	// Bring up loopback interface in container namespace
+	_ = exec.Command("ip", "netns", "exec", m.cfg.ContainerNS, "ip", "link", "set", "lo", "up").Run()
+	// Bring up veth interface in container namespace
 	_ = exec.Command("ip", "netns", "exec", m.cfg.ContainerNS, "ip", "link", "set", m.cfg.PeerIfName, "up").Run()
 	_ = exec.Command("ip", "netns", "exec", m.cfg.ContainerNS, "ip", "-6", "link", "set", m.cfg.PeerIfName, "up").Run()
 
@@ -207,70 +211,82 @@ func (m *Manager) writeExampleConfigs() error {
 		}
 		_ = os.WriteFile(path, []byte(content+"\n"), 0644)
 	}
-	// 1) unrestricted
+	// 1) unrestricted: no rules means no enforcement
 	writeIfMissing("network.unrestricted.json", `{
-  "mode": "unrestricted",
-  "domains": []
+  "rules": []
 }`)
-	// 2) defaults
+	// 2) defaults only: use the default allowlist
 	writeIfMissing("network.defaults.json", `{
-  "mode": "defaults",
-  "domains": []
-}`)
-	// 3) custom: sprites.dev and api.sprites.dev
-	writeIfMissing("network.custom.json", `{
-  "mode": "custom",
-  "domains": [
-    { "domain": "sprites.dev", "action": "allow" },
-    { "domain": "api.sprites.dev", "action": "allow" }
+  "rules": [
+    { "include": "defaults" }
   ]
 }`)
-	// 4) custom + defaults
-	writeIfMissing("network.custom_plus_defaults.json", `{
-  "mode": "custom_plus_defaults",
-  "domains": [
+	// 3) custom domains only (restrictive)
+	writeIfMissing("network.custom.json", `{
+  "rules": [
     { "domain": "sprites.dev", "action": "allow" },
-    { "domain": "api.sprites.dev", "action": "allow" }
+    { "domain": "api.sprites.dev", "action": "allow" },
+    { "domain": "*.example.com", "action": "allow" }
+  ]
+}`)
+	// 4) defaults + custom domains
+	writeIfMissing("network.defaults_plus_custom.json", `{
+  "rules": [
+    { "include": "defaults" },
+    { "domain": "sprites.dev", "action": "allow" },
+    { "domain": "*.example.com", "action": "allow" }
+  ]
+}`)
+	// 5) allow all except specific domains
+	writeIfMissing("network.allow_all_except.json", `{
+  "rules": [
+    { "domain": "*", "action": "allow" },
+    { "domain": "blocked-site.com", "action": "deny" }
   ]
 }`)
 	return nil
 }
 
-func (m *Manager) effectivePolicyFromBoot() (PolicyMode, []string) {
+func (m *Manager) effectivePolicyFromBoot() (PolicyMode, []Rule) {
 	pm := m.cfg.Mode
-	var allow []string
+	var rules []Rule
 	switch pm {
 	case Unrestricted:
+		// No rules for unrestricted mode
 	case DefaultRestricted:
-		allow = append(allow, DefaultAllowedDomains()...)
-		if len(m.cfg.ExtraAllow) > 0 {
-			allow = append(allow, m.cfg.ExtraAllow...)
+		// Convert default domains to rules
+		for _, domain := range DefaultAllowedDomains() {
+			rules = append(rules, Rule{Domain: strings.ToLower(domain), Action: "allow"})
+		}
+		// Add extra allow domains
+		for _, domain := range m.cfg.ExtraAllow {
+			rules = append(rules, Rule{Domain: strings.ToLower(domain), Action: "allow"})
 		}
 	default:
 		// treat unknown as unrestricted
 		pm = Unrestricted
 	}
-	return pm, allow
+	return pm, rules
 }
 
 func (m *Manager) applyPolicyFromConfig(ctx context.Context) error {
-	// Determine mode/allowlist
+	// Determine mode/rules
 	var pm PolicyMode
-	var allow []string
+	var rules []Rule
 	if m.cfg.ConfigDir != "" {
 		if _, err := os.Stat(filepath.Join(m.cfg.ConfigDir, "network.json")); err == nil {
-			mode, list, err := LoadNetworkConfig(m.cfg.ConfigDir)
+			mode, ruleList, err := LoadNetworkConfig(m.cfg.ConfigDir)
 			if err == nil {
-				pm, allow = mode, list
+				pm, rules = mode, ruleList
 			} else {
 				// fall back to boot
-				pm, allow = m.effectivePolicyFromBoot()
+				pm, rules = m.effectivePolicyFromBoot()
 			}
 		} else {
-			pm, allow = m.effectivePolicyFromBoot()
+			pm, rules = m.effectivePolicyFromBoot()
 		}
 	} else {
-		pm, allow = m.effectivePolicyFromBoot()
+		pm, rules = m.effectivePolicyFromBoot()
 	}
 
 	// Build egress manager config
@@ -281,8 +297,10 @@ func (m *Manager) applyPolicyFromConfig(ctx context.Context) error {
 		IfName:         m.cfg.IfName,
 		IfIPv4:         m.cfg.IfIPv4,
 		IfIPv6:         m.cfg.IfIPv6,
+        ContainerIPv4:  m.cfg.PeerIPv4,
+        ContainerIPv6:  m.cfg.PeerIPv6,
 		DnsListenPort:  m.cfg.DnsPort,
-		Allowlist:      allow,
+		Rules:          rules,
 		StaticHosts:    map[string][]string{},
 		WorkDir:        "/tmp/sprite-policy",
 		TableName:      m.cfg.TableName,
@@ -304,17 +322,53 @@ func (m *Manager) applyPolicyFromConfig(ctx context.Context) error {
 		m.egress = eg
 		return nil
 	}
-	// Atomic reload: update allowlist and nftables rules without restarting DNS
-	// 1. Update DNS allowlist (hot reload, no downtime)
-	if err := m.egress.UpdateAllowlist(ctx, allow); err != nil {
-		return fmt.Errorf("update allowlist: %w", err)
+	// Atomic reload: update rules and nftables rules without restarting DNS
+	// 1. Update DNS rules (hot reload, no downtime)
+	if err := m.egress.UpdateAllowlist(ctx, rules); err != nil {
+		return fmt.Errorf("update rules: %w", err)
 	}
 	// 2. Reapply nftables rules atomically (preserves dynamic sets)
 	if err := applyNftables(ctx, mgrCfg); err != nil {
 		return fmt.Errorf("reapply nftables: %w", err)
 	}
-	tap.Logger(ctx).With("component", "policy").Info("policy reloaded atomically", "mode", pm, "domains", len(allow))
+	// 3. Flush conntrack by temporarily reducing timeouts to 1 second
+	// This affects all system connections, but is the only way without nf_conntrack_netlink
+	if err := clearContainerFlows(ctx, m.cfg.PeerIPv4, m.cfg.PeerIPv6); err != nil {
+		tap.Logger(ctx).With("component", "policy").Warn("clearContainerFlows failed", "error", err)
+	}
+	tap.Logger(ctx).With("component", "policy").Info("policy reloaded atomically", "mode", pm, "rules", len(rules))
 	return nil
 }
 
 // watcher implemented in config_watcher.go
+
+// flapInterface briefly brings the host-side veth down and back up,
+// flushing neighbor caches to tear down in-flight connections.
+func flapInterface(ctx context.Context, ifName, opsNetns string, enableIPv6 bool) error {
+    if strings.TrimSpace(ifName) == "" {
+        return fmt.Errorf("interface name is empty")
+    }
+    run := func(args ...string) error {
+        var cmd *exec.Cmd
+        if strings.TrimSpace(opsNetns) != "" {
+            full := append([]string{"netns", "exec", opsNetns, "ip"}, args...)
+            cmd = exec.Command("ip", full...)
+        } else {
+            cmd = exec.Command("ip", args...)
+        }
+        output, err := cmd.CombinedOutput()
+        if err != nil {
+            return fmt.Errorf("%v: %s", err, string(output))
+        }
+        return nil
+    }
+
+    _ = run("link", "set", ifName, "down")
+    time.Sleep(50 * time.Millisecond)
+    _ = run("neigh", "flush", "dev", ifName)
+    if enableIPv6 {
+        _ = run("-6", "neigh", "flush", "dev", ifName)
+    }
+    _ = run("link", "set", ifName, "up")
+    return nil
+}

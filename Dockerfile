@@ -128,7 +128,7 @@ RUN apt-get update && \
     # Tools for DRBD
     drbd-utils \
     # Additional useful tools for disk management
-    parted gdisk util-linux fdisk xfsprogs fuse3 curl iproute2 nftables iputils-ping vim rsync \
+    parted gdisk util-linux fdisk xfsprogs fuse3 curl iproute2 nftables conntrack iputils-ping vim rsync \
     # Cleanup
     && apt-get clean && \
     rm -rf /var/lib/apt/lists/*

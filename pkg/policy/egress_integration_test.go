@@ -261,13 +261,13 @@ func setupNAT(t *testing.T, ns string, internalIf string, externalIf string) {
 
 	// Masquerade public IPv4 (not RFC1918, loopback, link-local)
 	run(t, "ip", "netns", "exec", ns, "nft", "add", "rule", "inet", natTable, "postrouting",
-		"ip", "saddr", "10.10.0.0/24",
+		"ip", "saddr", "10.0.0.0/30",
 		"ip", "daddr", "!=", "{", "10.0.0.0/8,", "172.16.0.0/12,", "192.168.0.0/16,", "127.0.0.0/8,", "169.254.0.0/16", "}",
 		"oifname", externalIf, "masquerade")
 
 	// Masquerade public IPv6 (not ULA, link-local, loopback, multicast)
 	run(t, "ip", "netns", "exec", ns, "nft", "add", "rule", "inet", natTable, "postrouting",
-		"ip6", "saddr", "fd00::/64",
+		"ip6", "saddr", "fdf::/120",
 		"ip6", "daddr", "!=", "{", "fd00::/8,", "fe80::/10,", "::1/128,", "ff00::/8", "}",
 		"oifname", externalIf, "masquerade")
 }
@@ -355,13 +355,16 @@ func TestEgressPolicy_TCP_UDP_IPv4_IPv6(t *testing.T) {
 
 	// Configure and start manager
 	cfg := Config{
-		Namespace:      spriteNS,
-		OpsNetns:       hostOpsNS,
-		IfName:         hostIf,
-		IfIPv4:         net.ParseIP(hostIPv4),
-		IfIPv6:         net.ParseIP(hostIPv6),
-		DnsListenPort:  53,
-		Allowlist:      []string{"google.com", "api.fly.io"},
+		Namespace:     spriteNS,
+		OpsNetns:      hostOpsNS,
+		IfName:        hostIf,
+		IfIPv4:        net.ParseIP(hostIPv4),
+		IfIPv6:        net.ParseIP(hostIPv6),
+		DnsListenPort: 53,
+		Rules: []Rule{
+			{Domain: "google.com", Action: "allow"},
+			{Domain: "api.fly.io", Action: "allow"},
+		},
 		WorkDir:        "/tmp/sprite-policy-tests",
 		TableName:      fmt.Sprintf("sprite_egress_%d", id),
 		SetV4:          fmt.Sprintf("allowed_v4_%d", id),
@@ -492,16 +495,20 @@ func TestEgressPolicy_TCP_UDP_IPv4_IPv6(t *testing.T) {
 	}
 
 	// Test dynamic update: allow sprites.dev -> now should succeed
-	if err := mgr.UpdateAllowlist(ctx, []string{"google.com", "api.fly.io", "sprites.dev"}); err != nil {
-		t.Fatalf("update allowlist: %v", err)
+	if err := mgr.UpdateAllowlist(ctx, []Rule{
+		{Domain: "google.com", Action: "allow"},
+		{Domain: "api.fly.io", Action: "allow"},
+		{Domain: "sprites.dev", Action: "allow"},
+	}); err != nil {
+		t.Fatalf("update rules: %v", err)
 	}
-	// Give dnsmasq time to reload
+	// Give DNS server time to reload
 	time.Sleep(200 * time.Millisecond)
 
-	// Verify that the allowlist was updated (DNS server updates in memory)
-	// The DNS server now handles allowlist updates in memory, so we just verify
+	// Verify that the rules were updated (DNS server updates in memory)
+	// The DNS server now handles rule updates in memory, so we just verify
 	// that the UpdateAllowlist call succeeded without error
-	t.Log("Allowlist updated successfully in DNS server")
+	t.Log("Rules updated successfully in DNS server")
 
 	// Test that the policy manager can be stopped cleanly
 	t.Log("Testing that the policy manager can be stopped cleanly...")

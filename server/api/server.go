@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/superfly/sprite-env/pkg/sync"
 	"github.com/superfly/sprite-env/pkg/tap"
 )
@@ -28,7 +27,7 @@ type Server struct {
 	syncServer      *sync.Server
 	authManager     *AuthManager
 	contextEnricher ContextEnricher
-	activityObs     func(start bool, source string)
+	activityObs     func(start bool)
 	proxyHandler    *ProxyHandler
 }
 
@@ -66,8 +65,8 @@ func NewServer(config Config, system SystemManager, ctx context.Context) (*Serve
 	authManager := NewAuthManager(config.APIToken, config.AdminToken)
 
 	// Create proxy handler for proxy:: prefixed tokens
-	// Try IPv6 (fd00:...) first, then fall back to IPv4 (10.0.0.1)
-	proxyHandler := NewProxyHandler(logger, "fd00::2", "10.0.0.1", 8080)
+	// Try IPv6 (fdf::...) first, then fall back to IPv4 (10.0.0.1)
+	proxyHandler := NewProxyHandler(logger, "fdf::1", "10.0.0.1", 8080)
 
 	s := &Server{
 		logger:       logger,
@@ -140,10 +139,8 @@ func NewServer(config Config, system SystemManager, ctx context.Context) (*Serve
 		next := handler
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if s.activityObs != nil {
-				requestID := uuid.New().String()
-				source := "http:" + requestID
-				s.activityObs(true, source)
-				defer s.activityObs(false, source)
+				s.activityObs(true)
+				defer s.activityObs(false)
 			}
 			next.ServeHTTP(w, r)
 		})
@@ -209,7 +206,7 @@ func (s *Server) SetAdminChannel(enricher ContextEnricher) {
 // (tmux manager obtained on-demand from system; no setter needed)
 
 // SetActivityObserver sets a callback to observe request start/end
-func (s *Server) SetActivityObserver(observe func(start bool, source string)) {
+func (s *Server) SetActivityObserver(observe func(start bool)) {
 	s.activityObs = observe
 }
 
@@ -278,6 +275,9 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 
 	// Admin endpoints
 	mux.HandleFunc("/admin/reset-state", s.handlers.HandleAdminResetState)
+
+    // Policy config endpoint - GET returns JSON; POST validates and writes JSON
+    mux.HandleFunc("/policy/network", s.waitForPolicyMiddleware(s.handlers.HandlePolicyNetwork))
 
 	// Sprite environment endpoint - POST /v1/sprites/:name/environment
 	// Waits for storage to be ready (needs JuiceFS for sprite.db)
@@ -395,6 +395,36 @@ func (s *Server) waitForStorageMiddleware(next http.HandlerFunc) http.HandlerFun
 
 		next(w, r)
 	}
+}
+
+// waitForPolicyMiddleware waits for the policy manager to be running
+func (s *Server) waitForPolicyMiddleware(next http.HandlerFunc) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        ctx, cancel := context.WithTimeout(r.Context(), s.config.MaxWaitTime)
+        defer cancel()
+
+        startTime := time.Now()
+        err := s.system.WhenPolicyRunning(ctx)
+        waitTime := time.Since(startTime)
+
+        if err != nil {
+            s.logger.Warn("Request timeout waiting for policy manager to be ready",
+                "requestPath", r.URL.Path,
+                "waitTime", waitTime,
+                "error", err)
+            http.Error(w, "Policy not ready", http.StatusServiceUnavailable)
+            return
+        }
+
+        // Log if we waited more than 5ms
+        if waitTime > 5*time.Millisecond {
+            s.logger.Info("Held request while waiting for policy manager",
+                "requestPath", r.URL.Path,
+                "waitTime", waitTime)
+        }
+
+        next.ServeHTTP(w, r)
+    }
 }
 
 // (no direct getter; handlers query system as needed)

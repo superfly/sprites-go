@@ -8,13 +8,14 @@ import (
 	"path/filepath"
 	"sync"
 
+
 	"github.com/superfly/sprite-env/pkg/tap"
 )
 
 // EgressPolicyManager defines lifecycle and update API for domain-based egress control.
 type EgressPolicyManager interface {
 	Start(ctx context.Context) error
-	UpdateAllowlist(ctx context.Context, domains []string) error
+	UpdateAllowlist(ctx context.Context, rules []Rule) error
 	Stop(ctx context.Context) error
 }
 
@@ -31,17 +32,25 @@ type Config struct {
 	// IfName is the host-side veth interface name connected to the container.
 	IfName string
 
-	// IfIPv4 is the host-side IPv4 address (e.g., 10.10.0.1).
+	// IfIPv4 is the host-side IPv4 address (e.g., 10.0.0.2).
 	IfIPv4 net.IP
 
-	// IfIPv6 is the host-side IPv6 address (e.g., fd00::1). Optional.
+	// IfIPv6 is the host-side IPv6 address (e.g., fdf::2). Optional.
 	IfIPv6 net.IP
+
+    // ContainerIPv4 is the container-side IPv4 address (e.g., 10.0.0.1).
+    // Used for targeted conntrack deletions on policy reload.
+    ContainerIPv4 net.IP
+
+    // ContainerIPv6 is the container-side IPv6 address (e.g., fdf::1).
+    // Used for targeted conntrack deletions on policy reload.
+    ContainerIPv6 net.IP
 
 	// DnsListenPort is the dnsmasq listening port (usually 53).
 	DnsListenPort int
 
-	// Allowlist is the initial domain allowlist (wildcards like *.example.com supported via dnsmasq patterns).
-	Allowlist []string
+	// Rules is the initial policy rules list (ordered, evaluated first-match-wins).
+	Rules []Rule
 
 	// StaticHosts maps hostnames to one or more literal IPs. Primarily for tests.
 	// These are rendered to dnsmasq address= lines (A/AAAA) in addition to nftset rules.
@@ -110,8 +119,8 @@ func NewEgressPolicyManager(cfg Config) (EgressPolicyManager, error) {
 	} else {
 		cfg.DropPrivileges = true
 	}
-	// If enforcement not explicitly requested, enable when there is an allowlist
-	if !cfg.Enforce && len(cfg.Allowlist) > 0 {
+	// If enforcement not explicitly requested, enable when there are rules
+	if !cfg.Enforce && len(cfg.Rules) > 0 {
 		cfg.Enforce = true
 	}
 
@@ -141,7 +150,7 @@ func (m *egressManager) Start(ctx context.Context) error {
 	}
 
 	// Create and start DNS server
-	dnsServer, err := NewDNSServer(ctx, m.cfg.Allowlist, m.cfg.TableName, m.cfg.SetV4, m.cfg.SetV6, m.cfg.OpsNetns)
+	dnsServer, err := NewDNSServer(ctx, m.cfg.Rules, m.cfg.TableName, m.cfg.SetV4, m.cfg.SetV6, m.cfg.OpsNetns)
 	if err != nil {
 		// Best effort cleanup nft if DNS server fails
 		_ = deleteNftables(ctx, m.cfg)
@@ -177,19 +186,23 @@ func (m *egressManager) Start(ctx context.Context) error {
 	return nil
 }
 
-func (m *egressManager) UpdateAllowlist(ctx context.Context, domains []string) error {
+func (m *egressManager) UpdateAllowlist(ctx context.Context, rules []Rule) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.started {
 		return fmt.Errorf("policy manager not started")
 	}
 
-	// Update DNS server allowlist
-	m.dnsServer.UpdateAllowlist(domains)
+	// Update DNS server rules
+	m.dnsServer.UpdateAllowlist(rules)
 
-	tap.Logger(ctx).With("component", "policy").Info("allowlist updated", "count", len(domains))
+    // Flapping happens after nft reapply in manager.applyPolicyFromConfig
+
+	tap.Logger(ctx).With("component", "policy").Info("rules updated", "count", len(rules))
 	return nil
 }
+
+// Flap is handled in manager.applyPolicyFromConfig
 
 func (m *egressManager) Stop(ctx context.Context) error {
 	m.mu.Lock()

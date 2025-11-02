@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/nftables"
 	"github.com/miekg/dns"
 	"github.com/superfly/sprite-env/pkg/tap"
 )
@@ -17,50 +17,43 @@ import (
 // DNSServer implements a custom DNS server that forwards queries to upstream
 // and writes allowed IPs to nftables sets.
 type DNSServer struct {
-	allowlist map[string]bool // domain -> allowed
-	cache     map[string]*cachedEntry
-	upstream  []string // parsed from resolv.conf
-	table     string
-	setV4     string
-	setV6     string
-	opsNetns  string
-	mu        sync.RWMutex
-	servers   []*dns.Server // multiple servers for IPv4/IPv6
-	ctx       context.Context
-	cancel    context.CancelFunc
-}
-
-type cachedEntry struct {
-	msg    *dns.Msg
-	expiry time.Time
+	rules      []Rule // ordered rules for evaluation
+	upstream   []string // parsed from resolv.conf
+	table      string
+	setV4      string
+	setV6      string
+	opsNetns   string
+	nftConn    *nftables.Conn        // Netlink connection for nftables
+	nftTable   *nftables.Table       // Reference to nftables table
+	nftSetV4   *nftables.Set         // Reference to IPv4 set
+	nftSetV6   *nftables.Set         // Reference to IPv6 set
+	mu         sync.RWMutex
+	nftMu      sync.Mutex // Serializes nftables updates to prevent race conditions
+	servers    []*dns.Server // multiple servers for IPv4/IPv6
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
 // NewDNSServer creates a new DNS server instance.
-func NewDNSServer(ctx context.Context, allowlist []string, table, setV4, setV6, opsNetns string) (*DNSServer, error) {
+func NewDNSServer(ctx context.Context, rules []Rule, table, setV4, setV6, opsNetns string) (*DNSServer, error) {
 	// Parse upstream DNS servers from /etc/resolv.conf
 	upstream, err := parseResolvConf("/etc/resolv.conf")
 	if err != nil {
 		return nil, fmt.Errorf("parse resolv.conf: %w", err)
 	}
 
-	// Build allowlist map for O(1) lookups
-	allowMap := make(map[string]bool)
-	for _, domain := range allowlist {
-		allowMap[strings.ToLower(domain)] = true
-	}
-
 	serverCtx, cancel := context.WithCancel(ctx)
 
 	return &DNSServer{
-		allowlist: allowMap,
-		cache:     make(map[string]*cachedEntry),
-		upstream:  upstream,
-		table:     table,
-		setV4:     setV4,
-		setV6:     setV6,
-		opsNetns:  opsNetns,
-		ctx:       serverCtx,
-		cancel:    cancel,
+		rules:    rules,
+		upstream: upstream,
+		table:    table,
+		setV4:    setV4,
+		setV6:    setV6,
+		opsNetns: opsNetns,
+		// nftables connection is lazy-initialized on first use
+		ctx:    serverCtx,
+		cancel: cancel,
 	}, nil
 }
 
@@ -138,17 +131,7 @@ func (s *DNSServer) Start(ctx context.Context, listenAddrs []string) error {
 
 // ServeDNS implements the dns.Handler interface.
 func (s *DNSServer) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
-	// Check cache first
-	cacheKey := s.cacheKey(r)
-	s.mu.RLock()
-	if entry, exists := s.cache[cacheKey]; exists && time.Now().Before(entry.expiry) {
-		s.mu.RUnlock()
-		w.WriteMsg(entry.msg)
-		return
-	}
-	s.mu.RUnlock()
-
-	// Forward to upstream
+	// Forward to upstream (no caching)
 	upstream := s.upstream[0] // Use first upstream server
 	client := &dns.Client{
 		Net:     "udp",
@@ -165,34 +148,83 @@ func (s *DNSServer) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
-	// Check if this is an allowed domain and write IPs to nftables
-	if len(r.Question) > 0 {
+	// Check if domain is allowed before processing response
+	if len(r.Question) > 0 && len(s.rules) > 0 {
 		domain := strings.ToLower(strings.TrimSuffix(r.Question[0].Name, "."))
-		if s.isAllowed(domain) {
-			// Write IPs to nftables BEFORE returning response to prevent race condition
-			// This ensures the nftables rule exists before the client gets the DNS response
-			if err := s.writeIPsToNftables(response); err != nil {
-				tap.Logger(s.ctx).With("component", "policy", "proc", "dns").Error("failed to write IPs to nftables", "error", err)
-				// Continue anyway - don't block DNS response
-			}
+		if !s.isAllowed(domain) {
+			// Domain is denied - return REFUSED
+			tap.Logger(s.ctx).With("component", "policy", "proc", "dns").Warn("domain denied by policy", "domain", domain)
+			m := new(dns.Msg)
+			m.SetRcode(r, dns.RcodeRefused)
+			w.WriteMsg(m)
+			return
 		}
 	}
 
-	// Cache the response
-	s.cacheResponse(cacheKey, response)
+	// Preserve the original query ID from the client's request
+	// The upstream response has its own ID which won't match the client's expectation
+	response.Id = r.Id
+
+	// Write allowed IPs to nftables (skip in unrestricted mode)
+	if len(r.Question) > 0 && len(s.rules) > 0 {
+		// Write IPs to nftables BEFORE returning response to prevent race condition
+		// This ensures the nftables rule exists before the client gets the DNS response
+		if err := s.writeIPsToNftables(response); err != nil {
+			tap.Logger(s.ctx).With("component", "policy", "proc", "dns").Error("failed to write IPs to nftables", "error", err)
+			// Continue anyway - don't block DNS response
+		}
+	}
 
 	// Return response to client (after nftables rules are written)
 	w.WriteMsg(response)
 }
 
-// isAllowed checks if a domain is in the allowlist.
+// isAllowed checks if a domain is allowed by evaluating rules.
+// If no rules exist (unrestricted mode), allow everything.
+// Otherwise, most specific matching rule wins (exact > subdomain wildcard > wildcard all).
 func (s *DNSServer) isAllowed(domain string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.allowlist[domain]
+
+	domain = strings.ToLower(strings.TrimSpace(domain))
+
+	// If no rules, allow everything (unrestricted mode)
+	if len(s.rules) == 0 {
+		return true
+	}
+
+	// Evaluate rules by specificity: exact matches first, then wildcards
+	// This allows "allow *, deny pornhub.com" to work intuitively
+
+	// 1. Check for exact domain match (most specific)
+	for _, rule := range s.rules {
+		if rule.Domain == domain {
+			return rule.Action == "allow"
+		}
+	}
+
+	// 2. Check for subdomain wildcard match (*.example.com)
+	for _, rule := range s.rules {
+		if strings.HasPrefix(rule.Domain, "*.") {
+			if MatchesPattern(domain, rule.Domain) {
+				return rule.Action == "allow"
+			}
+		}
+	}
+
+	// 3. Check for wildcard all (*) (least specific)
+	for _, rule := range s.rules {
+		if rule.Domain == "*" {
+			return rule.Action == "allow"
+		}
+	}
+
+	// Default deny if no rule matches
+	return false
 }
 
 // writeIPsToNftables writes IP addresses from DNS response to nftables sets.
+// IPs are added with a fixed timeout and automatically refreshed on repeated queries.
 func (s *DNSServer) writeIPsToNftables(response *dns.Msg) error {
 	if response == nil || response.Rcode != dns.RcodeSuccess {
 		return nil
@@ -208,14 +240,14 @@ func (s *DNSServer) writeIPsToNftables(response *dns.Msg) error {
 		}
 	}
 
-	// Write IPv4 addresses to nftables
+	// Write IPv4 addresses to nftables with fixed timeout
 	if len(v4IPs) > 0 {
 		if err := s.addToNftablesSet(s.setV4, v4IPs); err != nil {
 			return fmt.Errorf("failed to add IPv4 IPs to nftables: %w", err)
 		}
 	}
 
-	// Write IPv6 addresses to nftables
+	// Write IPv6 addresses to nftables with fixed timeout
 	if len(v6IPs) > 0 {
 		if err := s.addToNftablesSet(s.setV6, v6IPs); err != nil {
 			return fmt.Errorf("failed to add IPv6 IPs to nftables: %w", err)
@@ -225,75 +257,147 @@ func (s *DNSServer) writeIPsToNftables(response *dns.Msg) error {
 	return nil
 }
 
-// addToNftablesSet adds IP addresses to an nftables set.
+// ensureNftablesConnection initializes the nftables netlink connection if not already done.
+func (s *DNSServer) ensureNftablesConnection() error {
+	if s.nftConn != nil {
+		return nil // Already initialized
+	}
+
+	// Create netlink connection for nftables
+	// Note: OpsNetns not supported with netlink - only used in tests
+	nftConn, err := nftables.New()
+	if err != nil {
+		return fmt.Errorf("create nftables connection: %w", err)
+	}
+
+	// Look up the nftables table
+	nftTable := &nftables.Table{
+		Name:   s.table,
+		Family: nftables.TableFamilyINet,
+	}
+
+	// Get references to the sets
+	sets, err := nftConn.GetSets(nftTable)
+	if err != nil {
+		return fmt.Errorf("get nftables sets: %w", err)
+	}
+
+	var nftSetV4, nftSetV6 *nftables.Set
+	for _, set := range sets {
+		if set.Name == s.setV4 {
+			nftSetV4 = set
+		}
+		if set.Name == s.setV6 {
+			nftSetV6 = set
+		}
+	}
+
+	if nftSetV4 == nil {
+		return fmt.Errorf("nftables set %s not found", s.setV4)
+	}
+	if nftSetV6 == nil {
+		return fmt.Errorf("nftables set %s not found", s.setV6)
+	}
+
+	// Store references
+	s.nftConn = nftConn
+	s.nftTable = nftTable
+	s.nftSetV4 = nftSetV4
+	s.nftSetV6 = nftSetV6
+
+	return nil
+}
+
+// addToNftablesSet adds IP addresses to an nftables set using netlink API.
+// Much faster than exec-based approach (microseconds vs 50-200ms).
+// IPs are added with a fixed 5-minute timeout. Re-adding existing IPs refreshes their timeout.
 func (s *DNSServer) addToNftablesSet(setName string, ips []string) error {
 	if len(ips) == 0 {
 		return nil
 	}
 
-	// Build nftables command
-	cmd := []string{"nft", "add", "element", "inet", s.table, setName, "{" + strings.Join(ips, ", ") + "}"}
+	// Serialize nftables updates to prevent concurrent conflicts
+	s.nftMu.Lock()
+	defer s.nftMu.Unlock()
 
-	// Execute in OpsNetns if specified
-	var execCmd *exec.Cmd
-	if s.opsNetns != "" {
-		args := append([]string{"netns", "exec", s.opsNetns}, cmd...)
-		execCmd = exec.CommandContext(s.ctx, "ip", args...)
-	} else {
-		execCmd = exec.CommandContext(s.ctx, cmd[0], cmd[1:]...)
+	// Lazy-initialize nftables connection
+	if err := s.ensureNftablesConnection(); err != nil {
+		return fmt.Errorf("ensure nftables connection: %w", err)
 	}
 
-	if err := execCmd.Run(); err != nil {
-		tap.Logger(s.ctx).With("component", "policy", "proc", "dns").Warn("failed to add IPs to nftables", "set", setName, "ips", ips, "error", err)
+	// Select the correct set
+	var targetSet *nftables.Set
+	if setName == s.setV4 {
+		targetSet = s.nftSetV4
+	} else if setName == s.setV6 {
+		targetSet = s.nftSetV6
+	} else {
+		return fmt.Errorf("unknown set name: %s", setName)
+	}
+
+	// Convert IPs to nftables set elements
+	// Use fixed 5-minute timeout; re-adding refreshes the timeout automatically
+	elements := make([]nftables.SetElement, 0, len(ips))
+	for _, ipStr := range ips {
+		ip := net.ParseIP(ipStr)
+		if ip == nil {
+			tap.Logger(s.ctx).With("component", "policy", "proc", "dns").Warn("invalid IP address", "ip", ipStr)
+			continue
+		}
+
+		// Convert IP to key format
+		var key []byte
+		if setName == s.setV4 {
+			// IPv4: use 4-byte representation
+			ip4 := ip.To4()
+			if ip4 == nil {
+				tap.Logger(s.ctx).With("component", "policy", "proc", "dns").Warn("not an IPv4 address", "ip", ipStr)
+				continue
+			}
+			key = []byte(ip4)
+		} else {
+			// IPv6: use 16-byte representation
+			ip6 := ip.To16()
+			if ip6 == nil {
+				tap.Logger(s.ctx).With("component", "policy", "proc", "dns").Warn("not an IPv6 address", "ip", ipStr)
+				continue
+			}
+			key = []byte(ip6)
+		}
+
+		// Use fixed 1-hour timeout (matches set default)
+		// nftables automatically refreshes timeout when same IP is re-added
+		elements = append(elements, nftables.SetElement{
+			Key:     key,
+			Timeout: 1 * time.Hour,
+		})
+	}
+
+	if len(elements) == 0 {
+		return nil
+	}
+
+	// Add elements to set via netlink (batched operation)
+	if err := s.nftConn.SetAddElements(targetSet, elements); err != nil {
+		tap.Logger(s.ctx).With("component", "policy", "proc", "dns").Warn("failed to add IPs to nftables", "set", setName, "error", err)
 		return err
 	}
 
-	tap.Logger(s.ctx).With("component", "policy", "proc", "dns").Debug("added IPs to nftables", "set", setName, "ips", ips)
+	// Flush the netlink batch (commit changes)
+	if err := s.nftConn.Flush(); err != nil {
+		tap.Logger(s.ctx).With("component", "policy", "proc", "dns").Warn("failed to flush nftables changes", "set", setName, "error", err)
+		return err
+	}
+
+	tap.Logger(s.ctx).With("component", "policy", "proc", "dns").Debug("added IPs to nftables via netlink", "set", setName, "count", len(elements))
 	return nil
 }
 
-// cacheKey creates a cache key for a DNS query.
-func (s *DNSServer) cacheKey(r *dns.Msg) string {
-	if len(r.Question) == 0 {
-		return ""
-	}
-	q := r.Question[0]
-	return fmt.Sprintf("%s:%d:%d", q.Name, q.Qtype, q.Qclass)
-}
-
-// cacheResponse caches a DNS response with TTL.
-func (s *DNSServer) cacheResponse(key string, response *dns.Msg) {
-	if key == "" || response == nil {
-		return
-	}
-
-	// Find minimum TTL from response
-	minTTL := uint32(300) // Default 5 minutes
-	for _, rr := range response.Answer {
-		if rr.Header().Ttl < minTTL {
-			minTTL = rr.Header().Ttl
-		}
-	}
-
+// UpdateAllowlist updates the rules.
+func (s *DNSServer) UpdateAllowlist(rules []Rule) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.cache[key] = &cachedEntry{
-		msg:    response.Copy(),
-		expiry: time.Now().Add(time.Duration(minTTL) * time.Second),
-	}
-}
-
-// UpdateAllowlist updates the allowlist and clears cache.
-func (s *DNSServer) UpdateAllowlist(domains []string) {
-	allowMap := make(map[string]bool)
-	for _, domain := range domains {
-		allowMap[strings.ToLower(domain)] = true
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.allowlist = allowMap
-	s.cache = make(map[string]*cachedEntry) // Clear cache
+	s.rules = rules
 }
 
 // Shutdown stops the DNS server.

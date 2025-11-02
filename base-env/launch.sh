@@ -33,6 +33,16 @@ mkdir -p /.sprite/tmp
 mount -t tmpfs -o size=64M tmpfs /.sprite/tmp
 
 
+# Bind mount policy config directory at /.sprite/policy (readonly)
+mkdir -p /.sprite/policy
+POLICY_SRC="${SPRITE_WRITE_DIR}/juicefs/data/active/policy"
+if [ -d "$POLICY_SRC" ]; then
+    # Create mountpoint and bind, then remount readonly
+    mount --bind "$POLICY_SRC" "/.sprite/policy"
+    mount -o remount,ro,bind "/.sprite/policy"
+fi
+
+
 # This is a prerun script to do the overlay + loopback inside the namespace
 # Only copy mounts.sh if /mnt/newroot isn't already an overlayfs
 if ! mount | grep -q "^overlay on /mnt/newroot type overlay"; then
@@ -262,6 +272,12 @@ CONFIG_JSON='{
       "destination": "/.sprite/logs",
       "type": "bind",
       "source": "/dev/fly_vol/logs",
+      "options": ["ro", "rbind"]
+    },
+    {
+      "destination": "/.sprite/policy",
+      "type": "bind",
+      "source": "/.sprite/policy",
       "options": ["ro", "rbind"]
     }
   ],

@@ -1,9 +1,13 @@
 package system
 
 import (
-	"context"
-	"fmt"
-	"syscall"
+    "context"
+    "fmt"
+    "path/filepath"
+    "syscall"
+    "time"
+
+    "github.com/superfly/sprite-env/pkg/services"
 )
 
 // IsProcessRunning returns true if the process is currently running
@@ -97,4 +101,38 @@ func (s *System) WaitForJuiceFS(ctx context.Context) error {
 // WaitForOverlay waits for overlay to be ready - deprecated, use WhenStorageReady instead
 func (s *System) WaitForOverlay(ctx context.Context) error {
 	return s.WhenStorageReady(ctx)
+}
+
+// WhenPolicyRunning waits until the policy_manager service is running, or returns when ctx is done.
+// If the unified service manager is not initialized, this returns nil immediately.
+func (s *System) WhenPolicyRunning(ctx context.Context) error {
+    if s.UnifiedServiceManager == nil {
+        return nil
+    }
+    ticker := time.NewTicker(50 * time.Millisecond)
+    defer ticker.Stop()
+    for {
+        state, err := s.UnifiedServiceManager.GetServiceState("policy_manager")
+        if err == nil && state != nil && state.Status == services.StatusRunning {
+            return nil
+        }
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        case <-ticker.C:
+        }
+    }
+}
+
+// GetPolicyConfigDir returns the directory where network.json is stored.
+// Mirrors overlay's dataPath: <JuiceFSDataPath>/data/active/policy or fallback to WriteDir/policy.
+func (s *System) GetPolicyConfigDir() string {
+    if s.config != nil && s.config.JuiceFSDataPath != "" {
+        dataPath := filepath.Join(s.config.JuiceFSDataPath, "data")
+        return filepath.Join(dataPath, "active", "policy")
+    }
+    if s.config != nil {
+        return filepath.Join(s.config.WriteDir, "policy")
+    }
+    return filepath.Join("/tmp", "policy")
 }

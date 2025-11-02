@@ -11,6 +11,27 @@ import (
 )
 
 func applyNftables(ctx context.Context, cfg Config) error {
+	// Step 1: Delete existing chains and flush sets (ignore errors if they don't exist)
+	// Flushing sets removes old IPs from previously allowed domains
+	deleteScript := fmt.Sprintf(`delete chain inet %s input
+delete chain inet %s output
+delete chain inet %s forward
+flush set inet %s %s
+flush set inet %s %s
+`, cfg.TableName, cfg.TableName, cfg.TableName,
+		cfg.TableName, cfg.SetV4,
+		cfg.TableName, cfg.SetV6)
+
+	var delCmd *exec.Cmd
+	if cfg.OpsNetns != "" {
+		delCmd = exec.Command("ip", "netns", "exec", cfg.OpsNetns, "nft", "-f", "-")
+	} else {
+		delCmd = exec.Command("nft", "-f", "-")
+	}
+	delCmd.Stdin = bytes.NewReader([]byte(deleteScript))
+	_ = delCmd.Run() // Ignore errors - chains/sets might not exist
+
+	// Step 2: Apply new configuration
 	script := renderNftScript(cfg)
 	var cmd *exec.Cmd
 	if cfg.OpsNetns != "" {
@@ -51,14 +72,14 @@ func deleteNftables(ctx context.Context, cfg Config) error {
 func renderNftScript(cfg Config) string {
 	var b strings.Builder
 
-	// Create/update table and define sets + chains
-	// nftables will atomically replace chain definitions while preserving sets
+	// Define table structure (chains are already deleted in applyNftables)
 	fmt.Fprintf(&b, "table inet %s {\n", cfg.TableName)
 
 	// Define sets (will be created if missing, preserved if existing)
-	fmt.Fprintf(&b, "    set %s { type ipv4_addr; flags dynamic,timeout; timeout %ds; }\n", cfg.SetV4, cfg.TimeoutSeconds)
+	// Use 1 hour timeout for IP entries (auto-expire stale IPs, but keep frequently used ones)
+	fmt.Fprintf(&b, "    set %s { type ipv4_addr; flags dynamic,timeout; timeout 1h; }\n", cfg.SetV4)
 	if cfg.EnableIPv6 && cfg.SetV6 != "" {
-		fmt.Fprintf(&b, "    set %s { type ipv6_addr; flags dynamic,timeout; timeout %ds; }\n", cfg.SetV6, cfg.TimeoutSeconds)
+		fmt.Fprintf(&b, "    set %s { type ipv6_addr; flags dynamic,timeout; timeout 1h; }\n", cfg.SetV6)
 	}
 
 	// Input chain: accept by default; explicit accept for DNS traffic to configured IPs (defensive)
@@ -76,14 +97,22 @@ func renderNftScript(cfg Config) string {
 
 	// Forward chain: scope enforcement ONLY to our interface; default policy accept by default
 	fmt.Fprintf(&b, "    chain forward { type filter hook forward priority 0; policy accept; ")
-	// Allow replies
-	fmt.Fprintf(&b, " ct state established,related accept;")
+	// Allow replies on our interface only (both directions)
+	fmt.Fprintf(&b, " iifname \"%s\" ct state established,related accept;", cfg.IfName)
+	fmt.Fprintf(&b, " oifname \"%s\" ct state established,related accept;", cfg.IfName)
 	// Allow inbound from host into container over this interface (host source IP)
 	if cfg.IfIPv4 != nil {
 		fmt.Fprintf(&b, " oifname \"%s\" ip saddr %s accept;", cfg.IfName, cfg.IfIPv4.String())
 	}
 	if cfg.EnableIPv6 && cfg.IfIPv6 != nil {
 		fmt.Fprintf(&b, " oifname \"%s\" ip6 saddr %s accept;", cfg.IfName, cfg.IfIPv6.String())
+	}
+	// Allow any inbound traffic to container (for port forwarding from external sources)
+	if cfg.ContainerIPv4 != nil {
+		fmt.Fprintf(&b, " oifname \"%s\" ip daddr %s accept;", cfg.IfName, cfg.ContainerIPv4.String())
+	}
+	if cfg.EnableIPv6 && cfg.ContainerIPv6 != nil {
+		fmt.Fprintf(&b, " oifname \"%s\" ip6 daddr %s accept;", cfg.IfName, cfg.ContainerIPv6.String())
 	}
 	// Allow DNS queries from container to host-side DNS IP/port via this interface
 	// This MUST come before private IP blocking rules

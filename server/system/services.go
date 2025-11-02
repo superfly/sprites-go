@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"syscall"
@@ -65,19 +66,10 @@ func (s *System) initializeTMUXManager() error {
 				return container.Wrap(c, "app", container.WithTTY(false)).Cmd
 			}
 		}
-		// Register a simple callback for tmux window events to notify ActivityMonitor
-		opts.EventCallback = func(ev tmux.WindowMonitorEvent) {
-			if s.ActivityMonitor == nil {
-				return
-			}
-			switch ev.EventType {
-			case "active":
-				s.ActivityMonitor.ActivityStarted("tmux:" + ev.OriginalSession)
-			case "inactive":
-				s.ActivityMonitor.ActivityEnded("tmux:" + ev.OriginalSession)
-			}
-		}
 		s.TMUXManager = tmux.NewManager(s.ctx, opts)
+		
+		// Bridge tmux activity events to activity monitor
+		go s.bridgeTmuxActivityEvents()
 	}
 	return nil
 }
@@ -318,21 +310,32 @@ func (s *System) registerSystemServices() error {
 		}
 	}
 
-	// Level 3.5: Network policy manager (after overlay, before container)
-	if len(s.config.ProcessCommand) > 0 && s.config.ContainerEnabled {
+	// Level 3.5: Network policy manager (after juicefs, before container)
+	// Policy manager provides network namespace and veth even when ContainerEnabled=false
+	if len(s.config.ProcessCommand) > 0 {
 		deps := []string{}
-		if s.config.OverlayEnabled {
-			deps = append(deps, "overlay")
+		// Policy depends on JuiceFS so network.json is stored in active/ and checkpointed
+		if s.config.JuiceFSDataPath != "" {
+			deps = append(deps, "juicefs")
 		}
 
 		// Prepare boot config for policy manager
-		ifIPv4 := net.ParseIP("10.10.0.1")
-		peerIPv4 := net.ParseIP("10.10.0.2")
-		ifIPv6 := net.ParseIP("fd00::1")
-		peerIPv6 := net.ParseIP("fd00::2")
+		ifIPv4 := net.ParseIP("10.0.0.2")   // Host side
+		peerIPv4 := net.ParseIP("10.0.0.1") // Container side
+		ifIPv6 := net.ParseIP("fdf::2")     // Host side
+		peerIPv6 := net.ParseIP("fdf::1")   // Container side
 		ifName := "spr0-host"
 		peerIf := "spr0"
-		configDir := filepath.Join(s.config.WriteDir, "policy")
+		
+		// Store network.json under JuiceFS data/active/policy so it's checkpointed with overlay
+		var configDir string
+		if s.config.JuiceFSDataPath != "" {
+			dataPath := filepath.Join(s.config.JuiceFSDataPath, "data")
+			configDir = filepath.Join(dataPath, "active", "policy")
+		} else {
+			// Fallback to WriteDir if JuiceFS not configured
+			configDir = filepath.Join(s.config.WriteDir, "policy")
+		}
 
 		var policyMgr *policy.Manager
 
@@ -342,6 +345,15 @@ func (s *System) registerSystemServices() error {
 			Hooks: &services.ServiceHooks{
 				Start: func(ctx context.Context, p services.ProgressReporter) error {
 					p.ReportProgress("starting policy manager")
+
+					// Ensure policy config directory exists and seed empty config if missing
+					if err := os.MkdirAll(configDir, 0755); err != nil {
+						return fmt.Errorf("create policy config dir: %w", err)
+					}
+					cfgPath := filepath.Join(configDir, "network.json")
+					if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+						_ = os.WriteFile(cfgPath, []byte("{\n  \"rules\": []\n}\n"), 0644)
+					}
 					bootCfg := policy.BootConfig{
 						ContainerNS:    "sprite",
 						OpsNetns:       "",
@@ -379,15 +391,15 @@ func (s *System) registerSystemServices() error {
 		}
 	}
 
-	// Level 4: Container process (depends on overlay and policy_manager when enabled)
+	// Level 4: Container process (depends on overlay and policy_manager)
 	if len(s.config.ProcessCommand) > 0 {
 		deps := []string{}
 		if s.config.OverlayEnabled {
 			deps = append(deps, "overlay")
 		}
-		if s.config.ContainerEnabled {
-			deps = append(deps, "policy_manager")
-		}
+		// Container always depends on policy_manager for network setup
+		// Even in unrestricted mode, we need the network namespace and veth pair
+		deps = append(deps, "policy_manager")
 		if err := s.UnifiedServiceManager.RegisterService(&services.ServiceDefinition{
 			Name:         "container",
 			Dependencies: deps,
@@ -442,53 +454,40 @@ func (s *System) bridgeTmuxActivityEvents() {
 	if s.TMUXManager == nil || s.ActivityMonitor == nil {
 		return
 	}
-	// Persistently acquire and (re)attach to the window monitor events channel.
-	// The tmux window monitor starts lazily; it may not exist at process start,
-	// and the channel can also close if the monitor restarts.
-	var eventChan <-chan tmux.WindowMonitorEvent
-
-	s.logger.Debug("Tmux activity bridge starting (will wait for window monitor)")
-
-	for {
-		// Ensure we have an event channel; retry until available or context cancelled
-		for eventChan == nil {
-			if s.ctx.Err() != nil {
-				s.logger.Debug("Tmux activity bridge exiting before attach: context done")
-				return
-			}
-			if s.TMUXManager != nil {
-				if ch := s.TMUXManager.GetWindowMonitorEvents(); ch != nil {
-					eventChan = ch
-					s.logger.Info("Tmux activity bridge attached to window monitor events")
-					break
-				}
-			}
-			time.Sleep(200 * time.Millisecond)
+	
+	eventChan := s.TMUXManager.GetWindowMonitorEvents()
+	if eventChan == nil {
+		// Window monitor not started yet, wait a bit and retry
+		time.Sleep(1 * time.Second)
+		eventChan = s.TMUXManager.GetWindowMonitorEvents()
+		if eventChan == nil {
+			s.logger.Debug("Tmux window monitor not available, skipping activity bridging")
+			return
 		}
-
-		// Pump events until channel closes or context cancels
+	}
+	
+	s.logger.Debug("Starting tmux activity event bridge")
+	
+	for {
 		select {
 		case <-s.ctx.Done():
 			s.logger.Debug("Tmux activity bridge stopped due to context cancellation")
 			return
-		case ev, ok := <-eventChan:
+		case event, ok := <-eventChan:
 			if !ok {
-				// Channel closed; reset and attempt to reattach
-				s.logger.Debug("Tmux activity bridge: events channel closed, will reattach")
-				eventChan = nil
-				continue
+				s.logger.Debug("Tmux activity bridge stopped due to channel closure")
+				return
 			}
-
+			
 			// Only process active/inactive events
-			switch ev.EventType {
-			case "active":
-				source := "tmux:" + ev.OriginalSession
+			if event.EventType == "active" {
+				source := "tmux:" + event.OriginalSession
 				s.ActivityMonitor.ActivityStarted(source)
-				s.logger.Debug("Tmux session became active", "session", ev.OriginalSession)
-			case "inactive":
-				source := "tmux:" + ev.OriginalSession
+				s.logger.Debug("Tmux session became active", "session", event.OriginalSession)
+			} else if event.EventType == "inactive" {
+				source := "tmux:" + event.OriginalSession
 				s.ActivityMonitor.ActivityEnded(source)
-				s.logger.Debug("Tmux session became inactive", "session", ev.OriginalSession)
+				s.logger.Debug("Tmux session became inactive", "session", event.OriginalSession)
 			}
 		}
 	}
