@@ -14,19 +14,20 @@ import (
 
 // WindowMonitor monitors all tmux windows across all sessions
 type WindowMonitor struct {
-	logger         *slog.Logger
-	parser         *TmuxControlModeParser
-	monitorSession string
-	linkedWindows  map[string]string         // windowID -> original sessionID
-	activityStats  map[string]*ActivityStats // sessionID -> stats
-	mu             sync.RWMutex
-	eventChan      chan WindowMonitorEvent
-	socketPath     string                    // tmux socket path
-	configPath     string                    // tmux config path
-	cmdPath        string                    // Path to tmux binary (unwrapped)
-	wrapCmd        func(*exec.Cmd) *exec.Cmd // Optional wrapper (e.g., container.Wrap)
-	closed         chan struct{}             // Signal that monitor has closed
-	closeOnce      sync.Once
+	logger           *slog.Logger
+	parser           *TmuxControlModeParser
+	monitorSession   string
+	linkedWindows    map[string]string         // windowID -> original sessionID
+	activityStats    map[string]*ActivityStats // sessionID -> stats
+	inactivityTimers map[string]*time.Timer    // sessionID -> inactivity timer
+	mu               sync.RWMutex
+	eventChan        chan WindowMonitorEvent
+	socketPath       string                    // tmux socket path
+	configPath       string                    // tmux config path
+	cmdPath          string                    // Path to tmux binary (unwrapped)
+	wrapCmd          func(*exec.Cmd) *exec.Cmd // Optional wrapper (e.g., container.Wrap)
+	closed           chan struct{}             // Signal that monitor has closed
+	closeOnce        sync.Once
 }
 
 // ActivityStats tracks activity statistics for a session
@@ -35,7 +36,7 @@ type ActivityStats struct {
 	ByteCount      int64
 	LastActivity   time.Time
 	StartTime      time.Time
-	IsActive       bool    // Track whether session is currently considered active
+	IsActive       bool    // Computed dynamically from inactivity timer existence (set in GetActivityStats)
 	RecentDataRate float64 // bytes per second over recent window
 	dataPoints     []activityDataPoint
 }
@@ -65,15 +66,16 @@ func NewWindowMonitor(ctx context.Context, monitorSession string) *WindowMonitor
 	logger.Debug("Creating new WindowMonitor")
 
 	return &WindowMonitor{
-		logger:         logger,
-		monitorSession: monitorSession,
-		linkedWindows:  make(map[string]string),
-		activityStats:  make(map[string]*ActivityStats),
-		eventChan:      make(chan WindowMonitorEvent, 1000),
-		socketPath:     "", // Must be set explicitly
-		configPath:     "", // Must be set explicitly
-		cmdPath:        "", // Must be set explicitly via WithCommand
-		closed:         make(chan struct{}),
+		logger:           logger,
+		monitorSession:   monitorSession,
+		linkedWindows:    make(map[string]string),
+		activityStats:    make(map[string]*ActivityStats),
+		inactivityTimers: make(map[string]*time.Timer),
+		eventChan:        make(chan WindowMonitorEvent, 1000),
+		socketPath:       "", // Must be set explicitly
+		configPath:       "", // Must be set explicitly
+		cmdPath:          "", // Must be set explicitly via WithCommand
+		closed:           make(chan struct{}),
 	}
 }
 
@@ -194,9 +196,6 @@ func (wm *WindowMonitor) Start(ctx context.Context) error {
 	// Start the monitoring goroutine
 	go wm.monitorLoop(ctx)
 
-	// Start the activity timeout checker
-	go wm.activityTimeoutChecker(ctx)
-
 	// Do initial discovery after a small delay to ensure control mode is connected
 	// If there's a race and output arrives before discovery completes, linkWindowFromPane handles it
 	go func() {
@@ -286,10 +285,46 @@ func (wm *WindowMonitor) handleEvent(event TmuxEvent) {
 		wm.mu.RUnlock()
 
 		if exists {
-			// Update activity stats
+			// Update activity stats (only tracks data, doesn't send events)
 			wm.updateActivityStats(originalSession, len(e.Data))
 
-			// Send event (add $ prefix for consistency with new/inactive events)
+			// Always send "active" event immediately on output
+			cleanSessionID := strings.TrimPrefix(originalSession, "$")
+			wm.mu.Lock()
+			// Stop existing timer if any
+			if timer, hasTimer := wm.inactivityTimers[cleanSessionID]; hasTimer && timer != nil {
+				timer.Stop()
+			}
+			// Start new 5-second timer
+			wm.inactivityTimers[cleanSessionID] = time.AfterFunc(5*time.Second, func() {
+				wm.mu.Lock()
+				delete(wm.inactivityTimers, cleanSessionID)
+				wm.mu.Unlock()
+				// Send inactive event
+				select {
+				case wm.eventChan <- WindowMonitorEvent{
+					OriginalSession: "$" + cleanSessionID,
+					EventType:       "inactive",
+				}:
+					wm.logger.Debug("Sent inactive event after 5s quiet", "sessionID", cleanSessionID)
+				default:
+					wm.logger.Warn("Event channel full, dropping inactive event", "sessionID", cleanSessionID)
+				}
+			})
+			wm.mu.Unlock()
+
+			// Send active event immediately
+			select {
+			case wm.eventChan <- WindowMonitorEvent{
+				OriginalSession: "$" + originalSession,
+				EventType:       "active",
+			}:
+				wm.logger.Debug("Sent active event on output", "originalSession", originalSession)
+			default:
+				wm.logger.Warn("Event channel full, dropping active event", "originalSession", originalSession)
+			}
+
+			// Also send activity event with data (add $ prefix for consistency)
 			select {
 			case wm.eventChan <- WindowMonitorEvent{
 				WindowID:        windowID,
@@ -298,19 +333,59 @@ func (wm *WindowMonitor) handleEvent(event TmuxEvent) {
 				PaneID:          e.PaneID,
 				Data:            []byte(e.Data),
 			}:
-				wm.logger.Debug("Sent activity event", "originalSession", originalSession)
+				wm.logger.Debug("Sent activity event", "originalSession", originalSession, "dataLen", len(e.Data))
 			default:
 				wm.logger.Warn("Event channel full, dropping activity event",
 					"originalSession", originalSession)
 			}
-		} else {
-			wm.logger.Debug("Pane output for unlinked window, attempting to link",
-				"paneID", e.PaneID,
-				"windowID", windowID,
-				"linkedWindows", linkedWindowsCount)
-			// Try to link this specific window
-			go wm.linkWindowFromPane(e.PaneID, windowID)
-		}
+        } else {
+            wm.logger.Debug("Pane output for unlinked window, attempting to link",
+                "paneID", e.PaneID,
+                "windowID", windowID,
+                "linkedWindows", linkedWindowsCount)
+
+            // Best-effort: emit an activity event with data even before linking, so
+            // early output is visible to listeners (tests expect data-bearing event).
+            // We resolve the session ID synchronously; failures are non-fatal.
+            if windowID != "" {
+                args := []string{}
+                if wm.configPath != "" {
+                    args = append(args, "-f", wm.configPath)
+                }
+                args = append(args, "-S", wm.socketPath, "display-message", "-p", "-t", windowID,
+                    "#{session_id}:#{session_name}")
+
+                cmd := wm.buildTmuxCommand(args)
+                if out, err := cmd.Output(); err == nil {
+                    parts := strings.Split(strings.TrimSpace(string(out)), ":")
+                    if len(parts) >= 2 {
+                        sessID := parts[0]
+                        sessName := parts[1]
+                        if sessName != wm.monitorSession && strings.HasPrefix(sessName, "sprite-exec-") {
+                            // Emit an activity event with data using discovered session id
+                            select {
+                            case wm.eventChan <- WindowMonitorEvent{
+                                WindowID:        windowID,
+                                OriginalSession: "$" + strings.TrimPrefix(sessID, "$"),
+                                EventType:       "activity",
+                                PaneID:          e.PaneID,
+                                Data:            []byte(e.Data),
+                            }:
+                                // ok
+                            default:
+                                wm.logger.Warn("Event channel full, dropping pre-link activity event",
+                                    "originalSession", sessID)
+                            }
+                        }
+                    }
+                } else {
+                    wm.logger.Debug("Failed pre-link session lookup", "windowID", windowID, "error", err)
+                }
+            }
+
+            // Try to link this specific window
+            go wm.linkWindowFromPane(e.PaneID, windowID)
+        }
 
 	case WindowUnlinkEvent:
 		// A window was unlinked - might need to re-link it
@@ -328,9 +403,13 @@ func (wm *WindowMonitor) handleEvent(event TmuxEvent) {
 		originalSession := wm.linkedWindows[e.WindowID]
 		delete(wm.linkedWindows, e.WindowID)
 
-		// Clean up activity stats (originalSession is already the user session ID without $ prefix)
+		// Clean up activity stats and timers (originalSession is already the user session ID without $ prefix)
 		if originalSession != "" {
 			delete(wm.activityStats, originalSession)
+			if timer, exists := wm.inactivityTimers[originalSession]; exists && timer != nil {
+				timer.Stop()
+				delete(wm.inactivityTimers, originalSession)
+			}
 		}
 		wm.mu.Unlock()
 
@@ -351,9 +430,13 @@ func (wm *WindowMonitor) handleEvent(event TmuxEvent) {
 		originalSession := wm.linkedWindows[e.WindowID]
 		delete(wm.linkedWindows, e.WindowID)
 
-		// Clean up activity stats (originalSession is already the user session ID without $ prefix)
+		// Clean up activity stats and timers (originalSession is already the user session ID without $ prefix)
 		if originalSession != "" {
 			delete(wm.activityStats, originalSession)
+			if timer, exists := wm.inactivityTimers[originalSession]; exists && timer != nil {
+				timer.Stop()
+				delete(wm.inactivityTimers, originalSession)
+			}
 		}
 		wm.mu.Unlock()
 
@@ -616,17 +699,32 @@ func (wm *WindowMonitor) linkWindow(windowID, originalSessionID string) error {
 	if _, exists := wm.activityStats[cleanSessionID]; !exists {
 		now := time.Now()
 		wm.activityStats[cleanSessionID] = &ActivityStats{
-			SessionID:    cleanSessionID,
-			StartTime:    now,
+			SessionID:  cleanSessionID,
+			StartTime:  now,
 			LastActivity: now,
-			IsActive:     true, // New sessions start as active
-			dataPoints:   make([]activityDataPoint, 0, 100),
+			dataPoints: make([]activityDataPoint, 0, 100),
 		}
 		wm.logger.Debug("Initialized activity stats for newly linked session",
 			"sessionID", cleanSessionID,
 			"originalSessionID", originalSessionID,
 			"windowID", windowID)
 	}
+	// Start inactivity timer for newly linked session
+	wm.inactivityTimers[cleanSessionID] = time.AfterFunc(5*time.Second, func() {
+		wm.mu.Lock()
+		delete(wm.inactivityTimers, cleanSessionID)
+		wm.mu.Unlock()
+		// Send inactive event
+		select {
+		case wm.eventChan <- WindowMonitorEvent{
+			OriginalSession: "$" + cleanSessionID,
+			EventType:       "inactive",
+		}:
+			wm.logger.Debug("Sent inactive event after 5s quiet (new session)", "sessionID", cleanSessionID)
+		default:
+			wm.logger.Warn("Event channel full, dropping inactive event", "sessionID", cleanSessionID)
+		}
+	})
 	wm.mu.Unlock()
 
 	// Send active event to indicate the session is considered active upon linking
@@ -685,6 +783,15 @@ func (wm *WindowMonitor) Close() error {
 	var err error
 	wm.closeOnce.Do(func() {
 		close(wm.closed)
+		// Stop all inactivity timers
+		wm.mu.Lock()
+		for sessionID, timer := range wm.inactivityTimers {
+			if timer != nil {
+				timer.Stop()
+			}
+			delete(wm.inactivityTimers, sessionID)
+		}
+		wm.mu.Unlock()
 		if wm.parser != nil {
 			err = wm.parser.Close()
 			wm.parser = nil
@@ -693,7 +800,7 @@ func (wm *WindowMonitor) Close() error {
 	return err
 }
 
-// updateActivityStats updates activity statistics for a session
+// updateActivityStats updates activity statistics for a session (only tracks data, doesn't send events)
 func (wm *WindowMonitor) updateActivityStats(sessionID string, byteCount int) {
 	wm.mu.Lock()
 	defer wm.mu.Unlock()
@@ -711,39 +818,10 @@ func (wm *WindowMonitor) updateActivityStats(sessionID string, byteCount int) {
 		stats = &ActivityStats{
 			SessionID:    cleanSessionID,
 			StartTime:    now,
-			LastActivity: now,  // Initialize to current time to prevent immediate timeout
-			IsActive:     true, // New sessions start as active
+			LastActivity: now,
 			dataPoints:   make([]activityDataPoint, 0, 100),
 		}
 		wm.activityStats[cleanSessionID] = stats
-
-		// Send active event for new session (add $ prefix for consistency)
-		select {
-		case wm.eventChan <- WindowMonitorEvent{
-			OriginalSession: "$" + cleanSessionID,
-			EventType:       "active",
-		}:
-			wm.logger.Debug("Sent active event for new session", "sessionID", cleanSessionID)
-		default:
-			wm.logger.Warn("Event channel full, dropping active event for new session", "sessionID", cleanSessionID)
-		}
-	} else if !stats.IsActive {
-		// Session was inactive and is now active again
-		wm.logger.Debug("Session became active again",
-			"sessionID", cleanSessionID,
-			"wasInactive", true)
-		stats.IsActive = true
-
-		// Send active event (add $ prefix for consistency)
-		select {
-		case wm.eventChan <- WindowMonitorEvent{
-			OriginalSession: "$" + cleanSessionID,
-			EventType:       "active",
-		}:
-			wm.logger.Debug("Sent active event for reactivated session", "sessionID", cleanSessionID)
-		default:
-			wm.logger.Warn("Event channel full, dropping active event for reactivated session", "sessionID", cleanSessionID)
-		}
 	}
 
 	stats.ByteCount += int64(byteCount)
@@ -752,8 +830,7 @@ func (wm *WindowMonitor) updateActivityStats(sessionID string, byteCount int) {
 	wm.logger.Debug("Updated activity stats",
 		"sessionID", cleanSessionID,
 		"byteCount", byteCount,
-		"totalBytes", stats.ByteCount,
-		"isActive", stats.IsActive)
+		"totalBytes", stats.ByteCount)
 
 	// Add data point for rate calculation
 	stats.dataPoints = append(stats.dataPoints, activityDataPoint{
@@ -811,9 +888,12 @@ func (wm *WindowMonitor) GetActivityStats() map[string]*ActivityStats {
 	// Create a copy to avoid race conditions
 	result := make(map[string]*ActivityStats)
 	for id, stats := range wm.activityStats {
+		// Compute IsActive from timer existence
+		isActive := wm.inactivityTimers[id] != nil
+
 		wm.logger.Debug("Copying activity stats",
 			"sessionID", id,
-			"isActive", stats.IsActive,
+			"isActive", isActive,
 			"byteCount", stats.ByteCount,
 			"recentDataRate", stats.RecentDataRate)
 
@@ -822,7 +902,7 @@ func (wm *WindowMonitor) GetActivityStats() map[string]*ActivityStats {
 			ByteCount:      stats.ByteCount,
 			LastActivity:   stats.LastActivity,
 			StartTime:      stats.StartTime,
-			IsActive:       stats.IsActive,
+			IsActive:       isActive, // Computed from timer state
 			RecentDataRate: stats.RecentDataRate,
 			// Note: we don't copy dataPoints to avoid exposing internal state
 		}
@@ -833,49 +913,3 @@ func (wm *WindowMonitor) GetActivityStats() map[string]*ActivityStats {
 	return result
 }
 
-// activityTimeoutChecker periodically checks for sessions that have become inactive
-func (wm *WindowMonitor) activityTimeoutChecker(ctx context.Context) {
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	wm.logger.Debug("Activity timeout checker started")
-
-	for {
-		select {
-		case <-ctx.Done():
-			wm.logger.Info("Activity timeout checker stopped - context done")
-			return
-		case <-wm.closed:
-			wm.logger.Info("Activity timeout checker stopped - monitor closed")
-			return
-		case <-ticker.C:
-			wm.mu.Lock()
-			now := time.Now()
-
-			for sessionID, stats := range wm.activityStats {
-				inactiveDuration := now.Sub(stats.LastActivity)
-				// Check if session has been inactive for more than 5 seconds
-				if stats.IsActive && inactiveDuration > 5*time.Second {
-					wm.logger.Debug("Session became inactive due to timeout",
-						"sessionID", sessionID,
-						"inactiveDuration", inactiveDuration,
-						"lastActivity", stats.LastActivity)
-					stats.IsActive = false
-
-					// Send inactive event
-					select {
-					case wm.eventChan <- WindowMonitorEvent{
-						OriginalSession: "$" + sessionID, // Add back the $ prefix
-						EventType:       "inactive",
-					}:
-						wm.logger.Debug("Sent inactive event", "sessionID", sessionID)
-					default:
-						wm.logger.Warn("Event channel full, dropping inactive event", "sessionID", sessionID)
-					}
-				}
-			}
-
-			wm.mu.Unlock()
-		}
-	}
-}
