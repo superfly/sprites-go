@@ -287,9 +287,9 @@ func (s *System) StartProcess() error {
 	s.processStoppedCh = make(chan struct{})
 	s.processMu.Unlock()
 
-	// Send notification to admin channel (non-blocking)
+	// Send notification to admin channel (async, non-blocking)
 	if s.AdminChannel != nil {
-		go s.AdminChannel.SendActivityEvent("container_started", map[string]interface{}{
+		s.AdminChannel.SendActivityEvent("container_started", map[string]interface{}{
 			"timestamp":      time.Now().Unix(),
 			"pid":            processCmd.Process.Pid,
 			"command":        s.config.ProcessCommand,
@@ -545,9 +545,9 @@ func (s *System) generateCrashReport(err error, processRuntime time.Duration, st
 			s.logger.Error("Failed to report process crash", "error", reportErr)
 		}
 
-		// Send notification to admin channel (non-blocking)
+		// Send notification to admin channel (async, non-blocking)
 		if s.AdminChannel != nil {
-			go s.AdminChannel.SendActivityEvent("supervised_process_crashed", report.ToMap())
+			s.AdminChannel.SendActivityEvent("supervised_process_crashed", report.ToMap())
 		}
 	}
 }

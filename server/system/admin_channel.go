@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"sync"
 
 	"github.com/superfly/sprite-env/pkg/phx"
 	"github.com/superfly/sprite-env/pkg/tap"
@@ -15,6 +16,12 @@ import (
 
 // Context key for storing admin channel data
 type adminChannelContextKey struct{}
+
+// pendingEvent represents an event waiting to be sent
+type pendingEvent struct {
+	eventType string
+	payload   map[string]interface{}
+}
 
 // AdminChannel manages the outbound Phoenix channel connection
 type AdminChannel struct {
@@ -25,6 +32,16 @@ type AdminChannel struct {
 	logger  *slog.Logger
 	env     Environment
 	system  *System // Reference to system for handling sprite assignment
+
+	// Run loop infrastructure
+	eventCh          chan pendingEvent
+	done             chan struct{}
+	connReady        chan bool
+	channelReady     chan bool
+	pendingEvents    []pendingEvent
+	isSocketConnected bool
+	isChannelJoined   bool
+	stopOnce         sync.Once // Ensures Stop() only closes done channel once
 }
 
 // NewAdminChannel creates a new admin channel manager
@@ -111,10 +128,39 @@ func (ac *AdminChannel) Start() error {
 		ac.socket.Logger = &phxLogAdapter{logger: ac.logger}
 	}
 
+	// Initialize run loop infrastructure
+	ac.eventCh = make(chan pendingEvent, 100)
+	ac.done = make(chan struct{})
+	ac.connReady = make(chan bool, 10)
+	ac.channelReady = make(chan bool, 10)
+	ac.pendingEvents = make([]pendingEvent, 0)
+	ac.isSocketConnected = false
+	ac.isChannelJoined = false
+
 	// Start connection (non-blocking, starts background goroutines)
 	if err := ac.socket.Connect(); err != nil {
 		return fmt.Errorf("failed to start connection: %w", err)
 	}
+
+	// Register socket callbacks to track connection state
+	ac.socket.OnOpen(func() {
+		select {
+		case ac.connReady <- true:
+		default:
+		}
+	})
+	ac.socket.OnClose(func() {
+		select {
+		case ac.connReady <- false:
+		default:
+		}
+	})
+	ac.socket.OnError(func(err error) {
+		select {
+		case ac.connReady <- false:
+		default:
+		}
+	})
 
 	// Create and join channel immediately - no need to wait for socket connection
 	ac.channel = ac.socket.Channel(channelTopic, nil)
@@ -128,6 +174,26 @@ func (ac *AdminChannel) Start() error {
 	// Handle sprite_assigned notifications
 	ac.channel.On("sprite_assigned", func(payload any) {
 		ac.handleSpriteAssigned(payload, true)
+	})
+
+	// Register channel callbacks to track join state
+	ac.channel.On("phx_join", func(payload any) {
+		select {
+		case ac.channelReady <- true:
+		default:
+		}
+	})
+	ac.channel.On("phx_close", func(payload any) {
+		select {
+		case ac.channelReady <- false:
+		default:
+		}
+	})
+	ac.channel.On("phx_error", func(payload any) {
+		select {
+		case ac.channelReady <- false:
+		default:
+		}
 	})
 
 	// Join the channel - it will wait for socket connection if needed
@@ -144,6 +210,12 @@ func (ac *AdminChannel) Start() error {
 			"topic", channelTopic,
 			"response", response)
 
+		// Signal channel ready (phx_join event should also fire, but signal here too for safety)
+		select {
+		case ac.channelReady <- true:
+		default:
+		}
+
 		// Apply any sprite assignment info included in the join reply (no reply push)
 		ac.handleSpriteAssigned(response, false)
 	})
@@ -152,21 +224,88 @@ func (ac *AdminChannel) Start() error {
 		ac.logger.Error("Failed to join admin channel",
 			"topic", channelTopic,
 			"reason", reason)
+		// Signal channel not ready
+		select {
+		case ac.channelReady <- false:
+		default:
+		}
 	})
 
 	join.Receive("timeout", func(response any) {
 		ac.logger.Warn("Admin channel join timed out",
 			"topic", channelTopic,
 			"response", response)
+		// Signal channel not ready
+		select {
+		case ac.channelReady <- false:
+		default:
+		}
 	})
+
+	// Launch run loop goroutine
+	go ac.run()
 
 	// Return immediately - connection and join happen asynchronously
 	return nil
 }
 
+// run is the main event loop for AdminChannel
+func (ac *AdminChannel) run() {
+	for {
+		select {
+		case <-ac.done:
+			// Shutdown signal received, exit gracefully
+			return
+
+		case ready := <-ac.connReady:
+			// Socket connection state changed
+			ac.isSocketConnected = ready
+			// Channel will auto-rejoin via phx library's rejoin timer when socket reconnects
+
+		case joined := <-ac.channelReady:
+			// Channel join state changed
+			ac.isChannelJoined = joined
+			if joined {
+				// Channel just joined, flush pending events
+				var failedEvents []pendingEvent
+				for _, event := range ac.pendingEvents {
+					_, err := ac.channel.Push(event.eventType, event.payload)
+					if err != nil {
+						// Re-queue for retry later
+						failedEvents = append(failedEvents, event)
+					}
+				}
+				// Keep only failed events
+				ac.pendingEvents = failedEvents
+			}
+
+		case event := <-ac.eventCh:
+			// New event to send
+			if ac.isSocketConnected && ac.isChannelJoined {
+				// Ready to send immediately
+				_, err := ac.channel.Push(event.eventType, event.payload)
+				if err != nil {
+					// Push failed, queue for retry
+					ac.pendingEvents = append(ac.pendingEvents, event)
+				}
+			} else {
+				// Not ready, queue for later
+				ac.pendingEvents = append(ac.pendingEvents, event)
+			}
+		}
+	}
+}
+
 // Stop disconnects from the channel
 func (ac *AdminChannel) Stop() error {
-	// Disconnect without waiting for channel leave; best-effort shutdown
+	// Signal run loop to shutdown (only once)
+	ac.stopOnce.Do(func() {
+		if ac.done != nil {
+			close(ac.done)
+		}
+	})
+
+	// Disconnect socket immediately
 	if ac.socket != nil {
 		ac.socket.Disconnect()
 	}
@@ -188,14 +327,15 @@ func (ac *AdminChannel) LeaveAsync() {
 // Push sends a message to the admin channel with automatic nil checking and payload conversion.
 // It accepts any payload type and will convert it to map[string]interface{} via JSON marshaling if needed.
 // This is safe to call even if the admin channel is nil or not connected.
+// Push is fully async and never blocks - it sends to the event queue and returns immediately.
 func (ac *AdminChannel) Push(eventType string, payload interface{}) {
 	if ac == nil {
 		// Silently return if admin channel is not configured
 		return
 	}
 
-	if ac.channel == nil {
-		// Silently return if channel is not connected
+	if ac.eventCh == nil {
+		// Not started yet or already stopped
 		return
 	}
 
@@ -229,41 +369,26 @@ func (ac *AdminChannel) Push(eventType string, payload interface{}) {
 		}
 	}
 
-	// Send the event - Phoenix library will queue if not joined and flush when joined
-	_, err := ac.channel.Push(eventType, mapPayload)
-
-	if err != nil && ac.logger != nil {
-		ac.logger.Error("Failed to push admin channel event",
-			"event_type", eventType,
-			"error", err)
+	// Send to event queue (non-blocking)
+	event := pendingEvent{
+		eventType: eventType,
+		payload:   mapPayload,
+	}
+	select {
+	case ac.eventCh <- event:
+		// Successfully queued
+	default:
+		// Channel full (shouldn't happen with size 100, but handle gracefully)
+		if ac.logger != nil {
+			ac.logger.Error("Admin channel event queue full, dropping event",
+				"event_type", eventType)
+		}
 	}
 }
 
-// SendActivityEvent sends a simple activity event with a type and payload
+// SendActivityEvent sends a simple activity event with a type and payload.
+// This is a convenience wrapper around Push() for activity events.
 func (ac *AdminChannel) SendActivityEvent(eventType string, payload map[string]interface{}) {
-	if ac == nil {
-		// This shouldn't happen, but let's check
-		return
-	}
-
-	if ac.channel == nil {
-		ac.logger.Warn("Admin channel not connected, cannot send event", "event_type", eventType)
-		return
-	}
-
-	if payload == nil {
-		payload = make(map[string]interface{})
-	}
-
-	// Log the event being sent
-	ac.logger.Debug("Sending admin channel event",
-		"event_type", eventType,
-		"payload", payload,
-		"channel_joined", ac.channel.IsJoined(),
-		"channel_joining", ac.channel.IsJoining(),
-		"socket_connected", ac.socket != nil && ac.socket.IsConnected())
-
-	// Use the new Push method
 	ac.Push(eventType, payload)
 }
 
@@ -306,8 +431,8 @@ func (ac *AdminChannel) RequestEnd(ctx context.Context, infoInterface interface{
 	}
 	payload["type"] = "request_end"
 
-	// Send directly - Phoenix library handles queueing
-	ac.channel.Push("request_end", payload)
+	// Send via async Push
+	ac.Push("request_end", payload)
 }
 
 // GetFromContext retrieves the admin channel from context
@@ -403,9 +528,5 @@ func (ac *AdminChannel) handleSpriteAssigned(payload any, sendReply bool) {
 
 // replyToSpriteAssigned sends a reply to the sprite_assigned event
 func (ac *AdminChannel) replyToSpriteAssigned(response interface{}) {
-	if ac.channel == nil {
-		return
-	}
-
-	ac.channel.Push("sprite_assigned_reply", response)
+	ac.Push("sprite_assigned_reply", response)
 }
