@@ -114,9 +114,13 @@ func (m *ActivityMonitor) Stop() {
 
 // ActivityStarted records the start of an activity and signals the monitor
 func (m *ActivityMonitor) ActivityStarted(source string) {
-	// Reject events if the monitor isn't running
+	// Allow activities to be registered before Start() - they will be processed when Start() runs
+	// This is important for boot-time activities that may start before the monitor is fully initialized
 	if !m.started.Load() {
-		m.logger.Info("ActivityMonitor: drop event - not started", "source", source)
+		// Pre-register the activity so it's available when Start() runs
+		m.activities[source] = struct{}{}
+		m.lastActivity = m.now()
+		m.logger.Debug("ActivityMonitor: pre-registered activity (monitor not started yet)", "source", source)
 		return
 	}
 	// Non-blocking send to avoid deadlocks/backpressure cascades
@@ -130,9 +134,11 @@ func (m *ActivityMonitor) ActivityStarted(source string) {
 
 // ActivityEnded records the end of an activity
 func (m *ActivityMonitor) ActivityEnded(source string) {
-	// Reject events if the monitor isn't running
+	// Allow activities to be ended even if monitor isn't started yet (cleanup pre-registered activities)
 	if !m.started.Load() {
-		m.logger.Info("ActivityMonitor: drop event - not started", "source", source)
+		// Remove from pre-registered activities if present
+		delete(m.activities, source)
+		m.logger.Debug("ActivityMonitor: pre-unregistered activity (monitor not started yet)", "source", source)
 		return
 	}
 	// Non-blocking send to avoid deadlocks/backpressure cascades
@@ -190,11 +196,19 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 	defer statusTicker.Stop()
 
 	// Start idle timer if there is no active activity
+	// Note: m.activities may already contain pre-registered activities from before Start() was called
 	if len(m.activities) == 0 {
 		idleTimer = time.NewTimer(m.idleAfter)
 		idleTimerCh = idleTimer.C
 		// Log timer start at info level for visibility
 		m.logger.Info("ActivityMonitor: starting idle timer", "duration", m.idleAfter)
+	} else {
+		// Log that we started with pre-existing activities
+		sources := make([]string, 0, len(m.activities))
+		for source := range m.activities {
+			sources = append(sources, source)
+		}
+		m.logger.Info("ActivityMonitor: started with pre-existing activities", "sources", sources)
 	}
 
 	for {

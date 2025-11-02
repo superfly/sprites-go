@@ -64,6 +64,26 @@ func TestMonitorSeesDetachableExecOutput(t *testing.T) {
 		t.Fatal("window monitor did not start (event channel nil)")
 	}
 
+	// Wait for window discovery to complete before sending second output
+	// The monitor starts discovery after 100ms delay and sends an "active" event when windows are linked
+	// Wait for an "active" event to ensure discovery completed
+	discoveryDeadline := time.Now().Add(2 * time.Second)
+	windowLinked := false
+	for time.Now().Before(discoveryDeadline) && !windowLinked {
+		select {
+		case ev := <-evCh:
+			if ev.EventType == "active" {
+				windowLinked = true
+				// This event counts towards our final check, so record it
+				// We'll still look for activity-with-data from the second output
+			}
+		default:
+		}
+		if !windowLinked {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+
 	// Send more output after we have started monitoring events. Prefer control-mode to avoid spawning tmux.
 	if m.windowMonitor != nil && m.windowMonitor.parser != nil {
 		_ = m.windowMonitor.parser.ListPanes()
@@ -77,7 +97,8 @@ func TestMonitorSeesDetachableExecOutput(t *testing.T) {
 	}
 
 	// Collect events: expect an 'active' (from linking/initial activity) and at least one 'activity' with data (from second output)
-	gotActive := false
+	// Note: We may have already received an "active" event while waiting for discovery, so check for that too
+	gotActive := windowLinked // We already got an active event during discovery wait
 	gotActivityWithData := false
 	waitUntil := time.Now().Add(8 * time.Second)
 	for time.Now().Before(waitUntil) {

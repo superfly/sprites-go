@@ -297,10 +297,16 @@ func (wm *WindowMonitor) handleEvent(event TmuxEvent) {
 			}
 			// Start new 5-second timer
 			wm.inactivityTimers[cleanSessionID] = time.AfterFunc(5*time.Second, func() {
+				defer func() {
+					if r := recover(); r != nil {
+						// Channel may be closed - this is safe to ignore
+						wm.logger.Debug("Timer callback: channel closed, dropping inactive event", "sessionID", cleanSessionID)
+					}
+				}()
 				wm.mu.Lock()
 				delete(wm.inactivityTimers, cleanSessionID)
 				wm.mu.Unlock()
-				// Send inactive event
+				// Send inactive event (may panic if channel is closed)
 				select {
 				case wm.eventChan <- WindowMonitorEvent{
 					OriginalSession: "$" + cleanSessionID,
@@ -711,10 +717,16 @@ func (wm *WindowMonitor) linkWindow(windowID, originalSessionID string) error {
 	}
 	// Start inactivity timer for newly linked session
 	wm.inactivityTimers[cleanSessionID] = time.AfterFunc(5*time.Second, func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// Channel may be closed - this is safe to ignore
+				wm.logger.Debug("Timer callback: channel closed, dropping inactive event (new session)", "sessionID", cleanSessionID)
+			}
+		}()
 		wm.mu.Lock()
 		delete(wm.inactivityTimers, cleanSessionID)
 		wm.mu.Unlock()
-		// Send inactive event
+		// Send inactive event (may panic if channel is closed)
 		select {
 		case wm.eventChan <- WindowMonitorEvent{
 			OriginalSession: "$" + cleanSessionID,
