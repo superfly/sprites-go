@@ -61,25 +61,35 @@ func (h *Handlers) ServeExecWS(ctx context.Context, ws WSLike, query url.Values)
 	// Build final command considering tmux detachable/attach
 	finalCmd := baseCmd
 	var monitoredSessionID string
+	var wrapped *container.WrappedCommand
+	
 	if h.system != nil {
 		if tm := h.system.GetTMUXManager(); tm != nil {
 			if sessionID != "" {
-				// Attach flow builds full command
-				finalCmd = tm.AttachCmd(sessionID, controlMode)
+				// Attach flow builds full command + may provide wrapper for signaling
+				cmd, w := tm.Attach(sessionID, controlMode)
+				finalCmd = cmd
+				wrapped = w
 				monitoredSessionID = sessionID
 			} else if detachable {
-				// New detachable session
-				cmd, newID := tm.NewSessionCmd(baseCmd, controlMode)
+				// New detachable session (with control mode)
+				cmd, w, newID := tm.NewSession(baseCmd, controlMode)
 				finalCmd = cmd
+				wrapped = w
 				monitoredSessionID = newID
+			} else if h.containerEnabled {
+				// Non-tmux path: always container wrap when enabled
+				wrapped = container.Wrap(baseCmd, "app", container.WithTTY(tty))
+				if wrapped != nil {
+					finalCmd = wrapped.Cmd
+				}
 			}
 		}
 	}
 
-	// Wrap for container last, and avoid double-wrapping if tmux manager already wrapped
-	var wrapped *container.WrappedCommand
-	if h.containerEnabled && !isAlreadyContainerWrapped(finalCmd) {
-		wrapped = container.Wrap(finalCmd, "app", container.WithTTY(tty))
+	// If not tmux and container wrapping wasn't decided above (e.g., no system manager), apply it now
+	if wrapped == nil && monitoredSessionID == "" && h.containerEnabled {
+		wrapped = container.Wrap(baseCmd, "app", container.WithTTY(tty))
 		if wrapped != nil {
 			finalCmd = wrapped.Cmd
 		}
