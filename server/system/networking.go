@@ -74,6 +74,7 @@ func (s *System) initializeAPIServer() error {
 		SyncTargetPath:     syncTargetPath,
 		ProxyLocalhostIPv4: s.config.ProxyLocalhostIPv4,
 		ProxyLocalhostIPv6: s.config.ProxyLocalhostIPv6,
+		SpriteVersion:      getVersion(),
 	}
 
 	// API server will be no-op if ListenAddr is empty
@@ -86,6 +87,15 @@ func (s *System) initializeAPIServer() error {
 	if s.AdminChannel != nil {
 		apiServer.SetAdminChannel(s.AdminChannel)
 	}
+
+	// Wire HTTP activity observation immediately
+	apiServer.SetActivityObserver(func(start bool) {
+		if start {
+			s.ActivityMonitor.ActivityStarted("http")
+		} else {
+			s.ActivityMonitor.ActivityEnded("http")
+		}
+	})
 
 	s.APIServer = apiServer
 

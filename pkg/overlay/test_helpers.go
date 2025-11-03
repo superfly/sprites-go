@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 // VerifyNoTestOverlays checks that no test-related overlays or loop devices remain
@@ -33,13 +34,34 @@ func VerifyNoTestOverlays(t *testing.T, m *Manager) {
 
 	// Check for our specific loop devices by checking if our image file is attached
 	imagePath := m.GetImagePath()
+	// Allow a brief grace period for the kernel to release loop mappings
+	for i := 0; i < 10; i++ { // up to ~1s
+		if output, err := exec.Command("losetup", "-a").Output(); err == nil {
+			leak := false
+			loopList := string(output)
+			for _, line := range strings.Split(loopList, "\n") {
+				if line == "" {
+					continue
+				}
+				if strings.Contains(line, imagePath) {
+					leak = true
+					break
+				}
+			}
+			if !leak {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		} else {
+			break
+		}
+	}
 	if output, err := exec.Command("losetup", "-a").Output(); err == nil {
 		loopList := string(output)
 		for _, line := range strings.Split(loopList, "\n") {
 			if line == "" {
 				continue
 			}
-			// Check if this loop device references our image file
 			if strings.Contains(line, imagePath) {
 				failures = append(failures, fmt.Sprintf("Loop device still attached to our image: %s", line))
 			}

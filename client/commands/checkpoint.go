@@ -10,6 +10,9 @@ import (
 
 	"log/slog"
 
+	"net/http"
+
+	"github.com/superfly/sprite-env/client/config"
 	"github.com/superfly/sprite-env/client/format"
 	sprites "github.com/superfly/sprites-go"
 )
@@ -27,7 +30,7 @@ func CheckpointCommand(ctx *GlobalContext, args []string) {
 			"sprite checkpoint list",
 			"sprite checkpoint info v2",
 			"sprite checkpoint restore v1",
-			"sprite checkpoint list --history VERSION",
+			"sprite checkpoint delete v3",
 		},
 	}
 
@@ -42,7 +45,8 @@ func CheckpointCommand(ctx *GlobalContext, args []string) {
 		fmt.Fprintf(os.Stderr, "  create    Create a new checkpoint\n")
 		fmt.Fprintf(os.Stderr, "  list      List all checkpoints\n")
 		fmt.Fprintf(os.Stderr, "  info      Show information about a specific checkpoint\n")
-		fmt.Fprintf(os.Stderr, "  restore   Restore from a checkpoint\n\n")
+		fmt.Fprintf(os.Stderr, "  restore   Restore from a checkpoint\n")
+		fmt.Fprintf(os.Stderr, "  delete    Delete a checkpoint (soft delete)\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		cmd.FlagSet.PrintDefaults()
 		fmt.Fprintln(os.Stderr)
@@ -62,7 +66,7 @@ func CheckpointCommand(ctx *GlobalContext, args []string) {
 	}
 
 	// Get organization, client, and sprite using unified function
-	_, _, sprite, err := GetOrgClientAndSprite(ctx, flags.Org, flags.Sprite)
+	org, _, sprite, err := GetOrgClientAndSprite(ctx, flags.Org, flags.Sprite)
 	if err != nil {
 		// Check if it's a cancellation error
 		if strings.Contains(err.Error(), "cancelled") {
@@ -101,6 +105,13 @@ func CheckpointCommand(ctx *GlobalContext, args []string) {
 			os.Exit(1)
 		}
 		checkpointRestoreCommand(ctx, sprite, subArgs)
+	case "delete", "rm":
+		if len(subArgs) < 1 {
+			fmt.Fprintf(os.Stderr, "Error: checkpoint delete requires a checkpoint ID\n\n")
+			cmd.FlagSet.Usage()
+			os.Exit(1)
+		}
+		checkpointDeleteCommand(ctx, org, sprite, subArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "Error: Unknown checkpoint subcommand '%s'\n\n", subcommand)
 		cmd.FlagSet.Usage()
@@ -372,6 +383,75 @@ func checkpointRestoreCommand(ctx *GlobalContext, sprite *sprites.Sprite, args [
 	}
 
 	os.Exit(exitCode)
+}
+
+func checkpointDeleteCommand(ctx *GlobalContext, org *config.Organization, sprite *sprites.Sprite, args []string) {
+	// Create command structure
+	cmd := &Command{
+		Name:        "checkpoint delete",
+		Usage:       "checkpoint delete <version-id>",
+		Description: "Delete a checkpoint (soft delete)",
+		FlagSet:     flag.NewFlagSet("checkpoint delete", flag.ContinueOnError),
+		Examples: []string{
+			"sprite checkpoint delete v3",
+		},
+	}
+
+	// Set up flags
+	_ = NewGlobalFlags(cmd.FlagSet)
+
+	// Parse flags
+	remainingArgs, err := ParseFlags(cmd, args)
+	if err != nil {
+		os.Exit(1)
+	}
+
+	if len(remainingArgs) != 1 {
+		fmt.Fprintf(os.Stderr, "Error: checkpoint delete requires exactly one argument (version ID)\n\n")
+		cmd.FlagSet.Usage()
+		os.Exit(1)
+	}
+
+	checkpointID := remainingArgs[0]
+
+	// Build DELETE request to server API via sprite proxy URL
+	url := buildSpriteProxyURL(org, sprite.Name(), "/checkpoints/"+checkpointID)
+
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to build request: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Add auth header
+	token, err := org.GetToken()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to get auth token: %v\n", err)
+		os.Exit(1)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: request failed: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		fmt.Println("Deleted")
+		os.Exit(0)
+	case http.StatusNotFound:
+		fmt.Fprintf(os.Stderr, "Error: checkpoint not found\n")
+		os.Exit(1)
+	case http.StatusConflict:
+		fmt.Fprintf(os.Stderr, "Error: cannot delete active checkpoint\n")
+		os.Exit(1)
+	default:
+		fmt.Fprintf(os.Stderr, "Error: server returned %d\n", resp.StatusCode)
+		os.Exit(1)
+	}
 }
 
 // RestoreCommand handles the restore command

@@ -1,0 +1,125 @@
+package tmux
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/superfly/sprite-env/pkg/tap"
+)
+
+// Simulates the /exec detachable path using tmux.Manager and verifies that
+// the window monitor observes activity without requiring artificial waits.
+func TestMonitorSeesDetachableExecOutput(t *testing.T) {
+	socketPath := createTestSocket(t)
+	defer killTmuxServer(socketPath)
+
+	// Provide a minimal tmux config file path for Manager (it always passes -f)
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "tmux.conf")
+	if err := os.WriteFile(cfgPath, []byte(""), 0644); err != nil {
+		t.Fatalf("failed to write temp tmux config: %v", err)
+	}
+
+	logger := tap.NewDiscardLogger()
+	ctx := tap.WithLogger(context.Background(), logger)
+
+	m := NewManager(ctx, Options{
+		TmuxBinary: "tmux",
+		SocketPath: socketPath,
+		ConfigPath: cfgPath,
+	})
+
+	// Pre-create an exec session outside the manager (simulate an existing session)
+	testID := "9001"
+	execSessionName := "sprite-exec-" + testID
+	createTmuxSession(t, socketPath, execSessionName)
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "-S", socketPath, "kill-session", "-t", execSessionName).Run()
+	})
+
+	// Send initial output immediately (do not wait for monitor)
+	sendKeysToPane(t, socketPath, execSessionName, "echo FIRST_MONITOR_OK")
+	sendKeysToPane(t, socketPath, execSessionName, "Enter")
+
+	// Trigger manager to start the window monitor lazily without creating another session
+	// (NewSession enqueues monitor start)
+	dummyBase := exec.Command("true")
+	_, _ /*unused*/, _ = m.NewSession(dummyBase, false)
+
+	// Now wait until the window monitor event channel is available (lazy-started by manager)
+	var evCh <-chan WindowMonitorEvent
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		evCh = m.GetWindowMonitorEvents()
+		if evCh != nil {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if evCh == nil {
+		t.Fatal("window monitor did not start (event channel nil)")
+	}
+
+	// Wait for window discovery to complete before sending second output
+	// The monitor starts discovery after 100ms delay and sends an "active" event when windows are linked
+	// Wait for an "active" event to ensure discovery completed
+	discoveryDeadline := time.Now().Add(2 * time.Second)
+	windowLinked := false
+	for time.Now().Before(discoveryDeadline) && !windowLinked {
+		select {
+		case ev := <-evCh:
+			if ev.EventType == "active" {
+				windowLinked = true
+				// This event counts towards our final check, so record it
+				// We'll still look for activity-with-data from the second output
+			}
+		default:
+		}
+		if !windowLinked {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+
+	// Send more output after we have started monitoring events. Prefer control-mode to avoid spawning tmux.
+	if m.windowMonitor != nil && m.windowMonitor.parser != nil {
+		_ = m.windowMonitor.parser.ListPanes()
+		// Give tmux a brief moment to hydrate pane/window mappings
+		time.Sleep(150 * time.Millisecond)
+		// send-keys over control mode and press Enter
+		_ = m.windowMonitor.parser.SendCommand("send-keys -t " + execSessionName + " 'echo SECOND_MONITOR_OK' Enter")
+	} else {
+		sendKeysToPane(t, socketPath, execSessionName, "echo SECOND_MONITOR_OK")
+		sendKeysToPane(t, socketPath, execSessionName, "Enter")
+	}
+
+	// Collect events: expect an 'active' (from linking/initial activity) and at least one 'activity' with data (from second output)
+	// Note: We may have already received an "active" event while waiting for discovery, so check for that too
+	gotActive := windowLinked // We already got an active event during discovery wait
+	gotActivityWithData := false
+	waitUntil := time.Now().Add(8 * time.Second)
+	for time.Now().Before(waitUntil) {
+		select {
+		case ev := <-evCh:
+			if ev.EventType == "active" {
+				gotActive = true
+			}
+			if ev.EventType == "activity" && len(ev.Data) > 0 {
+				gotActivityWithData = true
+			}
+		default:
+		}
+		if gotActive && gotActivityWithData {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !gotActive || !gotActivityWithData {
+		t.Fatalf("expected active and activity-with-data events, got active=%v activityWithData=%v", gotActive, gotActivityWithData)
+	}
+
+	// Done
+}

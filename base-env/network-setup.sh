@@ -12,7 +12,7 @@ if [ -z "${SPRITE_WRITE_DIR:-}" ]; then
     exit 1
 fi
 
-# Configuration
+# Configuration (must match server policy manager defaults)
 NS_NAME=sprite
 VETH_HOST=spr0-host
 VETH_CONT=spr0
@@ -42,90 +42,27 @@ setup_namespace_sysctl() {
     ip netns exec $NS_NAME sysctl -w net.ipv4.conf.spr0.rp_filter=2 >/dev/null
 }
 
-# Create veth pair if it doesn't exist
-create_veth_pair() {
-    if ! ip link show $VETH_HOST &>/dev/null; then
-        ip link add $VETH_HOST type veth peer name $VETH_CONT
-    fi
-}
+# Note: veth creation, netns creation, addressing and routes are now handled by the policy manager.
+# We only apply sysctls, expose the netns path, and set up NAT here.
 
-# Create network namespace and handle stale files
-setup_namespace() {
-    # Check if namespace already exists and is working
-    if ip netns list | grep -q "^${NS_NAME}\s"; then
-        # Network namespace already exists, reusing it
-        true
-    elif [ ! -e "/run/netns/${NS_NAME}" ]; then
-        # Namespace doesn't exist at all, create it
-        ip netns add $NS_NAME
-    else
-        # Namespace file exists but not in ip netns list
-        # Try to remove it, but don't fail if we can't
-        rm -f "/run/netns/${NS_NAME}" 2>/dev/null || true
-        # Try to create namespace
-        ip netns add $NS_NAME 2>/dev/null || true
-    fi
-    
-    # Move veth to namespace if not already there
-    if ip link show $VETH_CONT &>/dev/null; then
-        ip link set $VETH_CONT netns $NS_NAME 2>/dev/null || true
-    fi
-    
-    # Make netns accessible to crun
+# Expose netns path (best-effort)
+expose_namespace_path() {
     mkdir -p /run/netns
-    if [ ! -e /run/netns/$NS_NAME ]; then
-        ln -sf /var/run/netns/$NS_NAME /run/netns/$NS_NAME
+    if [ -e /var/run/netns/$NS_NAME ] && [ ! -e /run/netns/$NS_NAME ]; then
+        ln -sf /var/run/netns/$NS_NAME /run/netns/$NS_NAME || true
     fi
 }
 
-# Configure host-side interface
-configure_host_interface() {
-    if ! ip addr show $VETH_HOST | grep -q "${IPV4_HOST}/30"; then
-        ip addr add ${IPV4_HOST}/30 dev $VETH_HOST
-    fi
-    if ! ip -6 addr show $VETH_HOST | grep -q "${IPV6_HOST}/120"; then
-        ip -6 addr add ${IPV6_HOST}/120 dev $VETH_HOST
-    fi
-    ip link set $VETH_HOST up
-}
-
-# Configure container-side interface and routing
-configure_container_interface() {
-    # Configure addresses
-    if ! ip netns exec $NS_NAME ip addr show $VETH_CONT | grep -q "${IPV4_CONT}/30"; then
-        ip netns exec $NS_NAME ip addr add ${IPV4_CONT}/30 dev $VETH_CONT
-    fi
-    if ! ip netns exec $NS_NAME ip -6 addr show $VETH_CONT | grep -q "${IPV6_CONT}/120"; then
-        ip netns exec $NS_NAME ip -6 addr add ${IPV6_CONT}/120 dev $VETH_CONT
-    fi
-    
-    # Bring up interfaces
-    ip netns exec $NS_NAME ip link set lo up
-    ip netns exec $NS_NAME ip link set $VETH_CONT up
-    
-    # Add default routes
-    if ! ip netns exec $NS_NAME ip route show | grep -q "default via $IPV4_HOST"; then
-        ip netns exec $NS_NAME ip route add default via $IPV4_HOST
-    fi
-    if ! ip netns exec $NS_NAME ip -6 route show | grep -q "default via $IPV6_HOST"; then
-        ip netns exec $NS_NAME ip -6 route add default via $IPV6_HOST
-    fi
-}
-
-# Cleanup existing nftables rules
+# Cleanup existing NAT tables
 cleanup_nftables() {
-    # Check if nft command exists
     if ! command -v nft &>/dev/null; then
         return 0
     fi
-    
-    # Delete existing sprite tables if they exist
-    local tables=$(nft list tables 2>/dev/null || true)
-    
-    if echo "$tables" | grep -qE "inet sprite_(nat|filter)"; then
-        echo "$tables" | grep -E "inet sprite_(nat|filter)" | while read -r family table; do
-            nft delete table $family $table 2>/dev/null || true
-        done
+    # Clean up host namespace NAT
+    nft delete table inet sprite_nat 2>/dev/null || true
+    # Clean up container namespace NAT
+    if ip netns list | grep -q "^${NS_NAME}\s"; then
+        ip netns exec $NS_NAME nft delete table ip nat 2>/dev/null || true
     fi
 }
 
@@ -216,15 +153,14 @@ cleanup() {
     echo "✅ Network namespace '$NS_NAME' cleanup completed"
 }
 
-# Setup NAT using nftables
+# Setup NAT (masquerade) using nftables. Forward filter is handled by policy manager.
 setup_nat() {
     # Clean up any existing rules first
     cleanup_nftables
-    # === host ns rules ===
-
-    # Create NAT and filter tables
+    
+    # === Host namespace NAT ===
+    # Create NAT table
     nft add table inet sprite_nat
-    nft add table inet sprite_filter
 
     # POSTROUTING chain: NAT public destinations
     nft add chain inet sprite_nat postrouting { type nat hook postrouting priority 100 \; }
@@ -241,68 +177,23 @@ setup_nat() {
     ip6 daddr != { fd00::/8, fe80::/10, ::1/128, ff00::/8 } \
     oifname "$OUT_IF" masquerade
 
-    # Forward filter chain: allow only public destinations
-    nft add chain inet sprite_filter forward { type filter hook forward priority 0 \; }
+    # === Container namespace NAT (DNAT to localhost) ===
+    # IPv4 NAT - redirect container IP to localhost for services
+    ip netns exec $NS_NAME nft add table ip nat
+    ip netns exec $NS_NAME nft add chain ip nat prerouting { type nat hook prerouting priority -100 \; }
+    ip netns exec $NS_NAME nft add chain ip nat output { type nat hook output priority -100 \; }
 
-    # Allow forward only from container to public IPv4
-    nft add rule inet sprite_filter forward \
-    iifname "$VETH_CONT" \
-    ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16 } \
-    accept
+    # DNAT: host→container traffic to 10.10.0.2 → 127.0.0.1 (for port forwarding)
+    ip netns exec $NS_NAME nft add rule ip nat prerouting iifname "$VETH_CONT" ip daddr $IPV4_CONT tcp dport != 0 dnat to 127.0.0.1
 
-    # Allow forward only from container to public IPv6
-    nft add rule inet sprite_filter forward \
-    iifname "$VETH_CONT" \
-    ip6 daddr != { fd00::/8, fe80::/10, ::1/128, ff00::/8 } \
-    accept
+    # DNAT: local container traffic to 10.10.0.2 → 127.0.0.1 (for localhost access)
+    ip netns exec $NS_NAME nft add rule ip nat output ip daddr $IPV4_CONT tcp dport != 0 dnat to 127.0.0.1
 
-    # Drop everything else from container
-    nft add rule inet sprite_filter forward iifname "$VETH_CONT" drop
-
-    # Allow return traffic (established connections)
-    nft add rule inet sprite_filter forward ct state established,related accept
-
-
-    # === inside sprite netns ===
-
-    # IPv4 NAT - redirect bridge IP to localhost
-    ip netns exec sprite nft add table ip nat
-    ip netns exec sprite nft add chain ip nat prerouting { type nat hook prerouting priority -100 \; }
-    ip netns exec sprite nft add chain ip nat output     { type nat hook output     priority -100 \; }
-    ip netns exec sprite nft add chain ip nat postrouting { type nat hook postrouting priority 100 \; }
-
-    # DNAT: host→ns traffic 10.0.0.1:any → 127.0.0.1:any
-    ip netns exec sprite nft add rule ip nat prerouting iifname "$VETH_CONT" ip daddr 10.0.0.1 tcp dport != 0 dnat to 127.0.0.1:tcp dport
-
-    # DNAT: local ns traffic 10.0.0.1:any → 127.0.0.1:any
-    ip netns exec sprite nft add rule ip nat output ip daddr 10.0.0.1 tcp dport != 0 dnat to 127.0.0.1:tcp dport
-
-
-    # IPv6: No NAT needed - fdf::1 is bound directly to the interface
-    # Applications can bind to fdf::1 and it will be routable from the host
-    
-    }
-
-# Create custom resolv.conf for containers
-create_resolv_conf() {
-    local resolv_dir="${SPRITE_WRITE_DIR}/container"
-    mkdir -p "$resolv_dir"
-    
-    cat > "$resolv_dir/resolv.conf" <<'EOF'
-# IPv6-only DNS resolvers
-nameserver 2606:4700:4700::1111   # Cloudflare
-nameserver 2606:4700:4700::1001   # Cloudflare (secondary)
-
-nameserver 2001:4860:4860::8888   # Google
-nameserver 2001:4860:4860::8844   # Google (secondary)
-
-nameserver 2620:fe::fe            # Quad9 (filtered)
-nameserver 2620:fe::9             # Quad9 (secondary)
-
-nameserver 2620:119:35::35        # OpenDNS
-nameserver 2620:119:53::53        # OpenDNS (secondary)
-EOF
+    # IPv6: No DNAT needed - fd00::2 is bound directly to the interface
+    # Applications can bind to fd00::2 and it will be routable from the host
 }
+
+# resolv.conf is now written by the policy manager via HostResolvPath.
 
 # Display current network configuration
 info() {
@@ -408,15 +299,10 @@ info() {
 # Main function that orchestrates the setup
 main() {
     setup_sysctl
-    create_veth_pair
-    setup_namespace
-    setup_namespace_sysctl
-    configure_host_interface
-    configure_container_interface
+    expose_namespace_path
+    setup_namespace_sysctl || true
     setup_nat
-    create_resolv_conf
-    
-    echo "✅ Network namespace '$NS_NAME' set up with NAT and static IPs"
+    echo "✅ Host NAT configured; policy manager is responsible for veth/netns/dns"
 }
 
 # Handle command line arguments

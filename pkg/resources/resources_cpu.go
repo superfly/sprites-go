@@ -26,6 +26,18 @@ func (m *Manager) SetCPUQuota(quota time.Duration, period time.Duration) error {
 	return m.writeFile("cpu.max", content+"\n")
 }
 
+// SetCPUWeight sets cpu.weight (cgroup v2) to a value in the range [1,10000].
+// Lower values mean lower CPU priority relative to peer cgroups.
+func (m *Manager) SetCPUWeight(weight int) error {
+	if weight < 1 {
+		weight = 1
+	}
+	if weight > 10000 {
+		weight = 10000
+	}
+	return m.writeFile("cpu.weight", fmt.Sprintf("%d\n", weight))
+}
+
 // ReadCPUStat reads and parses cpu.stat file
 func (m *Manager) ReadCPUStat() (CPUStat, error) {
 	f, err := os.Open(filepath.Join(m.cgroupPath, "cpu.stat"))

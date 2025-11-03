@@ -224,6 +224,44 @@ func (h *Handlers) HandleCheckpointRestore(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+// HandleDeleteCheckpoint handles DELETE /checkpoints/{id}
+func (h *Handlers) HandleDeleteCheckpoint(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract checkpoint ID from path
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) != 2 || parts[0] != "checkpoints" {
+		http.NotFound(w, r)
+		return
+	}
+	checkpointID := parts[1]
+
+	if checkpointID == "active" || strings.EqualFold(checkpointID, "Current") {
+		http.Error(w, "cannot delete active checkpoint", http.StatusConflict)
+		return
+	}
+
+	ctx := r.Context()
+	if err := h.system.DeleteCheckpoint(ctx, checkpointID); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			http.NotFound(w, r)
+			return
+		}
+		if strings.Contains(err.Error(), "cannot delete active") {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		h.logger.Error("Failed to delete checkpoint", "error", err, "checkpointID", checkpointID)
+		http.Error(w, fmt.Sprintf("Failed to delete checkpoint: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // HandleCheckpoint handles POST /sprites/{id}/checkpoint
 // @public
 // @operation POST /v1/sprites/{id}/checkpoint

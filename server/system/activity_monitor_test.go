@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -458,7 +459,7 @@ func TestActivityMonitor_ActivityDuringSuspension(t *testing.T) {
 }
 
 // Test edge case: activity event channel full
-func TestActivityMonitor_ChannelFull(t *testing.T) {
+func TestActivityMonitor_NotifyNonBlocking(t *testing.T) {
 	resetSuspendTracker()
 
 	logWriter := &testLogger{}
@@ -469,17 +470,132 @@ func TestActivityMonitor_ChannelFull(t *testing.T) {
 	ctx = tap.WithLogger(ctx, logger)
 
 	sys := createTestSystem(t, logWriter)
-	monitor := NewActivityMonitor(ctx, sys, 10*time.Second) // Long timeout
+	monitor := NewActivityMonitor(ctx, sys, 5*time.Second)
 
-	// Don't start the monitor to let channel fill up
-
-	// Try to overflow the channel (capacity is 128)
-	for i := 0; i < 200; i++ {
-		monitor.ActivityStarted(fmt.Sprintf("flood-%d", i))
+	// Spam ActivityStarted rapidly; activityNotify has cap=1 and sends are non-blocking
+	for i := 0; i < 1000; i++ {
+		monitor.ActivityStarted("spam")
 	}
 
-	// Should not panic or block indefinitely
-	// The implementation should handle full channel gracefully
+	// If we reach here quickly, the notify channel did not block
+}
+
+// Prevent-before-prep: ensure activity cancels suspend prior to API call
+func TestActivityMonitor_PreventBeforePrep(t *testing.T) {
+	resetSuspendTracker()
+
+	logWriter := &testLogger{}
+	logger := slog.New(slog.NewTextHandler(logWriter, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	ctx := tap.WithLogger(context.Background(), logger)
+
+	sys := createTestSystem(t, logWriter)
+	monitor := NewActivityMonitor(ctx, sys, 200*time.Millisecond)
+
+	// Mock prep to block until ctx is cancelled
+	prepStartedCh := make(chan struct{})
+	prepTimedOutCh := make(chan struct{})
+	monitor.prepSuspendFn = func(pctx context.Context) (func(), bool, error) {
+		close(prepStartedCh)
+		select {
+		case <-pctx.Done():
+			return func() {}, true, pctx.Err()
+		case <-time.After(2 * time.Second):
+			// Signal timeout to the test goroutine; do not call t.Fatal here
+			close(prepTimedOutCh)
+			return func() {}, false, nil
+		}
+	}
+
+	// Mock API to detect if called (should not be)
+	var apiCalled int32
+	monitor.suspendAPIFn = func(_ context.Context) error {
+		atomic.AddInt32(&apiCalled, 1)
+		return nil
+	}
+
+	mctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	monitor.Start(mctx)
+
+	// Wait for prep to start
+	<-prepStartedCh
+
+	// Inject activity to cancel suspend locally
+	monitor.ActivityStarted("interrupt")
+	monitor.ActivityEnded("interrupt")
+
+	// Give a brief moment for cancellation to propagate
+	time.Sleep(50 * time.Millisecond)
+
+	if atomic.LoadInt32(&apiCalled) != 0 {
+		t.Fatal("suspend API was called despite cancellation before prep completion")
+	}
+
+	// Ensure no prep timeout occurred
+	select {
+	case <-prepTimedOutCh:
+		t.Fatal("prep did not get cancelled in time")
+	default:
+	}
+
+	// Clean teardown: stop monitor and wait for goroutine to exit
+	monitor.Stop()
+	cancel()
+	// Best-effort wait for run goroutine to finish (errCh close)
+	// Non-blocking: use a short timeout
+	done := make(chan struct{})
+	go func() {
+		_ = monitor.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		// Do not fail; test has validated behavior; avoid lingering goroutines
+	}
+}
+
+// Point-of-no-return: after prep completes, API must still be called even if activity arrives
+func TestActivityMonitor_PointOfNoReturn(t *testing.T) {
+	resetSuspendTracker()
+
+	logWriter := &testLogger{}
+	logger := slog.New(slog.NewTextHandler(logWriter, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	ctx := tap.WithLogger(context.Background(), logger)
+
+	sys := createTestSystem(t, logWriter)
+	monitor := NewActivityMonitor(ctx, sys, 150*time.Millisecond)
+
+	// Mock prep to complete quickly
+	monitor.prepSuspendFn = func(pctx context.Context) (func(), bool, error) {
+		return func() {}, false, nil
+	}
+
+	// Mock API to record call and block briefly
+	apiCalledCh := make(chan struct{}, 1)
+	monitor.suspendAPIFn = func(_ context.Context) error {
+		select {
+		case apiCalledCh <- struct{}{}:
+		default:
+		}
+		time.Sleep(100 * time.Millisecond)
+		return nil
+	}
+
+	mctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	monitor.Start(mctx)
+
+	// Wait for API to be called
+	select {
+	case <-apiCalledCh:
+		// Simulate activity after API call
+		monitor.ActivityStarted("late-activity")
+		monitor.ActivityEnded("late-activity")
+		// Nothing to assert beyond not panicking and API having been called
+	case <-time.After(2 * time.Second):
+		t.Fatal("suspend API was not called after prep completion")
+	}
 }
 
 // Test real tmux session with activity forwarding
@@ -575,6 +691,8 @@ func TestActivityMonitor_ActivityCancelsSuspendPrep(t *testing.T) {
 	found := false
 	for _, entry := range logWriter.entries {
 		if strings.Contains(entry, "Activity detected during suspend") ||
+			strings.Contains(entry, "suspend cancelled") ||
+			strings.Contains(entry, "cancelling suspend") ||
 			strings.Contains(entry, "cancelled") {
 			found = true
 			break
@@ -718,4 +836,47 @@ func TestActivityMonitor_RapidSuspendCycles(t *testing.T) {
 	}
 
 	// Verify no panics or deadlocks occurred
+}
+
+// Test that boot activity prevents suspension during boot
+func TestActivityMonitor_BootActivityPreventsEarlySuspension(t *testing.T) {
+	resetSuspendTracker()
+
+	logWriter := &testLogger{}
+	logger := slog.New(slog.NewTextHandler(logWriter, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+	ctx := context.Background()
+	ctx = tap.WithLogger(ctx, logger)
+
+	sys := createTestSystem(t, logWriter)
+	monitor := NewActivityMonitor(ctx, sys, 500*time.Millisecond)
+
+	os.Setenv("SPRITE_PREVENT_SUSPEND", "true")
+	defer os.Unsetenv("SPRITE_PREVENT_SUSPEND")
+
+	// Simulate early boot scenario: start monitor and mark boot active immediately
+	monitor.ActivityStarted("boot")
+	monitorCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	monitor.Start(monitorCtx)
+
+	// Wait for longer than idle timeout while boot is active
+	time.Sleep(1 * time.Second)
+
+	// Should not have suspended yet because boot is active
+	if logWriter.hasSuspended() {
+		t.Error("Monitor suspended during boot activity")
+	}
+
+	// End boot activity
+	monitor.ActivityEnded("boot")
+
+	// Now wait for idle timeout
+	time.Sleep(700 * time.Millisecond)
+
+	// Should have suspended now
+	if !logWriter.hasSuspended() {
+		t.Error("Monitor did not suspend after boot ended and idle timeout")
+	}
 }

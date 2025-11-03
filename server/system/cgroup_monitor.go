@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"time"
 
 	"github.com/superfly/sprite-env/pkg/resources"
@@ -19,9 +20,10 @@ type ResourceMonitor struct {
 	logger       *slog.Logger
 }
 
-// NewResourceMonitor creates cgroup monitors for containers, juicefs, and litestream
-// The metricsCallback is called for each metrics emission and should handle forwarding to the appropriate destination
-func NewResourceMonitor(ctx context.Context, metricsCallback func(interface{})) (*ResourceMonitor, error) {
+// NewResourceMonitor creates cgroup monitors for containers, juicefs, and litestream.
+// Returns the ResourceMonitor and the sprite Manager (for freeze/thaw operations).
+// The metricsCallback is called for each metrics emission and should handle forwarding to the appropriate destination.
+func NewResourceMonitor(ctx context.Context, metricsCallback func(interface{})) (*ResourceMonitor, *resources.Manager, error) {
 	logger := tap.Logger(ctx)
 
 	crm := &ResourceMonitor{
@@ -49,17 +51,36 @@ func NewResourceMonitor(ctx context.Context, metricsCallback func(interface{})) 
 
 	monitorGroup, err := resources.NewMonitorGroup(opts)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create monitor group: %w", err)
+		return nil, nil, fmt.Errorf("failed to create monitor group: %w", err)
 	}
 	if monitorGroup == nil {
-		return nil, fmt.Errorf("failed to create any resource monitors")
+		return nil, nil, fmt.Errorf("failed to create any resource monitors")
 	}
 
 	crm.monitorGroup = monitorGroup
 
-	// Log initial stats for each monitor
+	// Log initial stats for each monitor and capture sprite manager
+	var spriteManager *resources.Manager
 	for _, monitor := range monitorGroup.Monitors() {
 		if mgr := monitor.GetManager(); mgr != nil {
+			// Capture the sprite manager for freeze/thaw operations
+			if monitor.Type() == "sprite" {
+				spriteManager = mgr
+				// Apply hardcoded low priority to sprite containers group synchronously
+				const cpuW = 50
+				const ioW = 50
+				if err := mgr.SetCPUWeight(cpuW); err != nil {
+					logger.Warn("Failed to set cpu.weight for sprite cgroup", "error", err)
+				} else {
+					logger.Info("Applied cpu.weight to sprite cgroup", "weight", cpuW, "path", filepath.Join("/sys/fs/cgroup", "containers"))
+				}
+				if err := mgr.SetIOWeight(ioW); err != nil {
+					logger.Warn("Failed to set io.weight for sprite cgroup", "error", err)
+				} else {
+					logger.Info("Applied io.weight to sprite cgroup", "weight", ioW, "path", filepath.Join("/sys/fs/cgroup", "containers"))
+				}
+			}
+
 			stats, err := mgr.ReadStats()
 			if err != nil {
 				logger.Warn("Failed to read initial cgroup stats", "error", err)
@@ -73,7 +94,7 @@ func NewResourceMonitor(ctx context.Context, metricsCallback func(interface{})) 
 		}
 	}
 
-	return crm, nil
+	return crm, spriteManager, nil
 }
 
 // logMetrics logs the metrics for debugging

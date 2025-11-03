@@ -34,4 +34,7 @@ type Config struct {
 	// Proxy configuration
 	ProxyLocalhostIPv4 string
 	ProxyLocalhostIPv6 string
+
+    // Server version string to expose in API responses
+    SpriteVersion string
 }

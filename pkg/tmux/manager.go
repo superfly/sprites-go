@@ -45,6 +45,9 @@ type Options struct {
 	// WrapCmd is an optional function to wrap commands (e.g., container exec)
 	WrapCmd func(*exec.Cmd) *exec.Cmd
 	Logger  *slog.Logger
+	// EventCallback, if set, will be invoked for each WindowMonitorEvent emitted
+	// by the internal WindowMonitor. Only a single callback is supported.
+	EventCallback func(WindowMonitorEvent)
 }
 
 // Manager provides a configurable tmux session manager
@@ -62,6 +65,11 @@ type Manager struct {
 
 	paneCallbacks   map[string]PaneLifecycleCallback
 	paneCallbacksMu sync.RWMutex
+
+	// removed state for wrapped metadata; API layer handles wrappers
+
+	// Optional single subscriber for window events
+	eventCallback func(WindowMonitorEvent)
 }
 
 func NewManager(ctx context.Context, opts Options) *Manager {
@@ -85,11 +93,16 @@ func NewManager(ctx context.Context, opts Options) *Manager {
 		wrapCmd:        opts.WrapCmd,
 		monitorStartCh: make(chan struct{}, 1),
 		paneCallbacks:  make(map[string]PaneLifecycleCallback),
+		eventCallback:  opts.EventCallback,
 	}
 
 	m.initializeNextID()
 	go m.monitorManager(ctx)
 	go m.paneMonitor(ctx)
+	// Start persistent window events pump to ensure callbacks are never lost
+	if m.eventCallback != nil {
+		go m.windowEventsPump(ctx)
+	}
 
 	return m
 }
@@ -134,8 +147,47 @@ func (m *Manager) monitorManager(ctx context.Context) {
 				} else if m.logger != nil {
 					m.logger.Debug("monitorManager: window monitor started")
 				}
+
+				// Event pump runs persistently via windowEventsPump()
 			}
 		}
+	}
+}
+
+// windowEventsPump persistently attaches to the window monitor events channel
+// and forwards events to the configured eventCallback, reattaching if the
+// monitor restarts or its channel closes.
+func (m *Manager) windowEventsPump(ctx context.Context) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if m.eventCallback == nil {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		if m.windowMonitor == nil {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		ch := m.windowMonitor.GetEventChannel()
+		if ch == nil {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		// Range until channel closes, then loop to reattach
+		for ev := range ch {
+			e := ev
+			go func() {
+				defer func() {
+					if r := recover(); r != nil && m.logger != nil {
+						m.logger.Warn("window event callback panicked", "panic", r)
+					}
+				}()
+				m.eventCallback(e)
+			}()
+		}
+		// Channel closed; reattach on next iteration
 	}
 }
 
@@ -164,84 +216,22 @@ func (m *Manager) GenerateSessionID() string {
 // NewSessionCmd builds a tmux command that creates a new session and runs base.
 // It generates a new session ID and returns the command and the ID.
 func (m *Manager) NewSessionCmd(base *exec.Cmd, controlMode bool) (*exec.Cmd, string) {
-	// Request monitor startup after first session creation
-	select {
-	case m.monitorStartCh <- struct{}{}:
-	default:
-	}
-
-	sessionID := m.GenerateSessionID()
-	tmuxArgs := []string{"-f", m.configPath, "-S", m.socketPath}
-	if controlMode {
-		tmuxArgs = append(tmuxArgs, "-CC")
-	}
-	sessionName := m.sessionName(sessionID)
-	// Create a wrapper script to set env/dir then exec the original command
-	scriptPath := fmt.Sprintf("/.sprite/tmp/exec-%s", sessionID)
-	if err := generateTmuxWrapperScript(scriptPath, base); err != nil {
-		if m.logger != nil {
-			m.logger.Warn("NewSessionCmd: wrapper script generation failed, falling back", "error", err)
-		}
-		// Fallback: direct command
-		tmuxArgs = append(tmuxArgs, "new-session", "-s", sessionName, base.Path)
-		if len(base.Args) > 1 {
-			tmuxArgs = append(tmuxArgs, base.Args[1:]...)
-		}
-	} else {
-		// Use script path directly
-		tmuxArgs = append(tmuxArgs, "new-session", "-s", sessionName, scriptPath)
-	}
-	if m.logger != nil {
-		m.logger.Debug("NewSessionCmd: building tmux new-session",
-			"sessionID", sessionID,
-			"sessionName", sessionName,
-			"args", tmuxArgs,
-			"dir", base.Dir)
-	}
-	cmd := m.buildTmuxCommand(tmuxArgs)
-	// Minimal env for tmux process (avoid leaking host env via crun)
-	// User command env is exported by the wrapper script from base.Env
-	cmd.Env = ensureDefaultEnv([]string{})
-	cmd.Stdin = base.Stdin
-	cmd.Stdout = base.Stdout
-	cmd.Stderr = base.Stderr
-	cmd.Dir = base.Dir
-	if m.logger != nil {
-		m.logger.Debug("NewSessionCmd: command built", "path", cmd.Path, "args", cmd.Args)
-	}
-	return cmd, sessionID
+	cmd, _, id := m.NewSession(base, controlMode)
+	return cmd, id
 }
 
 // AttachCmd builds a tmux command that attaches to an existing session
 func (m *Manager) AttachCmd(sessionID string, controlMode bool) *exec.Cmd {
-	// Request monitor startup (attach may be first interaction)
-	select {
-	case m.monitorStartCh <- struct{}{}:
-	default:
-	}
-
-	tmuxArgs := []string{"-f", m.configPath, "-S", m.socketPath}
-	if controlMode {
-		tmuxArgs = append(tmuxArgs, "-CC")
-	}
-	sessionName := m.sessionName(sessionID)
-	tmuxArgs = append(tmuxArgs, "attach-session", "-t", sessionName)
-	if m.logger != nil {
-		m.logger.Debug("AttachCmd: building tmux attach",
-			"sessionID", sessionID,
-			"sessionName", sessionName,
-			"args", tmuxArgs)
-	}
-	cmd := m.buildTmuxCommand(tmuxArgs)
-	if m.logger != nil {
-		m.logger.Debug("AttachCmd: command built", "path", cmd.Path, "args", cmd.Args)
-	}
+	cmd, _ := m.Attach(sessionID, controlMode)
 	return cmd
 }
 
 func (m *Manager) sessionName(id string) string {
 	return fmt.Sprintf("%s-exec-%s", m.sessionPrefix, id)
 }
+
+// WrappedForSession returns the container WrappedCommand associated with a session, if any.
+// WrappedForSession removed
 
 func (m *Manager) buildTmuxCommand(tmuxArgs []string) *exec.Cmd {
 	tmuxBinary := m.tmuxBinary
@@ -254,7 +244,7 @@ func (m *Manager) buildTmuxCommand(tmuxArgs []string) *exec.Cmd {
 	}
 	// Ensure TERM only; avoid inheriting host environment
 	cmd.Env = ensureDefaultEnv([]string{})
-	// If a wrapper is configured (container exec), wrap the command now
+	// If a wrapper is configured (container exec), wrap the command now (for non-exec utility paths)
 	if m.wrapCmd != nil {
 		if wrapped := m.wrapCmd(cmd); wrapped != nil {
 			if m.logger != nil {
@@ -271,6 +261,105 @@ func (m *Manager) buildTmuxCommand(tmuxArgs []string) *exec.Cmd {
 		panic("tmux manager: wrapCmd returned nil for tmux command")
 	}
 	return cmd
+}
+
+// NewSession builds a tmux command that creates a new session and runs base, returning
+// the command to execute, a nil container wrapper (tmux is never wrapped here), and the new session ID.
+func (m *Manager) NewSession(base *exec.Cmd, controlMode bool) (*exec.Cmd, *container.WrappedCommand, string) {
+	// Request monitor startup after first session creation
+	select {
+	case m.monitorStartCh <- struct{}{}:
+	default:
+	}
+
+	sessionID := m.GenerateSessionID()
+	tmuxArgs := []string{"-f", m.configPath, "-S", m.socketPath}
+	if controlMode {
+		tmuxArgs = append(tmuxArgs, "-CC")
+	}
+	sessionName := m.sessionName(sessionID)
+	// Create a wrapper script to set env/dir then exec the original command
+	scriptPath := fmt.Sprintf("/.sprite/tmp/exec-%s", sessionID)
+	if err := generateTmuxWrapperScript(scriptPath, base); err != nil {
+		if m.logger != nil {
+			m.logger.Warn("NewSession: wrapper script generation failed, falling back", "error", err)
+		}
+		// Fallback: direct command
+		tmuxArgs = append(tmuxArgs, "new", "-s", sessionName, base.Path)
+		if len(base.Args) > 1 {
+			tmuxArgs = append(tmuxArgs, base.Args[1:]...)
+		}
+	} else {
+		// Use script path directly
+		tmuxArgs = append(tmuxArgs, "new", "-s", sessionName, scriptPath)
+	}
+	if m.logger != nil {
+		m.logger.Debug("NewSession: building tmux new-session",
+			"sessionID", sessionID,
+			"sessionName", sessionName,
+			"args", tmuxArgs,
+			"dir", base.Dir)
+	}
+	// Build RAW tmux command (do not use buildTmuxCommand to avoid double-wrapping for exec flows)
+	tmuxBinary := m.tmuxBinary
+	cmd := exec.Command(tmuxBinary, tmuxArgs...)
+	if strings.HasPrefix(tmuxBinary, "./") || strings.HasPrefix(tmuxBinary, "../") {
+		cmd.Dir = "/.sprite/bin/"
+	}
+	// Minimal env for tmux process (avoid leaking host env)
+	// User command env is exported by the wrapper script from base.Env
+	cmd.Env = ensureDefaultEnv([]string{})
+	cmd.Stdin = base.Stdin
+	cmd.Stdout = base.Stdout
+	cmd.Stderr = base.Stderr
+	cmd.Dir = base.Dir
+	if m.logger != nil {
+		m.logger.Debug("NewSession: command built", "path", cmd.Path, "args", cmd.Args)
+	}
+	// For exec flows, if a wrapper is configured, wrap here and return the handle
+	if m.wrapCmd != nil {
+		wc := container.Wrap(cmd, "app", container.WithTTY(false))
+		return wc.Cmd, wc, sessionID
+	}
+	return cmd, nil, sessionID
+}
+
+// Attach builds a tmux command that attaches to an existing session, returning
+// the command to execute and a nil container wrapper (tmux is never wrapped here).
+func (m *Manager) Attach(sessionID string, controlMode bool) (*exec.Cmd, *container.WrappedCommand) {
+	// Request monitor startup (attach may be first interaction)
+	select {
+	case m.monitorStartCh <- struct{}{}:
+	default:
+	}
+
+	tmuxArgs := []string{"-f", m.configPath, "-S", m.socketPath}
+	if controlMode {
+		tmuxArgs = append(tmuxArgs, "-CC")
+	}
+	sessionName := m.sessionName(sessionID)
+	tmuxArgs = append(tmuxArgs, "attach", "-t", sessionName)
+	if m.logger != nil {
+		m.logger.Debug("Attach: building tmux attach",
+			"sessionID", sessionID,
+			"sessionName", sessionName,
+			"args", tmuxArgs)
+	}
+	// Build RAW tmux command (avoid buildTmuxCommand here to prevent double wrap)
+	tmuxBinary := m.tmuxBinary
+	cmd := exec.Command(tmuxBinary, tmuxArgs...)
+	if strings.HasPrefix(tmuxBinary, "./") || strings.HasPrefix(tmuxBinary, "../") {
+		cmd.Dir = "/.sprite/bin/"
+	}
+	cmd.Env = ensureDefaultEnv([]string{})
+	if m.logger != nil {
+		m.logger.Debug("Attach: command built", "path", cmd.Path, "args", cmd.Args)
+	}
+	if m.wrapCmd != nil {
+		wc := container.Wrap(cmd, "app", container.WithTTY(false))
+		return wc.Cmd, wc
+	}
+	return cmd, nil
 }
 
 // ensureDefaultEnv adds sane defaults (TERM) if not present
@@ -576,6 +665,15 @@ func (m *Manager) paneMonitor(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// GetWindowMonitorEvents returns the event channel from the window monitor
+// Returns nil if the window monitor is not started
+func (m *Manager) GetWindowMonitorEvents() <-chan WindowMonitorEvent {
+	if m.windowMonitor == nil {
+		return nil
+	}
+	return m.windowMonitor.GetEventChannel()
 }
 
 // SetWrapCmd sets the command wrapper function

@@ -785,6 +785,7 @@ func (m *Manager) AddUser(userID, email string) error {
 // GetUser returns a user by ID
 func (m *Manager) GetUser(userID string) *v1.UserInfo {
 	for _, u := range m.config.Users {
+		slog.Debug("GetUser", "userID", u.ID, "userConfigPath", u.ConfigPath, "userTokenPath", u.TokenPath)
 		if u.ID == userID {
 			return u
 		}
@@ -844,9 +845,10 @@ func (m *Manager) RemoveUser(userID string) error {
 	if err := m.loadUserConfig(userID); err == nil && m.userConfig != nil {
 		// Remove all tokens from user's keyring service
 		keyringService := fmt.Sprintf("%s:%s", KeyringService, userID)
-		for _, urlConfig := range m.userConfig.URLs {
+		for url, urlConfig := range m.userConfig.URLs {
 			for orgName := range urlConfig.Orgs {
-				keyringKey := fmt.Sprintf("sprites:org:%s", orgName)
+				// Use new keyring key format that includes URL
+				keyringKey := fmt.Sprintf("sprites:org:%s:%s", url, orgName)
 				_ = keyring.Delete(keyringService, keyringKey)
 			}
 		}

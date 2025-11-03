@@ -335,9 +335,21 @@ func (m *simpleSystemManager) GetTMUXManager() *tmux.Manager {
 	return tmux.NewManager(context.Background(), tmux.Options{TmuxBinary: "/bin/echo"})
 }
 
+// Implement DeleteCheckpoint to satisfy api.SystemManager
+func (m *simpleSystemManager) DeleteCheckpoint(ctx context.Context, checkpointID string) error {
+	if checkpointID == "active" || checkpointID == "Current" {
+		return fmt.Errorf("cannot delete active checkpoint")
+	}
+	return nil
+}
+
 func (m *simpleSystemManager) SetSpriteEnvironment(ctx context.Context, info interface{}) (interface{}, error) {
 	return map[string]string{
 		"status":  "ok",
 		"message": "Mock sprite environment set",
 	}, nil
 }
+
+// New methods for policy
+func (m *simpleSystemManager) WhenPolicyRunning(ctx context.Context) error { return nil }
+func (m *simpleSystemManager) GetPolicyConfigDir() string { return "/tmp" }

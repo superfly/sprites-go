@@ -36,6 +36,7 @@ type SystemManager interface {
 	ListCheckpoints(ctx context.Context) ([]api.CheckpointInfo, error)
 	ListCheckpointsByHistory(ctx context.Context, version string) ([]string, error)
 	GetCheckpoint(ctx context.Context, checkpointID string) (*api.CheckpointInfo, error)
+	DeleteCheckpoint(ctx context.Context, checkpointID string) error
 
 	// Overlay sync for suspend
 	// Returns a function that must be called to unfreeze the filesystem
@@ -57,6 +58,10 @@ type SystemManager interface {
 	// Takes a sprite info struct (JSON-compatible), returns a response struct (JSON-compatible)
 	// Uses interface{} to avoid import cycles between server/api and server/system
 	SetSpriteEnvironment(ctx context.Context, info interface{}) (interface{}, error)
+
+    // Policy manager readiness and configuration
+    WhenPolicyRunning(ctx context.Context) error
+    GetPolicyConfigDir() string
 }
 
 // ProcessManager interface for process operations

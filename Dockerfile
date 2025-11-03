@@ -44,7 +44,7 @@ ARG VERSION
 # Also build the client
 RUN cd client && \
     CGO_ENABLED=0 GOOS=linux go build \
-    -ldflags="-w -s" \
+    -ldflags="-w -s -X main.Version=${VERSION}" \
     -o ../sprite .
 
 
@@ -107,7 +107,7 @@ RUN ARCH=$(uname -m) && \
 # Get litestream binary
 FROM litestream/litestream:0.3 AS litestream
 
-FROM ghcr.io/superfly/juicefs:6bfa417 as juicefs
+FROM ghcr.io/superfly/juicefs:bbefe28 as juicefs
 
 # Assemble system files from multiple sources
 FROM alpine:latest AS assemble-system
@@ -122,13 +122,13 @@ COPY --chown=$UID:$UID base-env/system/ /system/
 FROM ubuntu:25.04
 
 RUN apt-get update && \
-    apt-get install -y sqlite3 bash e2fsprogs fio jq nano coreutils \
+    apt-get install -y sqlite3 bash e2fsprogs fio jq nano coreutils dnsmasq libcap2-bin \
     # Tools for dm-cache and storage management
     lvm2 thin-provisioning-tools \
     # Tools for DRBD
     drbd-utils \
     # Additional useful tools for disk management
-    parted gdisk util-linux fdisk xfsprogs fuse3 curl iproute2 nftables iputils-ping vim rsync \
+    parted gdisk util-linux fdisk xfsprogs fuse3 curl iproute2 nftables conntrack iputils-ping vim rsync \
     # Cleanup
     && apt-get clean && \
     rm -rf /var/lib/apt/lists/*
@@ -140,7 +140,9 @@ COPY --from=juicefs /usr/local/bin/juicefs /usr/local/bin/juicefs
 
 # Copy spritefs wrapper script
 COPY base-env/spritefs.sh /usr/local/bin/spritefs.sh
-RUN chmod +x /usr/local/bin/spritefs.sh
+RUN chmod +x /usr/local/bin/spritefs.sh && \
+    useradd -r -s /usr/sbin/nologin sprite-net && \
+    setcap 'cap_net_bind_service,cap_net_admin+ep' /usr/sbin/dnsmasq || true
 
 # Copy the complete assembled system directory
 COPY --from=assemble-system /system /system

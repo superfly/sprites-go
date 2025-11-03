@@ -83,7 +83,7 @@ func (nm *NamespaceMonitor) SubscribeInNamespace(pid int, namespace string, call
 			currentPorts: make(map[string]int),
 			loggedAddrs:  make(map[string]bool),
 		}
-		log.Printf("Port watcher: started monitoring namespace %s", namespace)
+		// quiet: no log here
 	}
 
 	// Add the subscription
@@ -96,12 +96,36 @@ func (nm *NamespaceMonitor) SubscribeInNamespace(pid int, namespace string, call
 
 	log.Printf("Port watcher: subscribed to PID %d in namespace %s (will monitor this PID and its children)", pid, namespace)
 
+	// Immediately notify about any ports that are already open for this PID
+	// Check the namespace watcher's currentPorts map
+	watcher := nm.monitors[namespace]
+	for portKey, portPID := range watcher.currentPorts {
+		// Check if this port belongs to the subscribed PID or its children
+		if isPIDInTree(portPID, pid) {
+			// Parse the portKey "addr:port" to extract address and port
+			parts := strings.Split(portKey, ":")
+			if len(parts) >= 2 {
+				portStr := parts[len(parts)-1]
+				port, err := strconv.Atoi(portStr)
+				if err == nil {
+					addr := strings.Join(parts[:len(parts)-1], ":")
+					// Send open event in a goroutine to avoid blocking
+					go callback(Port{
+						Port:    port,
+						PID:     portPID,
+						Address: addr,
+						State:   "open",
+					})
+				}
+			}
+		}
+	}
+
 	// Start ticker if this is the first subscription
 	if nm.tickerCancel == nil {
 		tickerCtx, tickerCancel := context.WithCancel(context.Background())
 		nm.tickerCancel = tickerCancel
 		go nm.run(tickerCtx)
-		log.Printf("Port watcher: started ticker for namespace monitoring")
 	}
 
 	return nil
@@ -118,7 +142,7 @@ func (nm *NamespaceMonitor) Unsubscribe(pid int) {
 	if len(nm.subscribers) == 0 && nm.tickerCancel != nil {
 		nm.tickerCancel()
 		nm.tickerCancel = nil
-		log.Printf("Port watcher: stopped ticker - no more subscribers")
+		// quiet: no log here
 
 		// Clean up all namespace watchers
 		nm.monitors = make(map[string]*namespaceWatcher)
@@ -135,24 +159,12 @@ func (nm *NamespaceMonitor) run(ctx context.Context) {
 	ticker := time.NewTicker(nm.pollInterval)
 	defer ticker.Stop()
 
-	lastTick := time.Now()
-	suspendThreshold := nm.pollInterval * 5 // Warn if gap is > 5x the normal interval
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			now := time.Now()
-			elapsed := now.Sub(lastTick)
-
-			// Check for suspiciously large gaps
-			if elapsed > suspendThreshold {
-				log.Printf("Port watcher: detected large gap between ticks (%v), likely VM suspend/resume", elapsed)
-			}
-
 			nm.scanAllNamespaces()
-			lastTick = now
 		}
 	}
 }
@@ -175,17 +187,13 @@ func (nm *NamespaceMonitor) scanAllNamespaces() {
 func (nm *NamespaceMonitor) scanNamespace(watcher *namespaceWatcher) {
 	// Use the named network namespace
 	if watcher.namespace == "" {
-		log.Printf("Port watcher: no namespace name set for namespace %s", watcher.namespaceID)
 		return
 	}
-
 	cmd := exec.Command("nsenter", "--net=/var/run/netns/"+watcher.namespace, "ss", "-ltnp")
 	output, err := cmd.Output()
 	if err != nil {
-		log.Printf("Port watcher: ss failed for namespace %s (name: %s): %v", watcher.namespaceID, watcher.namespace, err)
 		return
 	}
-
 	allSeenPorts := nm.parseSSOutput(string(output), watcher)
 
 	// Now update currentPorts based on ALL seen ports
@@ -203,12 +211,9 @@ func (nm *NamespaceMonitor) scanNamespace(watcher *namespaceWatcher) {
 
 				pid := watcher.currentPorts[portKey]
 
-				// Log port closure with process tree
+				// Log port closure
 				log.Printf("Port watcher: port closed in namespace %s - %s (PID: %d)",
 					watcher.namespaceID, portKey, pid)
-
-				// Debug: Print the full process tree for this PID
-				nm.debugPrintProcessTree(pid)
 
 				// Notify subscribers
 				nm.notifySubscribers(Port{
@@ -284,13 +289,11 @@ func (nm *NamespaceMonitor) parseAndNotify(r io.Reader, watcher *namespaceWatche
 					// fdf::1 (sprite container address)
 					addr = "fdf::1"
 				} else {
-					// Log unrecognized IPv6 patterns for debugging
+					// Quiet: ignore unrecognized IPv6 patterns
 					if len(addrHex) >= 32 {
 						logKey := fmt.Sprintf("%s:%d", addrHex, port)
 						if !watcher.loggedAddrs[logKey] {
 							watcher.loggedAddrs[logKey] = true
-							readableAddr := hexToIPv6(addrHex)
-							log.Printf("Port watcher: skipping unrecognized IPv6 address: %s (port %d)", readableAddr, port)
 						}
 					}
 					continue
@@ -320,7 +323,6 @@ func (nm *NamespaceMonitor) parseAndNotify(r io.Reader, watcher *namespaceWatche
 			// Find PID for this socket
 			pid := findPIDForSocketFunc(inode)
 			if pid == 0 {
-				log.Printf("Port watcher: found listening port %s:%d but couldn't determine PID (inode: %s)\n", addr, port, inode)
 				continue
 			}
 
@@ -336,9 +338,6 @@ func (nm *NamespaceMonitor) parseAndNotify(r io.Reader, watcher *namespaceWatche
 				// New port opened
 				log.Printf("Port watcher: new port detected in namespace %s - %s:%d (PID: %d)",
 					watcher.namespaceID, addr, port, pid)
-
-				// Debug: Print the full process tree for this PID
-				nm.debugPrintProcessTree(pid)
 
 				// Notify subscribers
 				nm.notifySubscribers(Port{
@@ -383,7 +382,6 @@ func (nm *NamespaceMonitor) parseSSOutput(output string, watcher *namespaceWatch
 			// IPv6 format: [addr]:port
 			closeBracket := strings.LastIndex(localAddr, "]")
 			if closeBracket == -1 || closeBracket+1 >= len(localAddr) || localAddr[closeBracket+1] != ':' {
-				log.Printf("Port watcher: malformed IPv6 address: %s", localAddr)
 				continue
 			}
 			addr = localAddr[1:closeBracket] // Remove brackets
@@ -392,7 +390,6 @@ func (nm *NamespaceMonitor) parseSSOutput(output string, watcher *namespaceWatch
 			// IPv4 format: addr:port
 			lastColon := strings.LastIndex(localAddr, ":")
 			if lastColon == -1 {
-				log.Printf("Port watcher: no port separator in address: %s", localAddr)
 				continue
 			}
 			addr = localAddr[:lastColon]
@@ -401,7 +398,6 @@ func (nm *NamespaceMonitor) parseSSOutput(output string, watcher *namespaceWatch
 
 		port, err := strconv.Atoi(portStr)
 		if err != nil {
-			log.Printf("Port watcher: invalid port number %s in address %s: %v", portStr, localAddr, err)
 			continue
 		}
 
@@ -426,7 +422,6 @@ func (nm *NamespaceMonitor) parseSSOutput(output string, watcher *namespaceWatch
 		// Extract PID from process info: users:(("claude",pid=9506,fd=29))
 		pid := nm.extractPIDFromProcessInfo(processInfo)
 		if pid == 0 {
-			log.Printf("Port watcher: found listening port %s:%d but couldn't determine PID from: %s", normalizedAddr, port, processInfo)
 			continue
 		}
 
@@ -442,9 +437,6 @@ func (nm *NamespaceMonitor) parseSSOutput(output string, watcher *namespaceWatch
 			// New port opened
 			log.Printf("Port watcher: new port detected in namespace %s - %s:%d (PID: %d)",
 				watcher.namespaceID, normalizedAddr, port, pid)
-
-			// Debug: Print the full process tree for this PID
-			nm.debugPrintProcessTree(pid)
 
 			// Notify subscribers
 			nm.notifySubscribers(Port{
@@ -488,9 +480,12 @@ func (nm *NamespaceMonitor) notifySubscribers(port Port) {
 	defer nm.mu.RUnlock()
 
 	// Check all subscriptions to see if this port's PID is in their tree
+	notifiedCount := 0
 	for rootPID, subs := range nm.subscribers {
-		if isPIDInTree(port.PID, rootPID) {
+		isInTree := isPIDInTree(port.PID, rootPID)
+		if isInTree {
 			for _, sub := range subs {
+				notifiedCount++
 				// Call the callback in a goroutine to avoid blocking
 				go sub.callback(port)
 			}

@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/superfly/sprite-env/pkg/container"
 	"github.com/superfly/sprite-env/server/system"
 )
 
@@ -56,8 +55,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialize container process template once (warns if missing)
-	container.InitProcessTemplateFromEnv()
+	// Process template now lazy-loads on first use via container.CloneProcessTemplate()
 
 	// Set system reference in crash handler for panic recovery shutdown
 	if crashHandler != nil {

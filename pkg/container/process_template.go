@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 )
 
 // ProcessSpec mirrors the crun --process JSON structure
@@ -20,19 +19,15 @@ type ProcessSpec struct {
 }
 
 var (
-	processTemplateMu sync.RWMutex
-	processTemplate   *ProcessSpec
+	processTemplate *ProcessSpec
 )
 
-// InitProcessTemplateFromEnv loads the process template once from $SPRITE_WRITE_DIR/tmp/process.json
-// WARN if the file is missing; keep nil if not found. It will not change at runtime.
+// InitProcessTemplateFromEnv loads the process template from $SPRITE_WRITE_DIR/tmp/process.json
+// This is best-effort and may race with writers; callers should tolerate nil and retry lazily.
 func InitProcessTemplateFromEnv() {
 	writeDir := os.Getenv("SPRITE_WRITE_DIR")
 	if writeDir == "" {
 		slog.Warn("InitProcessTemplateFromEnv: SPRITE_WRITE_DIR is unset; process template not loaded")
-		processTemplateMu.Lock()
-		processTemplate = nil
-		processTemplateMu.Unlock()
 		return
 	}
 	path := filepath.Join(writeDir, "tmp", "process.json")
@@ -43,36 +38,29 @@ func InitProcessTemplateFromEnv() {
 		} else {
 			slog.Error("InitProcessTemplateFromEnv: failed to read process.json", "error", err, "path", path)
 		}
-		processTemplateMu.Lock()
-		processTemplate = nil
-		processTemplateMu.Unlock()
 		return
 	}
 	var tmpl ProcessSpec
 	if err := json.Unmarshal(data, &tmpl); err != nil {
 		slog.Error("InitProcessTemplateFromEnv: invalid process.json", "error", err, "path", path)
-		processTemplateMu.Lock()
-		processTemplate = nil
-		processTemplateMu.Unlock()
 		return
 	}
-	processTemplateMu.Lock()
 	processTemplate = &tmpl
-	processTemplateMu.Unlock()
 }
 
 // HasProcessTemplate reports whether a template is loaded
 func HasProcessTemplate() bool {
-	processTemplateMu.RLock()
-	defer processTemplateMu.RUnlock()
 	return processTemplate != nil
 }
 
-// CloneProcessTemplate returns a deep copy of the loaded template or an error if not loaded
+// CloneProcessTemplate returns a deep copy of the loaded template. If the template
+// hasn't been loaded yet, this will attempt to load it from the environment on demand.
 func CloneProcessTemplate() (*ProcessSpec, error) {
-	processTemplateMu.RLock()
+	// Lazy-init on demand
+	if processTemplate == nil {
+		InitProcessTemplateFromEnv()
+	}
 	src := processTemplate
-	processTemplateMu.RUnlock()
 	if src == nil {
 		return nil, errors.New("process template not loaded")
 	}

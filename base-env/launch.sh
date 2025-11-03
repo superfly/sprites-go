@@ -16,15 +16,31 @@ function debug() {
 
 # Cgroup setup is now handled by the server at startup
 
-# Run network setup
+# Run host-side network setup (NAT only). Policy manager creates netns/veth/dns synchronously before process start.
 /home/sprite/network-setup.sh
 
 mkdir -p /dev/fly_vol/local-storage/var/lib/docker
 mkdir -p /dev/fly_vol/local-storage/tmp
 mkdir -p /dev/fly_vol/logs
 
+# Ensure system sprite dir exists and write version file at startup
+mkdir -p /system/.sprite
+if [ -n "${SPRITE_VERSION:-}" ]; then
+    echo "${SPRITE_VERSION}" > /system/.sprite/version.txt
+fi
+
 mkdir -p /.sprite/tmp
 mount -t tmpfs -o size=64M tmpfs /.sprite/tmp
+
+
+# Bind mount policy config directory at /.sprite/policy (readonly)
+mkdir -p /.sprite/policy
+POLICY_SRC="${SPRITE_WRITE_DIR}/juicefs/data/active/policy"
+if [ -d "$POLICY_SRC" ]; then
+    # Create mountpoint and bind, then remount readonly
+    mount --bind "$POLICY_SRC" "/.sprite/policy"
+    mount -o remount,ro,bind "/.sprite/policy"
+fi
 
 
 # This is a prerun script to do the overlay + loopback inside the namespace
@@ -231,7 +247,7 @@ CONFIG_JSON='{
     {
       "destination": "/etc/resolv.conf",
       "type": "bind",
-      "source": "/dev/fly_vol/container/resolv.conf",
+      "source": "/system/etc/resolv.conf",
       "options": ["ro", "nosuid", "noexec", "nodev", "bind"]
     },
     {
@@ -256,6 +272,12 @@ CONFIG_JSON='{
       "destination": "/.sprite/logs",
       "type": "bind",
       "source": "/dev/fly_vol/logs",
+      "options": ["ro", "rbind"]
+    },
+    {
+      "destination": "/.sprite/policy",
+      "type": "bind",
+      "source": "/.sprite/policy",
       "options": ["ro", "rbind"]
     }
   ],

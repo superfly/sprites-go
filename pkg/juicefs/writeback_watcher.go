@@ -135,14 +135,9 @@ func (w *WritebackWatcher) Start(ctx context.Context) error {
 			close(w.stoppedCh)
 			return fmt.Errorf("failed to watch writeback directory: %w", err)
 		}
-		w.logger.Info("Started watching writeback directory recursively", "path", w.rawstagingPath)
+		w.logger.Debug("Started watching writeback directory recursively", "path", w.rawstagingPath)
 
-		// Count any existing files in the directory tree
-		if err := w.scanExistingFiles(); err != nil {
-			w.logger.Warn("Failed to scan existing files", "error", err)
-		}
-
-		// Signal that watcher is ready
+		// Signal that watcher is ready immediately - scanning happens in background
 		close(w.readyCh)
 	} else {
 		// If not found, also watch the cache directory so we can detect when rawstaging appears
@@ -151,7 +146,7 @@ func (w *WritebackWatcher) Start(ctx context.Context) error {
 			close(w.stoppedCh)
 			return fmt.Errorf("failed to watch cache directory: %w", err)
 		}
-		w.logger.Info("Watching cache directory for rawstaging creation", "cacheDir", w.cacheDir)
+		w.logger.Debug("Watching cache directory for rawstaging creation", "cacheDir", w.cacheDir)
 	}
 	// processEvents will signal ready when rawstaging is found
 
@@ -161,32 +156,60 @@ func (w *WritebackWatcher) Start(ctx context.Context) error {
 	// Start the event processing goroutine
 	go w.processEvents(ctx)
 
+	// Scan existing files in background (don't block Start)
+	if w.rawstagingPath != "" {
+		go func() {
+			w.logger.Debug("Scanning existing files in background")
+			if err := w.scanExistingFiles(); err != nil {
+				w.logger.Debug("Background scan of existing files failed", "error", err)
+			}
+			w.logger.Debug("Background scan completed")
+		}()
+	}
+
 	return nil
 }
 
 // addRecursiveWatch adds watches for a directory and all its subdirectories
 func (w *WritebackWatcher) addRecursiveWatch(root string) error {
-	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			if err := w.watcher.Add(path); err != nil {
-				return fmt.Errorf("failed to watch %s: %w", path, err)
-			}
-			w.logger.Debug("Added watch for directory", "path", path)
-		}
-		return nil
-	})
+    return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+        // Files or directories in rawstaging can be created and removed very quickly.
+        // Treat transient lstat errors as non-fatal so we don't abort setting up watches.
+        if err != nil {
+            if os.IsNotExist(err) {
+                return nil
+            }
+            // Some platforms wrap ENOENT; ignore recognizable "no such file or directory" strings
+            if strings.Contains(err.Error(), "no such file or directory") {
+                return nil
+            }
+            return err
+        }
+        if info.IsDir() {
+            if err := w.watcher.Add(path); err != nil {
+                // Ignore directories that disappeared between Walk and Add
+                if os.IsNotExist(err) || strings.Contains(err.Error(), "no such file or directory") {
+                    return nil
+                }
+                return fmt.Errorf("failed to watch %s: %w", path, err)
+            }
+            w.logger.Debug("Added watch for directory", "path", path)
+        }
+        return nil
+    })
 }
 
 // scanExistingFiles counts any files already in writeback when we start
 func (w *WritebackWatcher) scanExistingFiles() error {
 	// Walk the entire tree to find all files
-	err := filepath.Walk(w.rawstagingPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
+    err := filepath.Walk(w.rawstagingPath, func(path string, info os.FileInfo, err error) error {
+        // Ignore transient ENOENT while scanning; files may be removed immediately after creation
+        if err != nil {
+            if os.IsNotExist(err) || strings.Contains(err.Error(), "no such file or directory") {
+                return nil
+            }
+            return err
+        }
 		if !info.IsDir() {
 			filename := filepath.Base(path)
 			if isIgnoredWritebackFile(filename) {

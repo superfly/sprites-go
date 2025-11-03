@@ -19,6 +19,8 @@ type contextKey struct{}
 var (
 	// defaultLogger is the fallback logger when none is found in context
 	defaultLogger *slog.Logger
+	// globalLogBuffer stores recent logs for retrieval (10k entries)
+	globalLogBuffer *LogBuffer
 )
 
 func init() {
@@ -46,13 +48,14 @@ func InitLogger() {
 	// Check if we should use JSON output
 	jsonOutput := os.Getenv("LOG_JSON") == "true"
 
-	var handler slog.Handler
+	// stdout handler
+	var stdoutHandler slog.Handler
 	if jsonOutput {
-		handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		stdoutHandler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 			Level: level,
 		})
 	} else {
-		handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		stdoutHandler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 			Level: level,
 			ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
 				if a.Key == slog.TimeKey && a.Value.Kind() == slog.KindTime {
@@ -63,6 +66,11 @@ func InitLogger() {
 			},
 		})
 	}
+
+	// initialize global buffer and fan-out
+	globalLogBuffer = newLogBuffer(10000)
+	bufHandler := newBufferHandler(globalLogBuffer)
+	handler := newMultiHandler(stdoutHandler, bufHandler)
 
 	defaultLogger = slog.New(handler)
 }
@@ -111,13 +119,13 @@ func NewLogger(level slog.Level, jsonOutput bool, output io.Writer) *slog.Logger
 		output = os.Stdout
 	}
 
-	var handler slog.Handler
+	var outHandler slog.Handler
 	if jsonOutput {
-		handler = slog.NewJSONHandler(output, &slog.HandlerOptions{
+		outHandler = slog.NewJSONHandler(output, &slog.HandlerOptions{
 			Level: level,
 		})
 	} else {
-		handler = slog.NewTextHandler(output, &slog.HandlerOptions{
+		outHandler = slog.NewTextHandler(output, &slog.HandlerOptions{
 			Level: level,
 			ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
 				if a.Key == slog.TimeKey && a.Value.Kind() == slog.KindTime {
@@ -129,12 +137,26 @@ func NewLogger(level slog.Level, jsonOutput bool, output io.Writer) *slog.Logger
 		})
 	}
 
-	return slog.New(handler)
+	// ensure global buffer exists
+	if globalLogBuffer == nil {
+		globalLogBuffer = newLogBuffer(10000)
+	}
+	bufHandler := newBufferHandler(globalLogBuffer)
+	return slog.New(newMultiHandler(outHandler, bufHandler))
 }
 
 // NewDiscardLogger creates a logger that discards all output
 func NewDiscardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+	if globalLogBuffer == nil {
+		globalLogBuffer = newLogBuffer(10000)
+	}
+	bufHandler := newBufferHandler(globalLogBuffer)
+	return slog.New(newMultiHandler(slog.NewTextHandler(io.Discard, nil), bufHandler))
+}
+
+// GetLogBuffer returns the global in-memory log buffer
+func GetLogBuffer() *LogBuffer {
+	return globalLogBuffer
 }
 
 // WithStructuredLogger returns an io.Writer that accepts JSON log lines and forwards

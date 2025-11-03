@@ -12,11 +12,22 @@ set -euo pipefail
 
 IMAGE_NAME="sprite-env-tests"
 
-# Check for running test containers
-RUNNING_CONTAINERS=$(docker ps --filter "ancestor=$IMAGE_NAME" --format "{{.ID}}" 2>/dev/null || true)
-if [ -n "$RUNNING_CONTAINERS" ]; then
-    echo "ERROR: Found running test containers. Stop them first:"
-    echo "  docker stop $RUNNING_CONTAINERS"
+# Allow overriding the path we mount into /workspace (defaults to current dir)
+MOUNT_PATH="${MOUNT_PATH:-$(pwd)}"
+if [ ! -d "$MOUNT_PATH" ]; then
+    echo "ERROR: MOUNT_PATH does not exist: $MOUNT_PATH"
+    exit 1
+fi
+
+# Create a unique container name based on the mounted path
+WORKDIR_HASH=$(printf "%s" "$MOUNT_PATH" | (command -v shasum >/dev/null 2>&1 && shasum | awk '{print $1}' || sha1sum | awk '{print $1}') | cut -c1-10)
+CONTAINER_NAME="sprite-env-tests-$(basename "$MOUNT_PATH")-$WORKDIR_HASH"
+
+# Check for an existing container with this name
+RUNNING_BY_NAME=$(docker ps --filter "name=^${CONTAINER_NAME}$" --format "{{.ID}}" 2>/dev/null || true)
+if [ -n "$RUNNING_BY_NAME" ]; then
+    echo "ERROR: Found running test container for this workspace: $CONTAINER_NAME"
+    echo "  docker stop $RUNNING_BY_NAME"
     exit 1
 fi
 
@@ -47,7 +58,8 @@ docker run \
     --init \
     --privileged \
     --cgroupns=host \
-    -v "$(pwd)":/workspace \
+    --name "$CONTAINER_NAME" \
+    -v "$MOUNT_PATH":/workspace \
     -v sprite-go-home:/root \
     -v sprite-go-mod:/go/pkg \
     -e SPRITE_TEST_DOCKER=1 \
@@ -55,6 +67,7 @@ docker run \
     -e SPRITE_TOKEN="test-token-12345" \
     -e SPRITE_DISABLE_ADMIN_CHANNEL=true \
     -e SPRITE_TEST_QUIET_PHX=true \
+    -e GOTOOLCHAIN=local \
     ${SPRITE_LOG_LEVEL:+-e SPRITE_LOG_LEVEL="$SPRITE_LOG_LEVEL"} \
     "$IMAGE_NAME" \
     ./scripts/run-tests.sh $@

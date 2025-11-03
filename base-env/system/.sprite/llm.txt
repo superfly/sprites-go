@@ -36,3 +36,59 @@
 ## Development Tools
 - If `llm-dev.txt` exists, it documents pre-installed language runtimes, version managers, and dev tools
 
+## Network Policy
+
+### Overview
+Sprite environments enforce network egress policy through DNS-based filtering. Only allowed domains can be resolved and accessed.
+
+### Viewing Current Policy
+The active policy is read-only and mounted at:
+```bash
+cat /.sprite/policy/network.json
+```
+
+### Policy Format
+Policies are JSON with a list of rules evaluated by specificity (exact match > subdomain wildcard > global wildcard):
+
+```json
+{
+  "rules": [
+    {"include": "defaults"},
+    {"domain": "example.com", "action": "allow"},
+    {"domain": "*.example.com", "action": "allow"},
+    {"domain": "blocked.com", "action": "deny"}
+  ]
+}
+```
+
+**Include Rules**: `{"include": "defaults"}` loads common development domains (GitHub, npm, PyPI, Docker Hub, AI APIs like OpenAI/Claude/Copilot, etc.)
+
+**Domain Rules**: Support exact matches, subdomain wildcards (`*.example.com`), and global wildcard (`*`)
+
+**Empty Rules**: `{"rules": []}` means no enforcement (unrestricted mode)
+
+### Updating Policy
+**Network policies MUST be updated externally** - the container cannot modify its own policy.
+
+Update via the Sprite API from outside the container:
+```bash
+curl -X POST https://your-sprite.fly.dev/v1/sprites/{id}/policy/network \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"rules": [{"include": "defaults"}]}'
+```
+
+Policy changes reload automatically and terminate existing connections to newly-blocked domains.
+
+### Behavior
+- **Denied domains**: DNS returns REFUSED (fast-fail)
+- **Raw IP connections**: Blocked unless the IP was resolved from an allowed domain
+- **Private IPs**: Always blocked (except DNS to host)
+- **Existing connections**: Terminated when policy changes via conntrack flush
+
+### Troubleshooting
+Test DNS resolution:
+```bash
+dig allowed-domain.com    # Should resolve
+dig blocked-domain.com    # Returns REFUSED
+```
+

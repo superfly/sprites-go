@@ -3,11 +3,14 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -143,4 +146,67 @@ func (h *Handlers) getContextEnricher(ctx context.Context) ContextEnricher {
 		return val.(ContextEnricher)
 	}
 	return nil
+}
+
+// HandleLogs serves recent logs from the in-memory buffer with optional filtering
+// Query params:
+// - limit: int (default 100, max 10000)
+// - level: debug|info|warn|error (min level). If debug=true, treated as level=debug
+// - debug: true|false (shorthand for level=debug)
+// - tags: comma-separated list; matches any
+func (h *Handlers) HandleLogs(w http.ResponseWriter, r *http.Request) {
+	buf := tap.GetLogBuffer()
+	if buf == nil {
+		http.Error(w, "log buffer unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	q := r.URL.Query()
+
+	// limit
+	limit := 100
+	if s := q.Get("limit"); s != "" {
+		if v, err := strconv.Atoi(s); err == nil && v > 0 {
+			if v > 10000 {
+				v = 10000
+			}
+			limit = v
+		}
+	}
+
+	// level / debug
+	minLevel := slog.LevelInfo
+	if q.Get("debug") == "true" {
+		minLevel = slog.LevelDebug
+	}
+	if lv := strings.ToLower(q.Get("level")); lv != "" {
+		switch lv {
+		case "debug":
+			minLevel = slog.LevelDebug
+		case "info":
+			minLevel = slog.LevelInfo
+		case "warn", "warning":
+			minLevel = slog.LevelWarn
+		case "error":
+			minLevel = slog.LevelError
+		}
+	}
+
+	// tags
+	var tags []string
+	if t := q.Get("tags"); t != "" {
+		parts := strings.Split(t, ",")
+		for _, p := range parts {
+			if s := strings.TrimSpace(p); s != "" {
+				tags = append(tags, s)
+			}
+		}
+	}
+
+	entries := buf.Snapshot(limit, minLevel, tags)
+	// Response shape: as captured
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(entries); err != nil {
+		h.logger.Error("Failed to encode logs response", "error", err)
+	}
 }

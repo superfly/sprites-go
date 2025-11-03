@@ -97,23 +97,14 @@ func TestOverlayFullLifecycle(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// Prepare for checkpoint (should freeze)
+		// Prepare for checkpoint (sync only)
 		if err := m.PrepareForCheckpoint(ctx); err != nil {
 			t.Fatalf("failed to prepare for checkpoint: %v", err)
 		}
 
-		// Verify filesystem is frozen
-		// Note: There's no easy way to verify freeze status without trying to write
-		// and potentially hanging, so we just trust it worked
-
-		// Unfreeze
-		if err := m.UnfreezeAfterCheckpoint(ctx); err != nil {
-			t.Fatalf("failed to unfreeze: %v", err)
-		}
-
-		// Verify we can write again
+		// Verify we can still write (no freeze at overlay level)
 		if err := os.WriteFile(testFile, []byte("new data"), 0644); err != nil {
-			t.Fatalf("failed to write after unfreeze: %v", err)
+			t.Fatalf("failed to write after sync: %v", err)
 		}
 	})
 
@@ -243,10 +234,11 @@ func TestOverlayWithMultipleLowers(t *testing.T) {
 		}
 	}
 
-	// Cleanup
+	// Cleanup: graceful stop and verify no leaks
 	if err := m.Unmount(ctx); err != nil {
 		t.Fatalf("failed to unmount: %v", err)
 	}
+	VerifyNoTestOverlays(t, m)
 }
 
 // TestOverlayErrorHandling tests error conditions
@@ -390,10 +382,11 @@ func TestOverlayConcurrentOperations(t *testing.T) {
 		}
 	}
 
-	// Cleanup
+	// Cleanup: graceful stop and verify no leaks
 	if err := m.Unmount(ctx); err != nil {
 		t.Fatalf("failed to unmount: %v", err)
 	}
+	VerifyNoTestOverlays(t, m)
 }
 
 // TestOverlayImageGrowth tests that the image file grows as needed
@@ -505,22 +498,17 @@ func TestFreezeUnfreezeStress(t *testing.T) {
 			t.Fatalf("iteration %d: failed to write before freeze: %v", i, err)
 		}
 
-		// Freeze
+		// Sync
 		if err := m.PrepareForCheckpoint(ctx); err != nil {
-			t.Fatalf("iteration %d: failed to freeze: %v", i, err)
+			t.Fatalf("iteration %d: failed to sync: %v", i, err)
 		}
 
 		// Brief pause to simulate checkpoint
 		time.Sleep(100 * time.Millisecond)
 
-		// Unfreeze
-		if err := m.UnfreezeAfterCheckpoint(ctx); err != nil {
-			t.Fatalf("iteration %d: failed to unfreeze: %v", i, err)
-		}
-
-		// Verify we can still write
+		// Verify we can still write (no freeze at overlay level)
 		if err := os.WriteFile(testFile, []byte(fmt.Sprintf("iteration %d - after", i)), 0644); err != nil {
-			t.Fatalf("iteration %d: failed to write after unfreeze: %v", i, err)
+			t.Fatalf("iteration %d: failed to write after sync: %v", i, err)
 		}
 	}
 

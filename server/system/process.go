@@ -19,12 +19,12 @@ import (
 
 // StartProcess starts the configured process
 func (s *System) StartProcess() error {
-    // If shutdown has been triggered, do not start the process
-    select {
-    case <-s.shutdownTriggeredCh:
-        return fmt.Errorf("cannot start process: shutdown in progress")
-    default:
-    }
+	// If shutdown has been triggered, do not start the process
+	select {
+	case <-s.shutdownTriggeredCh:
+		return fmt.Errorf("cannot start process: shutdown in progress")
+	default:
+	}
 	// Use atomic compare-and-swap to ensure only one process can be started
 	if !s.processStarted.CompareAndSwap(false, true) {
 		return fmt.Errorf("process already started or starting")
@@ -287,9 +287,9 @@ func (s *System) StartProcess() error {
 	s.processStoppedCh = make(chan struct{})
 	s.processMu.Unlock()
 
-	// Send notification to admin channel (non-blocking)
+	// Send notification to admin channel (async, non-blocking)
 	if s.AdminChannel != nil {
-		go s.AdminChannel.SendActivityEvent("container_started", map[string]interface{}{
+		s.AdminChannel.SendActivityEvent("container_started", map[string]interface{}{
 			"timestamp":      time.Now().Unix(),
 			"pid":            processCmd.Process.Pid,
 			"command":        s.config.ProcessCommand,
@@ -545,9 +545,9 @@ func (s *System) generateCrashReport(err error, processRuntime time.Duration, st
 			s.logger.Error("Failed to report process crash", "error", reportErr)
 		}
 
-		// Send notification to admin channel (non-blocking)
+		// Send notification to admin channel (async, non-blocking)
 		if s.AdminChannel != nil {
-			go s.AdminChannel.SendActivityEvent("supervised_process_crashed", report.ToMap())
+			s.AdminChannel.SendActivityEvent("supervised_process_crashed", report.ToMap())
 		}
 	}
 }
@@ -562,7 +562,7 @@ func (s *System) generateCrashReport(err error, processRuntime time.Duration, st
 //  2. Let process exit naturally with its exit code
 //  3. Let monitorProcessLoop detect the exit and trigger shutdown
 //
-// StopProcess is only called by Shutdown() → PrepareContainerForShutdown()
+// StopProcess is invoked by the unified service manager via ContainerService.Stop()
 // after shutdown has already been triggered by some other means.
 func (s *System) StopProcess() error {
 	s.processMu.Lock()

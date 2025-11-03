@@ -253,6 +253,17 @@ func (s *System) GetCheckpoint(ctx context.Context, checkpointID string) (*api.C
 	return &api.CheckpointInfo{ID: filepath.Base(rec.Path), CreateTime: rec.CreatedAt}, nil
 }
 
+// DeleteCheckpoint deletes a checkpoint by id: unmounts, removes fs, and soft-deletes DB
+func (s *System) DeleteCheckpoint(ctx context.Context, checkpointID string) error {
+	if checkpointID == "active" || checkpointID == "Current" {
+		return fmt.Errorf("cannot delete active checkpoint")
+	}
+	if s.OverlayManager == nil {
+		return fmt.Errorf("overlay manager not configured")
+	}
+	return s.OverlayManager.DeleteCheckpoint(ctx, checkpointID)
+}
+
 // ResetState resets the system state by:
 // 1. Stopping the process if running
 // 2. Clearing the JuiceFS mount directory

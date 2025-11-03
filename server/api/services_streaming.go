@@ -13,6 +13,8 @@ import (
 	"github.com/superfly/sprite-env/pkg/services"
 )
 
+const containerLogDir = "/.sprite/logs"
+
 // logEventWriter implements io.Writer to capture output and send as log events
 type logEventWriter struct {
 	logType string
@@ -410,13 +412,15 @@ func drainAndComplete(events <-chan ServiceLogEvent, encoder *json.Encoder, flus
 }
 
 // sendCompletionEvent sends a completion event with log file locations
+// Return container-mapped paths so clients inside the container can read them
 func sendCompletionEvent(encoder *json.Encoder, serviceName string, logDir string) {
+	const containerLogDir = "/.sprite/logs"
 	event := ServiceLogEvent{
 		Type:      "complete",
 		Timestamp: time.Now().UnixMilli(),
 		LogFiles: map[string]string{
-			"stdout": fmt.Sprintf("%s/services/%s.log", logDir, serviceName),
-			"stderr": fmt.Sprintf("%s/services/%s.stderr.log", logDir, serviceName),
+			"stdout": fmt.Sprintf("%s/services/%s.log", containerLogDir, serviceName),
+			"stderr": fmt.Sprintf("%s/services/%s.stderr.log", containerLogDir, serviceName),
 		},
 	}
 	encoder.Encode(event)

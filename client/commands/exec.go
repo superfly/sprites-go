@@ -54,6 +54,7 @@ func ExecCommand(ctx *GlobalContext, args []string) int {
 	detachable := cmd.FlagSet.Bool("detachable", false, "Create a detachable tmux session")
 	envVars := cmd.FlagSet.String("env", "", "Environment variables (KEY=value,KEY2=value2)")
 	sessionID := cmd.FlagSet.String("id", "", "Attach to existing session by ID")
+	httpPost := cmd.FlagSet.Bool("http-post", false, "Use HTTP/1.1 POST /exec instead of WebSockets (non-TTY only)")
 
 	// Parse flags
 	remainingArgs, err := ParseFlags(cmd, args)
@@ -96,8 +97,8 @@ func ExecCommand(ctx *GlobalContext, args []string) int {
 
 	// When using TTY mode, automatically include essential terminal environment variables
 	if *tty {
-		terminalEnvVars := []string{"TERM", "COLORTERM", "LANG", "LC_ALL"}
-		for _, envVar := range terminalEnvVars {
+		temporalEnvVars := []string{"TERM", "COLORTERM", "LANG", "LC_ALL"}
+		for _, envVar := range temporalEnvVars {
 			if value := os.Getenv(envVar); value != "" {
 				// Check if this env var is already explicitly set
 				envVar = envVar + "=" + value
@@ -131,6 +132,39 @@ func ExecCommand(ctx *GlobalContext, args []string) int {
 				format.Sprite(sprite.Name()))
 		}
 		fmt.Printf("Running: %s\n", format.Command(cmdStr))
+	}
+
+	// If HTTP exec is requested, run via POST /exec (non-TTY only)
+	if *httpPost {
+		if *tty {
+			fmt.Fprintf(os.Stderr, "Error: -http-post is not supported with -tty.\n")
+			return 1
+		}
+		token, tokErr := org.GetToken()
+		if tokErr != nil {
+			fmt.Fprintf(os.Stderr, "Error: Failed to get auth token: %v\n", tokErr)
+			return 1
+		}
+		stdinProvided := !term.IsTerminal(int(os.Stdin.Fd()))
+		slog.Default().Debug("Executing via HTTP POST /exec",
+			"sprite", sprite.Name(),
+			"args", remainingArgs,
+			"dir", *workingDir,
+			"stdin", stdinProvided,
+			"env_count", len(envList),
+		)
+		var stdinReader io.Reader
+		if stdinProvided {
+			stdinReader = os.Stdin
+		}
+		exitCode, fbErr := runExecHTTPFallback(
+			getSpritesAPIURL(org), token, sprite.Name(), remainingArgs, envList, *workingDir, stdinReader, os.Stdout, os.Stderr,
+		)
+		if fbErr != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", fbErr)
+			return 1
+		}
+		return exitCode
 	}
 
 	// Create the command using sprite instance
@@ -225,6 +259,27 @@ func ExecCommand(ctx *GlobalContext, args []string) int {
 	select {
 	case err := <-cmdDone:
 		if err != nil {
+			// If non-TTY, attempt HTTP fallback to POST /exec
+			if !*tty {
+				slog.Default().Debug("WebSocket exec failed; attempting HTTP fallback", "error", err)
+				// Print user-visible warning about fallback limitations
+				fmt.Fprintln(os.Stderr, "Warning: could not establish a WebSocket (wss) connection; falling back to HTTP POST /exec. This mode is non-TTY only: -tty execs won't work, and features like resize, tmux attach/detach, and text control messages are unavailable.")
+				// Build and run HTTP fallback with same arguments
+				token, tokErr := org.GetToken()
+				if tokErr == nil {
+					stdinReader := io.Reader(nil)
+					if !term.IsTerminal(int(os.Stdin.Fd())) {
+						stdinReader = os.Stdin
+					}
+					exitCode, fbErr := runExecHTTPFallback(
+						getSpritesAPIURL(org), token, sprite.Name(), remainingArgs, envList, *workingDir, stdinReader, os.Stdout, os.Stderr,
+					)
+					if fbErr == nil {
+						return exitCode
+					}
+					slog.Default().Debug("HTTP fallback failed", "error", fbErr)
+				}
+			}
 			// Extract exit code if available
 			if exitErr, ok := err.(*sprites.ExitError); ok {
 				return exitErr.ExitCode()
@@ -246,12 +301,7 @@ func ExecCommand(ctx *GlobalContext, args []string) int {
 	}
 }
 
-// handleSpriteTerminalResize monitors for terminal resize events and updates the remote TTY size
-func handleSpriteTerminalResize(cmd *sprites.Cmd) {
-	// This is a simplified version - in production you'd want to use
-	// syscall.SIGWINCH on Unix systems to detect resize events
-	// For now, this is a placeholder
-}
+// handleSpriteTerminalResize is implemented per-OS.
 
 // setPortNotificationHandler sets a TextMessageHandler to decode port notifications,
 // automatically start/stop local proxies via the SDK, and returns a cleanup function.

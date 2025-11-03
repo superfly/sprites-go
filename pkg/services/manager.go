@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"syscall"
 	"time"
 
 	"github.com/superfly/sprite-env/pkg/tap"
@@ -31,6 +30,9 @@ type Manager struct {
 	// State (plain bool, no mutex needed for simple flag)
 	started bool
 
+	// Service definitions for managed services
+	serviceDefs map[string]*ServiceDefinition
+
 	// Verifiers for external resources (check actual system state)
 	setupVerifiers   []func(context.Context) error // verify resources exist
 	cleanupVerifiers []func(context.Context) error // verify resources cleaned up
@@ -40,6 +42,7 @@ type Manager struct {
 type command struct {
 	op       operation
 	svc      *Service
+	svcDef   *ServiceDefinition // for opRegisterService
 	name     string
 	signal   string           // for opSignal
 	exitCode int              // for opProcessExit
@@ -59,6 +62,9 @@ const (
 	opStartAll
 	opGetProcessHandle
 	opGetAllStates
+	opRegisterService  // new: register a ServiceDefinition
+	opStopServiceTree  // new: stop a service and all its dependents
+	opStartServiceTree // new: start a service and all its dependencies
 )
 
 type stateRequest struct {
@@ -69,11 +75,16 @@ type stateRequest struct {
 // Option configures the Manager
 type Option func(*Manager)
 
-// WithLogDir sets the directory for service logs
-func WithLogDir(logDir string) Option {
+// WithLogDirForManager sets the directory for service logs (for Manager/PersistentManager)
+func WithLogDirForManager(logDir string) Option {
 	return func(m *Manager) {
 		m.logDir = logDir
 	}
+}
+
+// WithLogDir is an alias for WithLogDirForManager for test compatibility
+func WithLogDir(logDir string) Option {
+	return WithLogDirForManager(logDir)
 }
 
 // NewManager creates a new service manager
@@ -93,6 +104,7 @@ func NewManager(dataDir string, opts ...Option) (*Manager, error) {
 		stopCh:        make(chan struct{}),
 		stoppedCh:     make(chan struct{}),
 		errCh:         make(chan error, 1),
+		serviceDefs:   make(map[string]*ServiceDefinition),
 	}
 
 	// Apply options
@@ -405,6 +417,16 @@ func (m *Manager) run() {
 					allStates[name] = &stateCopy
 				}
 				cmd.result <- allStates
+
+			case opRegisterService:
+				// Register a service definition
+				err := m.handleRegisterService(cmd.svcDef, states)
+				cmd.result <- err
+
+			case opStopServiceTree:
+				// Stop a service and all its dependents
+				err := m.handleStopServiceTree(cmd.name, states, processes)
+				cmd.result <- err
 			}
 
 		case req := <-m.stateRequests:
@@ -681,14 +703,44 @@ func (m *Manager) CleanupVerifiers() []func(context.Context) error {
 	return m.cleanupVerifiers
 }
 
-// processExists checks if a process with the given PID is still running
-func processExists(pid int) bool {
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false
+// RegisterService registers a ServiceDefinition for management
+// This allows registering both process-based and managed services
+func (m *Manager) RegisterService(svcDef *ServiceDefinition) error {
+	if svcDef == nil {
+		return fmt.Errorf("service definition cannot be nil")
 	}
-	// On Unix, FindProcess always succeeds, so we need to send signal 0 to check
-	// Signal 0 doesn't actually send a signal, just checks if process exists
-	err = process.Signal(syscall.Signal(0))
-	return err == nil
+	if svcDef.Name == "" {
+		return fmt.Errorf("service name cannot be empty")
+	}
+    if svcDef.ManagedService == nil && svcDef.ProcessService == nil && (svcDef.Hooks == nil || (svcDef.Hooks.Start == nil && svcDef.Hooks.Stop == nil)) {
+        return fmt.Errorf("service definition must have Hooks, ManagedService or ProcessService")
+	}
+
+	result := make(chan interface{})
+	m.commands <- command{
+		op:     opRegisterService,
+		svcDef: svcDef,
+		result: result,
+	}
+	resp := <-result
+	if resp == nil {
+		return nil
+	}
+	return resp.(error)
+}
+
+// StopServiceTree stops a service and all services that depend on it
+// This is useful for partial shutdowns (e.g., stopping container and everything above it)
+func (m *Manager) StopServiceTree(rootService string) error {
+	result := make(chan interface{})
+	m.commands <- command{
+		op:     opStopServiceTree,
+		name:   rootService,
+		result: result,
+	}
+	resp := <-result
+	if resp == nil {
+		return nil
+	}
+	return resp.(error)
 }

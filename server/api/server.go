@@ -65,8 +65,8 @@ func NewServer(config Config, system SystemManager, ctx context.Context) (*Serve
 	authManager := NewAuthManager(config.APIToken, config.AdminToken)
 
 	// Create proxy handler for proxy:: prefixed tokens
-	// Try IPv6 (fd00:...) first, then fall back to IPv4 (10.0.0.1)
-	proxyHandler := NewProxyHandler(logger, "fd00::2", "10.0.0.1", 8080)
+	// Try IPv6 (fdf::...) first, then fall back to IPv4 (10.0.0.1)
+	proxyHandler := NewProxyHandler(logger, "fdf::1", "10.0.0.1", 8080)
 
 	s := &Server{
 		logger:       logger,
@@ -181,6 +181,10 @@ func NewServer(config Config, system SystemManager, ctx context.Context) (*Serve
 	s.server = &http.Server{
 		Addr: config.ListenAddr,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Include sprite version for API responses (not proxy)
+			if s.config.SpriteVersion != "" {
+				w.Header().Set("Sprite-Version", s.config.SpriteVersion)
+			}
 			// Check if this is a proxy request and include that in the log
 			if proxyInfo := r.Context().Value(proxyInfoKey{}); proxyInfo != nil {
 				s.logger.Info("request", "url", r.URL.String(), "type", proxyInfo)
@@ -211,7 +215,16 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 	// Note: All endpoints have global authentication applied at the top level
 
 	// Exec endpoint - waits for process to be running
-	mux.HandleFunc("/exec", s.enrichContextMiddleware(s.waitForProcessMiddleware(s.handlers.ExecHandler)))
+	mux.HandleFunc("/exec", s.enrichContextMiddleware(s.waitForProcessMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			s.handlers.ExecHandler(w, r)
+		case http.MethodPost:
+			s.handlers.ExecHTTPHandler(w, r)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
 
 	// Control endpoint (after stripSpritePrefix this path handles /v1/sprites/:name/control)
 	mux.HandleFunc("/control", s.enrichContextMiddleware(s.waitForProcessMiddleware(s.handlers.HandleControl)))
@@ -233,7 +246,11 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 			s.handlers.HandleListCheckpoints(w, r)
 		} else if len(parts) == 2 && parts[0] == "checkpoints" {
 			// GET /checkpoints/{id} - get specific checkpoint
-			s.handlers.HandleGetCheckpoint(w, r)
+			if r.Method == http.MethodDelete {
+				s.handlers.HandleDeleteCheckpoint(w, r)
+			} else {
+				s.handlers.HandleGetCheckpoint(w, r)
+			}
 		} else if len(parts) == 3 && parts[0] == "checkpoints" && parts[2] == "restore" {
 			// POST /checkpoints/{id}/restore - restore from checkpoint
 			s.handlers.HandleCheckpointRestore(w, r)
@@ -252,6 +269,9 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 	// Suspend endpoint - wait for storage to be ready
 	mux.HandleFunc("/suspend", s.waitForStorageMiddleware(s.handlers.HandleSuspend))
 
+	// Logs endpoint - allow standard token, no special waits
+	mux.HandleFunc("/logs", s.handlers.HandleLogs)
+
 	// Debug endpoints - don't wait for process or JuiceFS
 	mux.HandleFunc("/debug/create-zombie", s.handlers.HandleDebugCreateZombie)
 	mux.HandleFunc("/debug/check-process", s.handlers.HandleDebugCheckProcess)
@@ -259,9 +279,11 @@ func (s *Server) setupEndpoints(mux *http.ServeMux) {
 	// Admin endpoints
 	mux.HandleFunc("/admin/reset-state", s.handlers.HandleAdminResetState)
 
-	// Sprite environment endpoint under /v1/sprites/:name/
-	// Note: stripSpritePrefix will convert "/v1/sprites/:name/environment" to "/environment"; we keep this
-	// handler to catch direct (non-stripped) calls in tests or other callers.
+    // Policy config endpoint - GET returns JSON; POST validates and writes JSON
+    mux.HandleFunc("/policy/network", s.waitForPolicyMiddleware(s.handlers.HandlePolicyNetwork))
+
+	// Sprite environment endpoint - POST /v1/sprites/:name/environment
+	// Waits for storage to be ready (needs JuiceFS for sprite.db)
 	mux.HandleFunc("/v1/sprites/", s.waitForStorageMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 		if len(parts) == 4 && parts[0] == "v1" && parts[1] == "sprites" && parts[3] == "environment" {
@@ -375,6 +397,36 @@ func (s *Server) waitForStorageMiddleware(next http.HandlerFunc) http.HandlerFun
 
 		next(w, r)
 	}
+}
+
+// waitForPolicyMiddleware waits for the policy manager to be running
+func (s *Server) waitForPolicyMiddleware(next http.HandlerFunc) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        ctx, cancel := context.WithTimeout(r.Context(), s.config.MaxWaitTime)
+        defer cancel()
+
+        startTime := time.Now()
+        err := s.system.WhenPolicyRunning(ctx)
+        waitTime := time.Since(startTime)
+
+        if err != nil {
+            s.logger.Warn("Request timeout waiting for policy manager to be ready",
+                "requestPath", r.URL.Path,
+                "waitTime", waitTime,
+                "error", err)
+            http.Error(w, "Policy not ready", http.StatusServiceUnavailable)
+            return
+        }
+
+        // Log if we waited more than 5ms
+        if waitTime > 5*time.Millisecond {
+            s.logger.Info("Held request while waiting for policy manager",
+                "requestPath", r.URL.Path,
+                "waitTime", waitTime)
+        }
+
+        next.ServeHTTP(w, r)
+    }
 }
 
 // (no direct getter; handlers query system as needed)

@@ -32,6 +32,9 @@ type Metrics struct {
 	// Type identifies the metrics source (e.g., "sprite")
 	Type string `json:"type"`
 
+	// Timestamp of when the metrics were collected (ISO 8601 format)
+	Timestamp string `json:"timestamp"`
+
 	// Monotonic counters (delta since last flush)
 	CPUSeconds    float64 `json:"cpu_s"`
 	MemorySeconds float64 `json:"memory_s"`      // memory GB-seconds
@@ -40,6 +43,10 @@ type Metrics struct {
 	IOWriteGB     float64 `json:"io_write_gb"`   // write gigabytes
 	IOPSRead      uint64  `json:"iops_read"`     // read operations
 	IOPSWrite     uint64  `json:"iops_write"`    // write operations
+
+	// Billable counters (delta since last flush, with minimums applied)
+	BillableCPUSeconds    float64 `json:"billable_cpu_s"` // billed CPU seconds (min 6.25% per second of runtime)
+	BillableMemorySeconds float64 `json:"billable_mem_s"` // billed memory GB-seconds (min 0.250 GB per second of runtime)
 
 	// Monotonic counters (cumulative totals)
 	CPUSecondsTotal    float64 `json:"cpu_s_total"`
@@ -52,7 +59,8 @@ type Metrics struct {
 	IOPSWriteTotal     uint64  `json:"iops_write_total"`    // write operations
 
 	// Current state
-	MemoryCurrentMB uint64 `json:"memory_current_mb"`
+	MemoryCurrentMB     uint64 `json:"memory_current_mb"`
+	MemoryReclaimableMB uint64 `json:"memory_reclaimable_mb"`
 }
 
 // VMMetrics contains VM-level CPU balance information
@@ -221,6 +229,25 @@ func (mon *Monitor) run(ctx context.Context) {
 	}
 }
 
+// calculateBillableMetrics applies minimum billing rates to actual usage.
+// Minimum billing: 6.25% CPU (0.0625 s/s) and 250MB (0.250 GB-s/s) per second of runtime.
+func calculateBillableMetrics(runtimeDelta, cpuSecondsUsed, memoryGBSeconds float64) (billableCPU, billableMemory float64) {
+	minCPU := runtimeDelta * 0.0625   // 6.25% CPU
+	minMemory := runtimeDelta * 0.250 // 0.250 GB-seconds
+
+	billableCPU = cpuSecondsUsed
+	if billableCPU < minCPU {
+		billableCPU = minCPU
+	}
+
+	billableMemory = memoryGBSeconds
+	if billableMemory < minMemory {
+		billableMemory = minMemory
+	}
+
+	return billableCPU, billableMemory
+}
+
 // emitMetrics calculates and emits accumulated metrics, then resets delta counters
 func (mon *Monitor) emitMetrics() {
 	mon.mu.Lock()
@@ -233,9 +260,10 @@ func (mon *Monitor) emitMetrics() {
 	}
 
 	// Calculate runtime delta (wall clock time, excluding suspended periods)
+	runtimeDelta := 0.0
 	now := time.Now()
 	if !mon.lastRuntimeCheck.IsZero() {
-		runtimeDelta := now.Sub(mon.lastRuntimeCheck).Seconds()
+		runtimeDelta = now.Sub(mon.lastRuntimeCheck).Seconds()
 		mon.runtimeSeconds += runtimeDelta
 	}
 	mon.lastRuntimeCheck = now
@@ -267,9 +295,13 @@ func (mon *Monitor) emitMetrics() {
 	mon.ioReadOpsTotal += ioReadOpsDelta
 	mon.ioWriteOpsTotal += ioWriteOpsDelta
 
+	// Calculate billable amounts with minimums
+	billableCPU, billableMemory := calculateBillableMetrics(runtimeDelta, mon.cpuSecondsUsed, mon.memoryGBSeconds)
+
 	// Build metrics
 	metrics := Metrics{
-		Type: mon.opts.Type,
+		Type:      mon.opts.Type,
+		Timestamp: now.UTC().Format(time.RFC3339),
 
 		// Deltas since last flush
 		CPUSeconds:    mon.cpuSecondsUsed,
@@ -279,6 +311,10 @@ func (mon *Monitor) emitMetrics() {
 		IOWriteGB:     mon.ioWriteGB,
 		IOPSRead:      mon.ioReadOps,
 		IOPSWrite:     mon.ioWriteOps,
+
+		// Billable deltas (with minimums applied)
+		BillableCPUSeconds:    billableCPU,
+		BillableMemorySeconds: billableMemory,
 
 		// Cumulative totals
 		CPUSecondsTotal:    mon.cpuSecondsTotal,
@@ -291,7 +327,8 @@ func (mon *Monitor) emitMetrics() {
 		IOPSWriteTotal:     mon.ioWriteOpsTotal,
 
 		// Current state
-		MemoryCurrentMB: stats.MemoryCurrentBytes / 1024 / 1024,
+		MemoryCurrentMB:     stats.MemoryCurrentBytes / 1024 / 1024,
+		MemoryReclaimableMB: stats.MemoryReclaimableBytes / 1024 / 1024,
 	}
 
 	// Emit via callback

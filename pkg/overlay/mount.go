@@ -10,6 +10,10 @@ import (
 	"time"
 )
 
+// Test seam: allow tests to override mount functions
+var mountExt4Func = mountExt4
+var mountOverlayFSFunc = mountOverlayFS
+
 // EnsureImage creates the sparse image if it doesn't exist
 func (m *Manager) EnsureImage() error {
 	// Ensure the directory exists first (even if image exists, to prevent races)
@@ -96,13 +100,15 @@ func (m *Manager) PrepareAndMount(ctx context.Context) error {
 
 	// Check if it's a corruption error
 	errStr := err.Error()
-	if strings.Contains(errStr, "I/O error") || strings.Contains(errStr, "can't read superblock") {
+	if strings.Contains(errStr, "I/O error") || strings.Contains(errStr, "input/output error") || strings.Contains(errStr, "can't read superblock") {
 		m.logger.Error("Mount failed with corruption indicators, attempting recovery", "error", err)
 
 		// Backup the corrupted image
 		timestamp := time.Now().Format("20060102-150405")
 		backupPath := fmt.Sprintf("%s.corrupt-%s.bak", strings.TrimSuffix(m.imagePath, ".img"), timestamp)
 		m.logger.Warn("Backing up corrupted image", "from", m.imagePath, "to", backupPath)
+
+		// Error is logged above; admin forwarding happens via tap error callback
 
 		if backupErr := os.Rename(m.imagePath, backupPath); backupErr != nil {
 			m.logger.Warn("Failed to backup corrupted image, attempting removal", "error", backupErr)
@@ -121,15 +127,29 @@ func (m *Manager) PrepareAndMount(ctx context.Context) error {
 
 		// Retry mount
 		m.logger.Info("Retrying mount after recreating image")
+		recoveryStart := time.Now()
 		if retryErr := m.Mount(ctx); retryErr != nil {
 			return fmt.Errorf("mount failed after recreation: %w", retryErr)
 		}
 
+		_ = recoveryStart // retained for potential future metrics
+
 		return nil
 	}
 
-	// Not a corruption error, return original error
-	return err
+	// Not a corruption error: perform simple recovery by backing up current image and recreating
+	// in case the failure is due to a bad image that didn't match classic corruption strings.
+	ts := time.Now().Format("20060102-150405")
+	backupPath := fmt.Sprintf("%s.fail-%s.bak", strings.TrimSuffix(m.imagePath, ".img"), ts)
+	m.logger.Warn("Mount failed, backing up image and recreating from scratch", "error", err, "backup", backupPath)
+	_ = os.Rename(m.imagePath, backupPath)
+	if createErr := m.EnsureImage(); createErr != nil {
+		return fmt.Errorf("failed to recreate overlay image after mount error: %w (orig: %v)", createErr, err)
+	}
+	if retryErr := m.Mount(ctx); retryErr != nil {
+		return fmt.Errorf("mount failed after image recreation: %w (orig: %v)", retryErr, err)
+	}
+	return nil
 }
 
 // Mount mounts the overlay image
@@ -187,7 +207,7 @@ func (m *Manager) Mount(ctx context.Context) error {
 
 	m.logger.Info("Mounting loop device to overlay mount path", "device", m.loopDevice, "target", m.mountPath, "options", "discard,noatime,lazytime,commit=30,delalloc,data=ordered")
 	mountStart := time.Now()
-	err = mountExt4(m.loopDevice, m.mountPath, "discard,noatime,lazytime,commit=30,delalloc,data=ordered")
+	err = mountExt4Func(m.loopDevice, m.mountPath, "discard,noatime,lazytime,commit=30,delalloc,data=ordered")
 	mountDuration := time.Since(mountStart)
 
 	if err != nil {
@@ -323,7 +343,7 @@ func (m *Manager) mountOverlayFS(ctx context.Context) error {
 	m.logger.Info("Mounting overlayfs using syscall", "target", m.overlayTargetPath, "lowerdir", lowerDirs, "upperdir", upperDir, "workdir", workDir)
 
 	mountStart := time.Now()
-	err := mountOverlayFS(m.overlayTargetPath, lowerDirs, upperDir, workDir)
+	err := mountOverlayFSFunc(m.overlayTargetPath, lowerDirs, upperDir, workDir)
 	mountDuration := time.Since(mountStart)
 
 	if err != nil {
@@ -356,7 +376,7 @@ func (m *Manager) mountOverlayFS(ctx context.Context) error {
 // Unmount unmounts the overlay
 func (m *Manager) Unmount(ctx context.Context) error {
 	m.logger.Info("Starting overlay unmount sequence")
-	
+
 	// Signal shutdown
 	select {
 	case <-m.stopCh:
@@ -459,18 +479,33 @@ func (m *Manager) Unmount(ctx context.Context) error {
 		cmd = exec.Command("umount", "-f", m.mountPath)
 		m.logger.Debug("Step 3: Running force umount command", "command", "umount -f", "path", m.mountPath)
 		if output2, err2 := cmd.CombinedOutput(); err2 != nil {
-			m.logger.Error("Step 3: Force loopback umount also failed", "error", err2, "output", string(output2))
-			return fmt.Errorf("failed to unmount overlay: %w, outputs: %s, %s", err2, string(output), string(output2))
+			m.logger.Warn("Step 3: Force loopback umount failed, trying lazy unmount", "error", err2, "output", string(output2))
+			// Final fallback: lazy unmount to break references, then verify
+			cmd = exec.Command("umount", "-l", m.mountPath)
+			m.logger.Debug("Step 3: Running lazy umount command", "command", "umount -l", "path", m.mountPath)
+			if output3, err3 := cmd.CombinedOutput(); err3 != nil {
+				m.logger.Error("Step 3: Lazy loopback umount also failed", "error", err3, "output", string(output3))
+				return fmt.Errorf("failed to unmount overlay: %w, outputs: %s, %s, %s", err3, string(output), string(output2), string(output3))
+			}
+			m.logger.Info("Step 3: Lazy loopback umount succeeded")
+		} else {
+			m.logger.Info("Step 3: Force loopback umount succeeded")
 		}
-		m.logger.Info("Step 3: Force loopback umount succeeded")
 	} else {
 		m.logger.Info("Step 3: Normal loopback umount succeeded")
 	}
 
-	// Verify loopback mount is actually unmounted
+	// Verify loopback mount is actually unmounted (allow brief grace period)
+	verifyStart := time.Now()
+	for i := 0; i < 20; i++ { // up to ~2s
+		if !m.isMounted() {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	if m.isMounted() {
-		m.logger.Error("Step 3: Loopback mount still mounted after umount command")
-		return fmt.Errorf("loopback mount still mounted after umount command")
+		m.logger.Error("Step 3: Loopback mount still mounted after unmount attempts", "waited", time.Since(verifyStart))
+		return fmt.Errorf("loopback mount still mounted after unmount attempts")
 	}
 	m.logger.Info("Step 3: Loopback mount verified as unmounted")
 
@@ -483,6 +518,15 @@ func (m *Manager) Unmount(ctx context.Context) error {
 			return fmt.Errorf("failed to detach loop device %s: %w", m.loopDevice, err)
 		}
 		m.logger.Info("Step 3: Loop device detached successfully after unmount")
+		// Verify loop device is no longer attached to the backing image
+		// Some kernels may take a brief moment to release the mapping
+		for i := 0; i < 20; i++ { // up to ~2s
+			out, _ := exec.Command("losetup", "-a").CombinedOutput()
+			if !strings.Contains(string(out), m.imagePath) && !strings.Contains(string(out), m.loopDevice+":") {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
 		m.loopDevice = ""
 	} else {
 		m.logger.Info("Step 3: No loop device to detach after unmount")
@@ -503,33 +547,26 @@ func (m *Manager) Unmount(ctx context.Context) error {
 	return nil
 }
 
-// PrepareForCheckpoint prepares the overlay for checkpointing by syncing and freezing
+// PrepareForCheckpoint prepares the overlay for checkpointing by syncing filesystems.
+// This performs data sync operations only - the caller is responsible for freezing
+// processes (via cgroup.freeze) before calling this if needed.
 func (m *Manager) PrepareForCheckpoint(ctx context.Context) error {
 	if m.isOverlayFSMounted() {
-
-		// 1) Sync the overlayfs filesystem (where actual writes occur)
-		m.logger.Debug("Syncing OverlayFS filesystem", "path", m.overlayTargetPath)
-		syncCmd := exec.Command("sync", "-f", m.overlayTargetPath)
-		if output, err := syncCmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("failed to sync overlayfs: %w, output: %s", err, string(output))
-		}
-		m.logger.Debug("OverlayFS sync completed")
+    // 1) Sync the overlayfs filesystem (where actual writes occur)
+    m.logger.Debug("Syncing OverlayFS filesystem via syncfs", "path", m.overlayTargetPath)
+    if err := syncFilesystemByFD(m.overlayTargetPath); err != nil {
+        return fmt.Errorf("failed to sync overlayfs via syncfs: %w", err)
+    }
+    m.logger.Debug("OverlayFS sync completed")
 	}
 
-	// 2) Freeze the underlying ext4 filesystem to prevent new writes
-	m.logger.Debug("Freezing underlying ext4 filesystem", "path", m.mountPath)
-	freezeCmd := exec.Command("fsfreeze", "--freeze", m.mountPath)
-	if output, err := freezeCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to freeze ext4 filesystem: %w, output: %s", err, string(output))
-	}
-	m.logger.Debug("Filesystem frozen successfully")
-
-	// 3) Sync the loopback mount while frozen
-	m.logger.Debug("Syncing loopback mount after freeze", "path", m.mountPath)
+	// 2) Sync the loopback mount
+	m.logger.Debug("Syncing loopback mount", "path", m.mountPath)
 	if err := m.sync(ctx); err != nil {
-		return fmt.Errorf("failed to sync loopback mount after freeze: %w", err)
+		return fmt.Errorf("failed to sync loopback mount: %w", err)
 	}
 
+	// 3) Fsync the image file
 	f2, err := os.Open(m.imagePath)
 	if err != nil {
 		m.logger.Warn("Image open failed for fsync", "error", err, "path", m.imagePath)
@@ -540,30 +577,6 @@ func (m *Manager) PrepareForCheckpoint(ctx context.Context) error {
 			m.logger.Warn("Image fsync failed", "error", e, "path", m.imagePath)
 		}
 	}
-
-	return nil
-}
-
-// UnfreezeAfterCheckpoint unfreezes the overlay after checkpointing
-func (m *Manager) UnfreezeAfterCheckpoint(ctx context.Context) error {
-	if !m.isMounted() {
-		return nil // Not an error if not mounted
-	}
-
-	m.logger.Debug("Unfreezing underlying ext4 filesystem", "path", m.mountPath)
-	unfreezeCmd := exec.Command("fsfreeze", "--unfreeze", m.mountPath)
-	if output, err := unfreezeCmd.CombinedOutput(); err != nil {
-		// Check if it's already unfrozen by trying to write to the underlying mount
-		testFile := filepath.Join(m.mountPath, ".freeze_test")
-		if testErr := os.WriteFile(testFile, []byte("test"), 0644); testErr == nil {
-			// Successfully wrote, so it's not frozen
-			os.Remove(testFile)
-			m.logger.Debug("Filesystem was already unfrozen")
-			return nil
-		}
-		return fmt.Errorf("failed to unfreeze ext4 filesystem: %w, output: %s", err, string(output))
-	}
-	m.logger.Debug("Filesystem unfrozen successfully")
 
 	return nil
 }
@@ -611,12 +624,8 @@ func (m *Manager) sync(ctx context.Context) error {
 	m.logger.Debug("Starting filesystem sync", "path", m.mountPath)
 	syncStart := time.Now()
 
-	syncCmd := exec.Command("sync", "-f", m.mountPath)
-	if output, err := syncCmd.CombinedOutput(); err != nil {
-		if len(output) > 0 {
-			return fmt.Errorf("sync failed: %w, output: %s", err, string(output))
-		}
-		return fmt.Errorf("sync failed: %w", err)
+	if err := syncFilesystemByFD(m.mountPath); err != nil {
+		return fmt.Errorf("syncfs failed: %w", err)
 	}
 
 	m.logger.Debug("Filesystem sync completed", "path", m.mountPath, "duration", time.Since(syncStart))

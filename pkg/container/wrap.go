@@ -11,7 +11,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"syscall"
 )
+
+// NOTE: keep lightweight helpers local to avoid new deps across the tree
+// (we only use stdlib types here):
 
 // WrapConfig holds configuration for wrapping a command
 type WrapConfig struct {
@@ -40,7 +45,8 @@ func WithConsoleSocket(path string) WrapOption {
 // WrappedCommand holds a wrapped command and provides access to the PTY file for TTY mode
 type WrappedCommand struct {
 	*exec.Cmd
-	config *WrapConfig
+	config  *WrapConfig
+	pidFile string
 }
 
 // GetPTY waits for and returns the PTY file from the console socket
@@ -61,6 +67,40 @@ func (w *WrappedCommand) ClosePTY() error {
 	return nil
 }
 
+// GetPID returns the PID of the user process.
+//
+//   - For container-wrapped commands, it attempts to resolve and return the inner
+//     container process PID (the actual user process) rather than the wrapper
+//     process PID. If resolution fails, it falls back to returning the wrapper PID.
+//   - For non-container commands, it returns the process PID directly.
+func (w *WrappedCommand) GetPID() (int, error) {
+	if w == nil || w.Cmd == nil || w.Cmd.Process == nil {
+		return 0, fmt.Errorf("wrapped command not started")
+	}
+	wrapperPID := w.Cmd.Process.Pid
+
+	// Prefer PID file written by crun exec if available
+	if w.pidFile != "" {
+		if data, err := os.ReadFile(w.pidFile); err == nil {
+			trimmed := bytesTrimSpaceSafe(data)
+			if len(trimmed) > 0 {
+				if pid, perr := strconv.Atoi(string(trimmed)); perr == nil && pid > 0 {
+					return pid, nil
+				}
+			}
+		}
+	}
+
+	// Best effort: resolve inner PID when running via container wrapper.
+	// In our model, the wrapper (crun exec) is the parent and the user process
+	// is a child in the container namespace. Try to find and return it.
+	if pid, err := GetContainerPID(wrapperPID); err == nil && pid > 0 {
+		return pid, nil
+	}
+	// Fallback: return the wrapper PID if we cannot resolve an inner PID
+	return wrapperPID, nil
+}
+
 // Wrap builds/uses a hashed process.json and returns a crun exec command
 func Wrap(cmd *exec.Cmd, containerName string, opts ...WrapOption) *WrappedCommand {
 	config := &WrapConfig{}
@@ -70,8 +110,14 @@ func Wrap(cmd *exec.Cmd, containerName string, opts ...WrapOption) *WrappedComma
 
 	tmpl, err := CloneProcessTemplate()
 	if err != nil {
-		slog.Error("container.Wrap: process template not loaded; cannot exec", "error", err)
-		return &WrappedCommand{Cmd: exec.Command("false"), config: config}
+		// Attempt lazy initialization once in case the server started before the template existed
+		slog.Warn("container.Wrap: process template not loaded; attempting lazy init")
+		InitProcessTemplateFromEnv()
+		tmpl, err = CloneProcessTemplate()
+		if err != nil {
+			slog.Error("container.Wrap: process template still not available; cannot exec", "error", err)
+			return &WrappedCommand{Cmd: exec.Command("false"), config: config}
+		}
 	}
 
 	spec := &ProcessSpec{
@@ -128,6 +174,9 @@ func Wrap(cmd *exec.Cmd, containerName string, opts ...WrapOption) *WrappedComma
 		}
 		args = append(args, "--tty", "--console-socket", config.consoleSocket)
 	}
+	// Configure pidfile so we can read inner PID later
+	pidFile := filepath.Join(dir, "pid-"+sum+".pid")
+	args = append(args, "--pid-file", pidFile)
 	args = append(args, "--process", procPath)
 	args = append(args, containerName)
 
@@ -146,7 +195,7 @@ func Wrap(cmd *exec.Cmd, containerName string, opts ...WrapOption) *WrappedComma
 		}
 	}
 
-	wc := &WrappedCommand{Cmd: wrapped, config: config}
+	wc := &WrappedCommand{Cmd: wrapped, config: config, pidFile: pidFile}
 	slog.Debug("container.Wrap: built crun exec command",
 		"fullCommand", wrapped.String(),
 		"path", wrapped.Path,
@@ -174,6 +223,48 @@ func GetPTYFunc(socketPath string) func(ctx context.Context) (*os.File, error) {
 		defer tty.Close()
 		return tty.Get()
 	}
+}
+
+// Signal sends the provided signal to the inner user process PID.
+// Uses the pid from the pidfile when available; otherwise falls back to wrapper/child.
+func (w *WrappedCommand) Signal(sig os.Signal) error {
+	pid, err := w.GetPID()
+	if err != nil || pid <= 0 {
+		if err == nil {
+			err = fmt.Errorf("invalid pid %d", pid)
+		}
+		return err
+	}
+	if s, ok := sig.(syscall.Signal); ok {
+		return syscall.Kill(pid, s)
+	}
+	if p, perr := os.FindProcess(pid); perr == nil {
+		return p.Signal(sig)
+	} else {
+		return perr
+	}
+}
+
+// bytesTrimSpaceSafe trims ASCII whitespace without importing bytes.
+func bytesTrimSpaceSafe(b []byte) []byte {
+	i, j := 0, len(b)
+	for i < j {
+		c := b[i]
+		if c == ' ' || c == '\n' || c == '\r' || c == '\t' {
+			i++
+		} else {
+			break
+		}
+	}
+	for i < j {
+		c := b[j-1]
+		if c == ' ' || c == '\n' || c == '\r' || c == '\t' {
+			j--
+		} else {
+			break
+		}
+	}
+	return b[i:j]
 }
 
 // WrapForUser wraps a user command to execute inside a container using a per-command process.json

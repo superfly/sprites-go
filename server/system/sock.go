@@ -73,8 +73,18 @@ func (s *SockServer) Start(socketPath string) error {
 	mux := http.NewServeMux()
 	s.setupRoutes(mux)
 
+	// Wrap handler with activity tracking middleware
+	var handler http.Handler = mux
+	handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.system != nil && s.system.ActivityMonitor != nil {
+			s.system.ActivityMonitor.ActivityStarted("socket")
+			defer s.system.ActivityMonitor.ActivityEnded("socket")
+		}
+		mux.ServeHTTP(w, r)
+	})
+
 	s.server = &http.Server{
-		Handler:     mux,
+		Handler:     handler,
 		ReadTimeout: 30 * time.Second,
 	}
 
@@ -115,6 +125,7 @@ func (s *SockServer) setupRoutes(mux *http.ServeMux) {
 	// Checkpoint endpoints (no auth required)
 	mux.HandleFunc("GET /v1/checkpoints", s.apiHandlers.HandleListCheckpoints)
 	mux.HandleFunc("GET /v1/checkpoints/{id}", s.apiHandlers.HandleGetCheckpoint)
+	mux.HandleFunc("DELETE /v1/checkpoints/{id}", s.apiHandlers.HandleDeleteCheckpoint)
 	// Restore needs custom handling - returns immediately then triggers restore
 	mux.HandleFunc("POST /v1/checkpoints/{id}/restore", s.handleRestoreCheckpoint)
 	mux.HandleFunc("POST /v1/checkpoint", s.apiHandlers.HandleCheckpoint)

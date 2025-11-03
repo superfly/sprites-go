@@ -168,35 +168,49 @@ func TestHostNetworkNamespace(t *testing.T) {
 
 	// Start a process inside the sprite namespace that will open a port
 	// Use a fixed port for simplicity since we control the namespace
+	// Use socat instead of nc for a more reliable persistent listener
 	expectedPort := 12345
-	cmd := exec.Command("ip", "netns", "exec", "sprite", "nc", "-l", "127.0.0.1", fmt.Sprintf("%d", expectedPort))
+	cmd := exec.Command("ip", "netns", "exec", "sprite", "socat", 
+		fmt.Sprintf("TCP-LISTEN:%d,bind=127.0.0.1,reuseaddr,fork", expectedPort), 
+		"/dev/null")
 
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("Failed to start listener in namespace: %v", err)
 	}
 	defer cmd.Process.Kill()
 
-	// The actual process inside the namespace is nc, not the ip command
-	// We need to find the PID of nc inside the namespace
-	time.Sleep(100 * time.Millisecond) // Give nc time to start
+	// The actual process inside the namespace is socat, not the ip command
+	// We need to find the PID of socat inside the namespace
+	time.Sleep(200 * time.Millisecond) // Give socat time to start and bind
 
-	// Find the nc process
-	findCmd := exec.Command("ip", "netns", "exec", "sprite", "pidof", "nc")
+	// Find the socat process
+	findCmd := exec.Command("ip", "netns", "exec", "sprite", "pidof", "socat")
 	output, err := findCmd.Output()
 	if err != nil {
-		t.Fatalf("Failed to find nc process: %v", err)
+		t.Fatalf("Failed to find socat process: %v", err)
 	}
 
 	var pid int
 	if _, err := fmt.Sscanf(strings.TrimSpace(string(output)), "%d", &pid); err != nil {
-		t.Fatalf("Failed to parse nc PID: %v", err)
+		t.Fatalf("Failed to parse socat PID: %v", err)
 	}
 
 	t.Logf("Started listener in sprite namespace on port %d (PID: %d)", expectedPort, pid)
 
+	// Verify the port is actually listening before subscribing
+	time.Sleep(200 * time.Millisecond)
+	verifyCmd := exec.Command("nsenter", "--net=/var/run/netns/sprite", "ss", "-ltnp")
+	if verifyOut, err := verifyCmd.Output(); err == nil {
+		t.Logf("Current listening ports in sprite namespace:\n%s", string(verifyOut))
+	} else {
+		t.Logf("Failed to verify listening ports: %v", err)
+	}
+
 	// Subscribe to the process in the namespace
 	portChan := make(chan Port, 10)
+	receivedPorts := []Port{}
 	if err := nm.SubscribeInNamespace(pid, "sprite", func(port Port) {
+		t.Logf("Received port event: state=%s addr=%s port=%d pid=%d", port.State, port.Address, port.Port, port.PID)
 		select {
 		case portChan <- port:
 		case <-time.After(1 * time.Second):
@@ -206,14 +220,20 @@ func TestHostNetworkNamespace(t *testing.T) {
 		t.Fatalf("Failed to subscribe: %v", err)
 	}
 
+	// Give the initial scan time to complete
+	time.Sleep(500 * time.Millisecond)
+
 	// Wait for detection
 	// Note: We may receive events for other ports (especially close events for ports
 	// that were already open when monitoring started), so we need to loop until we
 	// find our specific port opening
-	timeout := time.After(3 * time.Second)
+	timeout := time.After(5 * time.Second)
 	for {
 		select {
 		case port := <-portChan:
+			receivedPorts = append(receivedPorts, port)
+			t.Logf("Checking port event: state=%s addr=%s port=%d pid=%d (looking for port=%d pid=%d)",
+				port.State, port.Address, port.Port, port.PID, expectedPort, pid)
 			// Skip close events and ports that aren't ours
 			if port.State == "open" && port.Port == expectedPort {
 				// Found our port!
@@ -225,7 +245,25 @@ func TestHostNetworkNamespace(t *testing.T) {
 			}
 			// Otherwise, keep looking for our port
 		case <-timeout:
-			t.Error("Timeout waiting for port detection in namespace")
+			t.Errorf("Timeout waiting for port detection in namespace")
+			t.Logf("Total port events received: %d", len(receivedPorts))
+			for i, p := range receivedPorts {
+				t.Logf("  Event %d: state=%s addr=%s port=%d pid=%d", i, p.State, p.Address, p.Port, p.PID)
+			}
+
+			// Final debug: check what's actually listening
+			finalCmd := exec.Command("nsenter", "--net=/var/run/netns/sprite", "ss", "-ltnp")
+			if finalOut, err := finalCmd.Output(); err == nil {
+				t.Logf("Final listening ports in sprite namespace:\n%s", string(finalOut))
+			}
+
+			// Check process tree
+			t.Logf("Process tree for PID %d:", pid)
+			psCmd := exec.Command("ps", "-fp", fmt.Sprintf("%d", pid))
+			if psOut, err := psCmd.Output(); err == nil {
+				t.Logf("Process info:\n%s", string(psOut))
+			}
+
 			return
 		}
 	}

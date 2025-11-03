@@ -2,6 +2,7 @@ package juicefs
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"context"
 	"database/sql"
 	"encoding/binary"
@@ -54,6 +55,10 @@ type JuiceFS struct {
 	// These check actual system state, not internal Go values
 	setupVerifiers   []func(context.Context) error // verify resources exist
 	cleanupVerifiers []func(context.Context) error // verify resources cleaned up
+
+    // Stats progress tracking (updated by monitorStatsProgress)
+    statsMu          sync.RWMutex
+    statsLastChange  time.Time
 }
 
 // Config holds the configuration for JuiceFS
@@ -259,15 +264,17 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 			j.logger.Info("Started writeback watcher before mount for directory detection")
 		}
 	}
-	j.logger.Debug("Writeback watcher setup completed", "duration", time.Since(stepStart).Seconds())
+	j.logger.Info("Writeback watcher setup completed", "duration", time.Since(stepStart).Seconds())
 
 	// Mount JuiceFS
 	stepStart = time.Now()
+
 	// Determine upload delay
 	uploadDelay := j.config.UploadDelay
 	if uploadDelay == 0 {
 		uploadDelay = time.Minute
 	}
+	// uploadDelay configured
 
 	mountArgs := []string{
 		"mount",
@@ -291,19 +298,10 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	// from being killed if the startup context is cancelled
 	j.mountCmd = exec.Command("juicefs", mountArgs...)
 
-	// Capture JuiceFS output to parse for readiness
-	stdout, err := j.mountCmd.StdoutPipe()
-	if err != nil {
-		// Close stoppedCh since monitorProcess will never run
-		close(j.stoppedCh)
-		return fmt.Errorf("failed to create stdout pipe: %w", err)
-	}
-	stderr, err := j.mountCmd.StderrPipe()
-	if err != nil {
-		// Close stoppedCh since monitorProcess will never run
-		close(j.stoppedCh)
-		return fmt.Errorf("failed to create stderr pipe: %w", err)
-	}
+	// Forward JuiceFS stdout/stderr directly to structured logger
+	structured := tap.WithStructuredLogger(tap.WithLogger(context.Background(), j.logger))
+	j.mountCmd.Stdout = structured
+	j.mountCmd.Stderr = structured
 
 	// Set JFS_SUPERVISOR=1 to enable proper signal handling
 	j.mountCmd.Env = append(os.Environ(), "JFS_SUPERVISOR=1", "JUICEFS_LOG_FORMAT=json")
@@ -320,16 +318,12 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	if err := j.mountCmd.Start(); err != nil {
 		// Close stoppedCh since monitorProcess will never run
 		close(j.stoppedCh)
+		j.logger.Error("Failed to start JuiceFS mount command", "error", err)
 		return fmt.Errorf("failed to start JuiceFS mount: %w", err)
 	}
-	j.logger.Debug("JuiceFS mount command startup completed", "duration", time.Since(stepStart).Seconds())
+	j.logger.Debug("JuiceFS mount command started", "pid", j.mountCmd.Process.Pid, "elapsed", time.Since(stepStart))
 
-	// Start monitoring stdout/stderr for ready signal
-	// Forward child output to structured logger as JSON lines
-	structured := tap.WithStructuredLogger(tap.WithLogger(context.Background(), j.logger))
-	tap.Go(j.logger, j.errCh, func() {
-		j.parseLogsForReady(stdout, stderr, mountPath, time.Now(), structured)
-	})
+	// Logs are forwarded via Stdout/Stderr to the structured writer; no analysis
 
 	// Do not Wait() here; monitorProcess handles Wait().
 	// NOTE: Signal handling removed - the System component will handle signals
@@ -339,26 +333,24 @@ func (j *JuiceFS) Start(ctx context.Context) error {
 	tap.Go(j.logger, j.errCh, j.monitorProcess)
 	j.logger.Debug("Process monitor setup completed", "duration", time.Since(time.Now()).Seconds())
 
-	// Wait for mount to be ready using context (shorter in test containers)
-	waitTimeout := getJuiceFSReadyTimeout()
-	waitCtx, waitCancel := context.WithTimeout(ctx, waitTimeout)
-	defer waitCancel()
+	// Start readiness polling without timeouts; will honor ctx cancellation and emit warnings
+	tap.Go(j.logger, j.errCh, func() {
+		j.waitForJuiceFSReady(ctx, mountPath, time.Now())
+	})
 
 	j.logger.Debug("Waiting for JuiceFS mount to be ready...")
 	waitStart := time.Now()
 
-	if err := j.WhenReady(waitCtx); err != nil {
+	// Wait indefinitely for readiness (bounded only by ctx)
+	if err := j.WhenReady(ctx); err != nil {
 		// Kill mount process if it's still running
 		if j.mountCmd != nil && j.mountCmd.Process != nil {
 			j.mountCmd.Process.Kill()
 		}
-		// Don't call Wait() here - monitorProcess will handle it
-
 		// Check if we have a more specific error from mount
 		j.mountErrorMu.RLock()
 		mountErr := j.mountError
 		j.mountErrorMu.RUnlock()
-
 		if mountErr != nil {
 			return mountErr
 		}
@@ -489,13 +481,24 @@ func (j *JuiceFS) monitorProcess() {
 	processDone := make(chan error, 1)
 	tap.Go(j.logger, j.errCh, func() {
 		if j.mountCmd != nil {
-			processDone <- j.mountCmd.Wait()
+			err := j.mountCmd.Wait()
+			if err != nil {
+				j.logger.Error("JuiceFS mount process exited with error", "error", err, "exitCode", j.mountCmd.ProcessState.ExitCode())
+			} else {
+				j.logger.Info("JuiceFS mount process exited cleanly", "exitCode", j.mountCmd.ProcessState.ExitCode())
+			}
+			processDone <- err
 		} else {
 			processDone <- nil
 		}
 	})
 
 	select {
+	case err := <-processDone:
+		// Process exited unexpectedly before stop signal
+		j.logger.Error("JuiceFS mount process exited unexpectedly, exiting immediately", "error", err, "elapsed", time.Since(start), "exit_code", 1)
+		j.signalMountError(fmt.Errorf("mount process exited unexpectedly: %w", err))
+		os.Exit(1)
 	case <-j.stopCh:
 		// Stop requested, check for dependent mounts
 		j.logger.Debug("Checking for dependent mounts before JuiceFS umount")
@@ -537,6 +540,8 @@ func (j *JuiceFS) monitorProcess() {
 			if j.mountCmd != nil && j.mountCmd.Process != nil {
 				_ = j.mountCmd.Process.Kill()
 			}
+			// Unblock Start waiters with cancellation
+			j.signalMountError(context.Canceled)
 			// Stop watcher if it was started
 			if j.writebackWatcher != nil {
 				j.logger.Info("Stopping writeback watcher (pre-ready)")
@@ -557,14 +562,12 @@ func (j *JuiceFS) monitorProcess() {
 		// Sync the JuiceFS filesystem to flush pending writes
 		j.logger.Debug("Syncing JuiceFS filesystem before umount", "path", mountPath)
 		syncStart := time.Now()
-		syncCmd := exec.Command("sync", "-f", mountPath)
-		if output, err := syncCmd.CombinedOutput(); err != nil {
-			j.logger.Warn("Sync failed for JuiceFS mount", "error", err)
-			if len(output) > 0 {
-				j.logger.Debug("Sync stderr/stdout", "output", string(output))
-			}
+
+		// Only use syncfs (syscall); no CLI fallbacks
+		if err := syncFilesystemByFD(mountPath); err != nil {
+			j.logger.Warn("syncfs failed for JuiceFS mount", "error", err)
 		} else {
-			j.logger.Debug("JuiceFS filesystem sync completed", "path", mountPath, "duration", time.Since(syncStart))
+			j.logger.Debug("JuiceFS filesystem sync completed via syncfs", "path", mountPath, "duration", time.Since(syncStart))
 		}
 
 		// Log writeback watcher status for diagnostics, but don't wait for flush
@@ -591,39 +594,110 @@ func (j *JuiceFS) monitorProcess() {
 			j.logger.Warn("Failed to flush cache via control file before umount", "error", err)
 		}
 
-		// Unmount JuiceFS with --flush to ensure all data is written
-		// No timeout - allow umount to take as long as needed for data integrity
-		// Retry indefinitely until success; failure to unmount is a stop-the-world condition
-		shutdownStart := time.Now()
-		j.logger.Debug("Starting JuiceFS umount with --flush", "path", mountPath)
+        // Unmount JuiceFS with --flush to ensure all data is written
+        // No timeout - allow umount to take as long as needed for data integrity
+        // Retry indefinitely until success; failure to unmount is a stop-the-world condition
+        shutdownStart := time.Now()
+        j.logger.Debug("Starting JuiceFS umount with --flush", "path", mountPath)
 
-		for attempt := 1; ; attempt++ {
-			cmd := exec.Command("juicefs", "umount", "--flush", mountPath)
-			stdout, _ := cmd.StdoutPipe()
-			stderr, _ := cmd.StderrPipe()
-			cmd.Env = append(os.Environ(), "JUICEFS_LOG_FORMAT=json")
+        // Start a single background progress monitor watching .stats for the entire
+        // shutdown sequence (umount + process exit). It will be cancelled when the
+        // mount process exits or when we return from this function.
+        statsCtx, statsCancel := context.WithCancel(context.Background())
+        go j.monitorStatsProgress(statsCtx, mountPath, "shutdown")
 
-			j.logger.Debug("Launching juicefs umount process", "attempt", attempt)
-			if err := cmd.Start(); err != nil {
-				j.logger.Error("Failed to start juicefs umount", "error", err, "attempt", attempt, "path", mountPath)
-				continue
-			}
+        // Single umount attempt (no retries). If this fails, we log and return to
+        // allow a higher-level recovery strategy.
+        cmd := exec.Command("juicefs", "umount", "--flush", mountPath)
+        stdout, _ := cmd.StdoutPipe()
+        stderr, _ := cmd.StderrPipe()
+        cmd.Env = append(os.Environ(), "JUICEFS_LOG_FORMAT=json")
 
-			// Use watcher-style logging for umount output
-			structured := tap.WithStructuredLogger(tap.WithLogger(context.Background(), j.logger))
-			watcher := NewOutputWatcher(j.logger, mountPath, structured)
-			watcher.Watch(stdout, stderr)
+        j.logger.Debug("Launching juicefs umount process")
+        if err := cmd.Start(); err != nil {
+            j.logger.Error("Failed to start juicefs umount", "error", err, "path", mountPath)
+            // Stop stats monitor and return
+            statsCancel()
+            return
+        }
 
-			if err := cmd.Wait(); err != nil {
-				j.logger.Warn("juicefs umount exited with error", "error", err, "attempt", attempt, "path", mountPath)
-				// Retry all umount failures - most are transient (device busy, I/O errors, etc.)
-				continue
-			}
+        // Use watcher-style logging for umount output
+        structured := tap.WithStructuredLogger(tap.WithLogger(context.Background(), j.logger))
+        watcher := NewOutputWatcher(j.logger, mountPath, structured)
+        watcher.Watch(stdout, stderr)
 
-			// Success
-			j.logger.Debug("juicefs umount completed successfully", "duration", time.Since(shutdownStart), "attempt", attempt, "path", mountPath)
-			break
-		}
+        if err := cmd.Wait(); err != nil {
+            j.logger.Error("juicefs umount failed", "error", err, "path", mountPath)
+            // On umount failure: signal the mount process to shut down and wait
+            // based on .stats progress (single monitor is already running).
+
+            // Send SIGTERM to request graceful shutdown
+            if j.mountCmd != nil && j.mountCmd.Process != nil {
+                _ = j.mountCmd.Process.Signal(syscall.SIGTERM)
+            }
+
+            failureTime := time.Now()
+            noProgressTimer := time.NewTimer(15 * time.Second)
+            defer noProgressTimer.Stop()
+            // We allow up to 5 minutes if progress is happening
+            var maxProgressTimer *time.Timer
+            var maxProgressCh <-chan time.Time
+
+            // Poll for either process exit or progress detection
+            progressTicker := time.NewTicker(1 * time.Second)
+            defer progressTicker.Stop()
+            progressSeen := false
+
+            for {
+                select {
+                case err := <-processDone:
+                    // Mount process exited
+                    if err != nil {
+                        j.logger.Warn("JuiceFS mount process exited after umount failure", "error", err)
+                    } else {
+                        j.logger.Info("JuiceFS mount process exited cleanly after umount failure")
+                    }
+                    statsCancel()
+                    return
+                case <-progressTicker.C:
+                    // Check if .stats changed after failure
+                    j.statsMu.RLock()
+                    last := j.statsLastChange
+                    j.statsMu.RUnlock()
+                    if last.After(failureTime) {
+                        if !progressSeen {
+                            progressSeen = true
+                            j.logger.Info("Progress detected in .stats after umount failure; allowing up to 5m for cleanup")
+                            maxProgressTimer = time.NewTimer(5 * time.Minute)
+                            maxProgressCh = maxProgressTimer.C
+                        }
+                    }
+                case <-noProgressTimer.C:
+                    if !progressSeen {
+                        j.logger.Warn("No progress observed in .stats; force killing JuiceFS mount process")
+                        if j.mountCmd != nil && j.mountCmd.Process != nil {
+                            _ = j.mountCmd.Process.Kill()
+                        }
+                        // Ensure process exit is observed
+                        _ = <-processDone
+                        statsCancel()
+                        return
+                    }
+                case <-maxProgressCh:
+                    // Progress was seen but exceeded 5 minutes window
+                    j.logger.Warn("Exceeded 5m grace with progress; force killing JuiceFS mount process")
+                    if j.mountCmd != nil && j.mountCmd.Process != nil {
+                        _ = j.mountCmd.Process.Kill()
+                    }
+                    _ = <-processDone
+                    statsCancel()
+                    return
+                }
+            }
+        }
+
+        // Success
+        j.logger.Debug("juicefs umount completed successfully", "duration", time.Since(shutdownStart), "path", mountPath)
 
 		// Verify the mount is actually gone from /proc/mounts before proceeding
 		j.logger.Debug("Verifying JuiceFS mount removal from /proc/mounts", "path", mountPath)
@@ -647,16 +721,55 @@ func (j *JuiceFS) monitorProcess() {
 			}
 		}
 
-		// Wait for the mount process to fully exit (no timeout)
-		// The umount command tells JuiceFS to unmount, but the process may take
-		// a moment to clean up and exit; do not proceed until it does
-		j.logger.Debug("Waiting for JuiceFS mount process to exit after umount (no timeout)...")
-		processExitStart := time.Now()
-		if err := <-processDone; err != nil {
-			j.logger.Warn("JuiceFS mount process exited with error", "error", err, "duration", time.Since(processExitStart))
-		} else {
-			j.logger.Debug("JuiceFS mount process exited cleanly", "duration", time.Since(processExitStart))
-		}
+        // Wait for the mount process to fully exit after umount
+        // The umount command tells JuiceFS to unmount, but some environments
+        // leave the mount process lingering. Allow a grace period, then
+        // escalate termination to avoid indefinite hangs during shutdown.
+        j.logger.Debug("Waiting for JuiceFS mount process to exit after umount...")
+        processExitStart := time.Now()
+        graceTimer := time.NewTimer(1 * time.Minute)
+        defer graceTimer.Stop()
+
+        select {
+        case err := <-processDone:
+            statsCancel()
+            if err != nil {
+                j.logger.Warn("JuiceFS mount process exited with error", "error", err, "duration", time.Since(processExitStart))
+            } else {
+                j.logger.Debug("JuiceFS mount process exited cleanly", "duration", time.Since(processExitStart))
+            }
+        case <-graceTimer.C:
+            j.logger.Warn("JuiceFS mount process did not exit after umount within grace period; sending SIGTERM")
+            if j.mountCmd != nil && j.mountCmd.Process != nil {
+                _ = j.mountCmd.Process.Signal(syscall.SIGTERM)
+            }
+
+            // Wait a short period for graceful exit
+            termTimer := time.NewTimer(15 * time.Second)
+            defer termTimer.Stop()
+            select {
+            case err := <-processDone:
+                statsCancel()
+                if err != nil {
+                    j.logger.Warn("JuiceFS mount process exited with error after SIGTERM", "error", err, "duration", time.Since(processExitStart))
+                } else {
+                    j.logger.Info("JuiceFS mount process exited cleanly after SIGTERM", "duration", time.Since(processExitStart))
+                }
+            case <-termTimer.C:
+                j.logger.Warn("JuiceFS mount process still running; sending SIGKILL")
+                if j.mountCmd != nil && j.mountCmd.Process != nil {
+                    _ = j.mountCmd.Process.Kill()
+                }
+                // Ensure we observe the exit to avoid zombie
+                if err := <-processDone; err != nil {
+                    statsCancel()
+                    j.logger.Warn("JuiceFS mount process exited with error after SIGKILL", "error", err, "duration", time.Since(processExitStart))
+                } else {
+                    statsCancel()
+                    j.logger.Info("JuiceFS mount process exited after SIGKILL", "duration", time.Since(processExitStart))
+                }
+            }
+        }
 
 		// Litestream replication is now managed by the DB manager; nothing to stop here
 	case err := <-processDone:
@@ -700,6 +813,10 @@ func (j *JuiceFS) monitorProcess() {
 				j.logger.Info("No recent kernel messages found")
 			}
 		}
+
+		// Process exited unexpectedly after mount was ready - exit immediately
+		j.logger.Error("JuiceFS mount process exited unexpectedly, exiting immediately", "error", err, "exit_code", 1)
+		os.Exit(1)
 
 		// Litestream replication is now managed by the DB manager; nothing to stop here
 	}
@@ -1120,39 +1237,7 @@ func (j *JuiceFS) WaitForMount(ctx context.Context) error {
 
 // parseLogsForReady monitors JuiceFS stdout/stderr for ready signals
 func (j *JuiceFS) parseLogsForReady(stdout, stderr io.ReadCloser, mountPath string, startTime time.Time, structured io.Writer) {
-	// Create output watcher
-	watcher := NewOutputWatcher(j.logger, mountPath, structured)
-	watcher.Watch(stdout, stderr)
-
-	// Create context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	// Wait for ready signal
-	err := watcher.WaitForReady(ctx, func() bool {
-		return j.isMountReady(mountPath)
-	})
-
-	if err != nil {
-		// Store the error
-		j.signalMountError(err)
-		return
-	}
-
-	// Mount is ready, perform post-mount setup
-	j.logger.Debug("Mount verified as ready",
-		"timeSinceStart", time.Since(startTime).Seconds())
-
-	if err := j.performPostMountSetup(mountPath, startTime); err != nil {
-		j.mountErrorMu.Lock()
-		j.mountError = err
-		j.mountErrorMu.Unlock()
-	}
-
-	// Close the channel to signal ready
-	close(j.mountReady)
-
-	// structured writer is owned by caller; do not close here
+	// No-op: logs are already wired via Cmd.Stdout/Stderr to structured writer
 }
 
 // isMountReady checks if the mount point is ready
@@ -1174,6 +1259,99 @@ func (j *JuiceFS) isMountReady(mountPath string) bool {
 	}
 
 	return strings.Contains(string(mountsData), mountPath)
+}
+
+// isJuiceFSMounted checks /proc/self/mountinfo for a JuiceFS mount at mountPath
+func (j *JuiceFS) isJuiceFSMounted(mountPath string) bool {
+	data, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return false
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		parts := strings.Split(line, " - ")
+		if len(parts) != 2 {
+			continue
+		}
+		left := strings.Fields(parts[0])
+		right := strings.Fields(parts[1])
+		if len(left) < 5 || len(right) < 2 {
+			continue
+		}
+		mp := left[4]
+		fstype := right[0]
+		// source := right[1] // may be "SpriteFS" depending on fuse version
+		// superopts := strings.Join(right[2:], " ")
+		if mp == mountPath && (fstype == "fuse.juicefs" || fstype == "juicefs") {
+			return true
+		}
+	}
+	return false
+}
+
+// verifyMountReadiness performs minimal, decisive checks:
+// 1) kernel reports a JuiceFS mount at mountPath (via /proc/self/mountinfo)
+// 2) the JuiceFS control file exists and opens RW
+func (j *JuiceFS) verifyMountReadiness(mountPath string) bool {
+	if !j.isJuiceFSMounted(mountPath) {
+		return false
+	}
+	controlFile := filepath.Join(mountPath, ".control")
+	if _, err := os.Stat(controlFile); err != nil {
+		return false
+	}
+	f, err := os.OpenFile(controlFile, os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	_ = f.Close()
+	return true
+}
+
+// waitForJuiceFSReady polls for mount readiness every 100ms, emits periodic warnings,
+// and signals readiness when thorough verification passes.
+func (j *JuiceFS) waitForJuiceFSReady(ctx context.Context, mountPath string, startTime time.Time) {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	firstWarn10s := false
+	firstWarn30s := false
+	lastMinuteWarn := time.Time{}
+
+	for {
+		select {
+		case <-ticker.C:
+			if j.verifyMountReadiness(mountPath) {
+				j.logger.Debug("Mount verified as ready", "timeSinceStart", time.Since(startTime).Seconds())
+				if err := j.performPostMountSetup(mountPath, startTime); err != nil {
+					j.mountErrorMu.Lock()
+					j.mountError = err
+					j.mountErrorMu.Unlock()
+				}
+				close(j.mountReady)
+				return
+			}
+			elapsed := time.Since(startTime)
+			if !firstWarn10s && elapsed >= 10*time.Second {
+				j.logger.Warn("JuiceFS mount is taking longer than expected (10s)... waiting")
+				firstWarn10s = true
+			} else if !firstWarn30s && elapsed >= 30*time.Second {
+				j.logger.Warn("JuiceFS mount is taking longer than expected (30s)... waiting")
+				firstWarn30s = true
+			} else if elapsed >= 30*time.Second {
+				if lastMinuteWarn.IsZero() || time.Since(lastMinuteWarn) >= time.Minute {
+					j.logger.Warn("JuiceFS mount still not ready... continuing to wait", "elapsed", elapsed.String())
+					lastMinuteWarn = time.Now()
+				}
+			}
+		case <-ctx.Done():
+			j.signalMountError(ctx.Err())
+			return
+		}
+	}
 }
 
 // performPostMountSetup handles the tasks that need to be done after mount is ready
@@ -1252,6 +1430,79 @@ func (j *JuiceFS) applyActiveFsQuota() {
 			j.logger.Debug("Quota info", "output", string(output))
 		}
 	}
+}
+
+// monitorStatsProgress periodically reads the JuiceFS .stats file and logs when
+// its content changes, as a heuristic for progress during long-running umount
+// or shutdown operations. It exits when the context is cancelled. Repeated read
+// failures are throttled to avoid log spam; ENOENT after unmount is expected.
+func (j *JuiceFS) monitorStatsProgress(ctx context.Context, mountPath string, phase string) {
+    statsPath := filepath.Join(mountPath, ".stats")
+    ticker := time.NewTicker(1 * time.Second)
+    defer ticker.Stop()
+
+    var lastHash [32]byte
+    var haveHash bool
+    var lastChange time.Time
+    var lastNoChangeReport time.Time
+    consecutiveErrors := 0
+    var prevData []byte
+
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+            data, err := os.ReadFile(statsPath)
+            if err != nil {
+                // If file not found, likely unmounted; stop quietly after a couple attempts
+                consecutiveErrors++
+                if consecutiveErrors <= 2 {
+                    j.logger.Debug("Stats monitor read failed", "phase", phase, "path", statsPath, "error", err)
+                }
+                if consecutiveErrors >= 5 {
+                    return
+                }
+                continue
+            }
+            consecutiveErrors = 0
+            sum := sha256.Sum256(data)
+            if !haveHash || sum != lastHash {
+                // Compute a simple diff around the change region and log a truncated view
+                const maxOut = 300
+                changeType, changeAt, oldDiff, newDiff := ComputeByteDelta(prevData, data)
+                j.logger.Info(
+                    "JuiceFS .stats changed",
+                    "phase", phase,
+                    "bytes", len(data),
+                    "sinceLastChange", time.Since(lastChange),
+                    "changeType", changeType,
+                    "changeAt", changeAt,
+                    "oldDeltaLen", len(oldDiff),
+                    "newDeltaLen", len(newDiff),
+                    "oldDelta", TruncateBytes(oldDiff, maxOut),
+                    "newDelta", TruncateBytes(newDiff, maxOut),
+                )
+
+                // Update trackers
+                lastHash = sum
+                haveHash = true
+                lastChange = time.Now()
+                j.statsMu.Lock()
+                j.statsLastChange = lastChange
+                j.statsMu.Unlock()
+                lastNoChangeReport = time.Time{}
+                // Keep a copy of current data for next diff
+                prevData = append(prevData[:0], data...)
+            } else {
+                // Log an occasional heartbeat if no changes for a while
+                if lastNoChangeReport.IsZero() || time.Since(lastNoChangeReport) >= 10*time.Second {
+                    j.logger.Debug("JuiceFS .stats unchanged", "phase", phase, "sinceLastChange", time.Since(lastChange))
+                    lastNoChangeReport = time.Now()
+                }
+            }
+        }
+    }
 }
 
 // handleSignals removed - signal handling is now done at the System level

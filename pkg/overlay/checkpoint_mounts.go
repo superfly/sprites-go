@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"os/exec"
+
 	"golang.org/x/sync/errgroup"
 )
 
@@ -226,6 +228,46 @@ func (m *Manager) isCheckpointMounted(cpName string) bool {
 	return exists
 }
 
+// UnmountCheckpoint unmounts a single checkpoint mount if present and detaches loop device
+func (m *Manager) UnmountCheckpoint(ctx context.Context, cpName string) error {
+	m.checkpointMu.Lock()
+	defer m.checkpointMu.Unlock()
+
+	// Determine mount path either from tracking map or expected location
+	mountPath, ok := m.checkpointMounts[cpName]
+	if !ok {
+		mountPath = filepath.Join(m.checkpointMountPath, cpName)
+	}
+
+	m.logger.Info("Unmounting checkpoint", "checkpoint", cpName, "path", mountPath)
+
+	// Best-effort: only unmount if actually mounted
+	if mounted, err := isMounted(mountPath); err == nil && mounted {
+		if err := unmount(mountPath); err != nil {
+			m.logger.Warn("Failed to unmount checkpoint", "checkpoint", cpName, "error", err)
+			return fmt.Errorf("unmount %s: %w", cpName, err)
+		}
+	}
+
+	// Remove empty mount directory (best-effort)
+	if err := os.RemoveAll(mountPath); err != nil {
+		m.logger.Warn("Failed to remove checkpoint mount directory", "checkpoint", cpName, "path", mountPath, "error", err)
+	}
+
+	// Detach loop device if tracked
+	if loopDevice, ok := m.checkpointLoopDevices[cpName]; ok {
+		if err := detachLoopDevice(loopDevice); err != nil {
+			m.logger.Warn("Failed to detach loop device", "checkpoint", cpName, "device", loopDevice, "error", err)
+			// Continue after warning
+		}
+		delete(m.checkpointLoopDevices, cpName)
+	}
+
+	// Clear tracking regardless
+	delete(m.checkpointMounts, cpName)
+	return nil
+}
+
 // UnmountCheckpoints unmounts all checkpoint mounts including the active checkpoint
 func (m *Manager) UnmountCheckpoints(ctx context.Context) error {
 	m.checkpointMu.Lock()
@@ -239,7 +281,7 @@ func (m *Manager) UnmountCheckpoints(ctx context.Context) error {
 		firstErr = err
 	}
 
-	// Unmount all other checkpoints
+	// Unmount all other checkpoints we are tracking
 	for cpName, mountPath := range m.checkpointMounts {
 		m.logger.Info("Unmounting checkpoint", "checkpoint", cpName, "path", mountPath)
 
@@ -262,6 +304,17 @@ func (m *Manager) UnmountCheckpoints(ctx context.Context) error {
 		delete(m.checkpointMounts, cpName)
 	}
 
+	// Belt-and-suspenders: scan /proc/mounts for ANY mounts under the checkpoint mount path
+	// and unmount them, even if not tracked in our maps (e.g., after restores or prior crashes)
+	if err := m.unmountResidualCheckpointMounts(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// Attempt to detach any residual loop devices that reference checkpoint images directly
+	if err := m.detachResidualCheckpointLoops(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
 	// Finally unmount the base checkpoint directory
 	if err := m.unmountCheckpointBase(ctx); err != nil {
 		m.logger.Warn("Failed to unmount checkpoint base", "error", err)
@@ -270,6 +323,108 @@ func (m *Manager) UnmountCheckpoints(ctx context.Context) error {
 		}
 	}
 
+	return firstErr
+}
+
+// unmountResidualCheckpointMounts finds and unmounts any mounts under the checkpoint mount path
+// that may not be tracked in m.checkpointMounts (e.g., after resume/restore cycles).
+func (m *Manager) unmountResidualCheckpointMounts() error {
+	mountsData, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		return nil // best-effort; skip if not readable
+	}
+
+	// Collect mount points under the checkpoint mount path
+	var mountPoints []string
+	lines := strings.Split(string(mountsData), "\n")
+	prefix := m.checkpointMountPath
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		// fields: device mountpoint fstype ...
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		mp := fields[1]
+		if strings.HasPrefix(mp, prefix) {
+			mountPoints = append(mountPoints, mp)
+		}
+	}
+
+	if len(mountPoints) == 0 {
+		return nil
+	}
+
+	// Unmount deepest paths first
+	// Simple length-descending sort
+	for i := 0; i < len(mountPoints); i++ {
+		for j := i + 1; j < len(mountPoints); j++ {
+			if len(mountPoints[j]) > len(mountPoints[i]) {
+				mountPoints[i], mountPoints[j] = mountPoints[j], mountPoints[i]
+			}
+		}
+	}
+
+	var firstErr error
+	for _, mp := range mountPoints {
+		// Best-effort unmount
+		if err := unmount(mp); err != nil {
+			// Try force umount as a fallback via util-linux umount -f
+			cmd := exec.Command("umount", "-f", mp)
+			if out, e := cmd.CombinedOutput(); e != nil {
+				m.logger.Warn("Failed to unmount residual checkpoint mount", "path", mp, "error", err, "umountOutput", string(out))
+				if firstErr == nil {
+					firstErr = fmt.Errorf("failed to unmount residual checkpoint mount %s: %w", mp, err)
+				}
+			}
+		}
+	}
+
+	return firstErr
+}
+
+// detachResidualCheckpointLoops parses losetup -a and detaches any loop devices whose backing
+// file resides under the checkpoint base directory. This is a last-resort cleanup to guarantee
+// no loop devices linger that would block JuiceFS unmount.
+func (m *Manager) detachResidualCheckpointLoops() error {
+	out, err := exec.Command("losetup", "-a").CombinedOutput()
+	if err != nil && len(out) == 0 {
+		return nil // losetup not available or failed; skip best-effort
+	}
+
+	var firstErr error
+	base := m.checkpointBasePath
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		// Typical format:
+		// /dev/loop1: []: (/path/to/file)
+		if line == "" {
+			continue
+		}
+		if !strings.Contains(line, base+"/") {
+			continue
+		}
+		// Extract device before ':'
+		idx := strings.Index(line, ":")
+		if idx <= 0 {
+			continue
+		}
+		dev := strings.TrimSpace(line[:idx])
+		if dev == "" {
+			continue
+		}
+		if err := detachLoopDevice(dev); err != nil {
+			m.logger.Warn("Failed to detach residual checkpoint loop device", "device", dev, "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
 	return firstErr
 }
 

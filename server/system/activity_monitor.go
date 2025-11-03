@@ -1,15 +1,15 @@
 package system
 
 import (
-    "context"
-    "log/slog"
-    "os"
-    "sync"
-    "sync/atomic"
-    "time"
+	"context"
+	"log/slog"
+	"os"
+	"sync"
+	"sync/atomic"
+	"time"
 
-    "github.com/superfly/sprite-env/pkg/fly"
-    "github.com/superfly/sprite-env/pkg/tap"
+	"github.com/superfly/sprite-env/pkg/fly"
+	"github.com/superfly/sprite-env/pkg/tap"
 )
 
 // Context key for storing activity monitor
@@ -22,66 +22,131 @@ type ActivityMonitor struct {
 	admin     *AdminChannel
 
 	// Activity tracking
-	activeCount  int64 // atomic counter for active activities
 	lastActivity time.Time
 	suspendedAt  time.Time // timestamp when suspend occurred
 
+	// Registry of active sources (only accessed by run loop)
+	activities map[string]struct{}
+
+	// Activity event channel for coordinating with run loop
+	activityEventCh chan activityEvent
+
 	// Internal channels
-	activityCh chan activityEvent
-	stopCh     chan struct{}
-	errCh      chan error // Reports panics from goroutines
+	stopCh chan struct{}
+	errCh  chan error // Reports panics from goroutines
 
 	// Ensure Stop() is idempotent
 	stopOnce sync.Once
+
+	// started indicates whether the run loop is active; used to gate event APIs
+	started atomic.Bool
+
+	// Injection seams for testing
+	prepSuspendFn func(ctx context.Context) (cleanup func(), cancelled bool, err error)
+	suspendAPIFn  func(ctx context.Context) error
+	now           func() time.Time
+
+	// Callback invoked right before calling suspend API (point of no return)
+	onSuspendCommit func()
 }
 
 type activityEvent struct {
 	isStart bool
-	source  string // "http" or "exec" for debugging
+	source  string // "http:<id>", "tmux:<session>", "boot", "socket", etc.
 }
 
 func NewActivityMonitor(ctx context.Context, sys *System, idleAfter time.Duration) *ActivityMonitor {
-	return &ActivityMonitor{
-		logger:       tap.Logger(ctx),
-		system:       sys,
-		idleAfter:    idleAfter,
-		activityCh:   make(chan activityEvent, 128),
-		stopCh:       make(chan struct{}),
-		errCh:        make(chan error, 1), // Buffered to avoid blocking on panic
-		lastActivity: time.Now(),
+	m := &ActivityMonitor{
+		logger:          tap.Logger(ctx),
+		system:          sys,
+		idleAfter:       idleAfter,
+		activities:      make(map[string]struct{}),
+		activityEventCh: make(chan activityEvent, 100), // Buffered for burst handling
+		stopCh:          make(chan struct{}),
+		errCh:           make(chan error, 1), // Buffered to avoid blocking on panic
+		lastActivity:    time.Now(),
 	}
+	// Set default injection seams
+	m.prepSuspendFn = m.prepSuspend
+	m.suspendAPIFn = fly.Suspend
+	m.now = time.Now
+	m.onSuspendCommit = func() {}
+	return m
 }
 
 func (m *ActivityMonitor) Start(ctx context.Context) {
+	// Quiet by default – use Debug for startup visibility
+	m.logger.Debug("ActivityMonitor: starting", "idle_after", m.idleAfter)
+	// Mark as started before launching the run loop so producers can proceed
+	m.started.Store(true)
 	tap.Go(m.logger, m.errCh, func() {
 		m.run(ctx)
 	})
+
+	// Emit an immediate idle status snapshot for visibility without waiting 60s
+	currentCount := len(m.activities)
+	sources := make([]string, 0, len(m.activities))
+	for source := range m.activities {
+		sources = append(sources, source)
+	}
+	since := m.now().Sub(m.lastActivity)
+	remaining := m.idleAfter - since
+	if remaining < 0 {
+		remaining = 0
+	}
+	m.logger.Info("ActivityMonitor: idle status",
+		"active_count", currentCount,
+		"sources", sources,
+		"since_last_activity_s", since.Seconds(),
+		"idle_after_s", m.idleAfter.Seconds(),
+		"time_until_suspend_s", remaining.Seconds(),
+	)
 }
 
 // Stop immediately stops the activity monitor loop to prevent further suspend attempts
 func (m *ActivityMonitor) Stop() {
 	m.stopOnce.Do(func() {
+		// Prevent new events from enqueueing; non-blocking APIs will drop
+		m.started.Store(false)
 		close(m.stopCh)
 	})
 }
 
-// ActivityStarted increments the activity counter
+// ActivityStarted records the start of an activity and signals the monitor
 func (m *ActivityMonitor) ActivityStarted(source string) {
-	atomic.AddInt64(&m.activeCount, 1)
+	// Allow activities to be registered before Start() - they will be processed when Start() runs
+	// This is important for boot-time activities that may start before the monitor is fully initialized
+	if !m.started.Load() {
+		// Pre-register the activity so it's available when Start() runs
+		m.activities[source] = struct{}{}
+		m.lastActivity = m.now()
+		m.logger.Debug("ActivityMonitor: pre-registered activity (monitor not started yet)", "source", source)
+		return
+	}
+	// Non-blocking send to avoid deadlocks/backpressure cascades
 	select {
-	case m.activityCh <- activityEvent{isStart: true, source: source}:
+	case m.activityEventCh <- activityEvent{isStart: true, source: source}:
+		m.logger.Debug("ActivityMonitor: activity started", "source", source)
 	default:
-		m.logger.Debug("Activity channel full, event dropped", "source", source)
+		m.logger.Warn("ActivityMonitor: drop event - buffer full", "source", source)
 	}
 }
 
-// ActivityEnded decrements the activity counter
+// ActivityEnded records the end of an activity
 func (m *ActivityMonitor) ActivityEnded(source string) {
-	atomic.AddInt64(&m.activeCount, -1)
+	// Allow activities to be ended even if monitor isn't started yet (cleanup pre-registered activities)
+	if !m.started.Load() {
+		// Remove from pre-registered activities if present
+		delete(m.activities, source)
+		m.logger.Debug("ActivityMonitor: pre-unregistered activity (monitor not started yet)", "source", source)
+		return
+	}
+	// Non-blocking send to avoid deadlocks/backpressure cascades
 	select {
-	case m.activityCh <- activityEvent{isStart: false, source: source}:
+	case m.activityEventCh <- activityEvent{isStart: false, source: source}:
+		m.logger.Debug("ActivityMonitor: activity ended", "source", source)
 	default:
-		m.logger.Debug("Activity channel full, event dropped", "source", source)
+		m.logger.Warn("ActivityMonitor: drop event - buffer full", "source", source)
 	}
 }
 
@@ -118,41 +183,32 @@ func (m *ActivityMonitor) EnrichContext(ctx context.Context) context.Context {
 // activityTrackerKey matches the one used in handlers package
 type activityTrackerKey struct{}
 
-// handleActivityEvent processes an activity event and updates internal state.
-func (m *ActivityMonitor) handleActivityEvent(ev activityEvent) {
-	currentCount := atomic.LoadInt64(&m.activeCount)
-
-	if ev.isStart {
-		m.logger.Debug("Activity started", "source", ev.source, "active_count", currentCount)
-	} else {
-		m.logger.Debug("Activity ended", "source", ev.source, "active_count", currentCount)
-		m.lastActivity = time.Now()
-	}
-}
-
 func (m *ActivityMonitor) run(ctx context.Context) {
 	var idleTimer *time.Timer
 	var idleTimerCh <-chan time.Time
+	var suspendCancel context.CancelFunc
+	var suspendDoneCh chan struct{}
+	var suspendCommitCh chan struct{}
+	var suspendInProgress bool
 
-	// If a main process is configured, wait until it's started before
-	// enabling the idle timer. This avoids suspend attempts during boot.
-	if m.system != nil && m.system.config != nil && len(m.system.config.ProcessCommand) > 0 {
-		// Poll until process is running or context is cancelled
-		for !m.system.IsProcessRunning() {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(100 * time.Millisecond):
-			}
-		}
-	}
+	// Status reporter ticker
+	statusTicker := time.NewTicker(60 * time.Second)
+	defer statusTicker.Stop()
 
-	// Start idle timer if there is no active activity after process start (if any)
-	currentCount := atomic.LoadInt64(&m.activeCount)
-	if currentCount == 0 {
+	// Start idle timer if there is no active activity
+	// Note: m.activities may already contain pre-registered activities from before Start() was called
+	if len(m.activities) == 0 {
 		idleTimer = time.NewTimer(m.idleAfter)
 		idleTimerCh = idleTimer.C
-		m.logger.Debug("Starting idle timer", "duration", m.idleAfter)
+		// Log timer start at info level for visibility
+		m.logger.Info("ActivityMonitor: starting idle timer", "duration", m.idleAfter)
+	} else {
+		// Log that we started with pre-existing activities
+		sources := make([]string, 0, len(m.activities))
+		for source := range m.activities {
+			sources = append(sources, source)
+		}
+		m.logger.Info("ActivityMonitor: started with pre-existing activities", "sources", sources)
 	}
 
 	for {
@@ -169,15 +225,39 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 			}
 			return
 
-		case ev := <-m.activityCh:
-			m.handleActivityEvent(ev)
-			currentCount := atomic.LoadInt64(&m.activeCount)
+		case <-statusTicker.C:
+			// Only report if we haven't suspended yet
+			if m.suspendedAt.IsZero() {
+				currentCount := len(m.activities)
+				sources := make([]string, 0, len(m.activities))
+				for source := range m.activities {
+					sources = append(sources, source)
+				}
 
-			if ev.isStart {
-				// Cancel idle timer if running
-				if idleTimer != nil {
+				since := m.now().Sub(m.lastActivity)
+				remaining := m.idleAfter - since
+				if remaining < 0 {
+					remaining = 0
+				}
+
+				m.logger.Info("ActivityMonitor: idle status",
+					"active_count", currentCount,
+					"sources", sources,
+					"since_last_activity_s", since.Seconds(),
+					"idle_after_s", m.idleAfter.Seconds(),
+					"time_until_suspend_s", remaining.Seconds(),
+				)
+			}
+
+		case event := <-m.activityEventCh:
+			if event.isStart {
+				// Add to registry
+				wasEmpty := len(m.activities) == 0
+				m.activities[event.source] = struct{}{}
+
+				// If we had no activity and now we do, cancel idle timer
+				if wasEmpty && idleTimer != nil {
 					if !idleTimer.Stop() {
-						// Timer already fired, drain the channel
 						select {
 						case <-idleTimer.C:
 						default:
@@ -185,70 +265,98 @@ func (m *ActivityMonitor) run(ctx context.Context) {
 					}
 					idleTimer = nil
 					idleTimerCh = nil
+					m.logger.Info("Activity detected, cancelling idle timer")
 				}
+
+				// Cancel suspend if in progress
+				if suspendCancel != nil {
+					m.logger.Info("Activity detected, cancelling suspend")
+					suspendCancel()
+					suspendCancel = nil
+					if m.admin != nil {
+						m.admin.SendActivityEvent("suspend_cancelled", map[string]interface{}{
+							"reason": "activity_detected",
+						})
+					}
+				} else if suspendInProgress {
+					if m.admin != nil {
+						m.admin.SendActivityEvent("activity_during_suspend", map[string]interface{}{
+							"timestamp": m.now().Unix(),
+						})
+					}
+				}
+
+				m.lastActivity = m.now()
 			} else {
-				// Start idle timer if no more activities
-				if currentCount == 0 && idleTimer == nil {
+				// Remove from registry
+				if _, ok := m.activities[event.source]; !ok {
+					// Received an end event for an unknown source – log a warning for diagnosis
+					m.logger.Warn("ActivityMonitor: end for unknown source", "source", event.source)
+				} else {
+					delete(m.activities, event.source)
+				}
+
+				// If registry is now empty, start idle timer
+				if len(m.activities) == 0 && idleTimer == nil {
 					idleTimer = time.NewTimer(m.idleAfter)
 					idleTimerCh = idleTimer.C
-					m.logger.Debug("Started idle timer", "duration", m.idleAfter)
+					m.logger.Info("ActivityMonitor: started idle timer", "duration", m.idleAfter)
 				}
+
+				m.lastActivity = m.now()
 			}
 
 		case <-idleTimerCh:
 			// Timer expired, check if still idle
-			currentCount := atomic.LoadInt64(&m.activeCount)
-			m.logger.Debug("Idle timer expired", "active_count", currentCount)
+			currentCount := len(m.activities)
+			// Quiet default – debug-level
+			m.logger.Debug("ActivityMonitor: idle timer expired", "active_count", currentCount)
 
 			if currentCount == 0 {
-				// No active activities, start suspend in a goroutine
-				suspendCtx, suspendCancel := context.WithCancel(context.Background())
-				suspendDone := make(chan struct{})
+				// Begin suspend flow
+				suspendCtx, cancel := context.WithCancel(context.Background())
+				suspendCancel = cancel
+				suspendDoneCh = make(chan struct{})
+				suspendCommitCh = make(chan struct{}, 1)
 
-				tap.Go(m.logger, m.errCh, func() {
-					defer close(suspendDone)
-					m.suspend(suspendCtx, time.Since(m.lastActivity))
-				})
-
-				// Wait for suspend to complete or for activity to be detected
-			suspendLoop:
-				for {
+				// Arrange callback for commit point
+				m.onSuspendCommit = func() {
 					select {
-					case ev := <-m.activityCh:
-						// Activity detected during suspend, cancel it
-						currentCount := atomic.LoadInt64(&m.activeCount)
-						m.logger.Info("Activity detected during suspend, cancelling",
-							"source", ev.source, "active_count", currentCount, "is_start", ev.isStart)
-						suspendCancel()
-
-						// Process the activity event normally
-						m.handleActivityEvent(ev)
-
-						// Continue draining activity events until suspend is done
-						// Don't break out of suspendLoop yet
-
-					case <-suspendDone:
-						// Suspend completed (either successfully or cancelled)
-						break suspendLoop
+					case suspendCommitCh <- struct{}{}:
+					default:
 					}
 				}
 
-				suspendCancel() // Ensure context is cancelled
+				tap.Go(m.logger, m.errCh, func() {
+					defer close(suspendDoneCh)
+					m.suspend(suspendCtx, time.Since(m.lastActivity))
+				})
+
+				// Clear idle timer
 				idleTimer = nil
 				idleTimerCh = nil
-
-				// Restart the idle timer after suspend completes (or if cancelled)
-				// This allows repeated suspensions if the system remains idle
-				currentCount = atomic.LoadInt64(&m.activeCount)
-				if currentCount == 0 {
-					m.lastActivity = time.Now()
-					idleTimer = time.NewTimer(m.idleAfter)
-					idleTimerCh = idleTimer.C
-					m.logger.Debug("Restarted idle timer after suspend", "duration", m.idleAfter)
-				}
 			} else {
 				idleTimer = nil
 				idleTimerCh = nil
+			}
+
+		case <-suspendCommitCh:
+			// Past point of no return
+			suspendInProgress = true
+
+		case <-suspendDoneCh:
+			// Suspend completed (successfully or cancelled)
+			suspendCancel = nil
+			suspendDoneCh = nil
+			suspendCommitCh = nil
+			suspendInProgress = false
+
+			// Restart idle timer if still idle
+			if len(m.activities) == 0 {
+				m.lastActivity = m.now()
+				idleTimer = time.NewTimer(m.idleAfter)
+				idleTimerCh = idleTimer.C
+				m.logger.Debug("Restarted idle timer after suspend", "duration", m.idleAfter)
 			}
 		}
 	}
@@ -281,25 +389,42 @@ func (m *ActivityMonitor) prepSuspend(ctx context.Context) (cleanup func(), canc
 		})
 	}
 
-	// Sync filesystem and get unfreeze function
-	start := time.Now()
-	syncCtx, syncCancel := context.WithTimeout(ctx, 10*time.Second)
-	defer syncCancel()
-
-	unfreezeFunc, syncErr := m.system.SyncOverlay(syncCtx)
-	if syncErr != nil {
-		if ctx.Err() != nil {
-			m.logger.Info("Overlay sync cancelled", "error", syncErr)
-			return cleanup, true, ctx.Err()
+	// Freeze the container cgroup before sync
+	if m.system.SpriteManager != nil {
+		m.logger.Debug("Freezing container cgroup")
+		if freezeErr := m.system.SpriteManager.Freeze(5 * time.Second); freezeErr != nil {
+			m.logger.Error("Failed to freeze container cgroup", "error", freezeErr)
+			// Non-fatal - continue with sync but without freeze
+		} else {
+			// Add cleanup to thaw the cgroup (runs on both cancel and resume)
+			cleanupFuncs = append(cleanupFuncs, func() error {
+				m.logger.Debug("Thawing container cgroup")
+				thawStart := time.Now()
+				if thawErr := m.system.SpriteManager.Thaw(5 * time.Second); thawErr != nil {
+					m.logger.Error("Failed to thaw container cgroup", "error", thawErr)
+					return thawErr
+				}
+				m.logger.Debug("Container cgroup thawed", "duration_s", time.Since(thawStart).Seconds())
+				return nil
+			})
 		}
-		m.logger.Error("Overlay sync failed", "error", syncErr)
-		return cleanup, false, syncErr
 	}
-	m.logger.Debug("Overlay sync completed", "duration_s", time.Since(start).Seconds())
 
-	// Add cleanup to unfreeze filesystem
-	if unfreezeFunc != nil {
-		cleanupFuncs = append(cleanupFuncs, unfreezeFunc)
+	// Sync overlay filesystem (sync-only, no freeze)
+	if m.system.OverlayManager != nil {
+		start := time.Now()
+		syncCtx, syncCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer syncCancel()
+
+		if syncErr := m.system.OverlayManager.PrepareForCheckpoint(syncCtx); syncErr != nil {
+			if ctx.Err() != nil {
+				m.logger.Info("Overlay sync cancelled", "error", syncErr)
+				return cleanup, true, ctx.Err()
+			}
+			m.logger.Error("Overlay sync failed", "error", syncErr)
+			return cleanup, false, syncErr
+		}
+		m.logger.Debug("Overlay sync completed", "duration_s", time.Since(start).Seconds())
 	}
 
 	// Wait for JuiceFS writeback flush before suspend
@@ -359,7 +484,7 @@ func (m *ActivityMonitor) suspend(ctx context.Context, inactive time.Duration) {
 	preventSuspend := os.Getenv("SPRITE_PREVENT_SUSPEND") == "true"
 
 	// Store the timestamp when suspension started
-	m.suspendedAt = time.Now()
+	m.suspendedAt = m.now()
 
 	if m.admin != nil {
 		m.admin.SendActivityEvent("suspend", map[string]interface{}{
@@ -375,7 +500,7 @@ func (m *ActivityMonitor) suspend(ctx context.Context, inactive time.Duration) {
 	m.logger.Info("ActivityMonitor: suspending", "idle_s", inactive.Seconds())
 
 	// Prepare for suspend (sync filesystem, flush juicefs, stop litestream)
-	cleanup, wasCancelled, err := m.prepSuspend(ctx)
+	cleanup, wasCancelled, err := m.prepSuspendFn(ctx)
 	defer cleanup()
 
 	if wasCancelled {
@@ -392,21 +517,26 @@ func (m *ActivityMonitor) suspend(ctx context.Context, inactive time.Duration) {
 	defer apiCancel()
 
 	// Capture system wall time BEFORE the suspend API call
-	initialSystemTime := time.Now()
+	initialSystemTime := m.now()
 	m.logger.Debug("Starting suspend process", "initial_time", initialSystemTime.Format(time.RFC3339Nano))
 
-    // Call fly suspend API
-    m.logger.Info("Calling Fly suspend API")
+	// Call fly suspend API
+	m.logger.Info("Calling Fly suspend API")
 
-    apiStart := time.Now()
-    err = fly.Suspend(apiCtx)
-    apiDuration := time.Since(apiStart)
+	// Notify run loop that we are past the point of no return
+	if m.onSuspendCommit != nil {
+		m.onSuspendCommit()
+	}
 
-    if err != nil {
-        m.logger.Error("Failed to call suspend API", "error", err, "duration", apiDuration)
-    } else {
-        m.logger.Info("Suspend API completed successfully", "duration", apiDuration)
-    }
+	apiStart := time.Now()
+	err = m.suspendAPIFn(apiCtx)
+	apiDuration := time.Since(apiStart)
+
+	if err != nil {
+		m.logger.Error("Failed to call suspend API", "error", err, "duration", apiDuration)
+	} else {
+		m.logger.Info("Suspend API completed successfully", "duration", apiDuration)
+	}
 
 	// Start loop after suspend API call for resume detection
 	const sleepInterval = 500 * time.Millisecond

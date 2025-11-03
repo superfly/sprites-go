@@ -10,15 +10,6 @@
   "metadata": {
     "sprite_config_version": "aa0774c40aaf0224bc69df451997c5f80fe64e590608d696a6d3693158bac768"
   },
-  "mounts": [
-    {
-      "encrypted": true,
-      "path": "/dev/fly_vol_old",
-      "size_gb": 10,
-      "volume": "<volume_id>",
-      "name": "data"
-    }
-  ],
   "services": [
     {
       "protocol": "tcp",

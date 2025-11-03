@@ -51,6 +51,10 @@ func (m *Manager) readMemoryStat() (MemoryStat, error) {
 			stat.KernelStack = v
 		case "slab":
 			stat.Slab = v
+		case "slab_reclaimable":
+			stat.SlabReclaimable = v
+		case "inactive_file":
+			stat.InactiveFile = v
 		case "sock":
 			stat.Sock = v
 		case "shmem":
