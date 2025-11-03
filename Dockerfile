@@ -25,12 +25,8 @@ COPY sdks/go ./sdks/go
 # Download dependencies
 RUN go mod download -x && cd cmd && go mod download -x
 
-# Copy only source code needed for builds (not base-env, scripts, etc.)
-COPY client/ ./client/
-COPY server/ ./server/
-COPY pkg/ ./pkg/
-COPY lib/ ./lib/
-COPY internal/ ./internal/
+# Copy all source code
+COPY . .
 
 FROM builder AS builder-server
 
@@ -133,8 +129,6 @@ RUN apt-get update && \
     drbd-utils \
     # Additional useful tools for disk management
     parted gdisk util-linux fdisk xfsprogs fuse3 curl iproute2 nftables conntrack iputils-ping vim rsync \
-    # AppArmor for filesystem policy enforcement
-    apparmor \
     # Cleanup
     && apt-get clean && \
     rm -rf /var/lib/apt/lists/*
@@ -152,10 +146,6 @@ RUN chmod +x /usr/local/bin/spritefs.sh && \
 
 # Copy the complete assembled system directory
 COPY --from=assemble-system /system /system
-
-# Copy bundled AppArmor profile to host /etc/apparmor.d (filesystem policy manager will overwrite if active)
-RUN mkdir -p /etc/apparmor.d && \
-    cp /system/etc/apparmor.d/sprite /etc/apparmor.d/sprite || true
 
 # Define environment variables for paths
 ARG VERSION
