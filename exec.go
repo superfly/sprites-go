@@ -479,7 +479,7 @@ func (c *Cmd) buildWebSocketURL() (*url.URL, error) {
 		q.Set("cc", "true")
 	}
 
-	// Add stdin parameter - tell server whether to expect stdin
+	// Add stdin parameter so the server knows whether to expect input
 	if c.Stdin == nil {
 		q.Set("stdin", "false")
 	} else {

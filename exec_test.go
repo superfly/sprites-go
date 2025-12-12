@@ -116,9 +116,9 @@ func TestCmdBuildWebSocketURL(t *testing.T) {
 			},
 			wantPath: "/v1/sprites/my-sprite/exec",
 			wantQuery: map[string][]string{
-				"cmd":  {"cat"},
-				"path": {"cat"},
-				// stdin parameter should NOT be present when Stdin is set
+				"cmd":   {"cat"},
+				"path":  {"cat"},
+				"stdin": {"true"},
 			},
 		},
 	}
@@ -161,15 +161,15 @@ func TestCmdBuildWebSocketURL(t *testing.T) {
 
 			// Verify stdin parameter behavior
 			// If Stdin is nil, stdin=false should be present
-			// If Stdin is set, stdin parameter should NOT be present
+			// If Stdin is set, stdin=true should be present
 			stdinParam := query.Get("stdin")
 			if tt.cmd.Stdin == nil {
 				if stdinParam != "false" {
 					t.Errorf("Expected stdin=false when Stdin is nil, got stdin=%q", stdinParam)
 				}
 			} else {
-				if stdinParam != "" {
-					t.Errorf("Expected no stdin parameter when Stdin is set, got stdin=%q", stdinParam)
+				if stdinParam != "true" {
+					t.Errorf("Expected stdin=true when Stdin is set, got stdin=%q", stdinParam)
 				}
 			}
 		})
