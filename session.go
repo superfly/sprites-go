@@ -63,6 +63,11 @@ func (c *Client) ListSessions(ctx context.Context, spriteName string) ([]*Sessio
 				Command: fmt.Sprintf("%v", sessionMap["command"]),
 			}
 
+			// Parse workdir
+			if workdir, ok := sessionMap["workdir"].(string); ok {
+				session.Workdir = workdir
+			}
+
 			// Parse created time
 			if created, ok := sessionMap["created"].(string); ok {
 				if t, err := time.Parse(time.RFC3339, created); err == nil {

@@ -68,6 +68,7 @@ type SpriteList struct {
 type Session struct {
 	ID             string     `json:"id"`
 	Command        string     `json:"command"`
+	Workdir        string     `json:"workdir"`
 	Created        time.Time  `json:"created"`
 	BytesPerSecond float64    `json:"bytes_per_second"`
 	IsActive       bool       `json:"is_active"`
