@@ -28,8 +28,7 @@ func (c *Client) ListSessions(ctx context.Context, spriteName string) ([]*Sessio
 	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
 
 	// Make request
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(httpReq)
+	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list sessions: %w", err)
 	}

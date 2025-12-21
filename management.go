@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"time"
 )
 
 // CreateSprite creates a new sprite with the given name and optional configuration
@@ -41,9 +40,8 @@ func (c *Client) CreateSpriteWithOrg(ctx context.Context, name string, config *S
 	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	// Make request with timeout
-	client := &http.Client{Timeout: 120 * time.Second}
-	resp, err := client.Do(httpReq)
+	// Make request
+	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create sprite: %w", err)
 	}
@@ -96,8 +94,7 @@ func (c *Client) GetSpriteWithOrg(ctx context.Context, name string, org *Organiz
 	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
 
 	// Make request
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(httpReq)
+	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get sprite: %w", err)
 	}
@@ -174,8 +171,7 @@ func (c *Client) ListSprites(ctx context.Context, opts *ListOptions) (*SpriteLis
 	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
 
 	// Make request
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(httpReq)
+	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list sprites: %w", err)
 	}
@@ -266,8 +262,7 @@ func (c *Client) DeleteSprite(ctx context.Context, name string) error {
 	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
 
 	// Make request
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(httpReq)
+	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("failed to delete sprite: %w", err)
 	}
@@ -306,8 +301,7 @@ func (c *Client) UpgradeSprite(ctx context.Context, name string) error {
 	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
 
 	// Make request
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Do(httpReq)
+	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("failed to upgrade sprite: %w", err)
 	}
@@ -350,9 +344,8 @@ func (c *Client) UpdateURLSettings(ctx context.Context, spriteName string, setti
 	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	// Make request with timeout
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(httpReq)
+	// Make request
+	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("failed to update URL settings: %w", err)
 	}

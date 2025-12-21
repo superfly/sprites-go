@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 )
 
 // CheckpointStream represents a streaming checkpoint operation
@@ -50,9 +49,12 @@ func (c *Client) CreateCheckpointWithComment(ctx context.Context, spriteName str
 	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	// Use client with no timeout for streaming
-	client := &http.Client{Timeout: 0}
-	resp, err := client.Do(httpReq)
+	// Use client with no timeout for streaming, but preserve transport for socket support
+	streamClient := &http.Client{
+		Transport: c.httpClient.Transport,
+		Timeout:   0,
+	}
+	resp, err := streamClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %w", err)
 	}
@@ -102,8 +104,7 @@ func (c *Client) ListCheckpoints(ctx context.Context, spriteName string, history
 	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
 
 	// Make request
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(httpReq)
+	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %w", err)
 	}
@@ -152,8 +153,7 @@ func (c *Client) GetCheckpoint(ctx context.Context, spriteName string, checkpoin
 	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
 
 	// Make request
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(httpReq)
+	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %w", err)
 	}
@@ -191,9 +191,12 @@ func (c *Client) RestoreCheckpoint(ctx context.Context, spriteName string, check
 
 	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
 
-	// Use client with no timeout for streaming
-	client := &http.Client{Timeout: 0}
-	resp, err := client.Do(httpReq)
+	// Use client with no timeout for streaming, but preserve transport for socket support
+	streamClient := &http.Client{
+		Transport: c.httpClient.Transport,
+		Timeout:   0,
+	}
+	resp, err := streamClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %w", err)
 	}
