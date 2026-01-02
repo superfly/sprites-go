@@ -26,6 +26,13 @@ const (
 	StreamStdinEOF StreamID = 4
 )
 
+// WebSocket keepalive timeouts
+const (
+	wsPingInterval = 15 * time.Second // How often to send pings
+	wsPongWait     = 45 * time.Second // Time allowed to read next pong (should be > ping interval)
+	wsWriteWait    = 10 * time.Second // Time allowed to write a message
+)
+
 // ControlMessage represents control messages sent over the WebSocket
 type ControlMessage struct {
 	Type string `json:"type"`
@@ -177,6 +184,13 @@ func (c *wsCmd) runIO() {
 	}
 	defer c.Close()
 
+	// Set up WebSocket keepalive - reset read deadline when we receive a pong
+	conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(wsPongWait))
+		return nil
+	})
+
 	stdout := c.Stdout
 	stderr := c.Stderr
 	if stdout == nil {
@@ -216,6 +230,8 @@ func (c *wsCmd) runIO() {
 				}
 				return
 			}
+			// Reset read deadline on any successful read
+			conn.SetReadDeadline(time.Now().Add(wsPongWait))
 			switch messageType {
 			case websocket.BinaryMessage:
 				stdout.Write(data)
@@ -248,6 +264,8 @@ func (c *wsCmd) runIO() {
 			adapter.Close()
 			return
 		}
+		// Reset read deadline on any successful read
+		conn.SetReadDeadline(time.Now().Add(wsPongWait))
 		switch messageType {
 		case websocket.BinaryMessage:
 			if len(data) == 0 {
@@ -342,12 +360,22 @@ func newWSAdapter(conn *websocket.Conn, isPTY bool) *wsAdapter {
 }
 
 func (a *wsAdapter) writeLoop() {
+	ticker := time.NewTicker(wsPingInterval)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case req := <-a.writeChan:
 			err := a.conn.WriteMessage(req.messageType, req.data)
 			if req.result != nil {
 				req.result <- err
+			}
+		case <-ticker.C:
+			// Send ping to keep connection alive
+			if err := a.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(wsWriteWait)); err != nil {
+				// Ping failed, connection is likely dead - close and exit
+				a.conn.Close()
+				return
 			}
 		case <-a.done:
 			return
