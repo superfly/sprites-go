@@ -431,17 +431,23 @@ func (c *Cmd) buildWebSocketURL() (*url.URL, error) {
 		return nil, fmt.Errorf("invalid base URL: %w", err)
 	}
 
-	// Build path
-	u.Path = fmt.Sprintf("/v1/sprites/%s/exec", c.sprite.name)
+	// Build path - use /exec/{id} for attach, /exec for new commands
+	if c.sessionID != "" {
+		u.Path = fmt.Sprintf("/v1/sprites/%s/exec/%s", c.sprite.name, c.sessionID)
+	} else {
+		u.Path = fmt.Sprintf("/v1/sprites/%s/exec", c.sprite.name)
+	}
 
 	// Build query parameters
 	q := u.Query()
 
-	// Add command arguments
-	for i, arg := range c.Args {
-		q.Add("cmd", arg)
-		if i == 0 {
-			q.Set("path", arg)
+	// Add command arguments (only for new commands, not attach)
+	if c.sessionID == "" {
+		for i, arg := range c.Args {
+			q.Add("cmd", arg)
+			if i == 0 {
+				q.Set("path", arg)
+			}
 		}
 	}
 
@@ -462,11 +468,6 @@ func (c *Cmd) buildWebSocketURL() (*url.URL, error) {
 			q.Set("rows", fmt.Sprintf("%d", c.ttySize.Rows))
 			q.Set("cols", fmt.Sprintf("%d", c.ttySize.Cols))
 		}
-	}
-
-	// Add session ID if specified
-	if c.sessionID != "" {
-		q.Set("id", c.sessionID)
 	}
 
 	// Add detachable flag
