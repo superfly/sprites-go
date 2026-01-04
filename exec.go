@@ -195,8 +195,9 @@ func (c *Cmd) Start() error {
 	// Set up I/O
 	c.setupIO()
 
-	// Set TTY mode
+	// Set TTY mode and attach flag
 	c.wsCmd.Tty = c.tty
+	c.wsCmd.IsAttach = c.sessionID != ""
 
 	// Set text message handler if provided
 	if c.TextMessageHandler != nil {

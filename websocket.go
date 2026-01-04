@@ -58,6 +58,10 @@ type wsCmd struct {
 	exitChan  chan int
 	doneChan  chan struct{}
 
+	// IsAttach indicates this is attaching to an existing session.
+	// When true, the client waits for session_info to determine TTY mode.
+	IsAttach bool
+
 	// TextMessageHandler is called when text messages are received over the WebSocket
 	TextMessageHandler func([]byte)
 }
@@ -148,6 +152,16 @@ func (c *wsCmd) start() {
 		return
 	}
 	c.conn = conn
+
+	// When attaching to an existing session, wait for session_info to determine TTY mode
+	if c.IsAttach {
+		if err := c.waitForSessionInfo(); err != nil {
+			c.startChan <- fmt.Errorf("failed to get session info: %w", err)
+			conn.Close()
+			return
+		}
+	}
+
 	c.adapter = newWSAdapter(conn, c.Tty)
 
 	// Send initial resize message for TTY mode
@@ -164,6 +178,42 @@ func (c *wsCmd) start() {
 
 	c.startChan <- nil
 	c.runIO()
+}
+
+// waitForSessionInfo reads messages until it receives the session_info message,
+// then sets the Tty field based on the session's TTY mode.
+func (c *wsCmd) waitForSessionInfo() error {
+	// Set a timeout for receiving session_info
+	c.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	defer c.conn.SetReadDeadline(time.Time{})
+
+	for {
+		msgType, data, err := c.conn.ReadMessage()
+		if err != nil {
+			return fmt.Errorf("reading session info: %w", err)
+		}
+
+		if msgType == websocket.TextMessage {
+			var info struct {
+				Type string `json:"type"`
+				TTY  bool   `json:"tty"`
+			}
+			if err := json.Unmarshal(data, &info); err == nil && info.Type == "session_info" {
+				c.Tty = info.TTY
+				// Call text handler if set
+				if c.TextMessageHandler != nil {
+					c.TextMessageHandler(data)
+				}
+				return nil
+			}
+			// Pass other text messages to handler
+			if c.TextMessageHandler != nil {
+				c.TextMessageHandler(data)
+			}
+		}
+		// Ignore binary messages during this phase - they're historical output
+		// that will be replayed; we need the session_info first to know how to parse them
+	}
 }
 
 // Wait waits for the command to finish
