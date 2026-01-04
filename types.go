@@ -73,6 +73,7 @@ type Session struct {
 	BytesPerSecond float64    `json:"bytes_per_second"`
 	IsActive       bool       `json:"is_active"`
 	LastActivity   *time.Time `json:"last_activity,omitempty"`
+	TTY            bool       `json:"tty"`
 }
 
 // ExecOptions represents options for executing commands
@@ -80,7 +81,6 @@ type ExecOptions struct {
 	WorkingDir  string
 	Environment []string
 	TTY         bool
-	Detachable  bool
 	SessionID   string
 	ControlMode bool
 	InitialCols int

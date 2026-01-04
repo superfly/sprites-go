@@ -87,6 +87,11 @@ func (c *Client) ListSessions(ctx context.Context, spriteName string) ([]*Sessio
 				}
 			}
 
+			// Parse TTY
+			if tty, ok := sessionMap["tty"].(bool); ok {
+				session.TTY = tty
+			}
+
 			sessions = append(sessions, session)
 		}
 	}
@@ -113,16 +118,13 @@ func (c *Client) AttachSessionWithOrg(spriteName string, sessionID string, org *
 	}
 
 	cmd := &Cmd{
-		Path:   "tmux",
-		Args:   []string{"tmux", "attach", "-t", sessionID},
+		Path:   "",
+		Args:   nil,
 		ctx:    context.Background(),
 		sprite: sprite,
 	}
 
-	// Session attachment requires TTY
-	cmd.tty = true
-
-	// Set the session ID in the WebSocket URL parameters
+	// Set the session ID - TTY mode is determined by the session itself
 	cmd.sessionID = sessionID
 
 	return cmd
@@ -144,9 +146,6 @@ func (c *Client) AttachSessionContext(ctx context.Context, spriteName string, se
 func (s *Sprite) AttachSessionContext(ctx context.Context, sessionID string) *Cmd {
 	return s.client.AttachSessionContext(ctx, s.name, sessionID)
 }
-
-// Add sessionID field to Cmd struct (this would need to be added to exec.go)
-// For now, we'll handle it in buildWebSocketURL by checking if it's a tmux attach command
 
 // IsSessionActive returns true if the session has recent activity
 func (s *Session) IsSessionActive() bool {

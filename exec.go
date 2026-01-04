@@ -78,7 +78,6 @@ type Cmd struct {
 
 	// Session management
 	sessionID   string
-	detachable  bool
 	controlMode bool
 
 	// TextMessageHandler is called when text messages are received from the server.
@@ -187,7 +186,11 @@ func (c *Cmd) Start() error {
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.sprite.client.token))
 
 	// Create WebSocket command
-	c.wsCmd = newWSCmdContext(c.ctx, req, c.Path, c.Args[1:]...)
+	var args []string
+	if len(c.Args) > 1 {
+		args = c.Args[1:]
+	}
+	c.wsCmd = newWSCmdContext(c.ctx, req, c.Path, args...)
 
 	// Set up I/O
 	c.setupIO()
@@ -468,11 +471,6 @@ func (c *Cmd) buildWebSocketURL() (*url.URL, error) {
 			q.Set("rows", fmt.Sprintf("%d", c.ttySize.Rows))
 			q.Set("cols", fmt.Sprintf("%d", c.ttySize.Cols))
 		}
-	}
-
-	// Add detachable flag
-	if c.detachable {
-		q.Set("detachable", "true")
 	}
 
 	// Add control mode flag

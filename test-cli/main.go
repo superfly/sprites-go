@@ -75,7 +75,6 @@ func main() {
 		tty        = flag.Bool("tty", false, "Enable TTY mode")
 		ttyRows    = flag.Int("tty-rows", 24, "TTY rows (height)")
 		ttyCols    = flag.Int("tty-cols", 80, "TTY columns (width)")
-		detachable = flag.Bool("detachable", false, "Create detachable tmux session")
 		sessionID  = flag.String("session-id", "", "Attach to existing session ID")
 		timeout    = flag.Duration("timeout", 0, "Command timeout (0 = no timeout)")
 		output     = flag.String("output", "stdout", "Output mode: stdout, combined, exit-code")
@@ -137,7 +136,6 @@ func main() {
 		"args":       args[1:],
 		"base_url":   *baseURL,
 		"tty":        *tty,
-		"detachable": *detachable,
 		"session_id": *sessionID,
 		"timeout":    timeout.String(),
 		"output":     *output,
@@ -162,13 +160,6 @@ func main() {
 		cmd = sprite.AttachSessionContext(ctx, *sessionID)
 		logger.LogEvent("session_attach", map[string]interface{}{
 			"session_id": *sessionID,
-		})
-	} else if *detachable {
-		// Create detachable session
-		cmd = sprite.CreateDetachableSessionContext(ctx, args[0], args[1:]...)
-		logger.LogEvent("detachable_session_create", map[string]interface{}{
-			"command": args[0],
-			"args":    args[1:],
 		})
 	} else {
 		// Regular command
@@ -387,8 +378,6 @@ func showHelp() {
 	fmt.Println("        TTY rows/height (default: 24)")
 	fmt.Println("  -tty-cols int")
 	fmt.Println("        TTY columns/width (default: 80)")
-	fmt.Println("  -detachable")
-	fmt.Println("        Create detachable tmux session")
 	fmt.Println("  -session-id string")
 	fmt.Println("        Attach to existing session ID")
 	fmt.Println("  -timeout duration")
@@ -410,7 +399,6 @@ func showHelp() {
 	fmt.Println("  When -log-target is specified, the CLI writes JSON events to the file:")
 	fmt.Println("  - command_start/completed/failed - Command lifecycle events")
 	fmt.Println("  - session_attach - Session attachment events")
-	fmt.Println("  - detachable_session_create - Detachable session creation")
 	fmt.Println("  - tty_configured - TTY configuration events")
 	fmt.Println("  - port_opened/port_closed - Port events with typed data")
 	fmt.Println("  - text_message - Other server messages")
@@ -430,9 +418,6 @@ func showHelp() {
 	fmt.Println()
 	fmt.Println("  # TTY command")
 	fmt.Println("  SPRITES_TOKEN=mytoken test-cli -sprite mysprite -tty -tty-rows 30 -tty-cols 100 bash")
-	fmt.Println()
-	fmt.Println("  # Detachable session")
-	fmt.Println("  SPRITES_TOKEN=mytoken test-cli -sprite mysprite -detachable bash")
 	fmt.Println()
 	fmt.Println("  # Attach to existing session")
 	fmt.Println("  SPRITES_TOKEN=mytoken test-cli -sprite mysprite -session-id session123")
