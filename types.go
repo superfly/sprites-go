@@ -121,3 +121,58 @@ type PortNotificationMessage struct {
 	Address string `json:"address"` // Address (e.g., "127.0.0.1", "0.0.0.0")
 	PID     int    `json:"pid"`     // Process ID
 }
+
+// Service represents a service definition
+type Service struct {
+	Name     string   `json:"name"`
+	Cmd      string   `json:"cmd"`
+	Args     []string `json:"args"`
+	Needs    []string `json:"needs"`
+	HTTPPort *int     `json:"http_port,omitempty"`
+}
+
+// ServiceState represents the runtime state of a service
+type ServiceState struct {
+	Name          string    `json:"name"`
+	Status        string    `json:"status"` // "stopped", "starting", "running", "stopping", "failed"
+	PID           int       `json:"pid,omitempty"`
+	StartedAt     time.Time `json:"started_at,omitempty"`
+	Error         string    `json:"error,omitempty"`
+	RestartCount  int       `json:"restart_count,omitempty"`
+	NextRestartAt time.Time `json:"next_restart_at,omitempty"`
+}
+
+// ServiceWithState combines service definition with runtime state
+type ServiceWithState struct {
+	Service
+	State *ServiceState `json:"state,omitempty"`
+}
+
+// ServiceRequest represents the request body for creating/updating services
+type ServiceRequest struct {
+	Cmd      string   `json:"cmd"`
+	Args     []string `json:"args,omitempty"`
+	Needs    []string `json:"needs,omitempty"`
+	HTTPPort *int     `json:"http_port,omitempty"`
+}
+
+// ServiceLogEvent represents a log event from service start/stop streaming
+type ServiceLogEvent struct {
+	Type      string            `json:"type"` // "stdout", "stderr", "exit", "error", "complete", "started", "stopping", "stopped"
+	Data      string            `json:"data,omitempty"`
+	ExitCode  *int              `json:"exit_code,omitempty"`
+	Timestamp int64             `json:"timestamp"`
+	LogFiles  map[string]string `json:"log_files,omitempty"`
+}
+
+// NetworkPolicyRule represents a single network policy rule
+type NetworkPolicyRule struct {
+	Domain  string `json:"domain,omitempty"`
+	Action  string `json:"action,omitempty"` // "allow" or "deny"
+	Include string `json:"include,omitempty"`
+}
+
+// NetworkPolicy represents the network policy configuration
+type NetworkPolicy struct {
+	Rules []NetworkPolicyRule `json:"rules"`
+}

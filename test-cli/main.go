@@ -122,6 +122,18 @@ func main() {
 		}
 		destroySprite(token, *baseURL, args[1], logger)
 		return
+	case "policy":
+		if *spriteName == "" {
+			log.Fatal("Error: -sprite is required for policy command")
+		}
+		handlePolicyCommand(token, *baseURL, *spriteName, args[1:], logger)
+		return
+	case "checkpoint":
+		if *spriteName == "" {
+			log.Fatal("Error: -sprite is required for checkpoint command")
+		}
+		handleCheckpointCommand(token, *baseURL, *spriteName, args[1:], logger)
+		return
 	}
 
 	// For exec commands, sprite name is required
@@ -347,6 +359,176 @@ func destroySprite(token, baseURL, spriteName string, logger *Logger) {
 	fmt.Printf("✅ Sprite '%s' destroyed successfully\n", spriteName)
 }
 
+func handlePolicyCommand(token, baseURL, spriteName string, args []string, logger *Logger) {
+	if len(args) == 0 {
+		log.Fatal("Error: policy subcommand required (get, set)")
+	}
+
+	client := sprites.New(token, sprites.WithBaseURL(baseURL))
+	sprite := client.Sprite(spriteName)
+	ctx := context.Background()
+
+	subcommand := args[0]
+	switch subcommand {
+	case "get":
+		logger.LogEvent("policy_get_start", map[string]interface{}{
+			"sprite": spriteName,
+		})
+		policy, err := sprite.GetNetworkPolicy(ctx)
+		if err != nil {
+			logger.LogEvent("policy_get_failed", map[string]interface{}{
+				"error": err.Error(),
+			})
+			log.Fatalf("Failed to get network policy: %v", err)
+		}
+		logger.LogEvent("policy_get_completed", map[string]interface{}{
+			"rules_count": len(policy.Rules),
+		})
+		output, _ := json.MarshalIndent(policy, "", "  ")
+		fmt.Println(string(output))
+
+	case "set":
+		if len(args) < 2 {
+			log.Fatal("Error: policy JSON required (policy set '<json>')")
+		}
+		policyJSON := args[1]
+		var policy sprites.NetworkPolicy
+		if err := json.Unmarshal([]byte(policyJSON), &policy); err != nil {
+			log.Fatalf("Invalid policy JSON: %v", err)
+		}
+		logger.LogEvent("policy_set_start", map[string]interface{}{
+			"sprite":      spriteName,
+			"rules_count": len(policy.Rules),
+		})
+		err := sprite.UpdateNetworkPolicy(ctx, &policy)
+		if err != nil {
+			logger.LogEvent("policy_set_failed", map[string]interface{}{
+				"error": err.Error(),
+			})
+			log.Fatalf("Failed to set network policy: %v", err)
+		}
+		logger.LogEvent("policy_set_completed", map[string]interface{}{
+			"rules_count": len(policy.Rules),
+		})
+		fmt.Println("Network policy updated")
+
+	default:
+		log.Fatalf("Unknown policy subcommand: %s", subcommand)
+	}
+}
+
+func handleCheckpointCommand(token, baseURL, spriteName string, args []string, logger *Logger) {
+	if len(args) == 0 {
+		log.Fatal("Error: checkpoint subcommand required (list, create, get, restore)")
+	}
+
+	client := sprites.New(token, sprites.WithBaseURL(baseURL))
+	sprite := client.Sprite(spriteName)
+	ctx := context.Background()
+
+	subcommand := args[0]
+	switch subcommand {
+	case "list":
+		logger.LogEvent("checkpoint_list_start", map[string]interface{}{
+			"sprite": spriteName,
+		})
+		checkpoints, err := sprite.ListCheckpoints(ctx, "")
+		if err != nil {
+			logger.LogEvent("checkpoint_list_failed", map[string]interface{}{
+				"error": err.Error(),
+			})
+			log.Fatalf("Failed to list checkpoints: %v", err)
+		}
+		logger.LogEvent("checkpoint_list_completed", map[string]interface{}{
+			"count": len(checkpoints),
+		})
+		output, _ := json.MarshalIndent(checkpoints, "", "  ")
+		fmt.Println(string(output))
+
+	case "create":
+		comment := ""
+		if len(args) >= 2 {
+			comment = args[1]
+		}
+		logger.LogEvent("checkpoint_create_start", map[string]interface{}{
+			"sprite":  spriteName,
+			"comment": comment,
+		})
+		stream, err := sprite.CreateCheckpointWithComment(ctx, comment)
+		if err != nil {
+			logger.LogEvent("checkpoint_create_failed", map[string]interface{}{
+				"error": err.Error(),
+			})
+			log.Fatalf("Failed to create checkpoint: %v", err)
+		}
+		err = stream.ProcessAll(func(msg *sprites.StreamMessage) error {
+			output, _ := json.Marshal(msg)
+			fmt.Println(string(output))
+			return nil
+		})
+		if err != nil {
+			log.Fatalf("Error processing stream: %v", err)
+		}
+		logger.LogEvent("checkpoint_create_completed", map[string]interface{}{
+			"sprite": spriteName,
+		})
+
+	case "get":
+		if len(args) < 2 {
+			log.Fatal("Error: checkpoint ID required")
+		}
+		checkpointID := args[1]
+		logger.LogEvent("checkpoint_get_start", map[string]interface{}{
+			"sprite":     spriteName,
+			"checkpoint": checkpointID,
+		})
+		checkpoint, err := sprite.GetCheckpoint(ctx, checkpointID)
+		if err != nil {
+			logger.LogEvent("checkpoint_get_failed", map[string]interface{}{
+				"error": err.Error(),
+			})
+			log.Fatalf("Failed to get checkpoint: %v", err)
+		}
+		logger.LogEvent("checkpoint_get_completed", map[string]interface{}{
+			"checkpoint": checkpointID,
+		})
+		output, _ := json.MarshalIndent(checkpoint, "", "  ")
+		fmt.Println(string(output))
+
+	case "restore":
+		if len(args) < 2 {
+			log.Fatal("Error: checkpoint ID required")
+		}
+		checkpointID := args[1]
+		logger.LogEvent("checkpoint_restore_start", map[string]interface{}{
+			"sprite":     spriteName,
+			"checkpoint": checkpointID,
+		})
+		stream, err := sprite.RestoreCheckpoint(ctx, checkpointID)
+		if err != nil {
+			logger.LogEvent("checkpoint_restore_failed", map[string]interface{}{
+				"error": err.Error(),
+			})
+			log.Fatalf("Failed to restore checkpoint: %v", err)
+		}
+		err = stream.ProcessAll(func(msg *sprites.StreamMessage) error {
+			output, _ := json.Marshal(msg)
+			fmt.Println(string(output))
+			return nil
+		})
+		if err != nil {
+			log.Fatalf("Error processing stream: %v", err)
+		}
+		logger.LogEvent("checkpoint_restore_completed", map[string]interface{}{
+			"sprite":     spriteName,
+			"checkpoint": checkpointID,
+		})
+
+	default:
+		log.Fatalf("Unknown checkpoint subcommand: %s", subcommand)
+	}
+}
+
 func showHelp() {
 	fmt.Println("Sprite SDK CLI")
 	fmt.Println("==============")
@@ -358,6 +540,8 @@ func showHelp() {
 	fmt.Println("  test-cli [options] <command> [args...]")
 	fmt.Println("  test-cli create <sprite-name>")
 	fmt.Println("  test-cli destroy <sprite-name>")
+	fmt.Println("  test-cli -sprite <name> policy <subcommand> [args...]")
+	fmt.Println("  test-cli -sprite <name> checkpoint <subcommand> [args...]")
 	fmt.Println()
 	fmt.Println("Required:")
 	fmt.Println("  SPRITES_TOKEN environment variable")
@@ -430,4 +614,23 @@ func showHelp() {
 	fmt.Println()
 	fmt.Println("  # With structured logging (includes port events)")
 	fmt.Println("  SPRITES_TOKEN=mytoken test-cli -sprite mysprite -log-target /tmp/sprite.log echo 'hello'")
+	fmt.Println()
+	fmt.Println("Services Commands:")
+	fmt.Println("  services list                         - List all services")
+	fmt.Println("  services get <name>                   - Get service details")
+	fmt.Println("  services create <name> <cmd> [args]   - Create and start a service")
+	fmt.Println("  services delete <name>                - Delete a service")
+	fmt.Println("  services start <name>                 - Start a stopped service")
+	fmt.Println("  services stop <name>                  - Stop a running service")
+	fmt.Println("  services signal <name> <signal>       - Send signal to service")
+	fmt.Println()
+	fmt.Println("Policy Commands:")
+	fmt.Println("  policy get                            - Get current network policy")
+	fmt.Println("  policy set '<json>'                   - Set network policy")
+	fmt.Println()
+	fmt.Println("Checkpoint Commands:")
+	fmt.Println("  checkpoint list                       - List all checkpoints")
+	fmt.Println("  checkpoint create [comment]           - Create a checkpoint")
+	fmt.Println("  checkpoint get <id>                   - Get checkpoint details")
+	fmt.Println("  checkpoint restore <id>               - Restore to a checkpoint")
 }
