@@ -170,6 +170,14 @@ func (c *Cmd) Start() error {
 		}
 	}
 
+	// For attach operations, ensure we know the server version to select the right endpoint
+	if c.sessionID != "" && c.sprite.client.SpriteVersion() == "" {
+		if err := c.sprite.client.FetchVersion(c.ctx); err != nil {
+			closeDescriptors(c.closers)
+			return fmt.Errorf("failed to fetch server version: %w", err)
+		}
+	}
+
 	// Build WebSocket URL
 	wsURL, err := c.buildWebSocketURL()
 	if err != nil {
@@ -435,15 +443,22 @@ func (c *Cmd) buildWebSocketURL() (*url.URL, error) {
 		return nil, fmt.Errorf("invalid base URL: %w", err)
 	}
 
-	// Build path - use /exec/{id} for attach, /exec for new commands
+	// Build query parameters
+	q := u.Query()
+
+	// Build path - endpoint format depends on server version for attach
 	if c.sessionID != "" {
-		u.Path = fmt.Sprintf("/v1/sprites/%s/exec/%s", c.sprite.name, c.sessionID)
+		if c.sprite.client.supportsPathAttach() {
+			// New format: path parameter
+			u.Path = fmt.Sprintf("/v1/sprites/%s/exec/%s", c.sprite.name, c.sessionID)
+		} else {
+			// Legacy format: query parameter
+			u.Path = fmt.Sprintf("/v1/sprites/%s/exec", c.sprite.name)
+			q.Set("id", c.sessionID)
+		}
 	} else {
 		u.Path = fmt.Sprintf("/v1/sprites/%s/exec", c.sprite.name)
 	}
-
-	// Build query parameters
-	q := u.Query()
 
 	// Add command arguments (only for new commands, not attach)
 	if c.sessionID == "" {

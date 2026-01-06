@@ -9,14 +9,16 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
 // Client is the main SDK client for interacting with the sprite API.
 type Client struct {
-	baseURL    string
-	token      string
-	httpClient *http.Client
+	baseURL       string
+	token         string
+	httpClient    *http.Client
+	spriteVersion atomic.Value // stores string, empty until captured from response header
 }
 
 // Option is a functional option for configuring the SDK client.
@@ -34,6 +36,16 @@ func New(token string, opts ...Option) *Client {
 
 	for _, opt := range opts {
 		opt(c)
+	}
+
+	// Wrap transport to capture Sprite-Version header from responses
+	transport := c.httpClient.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	c.httpClient.Transport = &versionCapturingTransport{
+		wrapped:       transport,
+		versionHolder: &c.spriteVersion,
 	}
 
 	// Normalize baseURL
@@ -91,6 +103,41 @@ func (c *Client) Create(name string) (*Sprite, error) {
 // Deprecated: Use ListSprites with context instead.
 func (c *Client) List() ([]*Sprite, error) {
 	return c.ListAllSprites(context.Background(), "")
+}
+
+// SpriteVersion returns the captured server version, or empty string if unknown.
+func (c *Client) SpriteVersion() string {
+	if v := c.spriteVersion.Load(); v != nil {
+		return v.(string)
+	}
+	return ""
+}
+
+// supportsPathAttach returns true if the server supports path-based attach endpoint.
+func (c *Client) supportsPathAttach() bool {
+	return supportsPathAttach(c.SpriteVersion())
+}
+
+// FetchVersion makes a lightweight API call to capture the server version.
+// This is called automatically before attach operations if the version is unknown.
+func (c *Client) FetchVersion(ctx context.Context) error {
+	url := fmt.Sprintf("%s/v1/sprites", c.baseURL)
+
+	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to fetch version: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Version is captured by the transport wrapper
+	return nil
 }
 
 // CreateToken creates a sprite access token using a Fly.io macaroon token.
