@@ -4,6 +4,7 @@ package sprites
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -183,11 +184,21 @@ func CreateToken(ctx context.Context, flyMacaroon, orgSlug string, inviteCode st
 	}
 
 	// Set headers - Fly tokens use "FlyV1" prefix
-	httpReq.Header.Set("Authorization", "FlyV1 "+flyMacaroon)
+	authHeader := "FlyV1 " + flyMacaroon
+	httpReq.Header.Set("Authorization", authHeader)
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	// Make request
-	client := &http.Client{Timeout: 30 * time.Second}
+	// Force HTTP/1.1 to avoid HTTP/2 header size limits in Fly.io's edge proxy
+	// The edge proxy rejects HTTP/2 requests with large headers (>16KB) even though
+	// the backend supports much larger headers (256KB)
+	// Setting TLSNextProto to a non-nil empty map disables HTTP/2 in the transport
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+		},
+	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return "", fmt.Errorf("failed to create token: %w", err)
