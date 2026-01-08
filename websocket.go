@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -237,6 +238,13 @@ func (c *wsCmd) runIO() {
 	// Set up WebSocket keepalive - reset read deadline when we receive a pong
 	conn.SetReadDeadline(time.Now().Add(wsPongWait))
 	conn.SetPongHandler(func(string) error {
+		slog.Default().Debug("ws pong received, resetting deadline", "deadline", time.Now().Add(wsPongWait))
+		conn.SetReadDeadline(time.Now().Add(wsPongWait))
+		return nil
+	})
+	// Also set ping handler to reset deadline (some servers send pings too)
+	conn.SetPingHandler(func(string) error {
+		slog.Default().Debug("ws ping received, resetting deadline", "deadline", time.Now().Add(wsPongWait))
 		conn.SetReadDeadline(time.Now().Add(wsPongWait))
 		return nil
 	})
@@ -259,6 +267,7 @@ func (c *wsCmd) runIO() {
 		for {
 			messageType, data, err := conn.ReadMessage()
 			if err != nil {
+				slog.Default().Debug("ws read error", "error", err, "errorType", fmt.Sprintf("%T", err))
 				adapter.Close()
 				if c.ctx.Err() != nil {
 					select {
@@ -422,8 +431,10 @@ func (a *wsAdapter) writeLoop() {
 			}
 		case <-ticker.C:
 			// Send ping to keep connection alive
+			slog.Default().Debug("ws sending ping")
 			if err := a.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(wsWriteWait)); err != nil {
 				// Ping failed, connection is likely dead - close and exit
+				slog.Default().Debug("ws ping send failed", "error", err)
 				a.conn.Close()
 				return
 			}
