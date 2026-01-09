@@ -87,12 +87,31 @@ func (s *Sprite) CreateCheckpointWithComment(ctx context.Context, comment string
     return s.client.CreateCheckpointWithComment(ctx, s.name, comment)
 }
 
-// ListCheckpoints retrieves a list of checkpoints for a sprite
+// ListCheckpointsOptions contains options for listing checkpoints
+type ListCheckpointsOptions struct {
+	HistoryFilter string
+	IncludeAuto   bool
+}
+
+// ListCheckpoints retrieves a list of checkpoints for a sprite (excludes auto checkpoints)
 func (c *Client) ListCheckpoints(ctx context.Context, spriteName string, historyFilter string) ([]*Checkpoint, error) {
-	// Build URL
+	return c.ListCheckpointsWithOptions(ctx, spriteName, ListCheckpointsOptions{
+		HistoryFilter: historyFilter,
+		IncludeAuto:   false,
+	})
+}
+
+// ListCheckpointsWithOptions retrieves a list of checkpoints with configurable options
+func (c *Client) ListCheckpointsWithOptions(ctx context.Context, spriteName string, opts ListCheckpointsOptions) ([]*Checkpoint, error) {
+	// Build URL with query parameters
 	url := fmt.Sprintf("%s/v1/sprites/%s/checkpoints", c.baseURL, spriteName)
-	if historyFilter != "" {
-		url += fmt.Sprintf("?history=%s", historyFilter)
+	sep := "?"
+	if opts.HistoryFilter != "" {
+		url += fmt.Sprintf("%shistory=%s", sep, opts.HistoryFilter)
+		sep = "&"
+	}
+	if opts.IncludeAuto {
+		url += fmt.Sprintf("%sincludeAuto=true", sep)
 	}
 
 	// Create request
@@ -134,9 +153,14 @@ func (c *Client) ListCheckpoints(ctx context.Context, spriteName string, history
 	return checkpoints, nil
 }
 
-// ListCheckpoints retrieves a list of checkpoints for this sprite
+// ListCheckpoints retrieves a list of checkpoints for this sprite (excludes auto checkpoints)
 func (s *Sprite) ListCheckpoints(ctx context.Context, historyFilter string) ([]*Checkpoint, error) {
 	return s.client.ListCheckpoints(ctx, s.name, historyFilter)
+}
+
+// ListCheckpointsWithOptions retrieves a list of checkpoints with configurable options
+func (s *Sprite) ListCheckpointsWithOptions(ctx context.Context, opts ListCheckpointsOptions) ([]*Checkpoint, error) {
+	return s.client.ListCheckpointsWithOptions(ctx, s.name, opts)
 }
 
 // GetCheckpoint retrieves information about a specific checkpoint

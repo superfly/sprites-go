@@ -93,6 +93,7 @@ type Checkpoint struct {
 	CreateTime time.Time `json:"create_time"`
 	History    []string  `json:"history,omitempty"`
 	Comment    string    `json:"comment,omitempty"`
+	IsAuto     bool      `json:"is_auto,omitempty"`
 }
 
 // StreamMessage represents a message in a streaming response
