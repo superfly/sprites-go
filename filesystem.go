@@ -17,8 +17,8 @@ import (
 // FS provides filesystem operations on a sprite.
 // It implements io/fs.FS for read operations and adds write operations.
 type FS interface {
-	fs.FS       // Open(name string) (fs.File, error)
-	fs.StatFS   // Stat(name string) (fs.FileInfo, error)
+	fs.FS         // Open(name string) (fs.File, error)
+	fs.StatFS     // Stat(name string) (fs.FileInfo, error)
 	fs.ReadFileFS // ReadFile(name string) ([]byte, error)
 	fs.ReadDirFS  // ReadDir(name string) ([]DirEntry, error)
 
@@ -29,11 +29,15 @@ type FS interface {
 	Remove(name string) error
 	RemoveAll(path string) error
 	Rename(oldname, newname string) error
+	Copy(src, dst string) error
+	Chmod(name string, mode fs.FileMode) error
 
 	// Context variants for long operations
 	WriteFileContext(ctx context.Context, name string, data []byte, perm fs.FileMode) error
 	RemoveContext(ctx context.Context, name string) error
 	RemoveAllContext(ctx context.Context, path string) error
+	CopyContext(ctx context.Context, src, dst string) error
+	ChmodContext(ctx context.Context, name string, mode fs.FileMode) error
 }
 
 // Filesystem returns a filesystem interface for the sprite.
@@ -101,6 +105,21 @@ type fsRenameRequest struct {
 	Source     string `json:"source"`
 	Dest       string `json:"dest"`
 	WorkingDir string `json:"workingDir"`
+}
+
+// fsCopyRequest is the request body for /fs/copy
+type fsCopyRequest struct {
+	Source     string `json:"source"`
+	Dest       string `json:"dest"`
+	WorkingDir string `json:"workingDir"`
+	Recursive  bool   `json:"recursive"`
+}
+
+// fsChmodRequest is the request body for /fs/chmod
+type fsChmodRequest struct {
+	Path       string `json:"path"`
+	WorkingDir string `json:"workingDir"`
+	Mode       string `json:"mode"`
 }
 
 // Open opens a file for reading.
@@ -434,6 +453,97 @@ func (f *spriteFS) renameContext(ctx context.Context, oldname, newname string) e
 			return &fs.PathError{Op: "rename", Path: oldname, Err: fmt.Errorf("%s", fsErr.Error)}
 		}
 		return &fs.PathError{Op: "rename", Path: oldname, Err: fmt.Errorf("HTTP %d", resp.StatusCode)}
+	}
+
+	return nil
+}
+
+// Copy copies a file or directory to a new location.
+func (f *spriteFS) Copy(src, dst string) error {
+	return f.CopyContext(context.Background(), src, dst)
+}
+
+// CopyContext copies a file or directory with context.
+func (f *spriteFS) CopyContext(ctx context.Context, src, dst string) error {
+	u := f.buildURL("/fs/copy")
+
+	body, err := json.Marshal(fsCopyRequest{
+		Source:     src,
+		Dest:       dst,
+		WorkingDir: f.workingDir,
+		Recursive:  true,
+	})
+	if err != nil {
+		return &fs.PathError{Op: "copy", Path: src, Err: err}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", u.String(), bytes.NewReader(body))
+	if err != nil {
+		return &fs.PathError{Op: "copy", Path: src, Err: err}
+	}
+	f.setAuth(req)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := f.sprite.client.httpClient.Do(req)
+	if err != nil {
+		return &fs.PathError{Op: "copy", Path: src, Err: err}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return &fs.PathError{Op: "copy", Path: src, Err: fs.ErrNotExist}
+	}
+	if resp.StatusCode != http.StatusOK {
+		var fsErr fsError
+		if json.NewDecoder(resp.Body).Decode(&fsErr) == nil && fsErr.Error != "" {
+			return &fs.PathError{Op: "copy", Path: src, Err: fmt.Errorf("%s", fsErr.Error)}
+		}
+		return &fs.PathError{Op: "copy", Path: src, Err: fmt.Errorf("HTTP %d", resp.StatusCode)}
+	}
+
+	return nil
+}
+
+// Chmod changes the file mode of the named file.
+func (f *spriteFS) Chmod(name string, mode fs.FileMode) error {
+	return f.ChmodContext(context.Background(), name, mode)
+}
+
+// ChmodContext changes the file mode with context.
+func (f *spriteFS) ChmodContext(ctx context.Context, name string, mode fs.FileMode) error {
+	u := f.buildURL("/fs/chmod")
+
+	body, err := json.Marshal(fsChmodRequest{
+		Path:       name,
+		WorkingDir: f.workingDir,
+		Mode:       fmt.Sprintf("%04o", mode&0777),
+	})
+	if err != nil {
+		return &fs.PathError{Op: "chmod", Path: name, Err: err}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", u.String(), bytes.NewReader(body))
+	if err != nil {
+		return &fs.PathError{Op: "chmod", Path: name, Err: err}
+	}
+	f.setAuth(req)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := f.sprite.client.httpClient.Do(req)
+	if err != nil {
+		return &fs.PathError{Op: "chmod", Path: name, Err: err}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return &fs.PathError{Op: "chmod", Path: name, Err: fs.ErrNotExist}
+	}
+	if resp.StatusCode != http.StatusOK {
+		var fsErr fsError
+		if json.NewDecoder(resp.Body).Decode(&fsErr) == nil && fsErr.Error != "" {
+			return &fs.PathError{Op: "chmod", Path: name, Err: fmt.Errorf("%s", fsErr.Error)}
+		}
+		return &fs.PathError{Op: "chmod", Path: name, Err: fmt.Errorf("HTTP %d", resp.StatusCode)}
 	}
 
 	return nil

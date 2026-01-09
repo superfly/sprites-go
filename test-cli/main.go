@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -80,6 +81,17 @@ func main() {
 		output     = flag.String("output", "stdout", "Output mode: stdout, combined, exit-code")
 		logTarget  = flag.String("log-target", "", "File path to write structured JSON logs")
 		help       = flag.Bool("help", false, "Show help")
+
+		// Filesystem flags
+		fsPath      = flag.String("path", "", "Path for filesystem operations")
+		fsContent   = flag.String("content", "", "Content for fs-write")
+		fsParents   = flag.Bool("parents", false, "Create parent directories for fs-mkdir")
+		fsRecursive = flag.Bool("recursive", false, "Recursive operation for fs-rm")
+		fsOld       = flag.String("old", "", "Old path for fs-rename")
+		fsNew       = flag.String("new", "", "New path for fs-rename")
+		fsSrc       = flag.String("src", "", "Source path for fs-copy")
+		fsDst       = flag.String("dst", "", "Destination path for fs-copy")
+		fsMode      = flag.String("mode", "", "File mode for fs-chmod (e.g., 0755)")
 	)
 	flag.Parse()
 
@@ -133,6 +145,87 @@ func main() {
 			log.Fatal("Error: -sprite is required for checkpoint command")
 		}
 		handleCheckpointCommand(token, *baseURL, *spriteName, args[1:], logger)
+		return
+	case "fs-write":
+		if *spriteName == "" {
+			log.Fatal("Error: -sprite is required for fs-write command")
+		}
+		if *fsPath == "" {
+			log.Fatal("Error: -path is required for fs-write command")
+		}
+		handleFsWrite(token, *baseURL, *spriteName, *dir, *fsPath, *fsContent, logger)
+		return
+	case "fs-read":
+		if *spriteName == "" {
+			log.Fatal("Error: -sprite is required for fs-read command")
+		}
+		if *fsPath == "" {
+			log.Fatal("Error: -path is required for fs-read command")
+		}
+		handleFsRead(token, *baseURL, *spriteName, *dir, *fsPath, logger)
+		return
+	case "fs-list":
+		if *spriteName == "" {
+			log.Fatal("Error: -sprite is required for fs-list command")
+		}
+		if *fsPath == "" {
+			log.Fatal("Error: -path is required for fs-list command")
+		}
+		handleFsList(token, *baseURL, *spriteName, *dir, *fsPath, logger)
+		return
+	case "fs-stat":
+		if *spriteName == "" {
+			log.Fatal("Error: -sprite is required for fs-stat command")
+		}
+		if *fsPath == "" {
+			log.Fatal("Error: -path is required for fs-stat command")
+		}
+		handleFsStat(token, *baseURL, *spriteName, *dir, *fsPath, logger)
+		return
+	case "fs-mkdir":
+		if *spriteName == "" {
+			log.Fatal("Error: -sprite is required for fs-mkdir command")
+		}
+		if *fsPath == "" {
+			log.Fatal("Error: -path is required for fs-mkdir command")
+		}
+		handleFsMkdir(token, *baseURL, *spriteName, *dir, *fsPath, *fsParents, logger)
+		return
+	case "fs-rm":
+		if *spriteName == "" {
+			log.Fatal("Error: -sprite is required for fs-rm command")
+		}
+		if *fsPath == "" {
+			log.Fatal("Error: -path is required for fs-rm command")
+		}
+		handleFsRm(token, *baseURL, *spriteName, *dir, *fsPath, *fsRecursive, logger)
+		return
+	case "fs-rename":
+		if *spriteName == "" {
+			log.Fatal("Error: -sprite is required for fs-rename command")
+		}
+		if *fsOld == "" || *fsNew == "" {
+			log.Fatal("Error: -old and -new are required for fs-rename command")
+		}
+		handleFsRename(token, *baseURL, *spriteName, *dir, *fsOld, *fsNew, logger)
+		return
+	case "fs-copy":
+		if *spriteName == "" {
+			log.Fatal("Error: -sprite is required for fs-copy command")
+		}
+		if *fsSrc == "" || *fsDst == "" {
+			log.Fatal("Error: -src and -dst are required for fs-copy command")
+		}
+		handleFsCopy(token, *baseURL, *spriteName, *dir, *fsSrc, *fsDst, logger)
+		return
+	case "fs-chmod":
+		if *spriteName == "" {
+			log.Fatal("Error: -sprite is required for fs-chmod command")
+		}
+		if *fsPath == "" || *fsMode == "" {
+			log.Fatal("Error: -path and -mode are required for fs-chmod command")
+		}
+		handleFsChmod(token, *baseURL, *spriteName, *dir, *fsPath, *fsMode, logger)
 		return
 	}
 
@@ -529,6 +622,351 @@ func handleCheckpointCommand(token, baseURL, spriteName string, args []string, l
 	}
 }
 
+// Filesystem command handlers
+
+func handleFsWrite(token, baseURL, spriteName, workingDir, path, content string, logger *Logger) {
+	logger.LogEvent("fs_write_start", map[string]interface{}{
+		"sprite": spriteName,
+		"path":   path,
+	})
+
+	client := sprites.New(token, sprites.WithBaseURL(baseURL))
+	sprite := client.Sprite(spriteName)
+
+	var fsys sprites.FS
+	if workingDir != "" {
+		fsys = sprite.FilesystemAt(workingDir)
+	} else {
+		fsys = sprite.Filesystem()
+	}
+
+	err := fsys.WriteFile(path, []byte(content), 0644)
+	if err != nil {
+		logger.LogEvent("fs_write_failed", map[string]interface{}{
+			"error": err.Error(),
+		})
+		log.Fatalf("Failed to write file: %v", err)
+	}
+
+	logger.LogEvent("fs_write_completed", map[string]interface{}{
+		"path": path,
+		"size": len(content),
+	})
+	fmt.Printf("Wrote %d bytes to %s\n", len(content), path)
+}
+
+func handleFsRead(token, baseURL, spriteName, workingDir, path string, logger *Logger) {
+	logger.LogEvent("fs_read_start", map[string]interface{}{
+		"sprite": spriteName,
+		"path":   path,
+	})
+
+	client := sprites.New(token, sprites.WithBaseURL(baseURL))
+	sprite := client.Sprite(spriteName)
+
+	var fsys sprites.FS
+	if workingDir != "" {
+		fsys = sprite.FilesystemAt(workingDir)
+	} else {
+		fsys = sprite.Filesystem()
+	}
+
+	data, err := fsys.ReadFile(path)
+	if err != nil {
+		logger.LogEvent("fs_read_failed", map[string]interface{}{
+			"error": err.Error(),
+		})
+		log.Fatalf("Failed to read file: %v", err)
+	}
+
+	logger.LogEvent("fs_read_completed", map[string]interface{}{
+		"path": path,
+		"size": len(data),
+	})
+	fmt.Print(string(data))
+}
+
+func handleFsList(token, baseURL, spriteName, workingDir, path string, logger *Logger) {
+	logger.LogEvent("fs_list_start", map[string]interface{}{
+		"sprite": spriteName,
+		"path":   path,
+	})
+
+	client := sprites.New(token, sprites.WithBaseURL(baseURL))
+	sprite := client.Sprite(spriteName)
+
+	var fsys sprites.FS
+	if workingDir != "" {
+		fsys = sprite.FilesystemAt(workingDir)
+	} else {
+		fsys = sprite.Filesystem()
+	}
+
+	entries, err := fsys.ReadDir(path)
+	if err != nil {
+		logger.LogEvent("fs_list_failed", map[string]interface{}{
+			"error": err.Error(),
+		})
+		log.Fatalf("Failed to list directory: %v", err)
+	}
+
+	// Build JSON output
+	type entryInfo struct {
+		Name  string `json:"name"`
+		IsDir bool   `json:"isDir"`
+		Mode  string `json:"mode"`
+		Size  int64  `json:"size,omitempty"`
+	}
+	var result []entryInfo
+	for _, e := range entries {
+		info, _ := e.Info()
+		entry := entryInfo{
+			Name:  e.Name(),
+			IsDir: e.IsDir(),
+			Mode:  fmt.Sprintf("%04o", info.Mode().Perm()),
+		}
+		if !e.IsDir() {
+			entry.Size = info.Size()
+		}
+		result = append(result, entry)
+	}
+
+	logger.LogEvent("fs_list_completed", map[string]interface{}{
+		"path":  path,
+		"count": len(entries),
+	})
+
+	output, _ := json.MarshalIndent(result, "", "  ")
+	fmt.Println(string(output))
+}
+
+func handleFsStat(token, baseURL, spriteName, workingDir, path string, logger *Logger) {
+	logger.LogEvent("fs_stat_start", map[string]interface{}{
+		"sprite": spriteName,
+		"path":   path,
+	})
+
+	client := sprites.New(token, sprites.WithBaseURL(baseURL))
+	sprite := client.Sprite(spriteName)
+
+	var fsys sprites.FS
+	if workingDir != "" {
+		fsys = sprite.FilesystemAt(workingDir)
+	} else {
+		fsys = sprite.Filesystem()
+	}
+
+	info, err := fsys.Stat(path)
+	if err != nil {
+		logger.LogEvent("fs_stat_failed", map[string]interface{}{
+			"error": err.Error(),
+		})
+		log.Fatalf("Failed to stat file: %v", err)
+	}
+
+	result := map[string]interface{}{
+		"name":    info.Name(),
+		"size":    info.Size(),
+		"mode":    fmt.Sprintf("%04o", info.Mode().Perm()),
+		"isDir":   info.IsDir(),
+		"modTime": info.ModTime().Format(time.RFC3339),
+	}
+
+	logger.LogEvent("fs_stat_completed", map[string]interface{}{
+		"path": path,
+	})
+
+	output, _ := json.MarshalIndent(result, "", "  ")
+	fmt.Println(string(output))
+}
+
+func handleFsMkdir(token, baseURL, spriteName, workingDir, path string, parents bool, logger *Logger) {
+	logger.LogEvent("fs_mkdir_start", map[string]interface{}{
+		"sprite":  spriteName,
+		"path":    path,
+		"parents": parents,
+	})
+
+	client := sprites.New(token, sprites.WithBaseURL(baseURL))
+	sprite := client.Sprite(spriteName)
+
+	var fsys sprites.FS
+	if workingDir != "" {
+		fsys = sprite.FilesystemAt(workingDir)
+	} else {
+		fsys = sprite.Filesystem()
+	}
+
+	var err error
+	if parents {
+		err = fsys.MkdirAll(path, 0755)
+	} else {
+		err = fsys.Mkdir(path, 0755)
+	}
+	if err != nil {
+		logger.LogEvent("fs_mkdir_failed", map[string]interface{}{
+			"error": err.Error(),
+		})
+		log.Fatalf("Failed to create directory: %v", err)
+	}
+
+	logger.LogEvent("fs_mkdir_completed", map[string]interface{}{
+		"path": path,
+	})
+	fmt.Printf("Created directory: %s\n", path)
+}
+
+func handleFsRm(token, baseURL, spriteName, workingDir, path string, recursive bool, logger *Logger) {
+	logger.LogEvent("fs_rm_start", map[string]interface{}{
+		"sprite":    spriteName,
+		"path":      path,
+		"recursive": recursive,
+	})
+
+	client := sprites.New(token, sprites.WithBaseURL(baseURL))
+	sprite := client.Sprite(spriteName)
+
+	var fsys sprites.FS
+	if workingDir != "" {
+		fsys = sprite.FilesystemAt(workingDir)
+	} else {
+		fsys = sprite.Filesystem()
+	}
+
+	var err error
+	if recursive {
+		err = fsys.RemoveAll(path)
+	} else {
+		err = fsys.Remove(path)
+	}
+	if err != nil {
+		logger.LogEvent("fs_rm_failed", map[string]interface{}{
+			"error": err.Error(),
+		})
+		log.Fatalf("Failed to remove: %v", err)
+	}
+
+	logger.LogEvent("fs_rm_completed", map[string]interface{}{
+		"path": path,
+	})
+	fmt.Printf("Removed: %s\n", path)
+}
+
+func handleFsRename(token, baseURL, spriteName, workingDir, oldPath, newPath string, logger *Logger) {
+	logger.LogEvent("fs_rename_start", map[string]interface{}{
+		"sprite":  spriteName,
+		"oldPath": oldPath,
+		"newPath": newPath,
+	})
+
+	client := sprites.New(token, sprites.WithBaseURL(baseURL))
+	sprite := client.Sprite(spriteName)
+
+	var fsys sprites.FS
+	if workingDir != "" {
+		fsys = sprite.FilesystemAt(workingDir)
+	} else {
+		fsys = sprite.Filesystem()
+	}
+
+	err := fsys.Rename(oldPath, newPath)
+	if err != nil {
+		logger.LogEvent("fs_rename_failed", map[string]interface{}{
+			"error": err.Error(),
+		})
+		log.Fatalf("Failed to rename: %v", err)
+	}
+
+	logger.LogEvent("fs_rename_completed", map[string]interface{}{
+		"oldPath": oldPath,
+		"newPath": newPath,
+	})
+	fmt.Printf("Renamed %s -> %s\n", oldPath, newPath)
+}
+
+func handleFsCopy(token, baseURL, spriteName, workingDir, src, dst string, logger *Logger) {
+	logger.LogEvent("fs_copy_start", map[string]interface{}{
+		"sprite": spriteName,
+		"src":    src,
+		"dst":    dst,
+	})
+
+	client := sprites.New(token, sprites.WithBaseURL(baseURL))
+	sprite := client.Sprite(spriteName)
+
+	var fsys sprites.FS
+	if workingDir != "" {
+		fsys = sprite.FilesystemAt(workingDir)
+	} else {
+		fsys = sprite.Filesystem()
+	}
+
+	err := fsys.Copy(src, dst)
+	if err != nil {
+		logger.LogEvent("fs_copy_failed", map[string]interface{}{
+			"error": err.Error(),
+		})
+		log.Fatalf("Failed to copy: %v", err)
+	}
+
+	logger.LogEvent("fs_copy_completed", map[string]interface{}{
+		"src": src,
+		"dst": dst,
+	})
+	fmt.Printf("Copied %s -> %s\n", src, dst)
+}
+
+func handleFsChmod(token, baseURL, spriteName, workingDir, path, modeStr string, logger *Logger) {
+	logger.LogEvent("fs_chmod_start", map[string]interface{}{
+		"sprite": spriteName,
+		"path":   path,
+		"mode":   modeStr,
+	})
+
+	client := sprites.New(token, sprites.WithBaseURL(baseURL))
+	sprite := client.Sprite(spriteName)
+
+	var fsys sprites.FS
+	if workingDir != "" {
+		fsys = sprite.FilesystemAt(workingDir)
+	} else {
+		fsys = sprite.Filesystem()
+	}
+
+	// Parse mode string (e.g., "0755" or "755")
+	mode, err := parseOctalMode(modeStr)
+	if err != nil {
+		log.Fatalf("Invalid mode: %v", err)
+	}
+
+	err = fsys.Chmod(path, mode)
+	if err != nil {
+		logger.LogEvent("fs_chmod_failed", map[string]interface{}{
+			"error": err.Error(),
+		})
+		log.Fatalf("Failed to chmod: %v", err)
+	}
+
+	logger.LogEvent("fs_chmod_completed", map[string]interface{}{
+		"path": path,
+		"mode": modeStr,
+	})
+	fmt.Printf("Changed mode of %s to %s\n", path, modeStr)
+}
+
+func parseOctalMode(s string) (os.FileMode, error) {
+	// Handle both "755" and "0755" formats
+	s = strings.TrimPrefix(s, "0")
+	if s == "" {
+		s = "0"
+	}
+	mode, err := strconv.ParseUint(s, 8, 32)
+	if err != nil {
+		return 0, fmt.Errorf("invalid octal mode: %s", s)
+	}
+	return os.FileMode(mode), nil
+}
+
 func showHelp() {
 	fmt.Println("Sprite SDK CLI")
 	fmt.Println("==============")
@@ -633,4 +1071,37 @@ func showHelp() {
 	fmt.Println("  checkpoint create [comment]           - Create a checkpoint")
 	fmt.Println("  checkpoint get <id>                   - Get checkpoint details")
 	fmt.Println("  checkpoint restore <id>               - Restore to a checkpoint")
+	fmt.Println()
+	fmt.Println("Filesystem Commands:")
+	fmt.Println("  fs-write -path <path> -content <text> - Write content to file")
+	fmt.Println("  fs-read -path <path>                  - Read file to stdout")
+	fmt.Println("  fs-list -path <path>                  - List directory (JSON output)")
+	fmt.Println("  fs-stat -path <path>                  - Get file info (JSON output)")
+	fmt.Println("  fs-mkdir -path <path> [-parents]      - Create directory")
+	fmt.Println("  fs-rm -path <path> [-recursive]       - Remove file/directory")
+	fmt.Println("  fs-rename -old <path> -new <path>     - Rename/move file")
+	fmt.Println("  fs-copy -src <path> -dst <path>       - Copy file/directory")
+	fmt.Println("  fs-chmod -path <path> -mode <mode>    - Change permissions (e.g., 0755)")
+	fmt.Println()
+	fmt.Println("Filesystem Examples:")
+	fmt.Println("  # Write a file")
+	fmt.Println("  test-cli -sprite mysprite fs-write -path /tmp/test.txt -content 'Hello World'")
+	fmt.Println()
+	fmt.Println("  # Read a file")
+	fmt.Println("  test-cli -sprite mysprite fs-read -path /tmp/test.txt")
+	fmt.Println()
+	fmt.Println("  # List directory")
+	fmt.Println("  test-cli -sprite mysprite fs-list -path /home/sprite")
+	fmt.Println()
+	fmt.Println("  # Create nested directories")
+	fmt.Println("  test-cli -sprite mysprite fs-mkdir -path /tmp/a/b/c -parents")
+	fmt.Println()
+	fmt.Println("  # Remove directory recursively")
+	fmt.Println("  test-cli -sprite mysprite fs-rm -path /tmp/mydir -recursive")
+	fmt.Println()
+	fmt.Println("  # Copy a file")
+	fmt.Println("  test-cli -sprite mysprite fs-copy -src /tmp/file.txt -dst /tmp/file_backup.txt")
+	fmt.Println()
+	fmt.Println("  # Change file permissions")
+	fmt.Println("  test-cli -sprite mysprite fs-chmod -path /tmp/script.sh -mode 0755")
 }
