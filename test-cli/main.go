@@ -119,6 +119,54 @@ func main() {
 		log.Fatal("Error: command is required")
 	}
 
+	// Parse filesystem flags from remaining args (since Go's flag package stops at first non-flag arg)
+	parseFsFlags := func(args []string) (path, content, old, new, src, dst, mode string, parents, recursive bool) {
+		for i := 0; i < len(args); i++ {
+			switch args[i] {
+			case "-path":
+				if i+1 < len(args) {
+					path = args[i+1]
+					i++
+				}
+			case "-content":
+				if i+1 < len(args) {
+					content = args[i+1]
+					i++
+				}
+			case "-old":
+				if i+1 < len(args) {
+					old = args[i+1]
+					i++
+				}
+			case "-new":
+				if i+1 < len(args) {
+					new = args[i+1]
+					i++
+				}
+			case "-src":
+				if i+1 < len(args) {
+					src = args[i+1]
+					i++
+				}
+			case "-dst":
+				if i+1 < len(args) {
+					dst = args[i+1]
+					i++
+				}
+			case "-mode":
+				if i+1 < len(args) {
+					mode = args[i+1]
+					i++
+				}
+			case "-parents":
+				parents = true
+			case "-recursive":
+				recursive = true
+			}
+		}
+		return
+	}
+
 	// Handle special commands that don't require a sprite
 	command := args[0]
 	switch command {
@@ -150,82 +198,137 @@ func main() {
 		if *spriteName == "" {
 			log.Fatal("Error: -sprite is required for fs-write command")
 		}
-		if *fsPath == "" {
+		fsPathVal, fsContentVal, _, _, _, _, _, _, _ := parseFsFlags(args[1:])
+		// Fall back to flag values if not in remaining args
+		if fsPathVal == "" {
+			fsPathVal = *fsPath
+		}
+		if fsContentVal == "" {
+			fsContentVal = *fsContent
+		}
+		if fsPathVal == "" {
 			log.Fatal("Error: -path is required for fs-write command")
 		}
-		handleFsWrite(token, *baseURL, *spriteName, *dir, *fsPath, *fsContent, logger)
+		handleFsWrite(token, *baseURL, *spriteName, *dir, fsPathVal, fsContentVal, logger)
 		return
 	case "fs-read":
 		if *spriteName == "" {
 			log.Fatal("Error: -sprite is required for fs-read command")
 		}
-		if *fsPath == "" {
+		fsPathVal, _, _, _, _, _, _, _, _ := parseFsFlags(args[1:])
+		if fsPathVal == "" {
+			fsPathVal = *fsPath
+		}
+		if fsPathVal == "" {
 			log.Fatal("Error: -path is required for fs-read command")
 		}
-		handleFsRead(token, *baseURL, *spriteName, *dir, *fsPath, logger)
+		handleFsRead(token, *baseURL, *spriteName, *dir, fsPathVal, logger)
 		return
 	case "fs-list":
 		if *spriteName == "" {
 			log.Fatal("Error: -sprite is required for fs-list command")
 		}
-		if *fsPath == "" {
+		fsPathVal, _, _, _, _, _, _, _, _ := parseFsFlags(args[1:])
+		if fsPathVal == "" {
+			fsPathVal = *fsPath
+		}
+		if fsPathVal == "" {
 			log.Fatal("Error: -path is required for fs-list command")
 		}
-		handleFsList(token, *baseURL, *spriteName, *dir, *fsPath, logger)
+		handleFsList(token, *baseURL, *spriteName, *dir, fsPathVal, logger)
 		return
 	case "fs-stat":
 		if *spriteName == "" {
 			log.Fatal("Error: -sprite is required for fs-stat command")
 		}
-		if *fsPath == "" {
+		fsPathVal, _, _, _, _, _, _, _, _ := parseFsFlags(args[1:])
+		if fsPathVal == "" {
+			fsPathVal = *fsPath
+		}
+		if fsPathVal == "" {
 			log.Fatal("Error: -path is required for fs-stat command")
 		}
-		handleFsStat(token, *baseURL, *spriteName, *dir, *fsPath, logger)
+		handleFsStat(token, *baseURL, *spriteName, *dir, fsPathVal, logger)
 		return
 	case "fs-mkdir":
 		if *spriteName == "" {
 			log.Fatal("Error: -sprite is required for fs-mkdir command")
 		}
-		if *fsPath == "" {
+		fsPathVal, _, _, _, _, _, _, fsParentsVal, _ := parseFsFlags(args[1:])
+		if fsPathVal == "" {
+			fsPathVal = *fsPath
+		}
+		if !fsParentsVal {
+			fsParentsVal = *fsParents
+		}
+		if fsPathVal == "" {
 			log.Fatal("Error: -path is required for fs-mkdir command")
 		}
-		handleFsMkdir(token, *baseURL, *spriteName, *dir, *fsPath, *fsParents, logger)
+		handleFsMkdir(token, *baseURL, *spriteName, *dir, fsPathVal, fsParentsVal, logger)
 		return
 	case "fs-rm":
 		if *spriteName == "" {
 			log.Fatal("Error: -sprite is required for fs-rm command")
 		}
-		if *fsPath == "" {
+		fsPathVal, _, _, _, _, _, _, _, fsRecursiveVal := parseFsFlags(args[1:])
+		if fsPathVal == "" {
+			fsPathVal = *fsPath
+		}
+		if !fsRecursiveVal {
+			fsRecursiveVal = *fsRecursive
+		}
+		if fsPathVal == "" {
 			log.Fatal("Error: -path is required for fs-rm command")
 		}
-		handleFsRm(token, *baseURL, *spriteName, *dir, *fsPath, *fsRecursive, logger)
+		handleFsRm(token, *baseURL, *spriteName, *dir, fsPathVal, fsRecursiveVal, logger)
 		return
 	case "fs-rename":
 		if *spriteName == "" {
 			log.Fatal("Error: -sprite is required for fs-rename command")
 		}
-		if *fsOld == "" || *fsNew == "" {
+		_, _, fsOldVal, fsNewVal, _, _, _, _, _ := parseFsFlags(args[1:])
+		if fsOldVal == "" {
+			fsOldVal = *fsOld
+		}
+		if fsNewVal == "" {
+			fsNewVal = *fsNew
+		}
+		if fsOldVal == "" || fsNewVal == "" {
 			log.Fatal("Error: -old and -new are required for fs-rename command")
 		}
-		handleFsRename(token, *baseURL, *spriteName, *dir, *fsOld, *fsNew, logger)
+		handleFsRename(token, *baseURL, *spriteName, *dir, fsOldVal, fsNewVal, logger)
 		return
 	case "fs-copy":
 		if *spriteName == "" {
 			log.Fatal("Error: -sprite is required for fs-copy command")
 		}
-		if *fsSrc == "" || *fsDst == "" {
+		_, _, _, _, fsSrcVal, fsDstVal, _, _, _ := parseFsFlags(args[1:])
+		if fsSrcVal == "" {
+			fsSrcVal = *fsSrc
+		}
+		if fsDstVal == "" {
+			fsDstVal = *fsDst
+		}
+		if fsSrcVal == "" || fsDstVal == "" {
 			log.Fatal("Error: -src and -dst are required for fs-copy command")
 		}
-		handleFsCopy(token, *baseURL, *spriteName, *dir, *fsSrc, *fsDst, logger)
+		handleFsCopy(token, *baseURL, *spriteName, *dir, fsSrcVal, fsDstVal, logger)
 		return
 	case "fs-chmod":
 		if *spriteName == "" {
 			log.Fatal("Error: -sprite is required for fs-chmod command")
 		}
-		if *fsPath == "" || *fsMode == "" {
+		fsPathVal, _, _, _, _, _, fsModeVal, _, _ := parseFsFlags(args[1:])
+		if fsPathVal == "" {
+			fsPathVal = *fsPath
+		}
+		if fsModeVal == "" {
+			fsModeVal = *fsMode
+		}
+		if fsPathVal == "" || fsModeVal == "" {
 			log.Fatal("Error: -path and -mode are required for fs-chmod command")
 		}
-		handleFsChmod(token, *baseURL, *spriteName, *dir, *fsPath, *fsMode, logger)
+		handleFsChmod(token, *baseURL, *spriteName, *dir, fsPathVal, fsModeVal, logger)
 		return
 	}
 
