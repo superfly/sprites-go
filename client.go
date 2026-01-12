@@ -119,10 +119,12 @@ func (c *Client) supportsPathAttach() bool {
 	return supportsPathAttach(c.SpriteVersion())
 }
 
-// FetchVersion makes a lightweight API call to capture the server version.
+// FetchVersion makes a lightweight API call to capture the sprite's version.
 // This is called automatically before attach operations if the version is unknown.
-func (c *Client) FetchVersion(ctx context.Context) error {
-	url := fmt.Sprintf("%s/v1/sprites", c.baseURL)
+// The spriteName parameter is required to route the request to the specific sprite,
+// since each sprite has its own version.
+func (c *Client) FetchVersion(ctx context.Context, spriteName string) error {
+	url := fmt.Sprintf("%s/v1/sprites/%s/exec", c.baseURL, spriteName)
 
 	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
 	if err != nil {
