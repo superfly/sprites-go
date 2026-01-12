@@ -24,11 +24,13 @@ func TestCmdString(t *testing.T) {
 
 func TestCmdBuildWebSocketURL(t *testing.T) {
 	tests := []struct {
-		name       string
-		spriteName string
-		cmd        *Cmd
-		wantPath   string
-		wantQuery  map[string][]string
+		name              string
+		spriteName        string
+		serverVersion     string
+		useLegacyEndpoint bool
+		cmd               *Cmd
+		wantPath          string
+		wantQuery         map[string][]string
 	}{
 		{
 			name:       "basic command",
@@ -121,12 +123,41 @@ func TestCmdBuildWebSocketURL(t *testing.T) {
 				"stdin": {"true"},
 			},
 		},
+		{
+			name:          "attach with path format (new servers)",
+			spriteName:    "my-sprite",
+			serverVersion: "0.1.0", // Release version supports path attach
+			cmd: &Cmd{
+				sessionID: "abc123",
+			},
+			wantPath: "/v1/sprites/my-sprite/exec/abc123",
+			wantQuery: map[string][]string{
+				"stdin": {"false"},
+			},
+		},
+		{
+			name:              "attach with query format (legacy servers)",
+			spriteName:        "my-sprite",
+			useLegacyEndpoint: true,
+			cmd: &Cmd{
+				sessionID: "abc123",
+			},
+			wantPath: "/v1/sprites/my-sprite/exec",
+			wantQuery: map[string][]string{
+				"id":    {"abc123"},
+				"stdin": {"false"},
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := New("test-token", WithBaseURL("http://localhost:8080"))
+			if tt.serverVersion != "" {
+				client.spriteVersion.Store(tt.serverVersion)
+			}
 			sprite := client.Sprite(tt.spriteName)
+			sprite.useLegacyExecEndpoint = tt.useLegacyEndpoint
 			tt.cmd.sprite = sprite
 
 			u, err := tt.cmd.buildWebSocketURL()

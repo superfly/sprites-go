@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 )
 
@@ -170,11 +171,11 @@ func (c *Cmd) Start() error {
 		}
 	}
 
-	// For attach operations, ensure we know the server version to select the right endpoint
+	// For attach operations, ensure we know the sprite's version to select the right endpoint
 	if c.sessionID != "" && c.sprite.client.SpriteVersion() == "" {
-		if err := c.sprite.client.FetchVersion(c.ctx); err != nil {
+		if err := c.sprite.client.FetchVersion(c.ctx, c.sprite.name); err != nil {
 			closeDescriptors(c.closers)
-			return fmt.Errorf("failed to fetch server version: %w", err)
+			return fmt.Errorf("failed to fetch sprite version: %w", err)
 		}
 	}
 
@@ -219,6 +220,43 @@ func (c *Cmd) Start() error {
 
 	// Start the WebSocket command
 	if err := c.wsCmd.Start(); err != nil {
+		// Check for 404 - sprite may need legacy endpoint format
+		if c.sessionID != "" && !c.sprite.useLegacyExecEndpoint && strings.Contains(err.Error(), "HTTP 404") {
+			// Mark sprite as requiring legacy format and force TTY mode
+			c.sprite.useLegacyExecEndpoint = true
+			c.tty = true
+
+			// Rebuild URL with legacy query parameter format
+			wsURL, err = c.buildWebSocketURL()
+			if err != nil {
+				closeDescriptors(c.closers)
+				return err
+			}
+
+			// Create new request and wsCmd for retry
+			req, err = http.NewRequestWithContext(c.ctx, "GET", wsURL.String(), nil)
+			if err != nil {
+				closeDescriptors(c.closers)
+				return err
+			}
+			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.sprite.client.token))
+
+			c.wsCmd = newWSCmdContext(c.ctx, req, c.Path, args...)
+			c.setupIO()
+			c.wsCmd.Tty = c.tty
+			c.wsCmd.IsAttach = true
+			if c.TextMessageHandler != nil {
+				c.wsCmd.TextMessageHandler = c.TextMessageHandler
+			}
+
+			// Retry with legacy endpoint
+			if retryErr := c.wsCmd.Start(); retryErr != nil {
+				closeDescriptors(c.closers)
+				return fmt.Errorf("failed to start sprite command: %w", retryErr)
+			}
+			return nil
+		}
+
 		closeDescriptors(c.closers)
 		return fmt.Errorf("failed to start sprite command: %w", err)
 	}
@@ -446,15 +484,16 @@ func (c *Cmd) buildWebSocketURL() (*url.URL, error) {
 	// Build query parameters
 	q := u.Query()
 
-	// Build path - endpoint format depends on server version for attach
+	// Build path - endpoint format depends on server version and cached preference
 	if c.sessionID != "" {
-		if c.sprite.client.supportsPathAttach() {
-			// New format: path parameter
-			u.Path = fmt.Sprintf("/v1/sprites/%s/exec/%s", c.sprite.name, c.sessionID)
-		} else {
+		// Use legacy format if sprite is known to require it, or if version doesn't support path attach
+		if c.sprite.useLegacyExecEndpoint || !c.sprite.client.supportsPathAttach() {
 			// Legacy format: query parameter
 			u.Path = fmt.Sprintf("/v1/sprites/%s/exec", c.sprite.name)
 			q.Set("id", c.sessionID)
+		} else {
+			// New format: path parameter (try first)
+			u.Path = fmt.Sprintf("/v1/sprites/%s/exec/%s", c.sprite.name, c.sessionID)
 		}
 	} else {
 		u.Path = fmt.Sprintf("/v1/sprites/%s/exec", c.sprite.name)
