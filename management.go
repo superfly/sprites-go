@@ -55,6 +55,10 @@ func (c *Client) CreateSpriteWithOrg(ctx context.Context, name string, config *S
 
 	// Check status code
 	if resp.StatusCode != http.StatusCreated {
+		// Parse structured error for 4xx/5xx responses
+		if apiErr := parseAPIError(resp, body); apiErr != nil {
+			return nil, apiErr
+		}
 		return nil, fmt.Errorf("failed to create sprite (status %d): %s", resp.StatusCode, string(body))
 	}
 
@@ -106,6 +110,10 @@ func (c *Client) GetSpriteWithOrg(ctx context.Context, name string, org *Organiz
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		// Parse structured error for 4xx/5xx responses
+		if apiErr := parseAPIError(resp, body); apiErr != nil {
+			return nil, apiErr
+		}
 		return nil, fmt.Errorf("failed to get sprite (status %d): %s", resp.StatusCode, string(body))
 	}
 
@@ -180,6 +188,10 @@ func (c *Client) ListSprites(ctx context.Context, opts *ListOptions) (*SpriteLis
 	// Check status
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		// Parse structured error for 4xx/5xx responses
+		if apiErr := parseAPIError(resp, body); apiErr != nil {
+			return nil, apiErr
+		}
 		return nil, fmt.Errorf("failed to list sprites (status %d): %s", resp.StatusCode, string(body))
 	}
 
@@ -271,6 +283,10 @@ func (c *Client) DeleteSprite(ctx context.Context, name string) error {
 	// Check status
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(resp.Body)
+		// Parse structured error for 4xx/5xx responses
+		if apiErr := parseAPIError(resp, body); apiErr != nil {
+			return apiErr
+		}
 		return fmt.Errorf("failed to delete sprite (status %d): %s", resp.StatusCode, string(body))
 	}
 
@@ -310,6 +326,10 @@ func (c *Client) UpgradeSprite(ctx context.Context, name string) error {
 	// Check status
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(resp.Body)
+		// Parse structured error for 4xx/5xx responses
+		if apiErr := parseAPIError(resp, body); apiErr != nil {
+			return apiErr
+		}
 		return fmt.Errorf("failed to upgrade sprite (status %d): %s", resp.StatusCode, string(body))
 	}
 
@@ -354,6 +374,10 @@ func (c *Client) UpdateURLSettings(ctx context.Context, spriteName string, setti
 	// Check status code
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		// Parse structured error for 4xx/5xx responses
+		if apiErr := parseAPIError(resp, body); apiErr != nil {
+			return apiErr
+		}
 		return fmt.Errorf("failed to update URL settings (status %d): %s", resp.StatusCode, string(body))
 	}
 

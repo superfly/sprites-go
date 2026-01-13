@@ -215,6 +215,10 @@ func CreateToken(ctx context.Context, flyMacaroon, orgSlug string, inviteCode st
 
 	// Check status
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		// Parse structured error for 4xx/5xx responses
+		if apiErr := parseAPIError(resp, body); apiErr != nil {
+			return "", apiErr
+		}
 		return "", fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
 	}
 
