@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -36,9 +37,10 @@ const (
 
 // ControlMessage represents control messages sent over the WebSocket
 type ControlMessage struct {
-	Type string `json:"type"`
-	Cols uint16 `json:"cols,omitempty"`
-	Rows uint16 `json:"rows,omitempty"`
+	Type   string `json:"type"`
+	Cols   uint16 `json:"cols,omitempty"`
+	Rows   uint16 `json:"rows,omitempty"`
+	Signal string `json:"signal,omitempty"`
 }
 
 // wsCmd represents a remote command execution via WebSocket
@@ -52,12 +54,14 @@ type wsCmd struct {
 	Dir            string
 	Tty            bool
 
-	ctx       context.Context
-	conn      *websocket.Conn
-	adapter   *wsAdapter
-	startChan chan error
-	exitChan  chan int
-	doneChan  chan struct{}
+	ctx          context.Context
+	conn         *websocket.Conn
+	adapter      *wsAdapter
+	startChan    chan error
+	exitChan     chan int
+	doneChan     chan struct{}
+	capabilities map[string]bool // Server capabilities from X-Sprite-Capabilities header
+	sessionID    string          // Session ID from session_info message
 
 	// IsAttach indicates this is attaching to an existing session.
 	// When true, the client waits for session_info to determine TTY mode.
@@ -154,6 +158,16 @@ func (c *wsCmd) start() {
 	}
 	c.conn = conn
 
+	// Parse capabilities from response header
+	c.capabilities = make(map[string]bool)
+	if resp != nil {
+		if caps := resp.Header.Get("X-Sprite-Capabilities"); caps != "" {
+			for _, cap := range strings.Split(caps, ",") {
+				c.capabilities[strings.TrimSpace(cap)] = true
+			}
+		}
+	}
+
 	// When attaching to an existing session, wait for session_info to determine TTY mode
 	if c.IsAttach {
 		if err := c.waitForSessionInfo(); err != nil {
@@ -196,11 +210,15 @@ func (c *wsCmd) waitForSessionInfo() error {
 
 		if msgType == websocket.TextMessage {
 			var info struct {
-				Type string `json:"type"`
-				TTY  bool   `json:"tty"`
+				Type      string `json:"type"`
+				TTY       bool   `json:"tty"`
+				SessionID int    `json:"session_id"`
 			}
 			if err := json.Unmarshal(data, &info); err == nil && info.Type == "session_info" {
 				c.Tty = info.TTY
+				if info.SessionID > 0 {
+					c.sessionID = fmt.Sprintf("%d", info.SessionID)
+				}
 				// Call text handler if set
 				if c.TextMessageHandler != nil {
 					c.TextMessageHandler(data)
@@ -295,6 +313,14 @@ func (c *wsCmd) runIO() {
 			case websocket.BinaryMessage:
 				stdout.Write(data)
 			case websocket.TextMessage:
+				// Parse session_info to capture session ID
+				var info struct {
+					Type      string `json:"type"`
+					SessionID int    `json:"session_id"`
+				}
+				if json.Unmarshal(data, &info) == nil && info.Type == "session_info" && info.SessionID > 0 {
+					c.sessionID = fmt.Sprintf("%d", info.SessionID)
+				}
 				// Handle control messages
 				if c.TextMessageHandler != nil {
 					c.TextMessageHandler(data)
@@ -349,6 +375,14 @@ func (c *wsCmd) runIO() {
 				return
 			}
 		case websocket.TextMessage:
+			// Parse session_info to capture session ID
+			var info struct {
+				Type      string `json:"type"`
+				SessionID int    `json:"session_id"`
+			}
+			if json.Unmarshal(data, &info) == nil && info.Type == "session_info" && info.SessionID > 0 {
+				c.sessionID = fmt.Sprintf("%d", info.SessionID)
+			}
 			// Handle control messages
 			if c.TextMessageHandler != nil {
 				c.TextMessageHandler(data)
@@ -404,6 +438,28 @@ func (c *wsCmd) Resize(width, height uint16) error {
 	}
 	msg := &ControlMessage{Type: "resize", Cols: width, Rows: height}
 	return c.adapter.WriteControl(msg)
+}
+
+// Signal sends a signal to the remote process
+func (c *wsCmd) Signal(signal string) error {
+	if c.adapter == nil {
+		return errors.New("websocket not connected")
+	}
+	msg := &ControlMessage{Type: "signal", Signal: signal}
+	return c.adapter.WriteControl(msg)
+}
+
+// HasCapability returns true if the server advertised the given capability
+func (c *wsCmd) HasCapability(cap string) bool {
+	if c.capabilities == nil {
+		return false
+	}
+	return c.capabilities[cap]
+}
+
+// SessionID returns the session ID from the session_info message
+func (c *wsCmd) SessionID() string {
+	return c.sessionID
 }
 
 // newWSAdapter creates a new WebSocket adapter

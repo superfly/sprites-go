@@ -463,6 +463,39 @@ func (c *Cmd) Resize(rows, cols uint16) error {
 	return c.wsCmd.Resize(cols, rows)
 }
 
+// Signal sends a signal to the remote process.
+// If the server supports WebSocket signals (advertised via X-Sprite-Capabilities header),
+// it sends the signal over the existing WebSocket connection. Otherwise, it falls back
+// to an HTTP POST request to the kill endpoint.
+// Valid signal names: INT, TERM, HUP, KILL, QUIT, USR1, USR2
+func (c *Cmd) Signal(signal string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.started {
+		return errors.New("sprite: Signal before process started")
+	}
+	if c.finished {
+		return errors.New("sprite: Signal after process finished")
+	}
+
+	// Use WebSocket if server supports it
+	if c.wsCmd.HasCapability("signal") {
+		return c.wsCmd.Signal(signal)
+	}
+
+	// Fall back to HTTP POST
+	// Use session ID from attach or from session_info message
+	sessID := c.sessionID
+	if sessID == "" {
+		sessID = c.wsCmd.SessionID()
+	}
+	if sessID == "" {
+		return errors.New("sprite: no session ID for HTTP signal fallback")
+	}
+	return c.sprite.client.signalSession(c.ctx, c.sprite.name, sessID, signal)
+}
+
 // ExitCode returns the exit code of the exited process, or -1
 // if the process hasn't exited or was terminated by a signal.
 func (c *Cmd) ExitCode() int {

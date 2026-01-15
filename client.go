@@ -236,3 +236,34 @@ func CreateToken(ctx context.Context, flyMacaroon, orgSlug string, inviteCode st
 
 	return tokenResp.Token, nil
 }
+
+// signalSession sends a signal to a session via HTTP POST.
+// This is used as a fallback when the server doesn't support WebSocket signals.
+func (c *Client) signalSession(ctx context.Context, spriteName, sessionID, signal string) error {
+	url := fmt.Sprintf("%s/v1/sprites/%s/exec/%s/kill?signal=%s&timeout=0s",
+		c.baseURL, spriteName, sessionID, signal)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send signal: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// 410 Gone means session already exited - not an error
+	if resp.StatusCode == http.StatusGone {
+		return nil
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("signal failed (status %d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	return nil
+}
