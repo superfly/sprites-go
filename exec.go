@@ -280,6 +280,9 @@ func (c *Cmd) Wait() error {
 	c.mu.Unlock()
 
 	// Wait for the command
+	if c.wsCmd == nil {
+		return errors.New("sprite: command not fully initialized")
+	}
 	err := c.wsCmd.Wait()
 
 	// Get exit code
@@ -427,6 +430,9 @@ func (c *Cmd) SetTTYSize(rows, cols uint16) error {
 
 	// If process is already started, resize the running terminal
 	if c.started && !c.finished {
+		if c.wsCmd == nil {
+			return errors.New("sprite: command not fully initialized")
+		}
 		return c.wsCmd.Resize(cols, rows)
 	}
 
@@ -449,6 +455,9 @@ func (c *Cmd) Resize(rows, cols uint16) error {
 	}
 	if c.finished {
 		return errors.New("sprite: Resize after process finished")
+	}
+	if c.wsCmd == nil {
+		return errors.New("sprite: command not fully initialized")
 	}
 
 	return c.wsCmd.Resize(cols, rows)
