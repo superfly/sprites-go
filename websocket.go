@@ -143,17 +143,20 @@ func (c *wsCmd) start() {
 	}
 	conn, resp, err := dialer.DialContext(c.ctx, c.Request.URL.String(), c.Request.Header)
 	if err != nil {
-		errMsg := fmt.Sprintf("failed to connect: %v", err)
+		// Check if we got an HTTP error response with a body we can parse
 		if resp != nil {
 			body, readErr := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if readErr == nil && len(body) > 0 {
-				errMsg = fmt.Sprintf("failed to connect: %v (HTTP %d: %s)", err, resp.StatusCode, string(body))
-			} else if readErr == nil {
-				errMsg = fmt.Sprintf("failed to connect: %v (HTTP %d)", err, resp.StatusCode)
+				// Try to parse as a structured API error
+				if apiErr := parseAPIError(resp, body); apiErr != nil {
+					c.startChan <- apiErr
+					return
+				}
 			}
 		}
-		c.startChan <- fmt.Errorf("%s", errMsg)
+		// Fall back to generic error
+		c.startChan <- fmt.Errorf("failed to connect: %w", err)
 		return
 	}
 	c.conn = conn

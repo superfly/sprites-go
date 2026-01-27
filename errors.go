@@ -38,6 +38,9 @@ type APIError struct {
 	// UpgradeAvailable indicates if an upgrade is available
 	UpgradeAvailable bool `json:"upgrade_available,omitempty"`
 
+	// UpgradeURL is the URL to upgrade the account (for rate limit errors)
+	UpgradeURL string `json:"upgrade_url,omitempty"`
+
 	// StatusCode is the HTTP status code (not from JSON, set by parser)
 	StatusCode int `json:"-"`
 
