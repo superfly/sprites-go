@@ -66,6 +66,7 @@ type activeForward struct {
 	id          uint64
 	mapping     ForwardMapping
 	socketPath  string
+	listenAddr  string
 }
 
 // ForwardInfo describes an established forward.
@@ -73,6 +74,7 @@ type ForwardInfo struct {
 	ForwardID  uint64
 	Mapping    ForwardMapping
 	SocketPath string // actual path inside the sprite
+	ListenAddr string // TCP address if relay is active (e.g., "localhost:25002")
 }
 
 // Forwards returns info about all established forwards.
@@ -86,6 +88,7 @@ func (fs *ForwardSession) Forwards() []ForwardInfo {
 			ForwardID:  fwd.id,
 			Mapping:    fwd.mapping,
 			SocketPath: fwd.socketPath,
+			ListenAddr: fwd.listenAddr,
 		})
 	}
 	return result
@@ -113,6 +116,7 @@ type ForwardInitResponse struct {
 	Success    bool   `json:"success"`
 	ForwardID  uint64 `json:"forward_id"`
 	SocketPath string `json:"socket_path"`
+	ListenAddr string `json:"listen_addr,omitempty"`
 	Error      string `json:"error,omitempty"`
 }
 
@@ -246,6 +250,7 @@ func (fs *ForwardSession) createForward(mapping ForwardMapping) error {
 		id:         resp.ForwardID,
 		mapping:    mapping,
 		socketPath: resp.SocketPath,
+		listenAddr: resp.ListenAddr,
 	}
 	fs.mu.Unlock()
 
