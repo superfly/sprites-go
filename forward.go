@@ -466,13 +466,20 @@ func (fs *ForwardSession) Close() error {
 		close(fs.closed)
 		fs.cancel()
 
-		// Close all channels
+		// Collect channels while holding the lock, then close without the lock
+		// to avoid deadlock with forwardChannel.close() which also acquires fs.mu
 		fs.mu.Lock()
+		channels := make([]*forwardChannel, 0, len(fs.channels))
 		for _, ch := range fs.channels {
-			ch.conn.Close()
+			channels = append(channels, ch)
 		}
 		fs.channels = make(map[uint64]*forwardChannel)
 		fs.mu.Unlock()
+
+		// Close connections without holding the lock
+		for _, ch := range channels {
+			ch.conn.Close()
+		}
 
 		// Close WebSocket
 		if fs.conn != nil {
