@@ -283,9 +283,9 @@ func (ch *forwardChannel) readLoop() {
 		}
 
 		if n > 0 {
-			// Send to sprite: [0x06][channelID:4 bytes BE][data]
+			// Send to sprite: [0x05][channelID:4 bytes BE][data]
 			msg := make([]byte, 5+n)
-			msg[0] = 0x06
+			msg[0] = 0x05
 			binary.BigEndian.PutUint32(msg[1:5], uint32(ch.id))
 			copy(msg[5:], buf[:n])
 
@@ -350,8 +350,8 @@ func (fs *ForwardSession) readLoop() {
 			fs.handleTextMessage(data)
 
 		case websocket.BinaryMessage:
-			// Data from sprite: [0x06][channelID:4 bytes BE][data]
-			if len(data) < 5 || data[0] != 0x06 {
+			// Data from sprite: [0x05][channelID:4 bytes BE][data]
+			if len(data) < 5 || data[0] != 0x05 {
 				continue
 			}
 			channelID := uint64(binary.BigEndian.Uint32(data[1:5]))

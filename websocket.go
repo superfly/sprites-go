@@ -26,7 +26,6 @@ const (
 	StreamStderr   StreamID = 2
 	StreamExit     StreamID = 3
 	StreamStdinEOF StreamID = 4
-	StreamSSHAgent StreamID = 5 // SSH agent protocol messages (bidirectional)
 )
 
 // WebSocket keepalive timeouts
@@ -70,11 +69,6 @@ type wsCmd struct {
 
 	// TextMessageHandler is called when text messages are received over the WebSocket
 	TextMessageHandler func([]byte)
-
-	// SSHAgentMessageHandler is called when SSH agent messages are received.
-	// The handler should forward these to the local SSH agent and return responses
-	// using WriteSSHAgent.
-	SSHAgentMessageHandler func([]byte)
 }
 
 // wsAdapter wraps a WebSocket connection for terminal communication
@@ -320,14 +314,7 @@ func (c *wsCmd) runIO() {
 			conn.SetReadDeadline(time.Now().Add(wsPongWait))
 			switch messageType {
 			case websocket.BinaryMessage:
-				// Check for SSH agent message (stream prefix 0x05)
-				if len(data) > 1 && data[0] == byte(StreamSSHAgent) {
-					if c.SSHAgentMessageHandler != nil {
-						c.SSHAgentMessageHandler(data[1:])
-					}
-				} else {
-					stdout.Write(data)
-				}
+				stdout.Write(data)
 			case websocket.TextMessage:
 				// Parse session_info to capture session ID
 				var info struct {
@@ -389,10 +376,6 @@ func (c *wsCmd) runIO() {
 				}
 				adapter.Close()
 				return
-			case StreamSSHAgent:
-				if c.SSHAgentMessageHandler != nil {
-					c.SSHAgentMessageHandler(payload)
-				}
 			}
 		case websocket.TextMessage:
 			// Parse session_info to capture session ID
@@ -467,28 +450,6 @@ func (c *wsCmd) Signal(signal string) error {
 	}
 	msg := &ControlMessage{Type: "signal", Signal: signal}
 	return c.adapter.WriteControl(msg)
-}
-
-// WriteSSHAgent sends an SSH agent message to the server
-func (c *wsCmd) WriteSSHAgent(data []byte) error {
-	if c.adapter == nil {
-		return errors.New("websocket not connected")
-	}
-	return c.adapter.WriteSSHAgent(data)
-}
-
-// WriteText sends a text message (JSON) to the server
-func (c *wsCmd) WriteText(data []byte) error {
-	if c.adapter == nil {
-		return errors.New("websocket not connected")
-	}
-	result := make(chan error, 1)
-	select {
-	case c.adapter.writeChan <- writeRequest{messageType: websocket.TextMessage, data: data, result: result}:
-		return <-result
-	case <-c.adapter.done:
-		return errors.New("adapter closed")
-	}
 }
 
 // HasCapability returns true if the server advertised the given capability
@@ -575,14 +536,6 @@ func (a *wsAdapter) WriteStream(stream StreamID, data []byte) error {
 	}
 	msg := make([]byte, len(data)+1)
 	msg[0] = byte(stream)
-	copy(msg[1:], data)
-	return a.WriteRaw(msg)
-}
-
-// WriteSSHAgent writes SSH agent data with the stream prefix (always prefixed, even in PTY mode)
-func (a *wsAdapter) WriteSSHAgent(data []byte) error {
-	msg := make([]byte, len(data)+1)
-	msg[0] = byte(StreamSSHAgent)
 	copy(msg[1:], data)
 	return a.WriteRaw(msg)
 }

@@ -106,11 +106,6 @@ type Cmd struct {
 	//         }
 	//     }
 	TextMessageHandler func([]byte)
-
-	// SSHAgentMessageHandler is called when SSH agent messages are received from the server.
-	// The handler should forward these to the local SSH agent and send responses back
-	// using WriteSSHAgent.
-	SSHAgentMessageHandler func([]byte)
 }
 
 // ttySize represents terminal dimensions
@@ -218,11 +213,6 @@ func (c *Cmd) Start() error {
 		c.wsCmd.TextMessageHandler = c.TextMessageHandler
 	}
 
-	// Set SSH agent message handler if provided
-	if c.SSHAgentMessageHandler != nil {
-		c.wsCmd.SSHAgentMessageHandler = c.SSHAgentMessageHandler
-	}
-
 	// Start goroutines for pipe handling
 	for _, fn := range c.goroutines {
 		go fn()
@@ -257,9 +247,6 @@ func (c *Cmd) Start() error {
 			c.wsCmd.IsAttach = true
 			if c.TextMessageHandler != nil {
 				c.wsCmd.TextMessageHandler = c.TextMessageHandler
-			}
-			if c.SSHAgentMessageHandler != nil {
-				c.wsCmd.SSHAgentMessageHandler = c.SSHAgentMessageHandler
 			}
 
 			// Retry with legacy endpoint
@@ -519,42 +506,6 @@ func (c *Cmd) ExitCode() int {
 		return -1
 	}
 	return c.exitCode
-}
-
-// WriteSSHAgent sends an SSH agent message to the server.
-// This is used to send responses from the local SSH agent back to the sprite.
-func (c *Cmd) WriteSSHAgent(data []byte) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if !c.started {
-		return errors.New("sprite: WriteSSHAgent before process started")
-	}
-	if c.finished {
-		return errors.New("sprite: WriteSSHAgent after process finished")
-	}
-	if c.wsCmd == nil {
-		return errors.New("sprite: command not fully initialized")
-	}
-	return c.wsCmd.WriteSSHAgent(data)
-}
-
-// WriteText sends a text (JSON) message to the server.
-// This is used for sending control messages like SSH agent approval responses.
-func (c *Cmd) WriteText(data []byte) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if !c.started {
-		return errors.New("sprite: WriteText before process started")
-	}
-	if c.finished {
-		return errors.New("sprite: WriteText after process finished")
-	}
-	if c.wsCmd == nil {
-		return errors.New("sprite: command not fully initialized")
-	}
-	return c.wsCmd.WriteText(data)
 }
 
 // buildWebSocketURL constructs the WebSocket URL for the exec endpoint
