@@ -58,7 +58,7 @@ func (c *Client) ListSessions(ctx context.Context, spriteName string) ([]*Sessio
 	for _, s := range sessionsRaw {
 		if sessionMap, ok := s.(map[string]interface{}); ok {
 			session := &Session{
-				ID:      fmt.Sprintf("%v", sessionMap["id"]),
+				ID:      fmt.Sprintf("%v", sessionMap["pid"]),
 				Command: fmt.Sprintf("%v", sessionMap["command"]),
 			}
 

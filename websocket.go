@@ -215,12 +215,12 @@ func (c *wsCmd) waitForSessionInfo() error {
 			var info struct {
 				Type      string `json:"type"`
 				TTY       bool   `json:"tty"`
-				SessionID int    `json:"session_id"`
+				SessionID string `json:"session_id"`
 			}
 			if err := json.Unmarshal(data, &info); err == nil && info.Type == "session_info" {
 				c.Tty = info.TTY
-				if info.SessionID > 0 {
-					c.sessionID = fmt.Sprintf("%d", info.SessionID)
+				if info.SessionID != "" {
+					c.sessionID = info.SessionID
 				}
 				// Call text handler if set
 				if c.TextMessageHandler != nil {
@@ -319,10 +319,10 @@ func (c *wsCmd) runIO() {
 				// Parse session_info to capture session ID
 				var info struct {
 					Type      string `json:"type"`
-					SessionID int    `json:"session_id"`
+					SessionID string `json:"session_id"`
 				}
-				if json.Unmarshal(data, &info) == nil && info.Type == "session_info" && info.SessionID > 0 {
-					c.sessionID = fmt.Sprintf("%d", info.SessionID)
+				if json.Unmarshal(data, &info) == nil && info.Type == "session_info" && info.SessionID != "" {
+					c.sessionID = info.SessionID
 				}
 				// Handle control messages
 				if c.TextMessageHandler != nil {
@@ -381,10 +381,10 @@ func (c *wsCmd) runIO() {
 			// Parse session_info to capture session ID
 			var info struct {
 				Type      string `json:"type"`
-				SessionID int    `json:"session_id"`
+				SessionID string `json:"session_id"`
 			}
-			if json.Unmarshal(data, &info) == nil && info.Type == "session_info" && info.SessionID > 0 {
-				c.sessionID = fmt.Sprintf("%d", info.SessionID)
+			if json.Unmarshal(data, &info) == nil && info.Type == "session_info" && info.SessionID != "" {
+				c.sessionID = info.SessionID
 			}
 			// Handle control messages
 			if c.TextMessageHandler != nil {
