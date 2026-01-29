@@ -66,7 +66,7 @@ type SpriteList struct {
 
 // Session represents an execution session
 type Session struct {
-	ID             string     `json:"pid"` // Process ID (as string for API compatibility)
+	ID             string     `json:"id"`
 	Command        string     `json:"command"`
 	Workdir        string     `json:"workdir"`
 	Created        time.Time  `json:"created"`
