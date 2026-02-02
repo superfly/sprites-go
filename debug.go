@@ -19,3 +19,11 @@ func dbg(msg string, args ...any) {
 		slog.Default().Debug(msg, args...)
 	}
 }
+
+// SetDebug enables or disables SDK debug logging.
+// When enabled, debug messages are written via slog.Default().
+// This allows the calling application to control SDK debug output
+// programmatically (e.g., when a CLI debug flag is set).
+func SetDebug(enabled bool) {
+	sdkDebug.Store(enabled)
+}
