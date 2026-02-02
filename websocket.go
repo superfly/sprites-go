@@ -413,19 +413,41 @@ func (c *wsCmd) runIO() {
 			switch messageType {
 			case websocket.BinaryMessage:
 				stdout.Write(data)
-			case websocket.TextMessage:
-				// Parse session_info to capture session ID
-				var info struct {
-					Type      string `json:"type"`
-					SessionID string `json:"session_id"`
+		case websocket.TextMessage:
+			// Check for control messages on control connections
+			if len(data) >= len("control:") && string(data[:len("control:")]) == "control:" {
+				dbg("sprites: pty received control message", "data", string(data))
+				continue
+			}
+			// Parse message type
+			var msg struct {
+				Type      string `json:"type"`
+				SessionID string `json:"session_id,omitempty"`
+				ExitCode  int    `json:"exit_code,omitempty"`
+			}
+			if json.Unmarshal(data, &msg) == nil {
+				dbg("sprites: pty received text message", "type", msg.Type, "data", string(data))
+				switch msg.Type {
+				case "session_info":
+					if msg.SessionID != "" {
+						c.sessionID = msg.SessionID
+					}
+				case "exit":
+					dbg("sprites: pty exit", "code", msg.ExitCode)
+					select {
+					case c.exitChan <- msg.ExitCode:
+					default:
+					}
+					adapter.Close()
+					return
 				}
-				if json.Unmarshal(data, &info) == nil && info.Type == "session_info" && info.SessionID != "" {
-					c.sessionID = info.SessionID
-				}
-				// Handle text messages (e.g., port notifications)
-				if c.TextMessageHandler != nil {
-					c.TextMessageHandler(data)
-				}
+			} else {
+				dbg("sprites: pty received non-json text message", "data", string(data))
+			}
+			// Handle text messages (e.g., port notifications)
+			if c.TextMessageHandler != nil {
+				c.TextMessageHandler(data)
+			}
 			}
 		}
 	}
@@ -466,16 +488,33 @@ func (c *wsCmd) runIO() {
 		case websocket.TextMessage:
 			// Ignore server control frames
 			if len(data) >= len("control:") && string(data[:len("control:")]) == "control:" {
-				// ignore control envelope; completion is observed via exit stream
+				dbg("sprites: non-pty received control message", "data", string(data))
 				continue
 			}
-			// Parse session_info to capture session ID
-			var info struct {
+			// Parse message type
+			var msg struct {
 				Type      string `json:"type"`
-				SessionID string `json:"session_id"`
+				SessionID string `json:"session_id,omitempty"`
+				ExitCode  int    `json:"exit_code,omitempty"`
 			}
-			if json.Unmarshal(data, &info) == nil && info.Type == "session_info" && info.SessionID != "" {
-				c.sessionID = info.SessionID
+			if json.Unmarshal(data, &msg) == nil {
+				dbg("sprites: non-pty received text message", "type", msg.Type, "data", string(data))
+				switch msg.Type {
+				case "session_info":
+					if msg.SessionID != "" {
+						c.sessionID = msg.SessionID
+					}
+				case "exit":
+					dbg("sprites: non-pty exit", "code", msg.ExitCode)
+					select {
+					case c.exitChan <- msg.ExitCode:
+					default:
+					}
+					adapter.Close()
+					return
+				}
+			} else {
+				dbg("sprites: non-pty received non-json text message", "data", string(data))
 			}
 			// Handle text messages (e.g., port notifications)
 			if c.TextMessageHandler != nil {
