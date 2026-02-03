@@ -53,6 +53,7 @@ type wsCmd struct {
 	Env            []string
 	Dir            string
 	Tty            bool
+	CellSync       bool // Request cell-sync mode
 
 	ctx          context.Context
 	conn         *websocket.Conn
@@ -62,6 +63,11 @@ type wsCmd struct {
 	doneChan     chan struct{}
 	capabilities map[string]bool // Server capabilities from X-Sprite-Capabilities header
 	sessionID    string          // Session ID from session_info message
+	isCellSync   bool            // True if cell-sync mode was negotiated
+
+	// Cell-sync session state (when isCellSync is true)
+	cellSyncSession *CellSyncSession
+	cellSyncHandler func(*ScreenSnapshot) // Called when screen is updated
 
 	// IsAttach indicates this is attaching to an existing session.
 	// When true, the client waits for session_info to determine TTY mode.
@@ -141,7 +147,14 @@ func (c *wsCmd) start() {
 	if c.Request.URL.Scheme == "wss" {
 		dialer.TLSClientConfig = &tls.Config{}
 	}
-	conn, resp, err := dialer.DialContext(c.ctx, c.Request.URL.String(), c.Request.Header)
+
+	// Add cell-sync Accept header if requested
+	headers := c.Request.Header.Clone()
+	if c.CellSync && c.Tty {
+		headers.Set("Accept", CellSyncMIMEType)
+	}
+
+	conn, resp, err := dialer.DialContext(c.ctx, c.Request.URL.String(), headers)
 	if err != nil {
 		// Check if we got an HTTP error response with a body we can parse
 		if resp != nil {
@@ -167,6 +180,15 @@ func (c *wsCmd) start() {
 		if caps := resp.Header.Get("X-Sprite-Capabilities"); caps != "" {
 			for _, cap := range strings.Split(caps, ",") {
 				c.capabilities[strings.TrimSpace(cap)] = true
+			}
+		}
+
+		// Check if cell-sync was confirmed via Content-Type
+		if c.CellSync && c.Tty {
+			contentType := resp.Header.Get("Content-Type")
+			if strings.Contains(contentType, CellSyncMIMEType) {
+				c.isCellSync = true
+				c.cellSyncSession = NewCellSyncSession()
 			}
 		}
 	}
@@ -280,9 +302,17 @@ func (c *wsCmd) runIO() {
 	}
 
 	if c.Tty {
-		// PTY mode - handle raw I/O
-		if c.Stdin != nil {
-			go io.Copy(adapter, c.Stdin)
+		// PTY mode - handle raw I/O or cell-sync
+		if c.isCellSync {
+			// Cell-sync mode - convert stdin to INPUT frames
+			if c.Stdin != nil {
+				go c.cellSyncStdinLoop(adapter)
+			}
+		} else {
+			// Raw PTY mode
+			if c.Stdin != nil {
+				go io.Copy(adapter, c.Stdin)
+			}
 		}
 
 		for {
@@ -314,7 +344,13 @@ func (c *wsCmd) runIO() {
 			conn.SetReadDeadline(time.Now().Add(wsPongWait))
 			switch messageType {
 			case websocket.BinaryMessage:
-				stdout.Write(data)
+				if c.isCellSync {
+					// Cell-sync mode - decode frames
+					c.handleCellSyncFrame(data, adapter)
+				} else {
+					// Raw PTY mode - pass through
+					stdout.Write(data)
+				}
 			case websocket.TextMessage:
 				// Parse session_info to capture session ID
 				var info struct {
@@ -463,6 +499,91 @@ func (c *wsCmd) HasCapability(cap string) bool {
 // SessionID returns the session ID from the session_info message
 func (c *wsCmd) SessionID() string {
 	return c.sessionID
+}
+
+// IsCellSync returns true if cell-sync mode was successfully negotiated
+func (c *wsCmd) IsCellSync() bool {
+	return c.isCellSync
+}
+
+// GetCellSyncSession returns the cell-sync session for direct access
+func (c *wsCmd) GetCellSyncSession() *CellSyncSession {
+	return c.cellSyncSession
+}
+
+// SetCellSyncHandler sets a callback for screen updates in cell-sync mode
+func (c *wsCmd) SetCellSyncHandler(handler func(*ScreenSnapshot)) {
+	c.cellSyncHandler = handler
+}
+
+// SendCellSyncInput sends a key event in cell-sync mode
+func (c *wsCmd) SendCellSyncInput(event KeyEvent) error {
+	if !c.isCellSync || c.adapter == nil {
+		return errors.New("not in cell-sync mode")
+	}
+	return c.adapter.WriteRaw(EncodeInput(event))
+}
+
+// SendCellSyncAck sends an ACK for a received epoch
+func (c *wsCmd) SendCellSyncAck(epoch uint32) error {
+	if !c.isCellSync || c.adapter == nil {
+		return errors.New("not in cell-sync mode")
+	}
+	return c.adapter.WriteRaw(EncodeAck(epoch))
+}
+
+// cellSyncStdinLoop reads from stdin and sends INPUT frames
+func (c *wsCmd) cellSyncStdinLoop(adapter *wsAdapter) {
+	buf := make([]byte, 256)
+	for {
+		n, err := c.Stdin.Read(buf)
+		if err != nil {
+			return
+		}
+		if n > 0 {
+			// Send each byte as a separate key event for proper handling
+			// In practice, we could batch printable ASCII, but for correctness
+			// we send individual events
+			for i := 0; i < n; i++ {
+				event := c.cellSyncSession.MakeKeyEvent(buf[i:i+1], 0)
+				if err := adapter.WriteRaw(EncodeInput(event)); err != nil {
+					return
+				}
+			}
+		}
+	}
+}
+
+// handleCellSyncFrame processes a cell-sync binary frame
+func (c *wsCmd) handleCellSyncFrame(data []byte, adapter *wsAdapter) {
+	if len(data) < FrameHeaderSize {
+		return
+	}
+
+	frame, err := DecodeFrame(data)
+	if err != nil {
+		slog.Default().Debug("cell-sync frame decode error", "error", err)
+		return
+	}
+
+	// Process the frame
+	updated, err := c.cellSyncSession.HandleFrame(frame)
+	if err != nil {
+		slog.Default().Debug("cell-sync frame handle error", "error", err)
+		return
+	}
+
+	// Send ACK for INIT, DIFF, and OPS frames
+	if frame.Type == FrameInit || frame.Type == FrameDiff || frame.Type == FrameOps {
+		if ackErr := adapter.WriteRaw(EncodeAck(frame.Epoch)); ackErr != nil {
+			slog.Default().Debug("cell-sync ack error", "error", ackErr)
+		}
+	}
+
+	// Notify handler if screen was updated
+	if updated && c.cellSyncHandler != nil {
+		c.cellSyncHandler(c.cellSyncSession.GetScreen())
+	}
 }
 
 // newWSAdapter creates a new WebSocket adapter

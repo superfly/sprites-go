@@ -77,6 +77,9 @@ type Cmd struct {
 	tty     bool
 	ttySize *ttySize
 
+	// Cell-sync mode (mosh-like screen synchronization)
+	cellSync bool
+
 	// Session management
 	sessionID   string
 	controlMode bool
@@ -204,8 +207,9 @@ func (c *Cmd) Start() error {
 	// Set up I/O
 	c.setupIO()
 
-	// Set TTY mode and attach flag
+	// Set TTY mode, cell-sync, and attach flag
 	c.wsCmd.Tty = c.tty
+	c.wsCmd.CellSync = c.cellSync
 	c.wsCmd.IsAttach = c.sessionID != ""
 
 	// Set text message handler if provided
@@ -244,6 +248,7 @@ func (c *Cmd) Start() error {
 			c.wsCmd = newWSCmdContext(c.ctx, req, c.Path, args...)
 			c.setupIO()
 			c.wsCmd.Tty = c.tty
+			c.wsCmd.CellSync = c.cellSync
 			c.wsCmd.IsAttach = true
 			if c.TextMessageHandler != nil {
 				c.wsCmd.TextMessageHandler = c.TextMessageHandler
@@ -415,6 +420,67 @@ func (c *Cmd) SetTTY(enable bool) {
 		panic("sprite: SetTTY after process started")
 	}
 	c.tty = enable
+}
+
+// SetCellSync enables or disables cell-sync mode for the command.
+// Cell-sync provides mosh-like screen state synchronization instead of raw byte streaming.
+// This mode is only effective when TTY mode is also enabled.
+// When enabled, the client receives screen state diffs instead of raw terminal output.
+func (c *Cmd) SetCellSync(enable bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.started {
+		panic("sprite: SetCellSync after process started")
+	}
+	c.cellSync = enable
+}
+
+// IsCellSync returns true if cell-sync mode was negotiated successfully.
+// This should only be called after Start() returns.
+func (c *Cmd) IsCellSync() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.wsCmd != nil {
+		return c.wsCmd.IsCellSync()
+	}
+	return false
+}
+
+// SetCellSyncHandler sets a callback for screen updates in cell-sync mode.
+// The handler is called whenever the screen state is updated.
+// This should be called before Start().
+func (c *Cmd) SetCellSyncHandler(handler func(*ScreenSnapshot)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.started && c.wsCmd != nil {
+		c.wsCmd.SetCellSyncHandler(handler)
+	}
+}
+
+// GetCellSyncSession returns the cell-sync session for direct access.
+// Returns nil if not in cell-sync mode.
+func (c *Cmd) GetCellSyncSession() *CellSyncSession {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.wsCmd != nil {
+		return c.wsCmd.GetCellSyncSession()
+	}
+	return nil
+}
+
+// SendCellSyncInput sends a key event in cell-sync mode.
+func (c *Cmd) SendCellSyncInput(event KeyEvent) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.wsCmd != nil {
+		return c.wsCmd.SendCellSyncInput(event)
+	}
+	return nil
 }
 
 // SetTTYSize sets the terminal size for TTY mode.
