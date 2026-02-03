@@ -434,6 +434,10 @@ func (c *wsCmd) runIO() {
 					}
 				case "exit":
 					dbg("sprites: pty exit", "code", msg.ExitCode)
+					// Call handler first so CLI can detect clean exit
+					if c.TextMessageHandler != nil {
+						c.TextMessageHandler(data)
+					}
 					select {
 					case c.exitChan <- msg.ExitCode:
 					default:
@@ -506,6 +510,10 @@ func (c *wsCmd) runIO() {
 					}
 				case "exit":
 					dbg("sprites: non-pty exit", "code", msg.ExitCode)
+					// Call handler first so CLI can detect clean exit
+					if c.TextMessageHandler != nil {
+						c.TextMessageHandler(data)
+					}
 					select {
 					case c.exitChan <- msg.ExitCode:
 					default:
