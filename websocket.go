@@ -64,8 +64,12 @@ type wsCmd struct {
 	sessionID    string          // Session ID from session_info message
 
 	// IsAttach indicates this is attaching to an existing session.
-	// When true, the client waits for session_info to determine TTY mode.
+	// When true and using control, the client waits for session_info to determine TTY mode.
+	// When true and not using control, the caller's Tty is used and session_info is consumed in runIO.
 	IsAttach bool
+
+	// AttachSessionID is the session ID to attach to (for control connections)
+	AttachSessionID string
 
 	// TextMessageHandler is called when text messages are received over the WebSocket
 	TextMessageHandler func([]byte)
@@ -177,6 +181,10 @@ func (c *wsCmd) start() {
 			if c.Stdin != nil {
 				args["stdin"] = "true"
 			}
+			// For attach operations, include the session ID
+			if c.AttachSessionID != "" {
+				args["id"] = c.AttachSessionID
+			}
 			// Construct control envelope
 			env := map[string]interface{}{
 				"type": "op.start",
@@ -237,8 +245,10 @@ func (c *wsCmd) start() {
 		}
 	}
 
-	// When attaching to an existing session, wait for session_info to determine TTY mode
-	if c.IsAttach {
+	// When attaching via control connection, wait for session_info to determine TTY mode.
+	// When attaching via direct WebSocket (no control), skip the wait so we match legacy
+	// behavior: use the caller's Tty and let runIO consume session_info in the read loop.
+	if c.IsAttach && c.usingControl && c.controlConn != nil {
 		if err := c.waitForSessionInfo(); err != nil {
 			c.startChan <- fmt.Errorf("failed to get session info: %w", err)
 			conn.Close()
@@ -282,23 +292,49 @@ func (c *wsCmd) start() {
 // waitForSessionInfo reads messages until it receives the session_info message,
 // then sets the Tty field based on the session's TTY mode.
 func (c *wsCmd) waitForSessionInfo() error {
+	dbg("sprites: waitForSessionInfo starting", "usingControl", c.usingControl)
 	// Set a timeout for receiving session_info
-	c.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	defer c.conn.SetReadDeadline(time.Time{})
+	ctx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
+	defer cancel()
+
+	// For non-control connections, also set read deadline on the websocket
+	if !c.usingControl {
+		c.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		defer c.conn.SetReadDeadline(time.Time{})
+	}
 
 	for {
-		msgType, data, err := c.conn.ReadMessage()
-		if err != nil {
-			return fmt.Errorf("reading session info: %w", err)
+		var msgType int
+		var data []byte
+		var err error
+
+		if c.usingControl && c.controlConn != nil {
+			// For control connections, read from readCh (the readLoop feeds it)
+			select {
+			case msg := <-c.controlConn.readCh:
+				msgType = msg.MessageType
+				data = msg.Data
+			case <-ctx.Done():
+				dbg("sprites: waitForSessionInfo timeout (no session_info received)")
+				return fmt.Errorf("timeout waiting for session_info")
+			}
+		} else {
+			// Direct websocket read
+			msgType, data, err = c.conn.ReadMessage()
+			if err != nil {
+				return fmt.Errorf("reading session info: %w", err)
+			}
 		}
 
 		if msgType == websocket.TextMessage {
+			dbg("sprites: waitForSessionInfo received text", "data", string(data))
 			var info struct {
 				Type      string `json:"type"`
 				TTY       bool   `json:"tty"`
 				SessionID string `json:"session_id"`
 			}
 			if err := json.Unmarshal(data, &info); err == nil && info.Type == "session_info" {
+				dbg("sprites: waitForSessionInfo got session_info", "tty", info.TTY, "session_id", info.SessionID)
 				c.Tty = info.TTY
 				if info.SessionID != "" {
 					c.sessionID = info.SessionID
@@ -313,9 +349,11 @@ func (c *wsCmd) waitForSessionInfo() error {
 			if c.TextMessageHandler != nil {
 				c.TextMessageHandler(data)
 			}
+		} else {
+			dbg("sprites: waitForSessionInfo received binary", "len", len(data))
 		}
-		// Ignore binary messages during this phase - they're historical output
-		// that will be replayed; we need the session_info first to know how to parse them
+		// Binary messages during this phase are historical output that will be
+		// replayed; we need the session_info first to know how to parse them
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"sync"
 	"time"
 
@@ -15,7 +16,13 @@ import (
 )
 
 const (
-	maxPoolSize     = 10
+	// maxPoolSize is a sanity cap; checkout fails if pool is full
+	maxPoolSize = 100
+	// poolDrainThreshold: when checkin and size > this, drain idle conns
+	poolDrainThreshold = 20
+	// poolDrainTarget: drain down to this many conns when draining
+	poolDrainTarget = 10
+
 	dialTimeout     = 5 * time.Second
 	keepAliveWindow = 30 * time.Second
 )
@@ -53,7 +60,7 @@ func newControlPool(client *Client, spriteName string) *controlPool {
 	return &controlPool{
 		client:     client,
 		spriteName: spriteName,
-		conns:      make([]*controlConn, 0, maxPoolSize),
+		conns:      make([]*controlConn, 0, 32),
 	}
 }
 
@@ -89,7 +96,7 @@ func (p *controlPool) checkout(ctx context.Context) (*controlConn, error) {
 		conn.mu.Unlock()
 	}
 
-	// No idle connections, create a new one if under limit
+	// No idle connections, create a new one if under sanity limit
 	if len(p.conns) < maxPoolSize {
 		conn, err := p.dial(ctx)
 		if err != nil {
@@ -101,21 +108,76 @@ func (p *controlPool) checkout(ctx context.Context) (*controlConn, error) {
 		return conn, nil
 	}
 
-	return nil, fmt.Errorf("no available connections in pool")
+	return nil, fmt.Errorf("no available connections in pool (at cap %d)", maxPoolSize)
 }
 
-// checkin returns a connection to the pool
+// checkin returns a connection to the pool and may drain idle conns if pool is large
 func (p *controlPool) checkin(conn *controlConn) {
 	if conn == nil {
 		return
 	}
 
 	conn.mu.Lock()
-	defer conn.mu.Unlock()
-
 	conn.busy = false
 	conn.lastUsed = time.Now()
+	conn.mu.Unlock()
+
 	dbg("sprites: checkin control conn", "sprite", p.spriteName, "idle_at", conn.lastUsed.Unix())
+
+	p.mu.Lock()
+	p.tryDrainLocked()
+	p.mu.Unlock()
+}
+
+// tryDrainLocked removes idle connections when the pool is large and idle.
+// Caller must hold p.mu.
+func (p *controlPool) tryDrainLocked() {
+	if p.closed || len(p.conns) <= poolDrainThreshold {
+		return
+	}
+	type idleConn struct {
+		conn     *controlConn
+		lastUsed time.Time
+	}
+	var idles []idleConn
+	for _, c := range p.conns {
+		c.mu.Lock()
+		if !c.busy {
+			select {
+			case <-c.closedCh:
+				c.mu.Unlock()
+				continue
+			default:
+			}
+			idles = append(idles, idleConn{conn: c, lastUsed: c.lastUsed})
+		}
+		c.mu.Unlock()
+	}
+	toClose := len(p.conns) - poolDrainTarget
+	if toClose <= 0 || len(idles) == 0 {
+		return
+	}
+	if toClose > len(idles) {
+		toClose = len(idles)
+	}
+	sort.Slice(idles, func(i, j int) bool { return idles[i].lastUsed.Before(idles[j].lastUsed) })
+	closeSet := make(map[*controlConn]bool, toClose)
+	for i := 0; i < toClose; i++ {
+		closeSet[idles[i].conn] = true
+	}
+	for _, c := range p.conns {
+		if closeSet[c] {
+			c.close()
+		}
+	}
+	newConns := make([]*controlConn, 0, len(p.conns)-toClose)
+	for _, c := range p.conns {
+		if !closeSet[c] {
+			newConns = append(newConns, c)
+		}
+	}
+	p.conns = newConns
+	dbg("sprites: drained control pool", "sprite", p.spriteName, "pool_size", len(p.conns))
 }
 
 // dial creates a new control WebSocket connection

@@ -245,6 +245,7 @@ func (c *Cmd) Start() error {
 	// Set TTY mode and attach flag
 	c.wsCmd.Tty = c.tty
 	c.wsCmd.IsAttach = c.sessionID != ""
+	c.wsCmd.AttachSessionID = c.sessionID
 
 	// Set environment and directory
 	c.wsCmd.Env = c.Env
