@@ -60,6 +60,7 @@ type wsCmd struct {
 	startChan    chan error
 	exitChan     chan int
 	doneChan     chan struct{}
+	receivedExit bool            // true if we received an exit code from server
 	capabilities map[string]bool // Server capabilities from X-Sprite-Capabilities header
 	sessionID    string          // Session ID from session_info message
 
@@ -367,6 +368,7 @@ func (c *wsCmd) runIO() {
 			case StreamStderr:
 				stderr.Write(payload)
 			case StreamExit:
+				c.receivedExit = true
 				if len(payload) > 0 {
 					code := int(payload[0])
 					select {
@@ -394,8 +396,11 @@ func (c *wsCmd) runIO() {
 	}
 }
 
-// ExitCode returns the exit code, or -1 if unknown
+// ExitCode returns the exit code, or -1 if we never received one from the server
 func (c *wsCmd) ExitCode() int {
+	if !c.receivedExit {
+		return -1
+	}
 	select {
 	case code := <-c.exitChan:
 		select {
@@ -404,10 +409,8 @@ func (c *wsCmd) ExitCode() int {
 		}
 		return code
 	default:
-		if c.IsDone() {
-			return 0
-		}
-		return -1
+		// receivedExit is true but exitChan is empty - exit code was 0
+		return 0
 	}
 }
 
