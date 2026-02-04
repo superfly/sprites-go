@@ -312,8 +312,12 @@ func (c *Cmd) Wait() error {
 	// Determine final error
 	if err != nil {
 		c.waitErr = err
-	} else if c.exitCode != 0 {
+	} else if c.exitCode >= 0 && c.exitCode != 0 {
+		// Only return ExitError when we have a known exit code from the server
 		c.waitErr = &ExitError{Code: c.exitCode}
+	} else if c.exitCode == -1 {
+		// Exit code -1 means we never received an exit code - connection was lost
+		c.waitErr = errors.New("connection closed")
 	} else if copyError != nil {
 		c.waitErr = copyError
 	}
