@@ -4,14 +4,226 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
+
+const (
+	proxyCloseDeadline = 1 * time.Second
+)
+
+// proxyConn wraps a WebSocket connection and implements [net.Conn].
+type proxyConn struct {
+	conn       *websocket.Conn
+	remoteAddr *proxyAddr
+	closeOnce  sync.Once
+	closed     chan struct{}
+
+	readReader io.Reader // current message reader
+	readMu     sync.Mutex
+	writeMu    sync.Mutex
+}
+
+// proxyAddr implements [net.Addr].
+type proxyAddr struct {
+	network string
+	address string
+}
+
+func (a *proxyAddr) Network() string {
+	return a.network
+}
+
+func (a *proxyAddr) String() string {
+	return a.address
+}
+
+func (conn *proxyConn) Read(p []byte) (n int, err error) {
+	conn.readMu.Lock()
+	defer conn.readMu.Unlock()
+
+	for {
+		// if we have a reader, read from it
+		if conn.readReader != nil {
+			n, err = conn.readReader.Read(p)
+			if err == io.EOF {
+				conn.readReader = nil
+				continue
+			}
+			return n, err
+		}
+
+		messageType, reader, err := conn.conn.NextReader()
+		if err != nil {
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				return 0, io.EOF
+			}
+			return 0, err
+		}
+		// only handle binary messages
+		if messageType != websocket.BinaryMessage {
+			continue
+		}
+
+		conn.readReader = reader
+	}
+}
+
+func (conn *proxyConn) Write(p []byte) (n int, err error) {
+	conn.writeMu.Lock()
+	defer conn.writeMu.Unlock()
+
+	select {
+	case <-conn.closed:
+		return 0, net.ErrClosed
+	default:
+	}
+
+	err = conn.conn.WriteMessage(websocket.BinaryMessage, p)
+	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (conn *proxyConn) Close() error {
+	var closeErr error
+	conn.closeOnce.Do(func() {
+		close(conn.closed)
+
+		// send close message with deadline
+		deadline := time.Now().Add(proxyCloseDeadline)
+		conn.conn.SetWriteDeadline(deadline)
+		conn.conn.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+			deadline,
+		)
+		closeErr = conn.conn.Close()
+	})
+	return closeErr
+}
+
+func (conn *proxyConn) LocalAddr() net.Addr {
+	// there is no local address, return nil
+	return nil
+}
+func (conn *proxyConn) RemoteAddr() net.Addr {
+	return conn.remoteAddr
+}
+
+func (conn *proxyConn) SetDeadline(t time.Time) error {
+	if err := conn.SetReadDeadline(t); err != nil {
+		return err
+	}
+	return conn.SetWriteDeadline(t)
+}
+func (conn *proxyConn) SetReadDeadline(t time.Time) error {
+	return conn.conn.SetReadDeadline(t)
+}
+func (conn *proxyConn) SetWriteDeadline(t time.Time) error {
+	return conn.conn.SetWriteDeadline(t)
+}
+
+// ProxySocket establishes a proxied connection to a port on a sprite.
+//
+// The only known network is "tcp".
+func (c *Client) ProxySocket(ctx context.Context, network, spriteName, addr string) (net.Conn, error) {
+	switch network {
+	case "tcp":
+		return c.proxySocketTCP(ctx, spriteName, addr)
+	default:
+		return nil, fmt.Errorf("unsupported network type %q", network)
+	}
+}
+
+// proxySocketTCP establishes a tunneled TCP connection directly to a service
+// running on a sprite.
+func (c *Client) proxySocketTCP(ctx context.Context, spriteName, addr string) (net.Conn, error) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid address %q: %w", addr, err)
+	}
+
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil || port < 1 {
+		return nil, fmt.Errorf("invalid port in address %q: must be 1-65535", addr)
+	}
+
+	// Build WebSocket URL for proxy
+	wsURL, err := c.buildProxyURL(spriteName)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set up WebSocket dialer
+	dialer := &websocket.Dialer{
+		ReadBufferSize:  1024 * 1024, // 1MB
+		WriteBufferSize: 1024 * 1024, // 1MB
+	}
+
+	// Add TLS config if needed
+	if wsURL.Scheme == "wss" {
+		dialer.TLSClientConfig = &tls.Config{
+			InsecureSkipVerify: false,
+		}
+	}
+
+	// Set headers including auth
+	header := http.Header{}
+	header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
+	header.Set("User-Agent", "sprites-go-sdk/1.0")
+
+	// Connect to WebSocket
+	wsConn, _, err := dialer.DialContext(ctx, wsURL.String(), header)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect: %w", err)
+	}
+
+	// Send initialization message
+	// Use specified RemoteHost if provided, otherwise default to "localhost"
+	if host == "" {
+		host = "localhost"
+	}
+	initMsg := ProxyInitMessage{
+		Host: host,
+		Port: int(port),
+	}
+
+	if err := wsConn.WriteJSON(&initMsg); err != nil {
+		wsConn.Close()
+		return nil, fmt.Errorf("failed to send init message: %w", err)
+	}
+
+	// Read response
+	var response ProxyResponseMessage
+	if err := wsConn.ReadJSON(&response); err != nil {
+		wsConn.Close()
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if response.Status != "connected" {
+		wsConn.Close()
+		return nil, fmt.Errorf("proxy connection failed: %s", response.Status)
+	}
+
+	return &proxyConn{
+		remoteAddr: &proxyAddr{
+			network: "tcp",
+			address: response.Target,
+		},
+		conn:   wsConn,
+		closed: make(chan struct{}),
+	}, nil
+}
 
 // ProxySession represents an active port proxy session
 type ProxySession struct {
@@ -20,7 +232,6 @@ type ProxySession struct {
 	RemoteHost string // Optional: specific host to connect to (e.g., "10.0.0.1", "fdf::1"). Defaults to "localhost" if empty.
 
 	listener  net.Listener
-	conn      *websocket.Conn
 	ctx       context.Context
 	cancel    context.CancelFunc
 	closeOnce sync.Once
@@ -116,6 +327,11 @@ func (c *Client) createProxySession(ctx context.Context, spriteName string, mapp
 	return session, nil
 }
 
+// ProxySocket establishes a proxied connection to a port on this sprite
+func (s *Sprite) ProxySocket(ctx context.Context, network, addr string) (net.Conn, error) {
+	return s.client.ProxySocket(ctx, network, s.name, addr)
+}
+
 // ProxyPort creates a proxy session for a single port on this sprite
 func (s *Sprite) ProxyPort(ctx context.Context, localPort, remotePort int) (*ProxySession, error) {
 	return s.client.ProxyPort(ctx, s.name, localPort, remotePort)
@@ -161,119 +377,50 @@ func (ps *ProxySession) acceptLoop() {
 func (ps *ProxySession) handleConnection(localConn net.Conn) {
 	defer localConn.Close()
 
-	// Build WebSocket URL for proxy
-	wsURL, err := ps.buildProxyURL()
+	addr := fmt.Sprintf("%s:%d", ps.RemoteHost, ps.RemotePort)
+	remoteConn, err := ps.client.ProxySocket(ps.ctx, "tcp", ps.spriteName, addr)
 	if err != nil {
+		slog.Default().Debug("Proxy connection failed",
+			"sprite", ps.spriteName,
+			"error", err,
+		)
 		return
 	}
-
-	// Set up WebSocket dialer
-	dialer := &websocket.Dialer{
-		ReadBufferSize:  1024 * 1024, // 1MB
-		WriteBufferSize: 1024 * 1024, // 1MB
-	}
-
-	// Add TLS config if needed
-	if wsURL.Scheme == "wss" {
-		dialer.TLSClientConfig = &tls.Config{
-			InsecureSkipVerify: false,
-		}
-	}
-
-	// Set headers including auth
-	header := http.Header{}
-	header.Set("Authorization", fmt.Sprintf("Bearer %s", ps.client.token))
-	header.Set("User-Agent", "sprites-go-sdk/1.0")
-
-	// Connect to WebSocket
-	wsConn, _, err := dialer.DialContext(ps.ctx, wsURL.String(), header)
-	if err != nil {
-		return
-	}
-	defer wsConn.Close()
-
-	// Send initialization message
-	// Use specified RemoteHost if provided, otherwise default to "localhost"
-	host := ps.RemoteHost
-	if host == "" {
-		host = "localhost"
-	}
-	initMsg := ProxyInitMessage{
-		Host: host,
-		Port: ps.RemotePort,
-	}
-
-	if err := wsConn.WriteJSON(&initMsg); err != nil {
-		return
-	}
-
-	// Read response
-	var response ProxyResponseMessage
-	if err := wsConn.ReadJSON(&response); err != nil {
-		return
-	}
-
-	if response.Status != "connected" {
-		return
-	}
+	defer remoteConn.Close()
 
 	// Log established proxy connection with resolved target
 	slog.Default().Debug("Proxy connection established",
 		"sprite", ps.spriteName,
 		"local", localConn.LocalAddr().String(),
-		"remote_host", host,
+		"remote_host", ps.RemoteHost,
 		"remote_port", ps.RemotePort,
-		"target", response.Target,
+		"target", remoteConn.RemoteAddr(),
 	)
 
 	// Start bidirectional copy
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// Copy from local to WebSocket
+	// Copy from local to remote
 	go func() {
 		defer wg.Done()
-		defer wsConn.Close()
-
-		buffer := make([]byte, 32*1024) // 32KB buffer
-		for {
-			n, err := localConn.Read(buffer)
-			if err != nil {
-				return
-			}
-
-			if err := wsConn.WriteMessage(websocket.BinaryMessage, buffer[:n]); err != nil {
-				return
-			}
-		}
+		defer remoteConn.Close()
+		io.Copy(remoteConn, localConn)
 	}()
 
-	// Copy from WebSocket to local
+	// Copy from remote to local
 	go func() {
 		defer wg.Done()
 		defer localConn.Close()
-
-		for {
-			messageType, data, err := wsConn.ReadMessage()
-			if err != nil {
-				return
-			}
-
-			// Only forward binary messages
-			if messageType == websocket.BinaryMessage {
-				if _, err := localConn.Write(data); err != nil {
-					return
-				}
-			}
-		}
+		io.Copy(localConn, remoteConn)
 	}()
 
 	wg.Wait()
 }
 
 // buildProxyURL builds the WebSocket URL for the proxy endpoint
-func (ps *ProxySession) buildProxyURL() (*url.URL, error) {
-	baseURL := ps.client.baseURL
+func (c *Client) buildProxyURL(spriteName string) (*url.URL, error) {
+	baseURL := c.baseURL
 
 	// Convert HTTP(S) to WS(S)
 	if baseURL[:4] == "http" {
@@ -287,7 +434,7 @@ func (ps *ProxySession) buildProxyURL() (*url.URL, error) {
 	}
 
 	// Build path
-	u.Path = fmt.Sprintf("/v1/sprites/%s/proxy", ps.spriteName)
+	u.Path = fmt.Sprintf("/v1/sprites/%s/proxy", spriteName)
 
 	return u, nil
 }
@@ -300,10 +447,6 @@ func (ps *ProxySession) Close() error {
 
 		if ps.listener != nil {
 			ps.listener.Close()
-		}
-
-		if ps.conn != nil {
-			ps.conn.Close()
 		}
 	})
 
