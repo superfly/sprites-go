@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -28,6 +31,10 @@ type ProxySession struct {
 
 	client     *Client
 	spriteName string
+
+	// fatalErr is set when a fatal error occurs (e.g., 404, 401, 403)
+	fatalErr   error
+	fatalErrMu sync.Mutex
 }
 
 // PortMapping represents a local to remote port mapping
@@ -75,8 +82,46 @@ func (c *Client) ProxyPorts(ctx context.Context, spriteName string, mappings []P
 	return sessions, nil
 }
 
+// checkSpriteAccessible verifies the sprite is reachable before starting a proxy.
+// This catches wrong org, wrong sprite name, and auth issues early.
+func (c *Client) checkSpriteAccessible(ctx context.Context, spriteName string) error {
+	url := fmt.Sprintf("%s/v1/sprites/%s/exec", c.baseURL, spriteName)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to reach sprite: %w", err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return nil
+	case http.StatusUnauthorized:
+		return fmt.Errorf("unauthorized - check your API token")
+	case http.StatusForbidden:
+		return fmt.Errorf("forbidden - you don't have access to this sprite")
+	case http.StatusNotFound:
+		return fmt.Errorf("sprite %q not found - check sprite name and organization", spriteName)
+	default:
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(body))
+	}
+}
+
 // createProxySession creates a single proxy session
 func (c *Client) createProxySession(ctx context.Context, spriteName string, mapping PortMapping) (*ProxySession, error) {
+	// Preflight check: verify sprite is accessible before starting local listener
+	// This catches wrong org, wrong sprite name, auth issues early
+	if err := c.checkSpriteAccessible(ctx, spriteName); err != nil {
+		return nil, fmt.Errorf("sprite not accessible: %w", err)
+	}
+
 	// Start local listener
 	listener, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", mapping.LocalPort))
 	if err != nil {
@@ -152,20 +197,59 @@ func (ps *ProxySession) acceptLoop() {
 			}
 		}
 
-		// Handle connection in goroutine
-		go ps.handleConnection(conn)
+		// Handle connection synchronously to detect fatal errors on first connection
+		fatalErr := ps.handleConnection(conn)
+		if fatalErr != nil {
+			ps.setFatalError(fatalErr)
+			slog.Default().Error("Fatal proxy error, closing session", "error", fatalErr)
+			return
+		}
 	}
 }
 
-// handleConnection handles a single proxy connection
-func (ps *ProxySession) handleConnection(localConn net.Conn) {
-	defer localConn.Close()
+// setFatalError records a fatal error
+func (ps *ProxySession) setFatalError(err error) {
+	ps.fatalErrMu.Lock()
+	defer ps.fatalErrMu.Unlock()
+	if ps.fatalErr == nil {
+		ps.fatalErr = err
+	}
+}
+
+// Err returns the fatal error if one occurred
+func (ps *ProxySession) Err() error {
+	ps.fatalErrMu.Lock()
+	defer ps.fatalErrMu.Unlock()
+	return ps.fatalErr
+}
+
+// resetConnection closes a connection with TCP RST to simulate connection refused
+func resetConnection(conn net.Conn) {
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetLinger(0) // Send RST on close
+	}
+	conn.Close()
+}
+
+// handleConnection handles a single proxy connection.
+// Returns a non-nil error for fatal errors (e.g., 404, 401, 403) that should close the session.
+func (ps *ProxySession) handleConnection(localConn net.Conn) error {
+	// Don't defer close here - we'll handle it explicitly to choose between clean close and RST
+
+	slog.Default().Debug("Handling new proxy connection",
+		"sprite", ps.spriteName,
+		"remote_port", ps.RemotePort,
+	)
 
 	// Build WebSocket URL for proxy
 	wsURL, err := ps.buildProxyURL()
 	if err != nil {
-		return
+		slog.Default().Debug("Failed to build proxy URL", "error", err)
+		resetConnection(localConn)
+		return nil // Not a fatal error
 	}
+
+	slog.Default().Debug("Dialing WebSocket", "url", wsURL.String())
 
 	// Set up WebSocket dialer
 	dialer := &websocket.Dialer{
@@ -186,11 +270,24 @@ func (ps *ProxySession) handleConnection(localConn net.Conn) {
 	header.Set("User-Agent", "sprites-go-sdk/1.0")
 
 	// Connect to WebSocket
-	wsConn, _, err := dialer.DialContext(ps.ctx, wsURL.String(), header)
+	wsConn, resp, err := dialer.DialContext(ps.ctx, wsURL.String(), header)
 	if err != nil {
-		return
+		if resp != nil {
+			slog.Default().Debug("WebSocket dial failed", "error", err, "status", resp.StatusCode)
+			// Fatal errors: 401 (unauthorized), 403 (forbidden), 404 (not found)
+			if resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 404 {
+				resetConnection(localConn)
+				return fmt.Errorf("proxy connection failed: HTTP %d - %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+			}
+		} else {
+			slog.Default().Debug("WebSocket dial failed", "error", err)
+		}
+		resetConnection(localConn)
+		return nil // Transient error, keep listening
 	}
 	defer wsConn.Close()
+
+	slog.Default().Debug("WebSocket connected, sending init message")
 
 	// Send initialization message
 	// Use specified RemoteHost if provided, otherwise default to "localhost"
@@ -204,17 +301,32 @@ func (ps *ProxySession) handleConnection(localConn net.Conn) {
 	}
 
 	if err := wsConn.WriteJSON(&initMsg); err != nil {
-		return
+		slog.Default().Debug("Failed to send init message", "error", err)
+		resetConnection(localConn)
+		return nil
 	}
+
+	slog.Default().Debug("Init message sent, reading response")
 
 	// Read response
 	var response ProxyResponseMessage
 	if err := wsConn.ReadJSON(&response); err != nil {
-		return
+		slog.Default().Debug("Failed to read response", "error", err)
+		// User-friendly warning with color (yellow) and timestamp
+		timestamp := time.Now().Format("15:04:05")
+		fmt.Fprintf(os.Stderr, "[%s] \033[33mWarning:\033[0m Connection to port %d failed: %v\n", timestamp, ps.RemotePort, err)
+		resetConnection(localConn)
+		return nil
 	}
 
+	slog.Default().Debug("Got proxy response", "status", response.Status, "target", response.Target)
+
 	if response.Status != "connected" {
-		return
+		slog.Default().Debug("Proxy not connected", "status", response.Status)
+		timestamp := time.Now().Format("15:04:05")
+		fmt.Fprintf(os.Stderr, "[%s] \033[33mWarning:\033[0m Connection to port %d failed: %s\n", timestamp, ps.RemotePort, response.Status)
+		resetConnection(localConn)
+		return nil
 	}
 
 	// Log established proxy connection with resolved target
@@ -269,6 +381,7 @@ func (ps *ProxySession) handleConnection(localConn net.Conn) {
 	}()
 
 	wg.Wait()
+	return nil // Connection handled successfully
 }
 
 // buildProxyURL builds the WebSocket URL for the proxy endpoint
