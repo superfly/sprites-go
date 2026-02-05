@@ -65,11 +65,22 @@ type wsCmd struct {
 	sessionID    string          // Session ID from session_info message
 
 	// IsAttach indicates this is attaching to an existing session.
-	// When true, the client waits for session_info to determine TTY mode.
+	// When true and using control, the client waits for session_info to determine TTY mode.
+	// When true and not using control, the caller's Tty is used and session_info is consumed in runIO.
 	IsAttach bool
+
+	// AttachSessionID is the session ID to attach to (for control connections)
+	AttachSessionID string
 
 	// TextMessageHandler is called when text messages are received over the WebSocket
 	TextMessageHandler func([]byte)
+
+	// existingConn allows reusing an existing WebSocket connection (for control connections)
+	existingConn *websocket.Conn
+	// usingControl indicates if this is using a control connection
+	usingControl bool
+	// controlConn is the control connection wrapper (for reading from readCh)
+	controlConn *controlConn
 }
 
 // wsAdapter wraps a WebSocket connection for terminal communication
@@ -134,32 +145,95 @@ func (c *wsCmd) Start() error {
 
 func (c *wsCmd) start() {
 	defer close(c.doneChan)
-	dialer := websocket.DefaultDialer
-	dialer.HandshakeTimeout = 10 * time.Second
-	dialer.ReadBufferSize = 1024 * 1024
-	dialer.WriteBufferSize = 1024 * 1024
 
-	if c.Request.URL.Scheme == "wss" {
-		dialer.TLSClientConfig = &tls.Config{}
-	}
-	conn, resp, err := dialer.DialContext(c.ctx, c.Request.URL.String(), c.Request.Header)
-	if err != nil {
-		// Check if we got an HTTP error response with a body we can parse
-		if resp != nil {
-			body, readErr := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if readErr == nil && len(body) > 0 {
-				// Try to parse as a structured API error
-				if apiErr := parseAPIError(resp, body); apiErr != nil {
-					c.startChan <- apiErr
-					return
+	var conn *websocket.Conn
+	var resp *http.Response
+	var err error
+
+	// Use existing connection if provided (for control connections)
+	if c.existingConn != nil {
+		conn = c.existingConn
+
+		// Send operation start message for control connections
+		if c.usingControl {
+			// Build args map using strings to match server url.Values conversion
+			args := map[string]interface{}{}
+			if len(c.Args) > 0 {
+				arr := make([]interface{}, len(c.Args))
+				for i, v := range c.Args {
+					arr[i] = v
 				}
+				args["cmd"] = arr
+				args["path"] = c.Path
+			}
+			if len(c.Env) > 0 {
+				env := make([]interface{}, len(c.Env))
+				for i, v := range c.Env {
+					env[i] = v
+				}
+				args["env"] = env
+			}
+			if c.Dir != "" {
+				args["dir"] = c.Dir
+			}
+			if c.Tty {
+				args["tty"] = "true"
+			}
+			if c.Stdin != nil {
+				args["stdin"] = "true"
+			}
+			// For attach operations, include the session ID
+			if c.AttachSessionID != "" {
+				args["id"] = c.AttachSessionID
+			}
+			// Construct control envelope
+			env := map[string]interface{}{
+				"type": "op.start",
+				"op":   "exec",
+				"args": args,
+			}
+			b, _ := json.Marshal(env)
+			payload := append([]byte("control:"), b...)
+			dbg("sprites: sending control op.start", "args_len", len(b))
+			if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+				c.startChan <- fmt.Errorf("failed to send operation start message: %w", err)
+				return
 			}
 		}
-		// Fall back to generic error
-		c.startChan <- fmt.Errorf("failed to connect: %w", err)
-		return
+	} else {
+		// Dial new connection (legacy direct WebSocket path)
+		dialer := websocket.DefaultDialer
+		dialer.HandshakeTimeout = 10 * time.Second
+		dialer.ReadBufferSize = 1024 * 1024
+		dialer.WriteBufferSize = 1024 * 1024
+
+		if c.Request.URL.Scheme == "wss" {
+			dialer.TLSClientConfig = &tls.Config{}
+		}
+		conn, resp, err = dialer.DialContext(c.ctx, c.Request.URL.String(), c.Request.Header)
+		if err != nil {
+			// Check if we got an HTTP error response with a body we can parse
+			if resp != nil {
+				body, readErr := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if readErr == nil && len(body) > 0 {
+					// Try to parse as a structured API error
+					if apiErr := parseAPIError(resp, body); apiErr != nil {
+						c.startChan <- apiErr
+						return
+					}
+				}
+			}
+			// Fall back to generic error with HTTP status if available
+			errMsg := fmt.Sprintf("failed to connect: %v", err)
+			if resp != nil {
+				errMsg = fmt.Sprintf("failed to connect: %v (HTTP %d)", err, resp.StatusCode)
+			}
+			c.startChan <- fmt.Errorf("%s", errMsg)
+			return
+		}
 	}
+
 	c.conn = conn
 
 	// Parse capabilities from response header
@@ -172,8 +246,10 @@ func (c *wsCmd) start() {
 		}
 	}
 
-	// When attaching to an existing session, wait for session_info to determine TTY mode
-	if c.IsAttach {
+	// When attaching via control connection, wait for session_info to determine TTY mode.
+	// When attaching via direct WebSocket (no control), skip the wait so we match legacy
+	// behavior: use the caller's Tty and let runIO consume session_info in the read loop.
+	if c.IsAttach && c.usingControl && c.controlConn != nil {
 		if err := c.waitForSessionInfo(); err != nil {
 			c.startChan <- fmt.Errorf("failed to get session info: %w", err)
 			conn.Close()
@@ -197,28 +273,69 @@ func (c *wsCmd) start() {
 
 	c.startChan <- nil
 	c.runIO()
+
+	// For control connections, consume the operation completion message
+	// This is sent by the wss.Conn layer after the operation completes
+	// We need to read it to keep the connection clean for the next operation
+	if c.usingControl && c.controlConn != nil {
+		// Read from readCh (fed by readLoop)
+		select {
+		case <-c.controlConn.readCh:
+			// Consume and discard the completion message
+		case <-c.ctx.Done():
+			// Context cancelled, don't wait
+		case <-time.After(100 * time.Millisecond):
+			// Timeout - completion message may have already been consumed
+		}
+	}
 }
 
 // waitForSessionInfo reads messages until it receives the session_info message,
 // then sets the Tty field based on the session's TTY mode.
 func (c *wsCmd) waitForSessionInfo() error {
+	dbg("sprites: waitForSessionInfo starting", "usingControl", c.usingControl)
 	// Set a timeout for receiving session_info
-	c.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	defer c.conn.SetReadDeadline(time.Time{})
+	ctx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
+	defer cancel()
+
+	// For non-control connections, also set read deadline on the websocket
+	if !c.usingControl {
+		c.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		defer c.conn.SetReadDeadline(time.Time{})
+	}
 
 	for {
-		msgType, data, err := c.conn.ReadMessage()
-		if err != nil {
-			return fmt.Errorf("reading session info: %w", err)
+		var msgType int
+		var data []byte
+		var err error
+
+		if c.usingControl && c.controlConn != nil {
+			// For control connections, read from readCh (the readLoop feeds it)
+			select {
+			case msg := <-c.controlConn.readCh:
+				msgType = msg.MessageType
+				data = msg.Data
+			case <-ctx.Done():
+				dbg("sprites: waitForSessionInfo timeout (no session_info received)")
+				return fmt.Errorf("timeout waiting for session_info")
+			}
+		} else {
+			// Direct websocket read
+			msgType, data, err = c.conn.ReadMessage()
+			if err != nil {
+				return fmt.Errorf("reading session info: %w", err)
+			}
 		}
 
 		if msgType == websocket.TextMessage {
+			dbg("sprites: waitForSessionInfo received text", "data", string(data))
 			var info struct {
 				Type      string `json:"type"`
 				TTY       bool   `json:"tty"`
 				SessionID string `json:"session_id"`
 			}
 			if err := json.Unmarshal(data, &info); err == nil && info.Type == "session_info" {
+				dbg("sprites: waitForSessionInfo got session_info", "tty", info.TTY, "session_id", info.SessionID)
 				c.Tty = info.TTY
 				if info.SessionID != "" {
 					c.sessionID = info.SessionID
@@ -233,9 +350,11 @@ func (c *wsCmd) waitForSessionInfo() error {
 			if c.TextMessageHandler != nil {
 				c.TextMessageHandler(data)
 			}
+		} else {
+			dbg("sprites: waitForSessionInfo received binary", "len", len(data))
 		}
-		// Ignore binary messages during this phase - they're historical output
-		// that will be replayed; we need the session_info first to know how to parse them
+		// Binary messages during this phase are historical output that will be
+		// replayed; we need the session_info first to know how to parse them
 	}
 }
 
@@ -247,6 +366,23 @@ func (c *wsCmd) Wait() error {
 	case <-c.ctx.Done():
 		return c.ctx.Err()
 	}
+}
+
+// readMessage reads the next WebSocket message
+// For control connections, reads from the readCh (fed by readLoop)
+// For direct connections, reads directly from the WebSocket
+func (c *wsCmd) readMessage() (messageType int, data []byte, err error) {
+	if c.usingControl && c.controlConn != nil {
+		// Read from the control connection's read channel
+		select {
+		case msg := <-c.controlConn.readCh:
+			return msg.MessageType, msg.Data, nil
+		case <-c.ctx.Done():
+			return 0, nil, c.ctx.Err()
+		}
+	}
+	// Direct WebSocket read
+	return c.conn.ReadMessage()
 }
 
 func (c *wsCmd) runIO() {
@@ -287,7 +423,7 @@ func (c *wsCmd) runIO() {
 		}
 
 		for {
-			messageType, data, err := conn.ReadMessage()
+			messageType, data, err := c.readMessage()
 			if err != nil {
 				slog.Default().Debug("ws read error", "error", err, "errorType", fmt.Sprintf("%T", err))
 				adapter.Close()
@@ -316,19 +452,45 @@ func (c *wsCmd) runIO() {
 			switch messageType {
 			case websocket.BinaryMessage:
 				stdout.Write(data)
-			case websocket.TextMessage:
-				// Parse session_info to capture session ID
-				var info struct {
-					Type      string `json:"type"`
-					SessionID string `json:"session_id"`
+		case websocket.TextMessage:
+			// Check for control messages on control connections
+			if len(data) >= len("control:") && string(data[:len("control:")]) == "control:" {
+				dbg("sprites: pty received control message", "data", string(data))
+				continue
+			}
+			// Parse message type
+			var msg struct {
+				Type      string `json:"type"`
+				SessionID string `json:"session_id,omitempty"`
+				ExitCode  int    `json:"exit_code,omitempty"`
+			}
+			if json.Unmarshal(data, &msg) == nil {
+				dbg("sprites: pty received text message", "type", msg.Type, "data", string(data))
+				switch msg.Type {
+				case "session_info":
+					if msg.SessionID != "" {
+						c.sessionID = msg.SessionID
+					}
+				case "exit":
+					dbg("sprites: pty exit", "code", msg.ExitCode)
+					// Call handler first so CLI can detect clean exit
+					if c.TextMessageHandler != nil {
+						c.TextMessageHandler(data)
+					}
+					select {
+					case c.exitChan <- msg.ExitCode:
+					default:
+					}
+					adapter.Close()
+					return
 				}
-				if json.Unmarshal(data, &info) == nil && info.Type == "session_info" && info.SessionID != "" {
-					c.sessionID = info.SessionID
-				}
-				// Handle control messages
-				if c.TextMessageHandler != nil {
-					c.TextMessageHandler(data)
-				}
+			} else {
+				dbg("sprites: pty received non-json text message", "data", string(data))
+			}
+			// Handle text messages (e.g., port notifications)
+			if c.TextMessageHandler != nil {
+				c.TextMessageHandler(data)
+			}
 			}
 		}
 	}
@@ -336,19 +498,29 @@ func (c *wsCmd) runIO() {
 	// Non-PTY mode - handle stream-based I/O
 	if c.Stdin != nil {
 		go func() {
-			stdinWriter := &streamWriter{ws: adapter, streamID: StreamStdin}
-			io.Copy(stdinWriter, c.Stdin)
-			adapter.WriteStream(StreamStdinEOF, []byte{})
+			if c.usingControl && c.controlConn != nil {
+				// For control connections, send raw bytes and then a single-byte EOF marker (0x04)
+				rw := &rawWriter{ws: adapter}
+				n, _ := io.Copy(rw, c.Stdin)
+				dbg("sprites: sent stdin bytes", "n", n)
+				adapter.WriteRaw([]byte{byte(StreamStdinEOF)})
+				dbg("sprites: sent stdin EOF")
+			} else {
+				stdinWriter := &streamWriter{ws: adapter, streamID: StreamStdin}
+				n, _ := io.Copy(stdinWriter, c.Stdin)
+				dbg("sprites: sent stdin bytes (legacy)", "n", n)
+				adapter.WriteStream(StreamStdinEOF, []byte{})
+			}
 		}()
-	} else {
-		// Send EOF immediately if no stdin is provided
+	} else if !(c.usingControl && c.controlConn != nil) {
+		// For legacy direct connections, send EOF immediately if no stdin is provided
 		go func() {
 			adapter.WriteStream(StreamStdinEOF, []byte{})
 		}()
 	}
 
 	for {
-		messageType, data, err := conn.ReadMessage()
+		messageType, data, err := c.readMessage()
 		if err != nil {
 			adapter.Close()
 			return
@@ -356,6 +528,45 @@ func (c *wsCmd) runIO() {
 		// Reset read deadline on any successful read
 		conn.SetReadDeadline(time.Now().Add(wsPongWait))
 		switch messageType {
+		case websocket.TextMessage:
+			// Ignore server control frames
+			if len(data) >= len("control:") && string(data[:len("control:")]) == "control:" {
+				dbg("sprites: non-pty received control message", "data", string(data))
+				continue
+			}
+			// Parse message type
+			var msg struct {
+				Type      string `json:"type"`
+				SessionID string `json:"session_id,omitempty"`
+				ExitCode  int    `json:"exit_code,omitempty"`
+			}
+			if json.Unmarshal(data, &msg) == nil {
+				dbg("sprites: non-pty received text message", "type", msg.Type, "data", string(data))
+				switch msg.Type {
+				case "session_info":
+					if msg.SessionID != "" {
+						c.sessionID = msg.SessionID
+					}
+				case "exit":
+					dbg("sprites: non-pty exit", "code", msg.ExitCode)
+					// Call handler first so CLI can detect clean exit
+					if c.TextMessageHandler != nil {
+						c.TextMessageHandler(data)
+					}
+					select {
+					case c.exitChan <- msg.ExitCode:
+					default:
+					}
+					adapter.Close()
+					return
+				}
+			} else {
+				dbg("sprites: non-pty received non-json text message", "data", string(data))
+			}
+			// Handle text messages (e.g., port notifications)
+			if c.TextMessageHandler != nil {
+				c.TextMessageHandler(data)
+			}
 		case websocket.BinaryMessage:
 			if len(data) == 0 {
 				continue
@@ -371,6 +582,7 @@ func (c *wsCmd) runIO() {
 				c.receivedExit = true
 				if len(payload) > 0 {
 					code := int(payload[0])
+					dbg("sprites: observed exit", "code", code)
 					select {
 					case c.exitChan <- code:
 					default:
@@ -378,19 +590,6 @@ func (c *wsCmd) runIO() {
 				}
 				adapter.Close()
 				return
-			}
-		case websocket.TextMessage:
-			// Parse session_info to capture session ID
-			var info struct {
-				Type      string `json:"type"`
-				SessionID string `json:"session_id"`
-			}
-			if json.Unmarshal(data, &info) == nil && info.Type == "session_info" && info.SessionID != "" {
-				c.sessionID = info.SessionID
-			}
-			// Handle control messages
-			if c.TextMessageHandler != nil {
-				c.TextMessageHandler(data)
 			}
 		}
 	}
@@ -570,6 +769,18 @@ type streamWriter struct {
 func (w *streamWriter) Write(p []byte) (int, error) {
 	err := w.ws.WriteStream(w.streamID, p)
 	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+// rawWriter writes raw bytes without any stream framing
+type rawWriter struct {
+	ws *wsAdapter
+}
+
+func (w *rawWriter) Write(p []byte) (int, error) {
+	if err := w.ws.WriteRaw(p); err != nil {
 		return 0, err
 	}
 	return len(p), nil
