@@ -28,6 +28,9 @@ type Client struct {
 
 	// Control initialization behavior
 	controlInitTimeout time.Duration
+
+	// disableControl prevents automatic control connection usage
+	disableControl bool
 }
 
 // Option is a functional option for configuring the SDK client.
@@ -90,6 +93,14 @@ func WithHTTPClient(client *http.Client) Option {
 func WithControlInitTimeout(d time.Duration) Option {
 	return func(c *Client) {
 		c.controlInitTimeout = d
+	}
+}
+
+// WithDisableControl prevents the SDK from using control connections.
+// When disabled, all operations use direct WebSocket connections per request.
+func WithDisableControl() Option {
+	return func(c *Client) {
+		c.disableControl = true
 	}
 }
 
