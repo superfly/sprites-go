@@ -67,6 +67,12 @@ func (s *Sprite) ensureControlSupport(ctx context.Context) {
 	}
 	s.controlChecked = true
 
+	// If control is disabled at client level, skip the check
+	if s.client.disableControl {
+		dbg("sprites: control disabled by client option", "sprite", s.name)
+		return
+	}
+
 	// Try to establish a control connection to test support
 	pool := s.client.getOrCreatePool(s.name)
 	if url, err := pool.buildControlURL(); err == nil {

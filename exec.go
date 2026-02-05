@@ -149,6 +149,21 @@ func (c *Cmd) String() string {
 	return fmt.Sprintf("%s %v", c.Path, c.Args[1:])
 }
 
+// ConnectionMode returns the connection mode used by this command.
+// Returns "control" for multiplexed control connections, "direct" for
+// direct WebSocket connections, or "" if Start() hasn't been called yet.
+func (c *Cmd) ConnectionMode() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.started {
+		return ""
+	}
+	if c.controlMode {
+		return "control"
+	}
+	return "direct"
+}
+
 // Run starts the specified command and waits for it to complete.
 func (c *Cmd) Run() error {
 	if err := c.Start(); err != nil {
