@@ -161,41 +161,36 @@ func (ps *ProxySession) acceptLoop() {
 func (ps *ProxySession) handleConnection(localConn net.Conn) {
 	defer localConn.Close()
 
-	// Check if sprite supports control connections (lazy check on first use)
-	sprite := ps.client.Sprite(ps.spriteName)
-	sprite.ensureControlSupport(ps.ctx)
+	// Build WebSocket URL for proxy
+	wsURL, err := ps.buildProxyURL()
+	if err != nil {
+		return
+	}
 
-	var wsConn *websocket.Conn
-	var controlConn *controlConn
-	usingControl := false
+	// Set up WebSocket dialer
+	dialer := &websocket.Dialer{
+		ReadBufferSize:  1024 * 1024, // 1MB
+		WriteBufferSize: 1024 * 1024, // 1MB
+	}
 
-	if sprite.supportsControl {
-		// Try to use control connection
-		pool := ps.client.getOrCreatePool(ps.spriteName)
-		var err error
-		controlConn, err = pool.checkout(ps.ctx)
-
-		if err == nil && controlConn != nil {
-			// Successfully got a control connection
-			wsConn = controlConn.ws
-			usingControl = true
-			defer func() {
-				// Send release message and return to pool
-				controlConn.sendRelease()
-				pool.checkin(controlConn)
-			}()
+	// Add TLS config if needed
+	if wsURL.Scheme == "wss" {
+		dialer.TLSClientConfig = &tls.Config{
+			InsecureSkipVerify: false,
 		}
 	}
 
-	if !usingControl {
-		// Fall back to direct WebSocket connection (legacy path or control unavailable)
-		var err error
-		wsConn, err = ps.dialDirectWebSocket()
-		if err != nil {
-			return
-		}
-		defer wsConn.Close()
+	// Set headers including auth
+	header := http.Header{}
+	header.Set("Authorization", fmt.Sprintf("Bearer %s", ps.client.token))
+	header.Set("User-Agent", "sprites-go-sdk/1.0")
+
+	// Connect to WebSocket
+	wsConn, _, err := dialer.DialContext(ps.ctx, wsURL.String(), header)
+	if err != nil {
+		return
 	}
+	defer wsConn.Close()
 
 	// Send initialization message
 	// Use specified RemoteHost if provided, otherwise default to "localhost"
@@ -203,30 +198,13 @@ func (ps *ProxySession) handleConnection(localConn net.Conn) {
 	if host == "" {
 		host = "localhost"
 	}
+	initMsg := ProxyInitMessage{
+		Host: host,
+		Port: ps.RemotePort,
+	}
 
-	if usingControl {
-		// Using control connection - send operation start message with keep_alive
-		startMsg := map[string]interface{}{
-			"type":      "start",
-			"operation": "proxy",
-			"params": map[string]interface{}{
-				"host":       host,
-				"port":       ps.RemotePort,
-				"keep_alive": true,
-			},
-		}
-		if err := wsConn.WriteJSON(&startMsg); err != nil {
-			return
-		}
-	} else {
-		// Direct WebSocket - send init message
-		initMsg := ProxyInitMessage{
-			Host: host,
-			Port: ps.RemotePort,
-		}
-		if err := wsConn.WriteJSON(&initMsg); err != nil {
-			return
-		}
+	if err := wsConn.WriteJSON(&initMsg); err != nil {
+		return
 	}
 
 	// Read response
@@ -298,7 +276,7 @@ func (ps *ProxySession) buildProxyURL() (*url.URL, error) {
 	baseURL := ps.client.baseURL
 
 	// Convert HTTP(S) to WS(S)
-	if len(baseURL) >= 4 && baseURL[:4] == "http" {
+	if baseURL[:4] == "http" {
 		baseURL = "ws" + baseURL[4:]
 	}
 
@@ -312,42 +290,6 @@ func (ps *ProxySession) buildProxyURL() (*url.URL, error) {
 	u.Path = fmt.Sprintf("/v1/sprites/%s/proxy", ps.spriteName)
 
 	return u, nil
-}
-
-// dialDirectWebSocket creates a direct WebSocket connection for proxy (legacy path)
-func (ps *ProxySession) dialDirectWebSocket() (*websocket.Conn, error) {
-	// Build WebSocket URL for proxy
-	wsURL, err := ps.buildProxyURL()
-	if err != nil {
-		return nil, err
-	}
-
-	// Set up WebSocket dialer
-	dialer := &websocket.Dialer{
-		ReadBufferSize:  1024 * 1024, // 1MB
-		WriteBufferSize: 1024 * 1024, // 1MB
-	}
-
-	// Add TLS config if needed
-	if wsURL.Scheme == "wss" {
-		dialer.TLSClientConfig = &tls.Config{
-			InsecureSkipVerify: false,
-		}
-	}
-
-	// Set headers including auth and feature flag
-	header := http.Header{}
-	header.Set("Authorization", fmt.Sprintf("Bearer %s", ps.client.token))
-	header.Set("User-Agent", "sprites-go-sdk/1.0")
-	header.Set("Sprite-Client-Features", "control")
-
-	// Connect to WebSocket
-	wsConn, _, err := dialer.DialContext(ps.ctx, wsURL.String(), header)
-	if err != nil {
-		return nil, err
-	}
-
-	return wsConn, nil
 }
 
 // Close closes the proxy session
