@@ -81,6 +81,9 @@ type Cmd struct {
 	sessionID   string
 	controlMode bool
 
+	// Control connection for cleanup
+	controlConn *controlConn
+
 	// TextMessageHandler is called when text messages are received from the server.
 	// This is typically used for port notifications or other out-of-band messages.
 	// The handler is called with the raw message data.
@@ -146,6 +149,21 @@ func (c *Cmd) String() string {
 	return fmt.Sprintf("%s %v", c.Path, c.Args[1:])
 }
 
+// ConnectionMode returns the connection mode used by this command.
+// Returns "control" for multiplexed control connections, "direct" for
+// direct WebSocket connections, or "" if Start() hasn't been called yet.
+func (c *Cmd) ConnectionMode() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.started {
+		return ""
+	}
+	if c.controlMode {
+		return "control"
+	}
+	return "direct"
+}
+
 // Run starts the specified command and waits for it to complete.
 func (c *Cmd) Run() error {
 	if err := c.Start(); err != nil {
@@ -179,16 +197,44 @@ func (c *Cmd) Start() error {
 		}
 	}
 
+	// Check if sprite supports control connections (lazy check on first use)
+	c.sprite.ensureControlSupport(c.ctx)
+
+	var controlConn *controlConn
+	usingControl := false
+
+	if c.sprite.supportsControl {
+		// Try to use control connection
+		pool := c.sprite.client.getOrCreatePool(c.sprite.name)
+		var err error
+		controlConn, err = pool.checkout(c.ctx)
+
+		if err == nil && controlConn != nil {
+			// Successfully got a control connection
+			usingControl = true
+			c.controlMode = true
+			dbg("sprites: using control conn for exec", "sprite", c.sprite.name)
+		}
+	}
+
 	// Build WebSocket URL
 	wsURL, err := c.buildWebSocketURL()
 	if err != nil {
+		if controlConn != nil {
+			pool := c.sprite.client.getOrCreatePool(c.sprite.name)
+			pool.checkin(controlConn)
+		}
 		closeDescriptors(c.closers)
 		return err
 	}
 
-	// Create HTTP request with auth
+	// Create HTTP request (for Request field, even though we may not dial)
 	req, err := http.NewRequestWithContext(c.ctx, "GET", wsURL.String(), nil)
 	if err != nil {
+		if controlConn != nil {
+			pool := c.sprite.client.getOrCreatePool(c.sprite.name)
+			pool.checkin(controlConn)
+		}
 		closeDescriptors(c.closers)
 		return err
 	}
@@ -201,12 +247,24 @@ func (c *Cmd) Start() error {
 	}
 	c.wsCmd = newWSCmdContext(c.ctx, req, c.Path, args...)
 
+	// If using control connection, provide the existing WebSocket
+	if usingControl {
+		c.wsCmd.existingConn = controlConn.ws
+		c.wsCmd.usingControl = true
+		c.wsCmd.controlConn = controlConn
+	}
+
 	// Set up I/O
 	c.setupIO()
 
 	// Set TTY mode and attach flag
 	c.wsCmd.Tty = c.tty
 	c.wsCmd.IsAttach = c.sessionID != ""
+	c.wsCmd.AttachSessionID = c.sessionID
+
+	// Set environment and directory
+	c.wsCmd.Env = c.Env
+	c.wsCmd.Dir = c.Dir
 
 	// Set text message handler if provided
 	if c.TextMessageHandler != nil {
@@ -257,8 +315,17 @@ func (c *Cmd) Start() error {
 			return nil
 		}
 
+		if controlConn != nil {
+			pool := c.sprite.client.getOrCreatePool(c.sprite.name)
+			pool.checkin(controlConn)
+		}
 		closeDescriptors(c.closers)
 		return fmt.Errorf("failed to start sprite command: %w", err)
+	}
+
+	// Store control connection for cleanup in Wait()
+	if usingControl {
+		c.controlConn = controlConn
 	}
 
 	return nil
@@ -304,6 +371,15 @@ func (c *Cmd) Wait() error {
 	// Close all descriptors
 	for _, closer := range c.closers {
 		closer.Close()
+	}
+
+	// Clean up control connection if we used one
+	if c.controlConn != nil {
+		c.controlConn.sendRelease()
+		pool := c.sprite.client.getOrCreatePool(c.sprite.name)
+		pool.checkin(c.controlConn)
+		dbg("sprites: returned control conn after exec", "sprite", c.sprite.name)
+		c.controlConn = nil
 	}
 
 	c.mu.Lock()
