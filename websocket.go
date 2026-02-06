@@ -418,8 +418,36 @@ func (c *wsCmd) runIO() {
 
 	if c.Tty {
 		// PTY mode - handle raw I/O
+		// Use a buffered pipeline so keystrokes are captured immediately
+		// from stdin regardless of WebSocket write latency.
 		if c.Stdin != nil {
-			go io.Copy(adapter, c.Stdin)
+			stdinBuf := make(chan []byte, 32)
+			// Reader: stdin → channel (captures keystrokes immediately)
+			go func() {
+				defer close(stdinBuf)
+				buf := make([]byte, 32*1024)
+				for {
+					n, err := c.Stdin.Read(buf)
+					if n > 0 {
+						data := make([]byte, n)
+						copy(data, buf[:n])
+						select {
+						case stdinBuf <- data:
+						case <-adapter.done:
+							return
+						}
+					}
+					if err != nil {
+						return
+					}
+				}
+			}()
+			// Writer: channel → WebSocket adapter
+			go func() {
+				for data := range stdinBuf {
+					adapter.Write(data)
+				}
+			}()
 		}
 
 		for {
@@ -710,7 +738,14 @@ func (a *wsAdapter) WriteRaw(data []byte) error {
 	result := make(chan error, 1)
 	select {
 	case a.writeChan <- writeRequest{messageType: websocket.BinaryMessage, data: data, result: result}:
-		return <-result
+		// Wait for write to complete, but also bail if adapter is closed
+		// (prevents orphan goroutine if Close() is called during a pending write)
+		select {
+		case err := <-result:
+			return err
+		case <-a.done:
+			return errors.New("adapter closed")
+		}
 	case <-a.done:
 		return errors.New("adapter closed")
 	}
@@ -725,7 +760,12 @@ func (a *wsAdapter) WriteControl(msg *ControlMessage) error {
 	result := make(chan error, 1)
 	select {
 	case a.writeChan <- writeRequest{messageType: websocket.TextMessage, data: data, result: result}:
-		return <-result
+		select {
+		case err := <-result:
+			return err
+		case <-a.done:
+			return errors.New("adapter closed")
+		}
 	case <-a.done:
 		return errors.New("adapter closed")
 	}
