@@ -505,6 +505,7 @@ func (c *wsCmd) runIO() {
 					if c.TextMessageHandler != nil {
 						c.TextMessageHandler(data)
 					}
+					c.receivedExit = true
 					select {
 					case c.exitChan <- msg.ExitCode:
 					default:
@@ -581,6 +582,7 @@ func (c *wsCmd) runIO() {
 					if c.TextMessageHandler != nil {
 						c.TextMessageHandler(data)
 					}
+					c.receivedExit = true
 					select {
 					case c.exitChan <- msg.ExitCode:
 					default:
