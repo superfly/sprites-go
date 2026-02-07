@@ -29,11 +29,12 @@ const (
 
 // controlPool manages a pool of control WebSocket connections for a sprite
 type controlPool struct {
-	client     *Client
-	spriteName string
-	mu         sync.Mutex
-	conns      []*controlConn
-	closed     bool
+	client       *Client
+	spriteName   string
+	mu           sync.Mutex
+	conns        []*controlConn
+	pendingDials int // number of dials in progress (outside lock)
+	closed       bool
 }
 
 // controlConn represents a control WebSocket connection
@@ -64,12 +65,14 @@ func newControlPool(client *Client, spriteName string) *controlPool {
 	}
 }
 
-// checkout gets an idle connection from the pool, or creates a new one if needed
+// checkout gets an idle connection from the pool, or creates a new one if needed.
+// Dials happen outside the pool lock to avoid blocking all other checkout/checkin
+// operations during network I/O (up to 5s).
 func (p *controlPool) checkout(ctx context.Context) (*controlConn, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	if p.closed {
+		p.mu.Unlock()
 		return nil, fmt.Errorf("pool is closed")
 	}
 
@@ -91,24 +94,45 @@ func (p *controlPool) checkout(ctx context.Context) (*controlConn, error) {
 			conn.busy = true
 			conn.mu.Unlock()
 			dbg("sprites: checkout control conn", "sprite", p.spriteName, "pool", len(p.conns))
+			p.mu.Unlock()
 			return conn, nil
 		}
 		conn.mu.Unlock()
 	}
 
-	// No idle connections, create a new one if under sanity limit
-	if len(p.conns) < maxPoolSize {
-		conn, err := p.dial(ctx)
-		if err != nil {
-			return nil, err
-		}
-		conn.busy = true
-		p.conns = append(p.conns, conn)
-		dbg("sprites: dialed new control conn", "sprite", p.spriteName, "pool", len(p.conns))
-		return conn, nil
+	// No idle connections — check if we can dial a new one
+	if len(p.conns)+p.pendingDials >= maxPoolSize {
+		p.mu.Unlock()
+		return nil, fmt.Errorf("no available connections in pool (at cap %d)", maxPoolSize)
 	}
 
-	return nil, fmt.Errorf("no available connections in pool (at cap %d)", maxPoolSize)
+	// Reserve a slot and release the lock before dialing
+	p.pendingDials++
+	p.mu.Unlock()
+
+	conn, err := p.dial(ctx)
+
+	// Re-acquire lock to update pool state
+	p.mu.Lock()
+	p.pendingDials--
+
+	if err != nil {
+		p.mu.Unlock()
+		return nil, err
+	}
+
+	// Check if pool was closed while we were dialing
+	if p.closed {
+		p.mu.Unlock()
+		conn.close()
+		return nil, fmt.Errorf("pool closed during dial")
+	}
+
+	conn.busy = true
+	p.conns = append(p.conns, conn)
+	dbg("sprites: dialed new control conn", "sprite", p.spriteName, "pool", len(p.conns))
+	p.mu.Unlock()
+	return conn, nil
 }
 
 // checkin returns a connection to the pool and may drain idle conns if pool is large
