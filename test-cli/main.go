@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -425,6 +426,8 @@ func main() {
 
 	switch *output {
 	case "stdout":
+		var stderrBuf bytes.Buffer
+		cmd.Stderr = &stderrBuf
 		outputData, cmdErr = cmd.Output()
 		if cmdErr != nil {
 			if exitErr, ok := cmdErr.(*sprites.ExitError); ok {
@@ -433,8 +436,10 @@ func main() {
 			logger.LogEvent("command_failed", map[string]interface{}{
 				"error":     cmdErr.Error(),
 				"exit_code": exitCode,
+				"stdout":    string(outputData),
+				"stderr":    stderrBuf.String(),
 			})
-			log.Fatalf("Command failed: %v", cmdErr)
+			log.Fatalf("Command failed: %v\nstdout: %s\nstderr: %s", cmdErr, string(outputData), stderrBuf.String())
 		}
 		fmt.Print(string(outputData))
 		logger.LogEvent("command_completed", map[string]interface{}{
@@ -450,8 +455,9 @@ func main() {
 			logger.LogEvent("command_failed", map[string]interface{}{
 				"error":     cmdErr.Error(),
 				"exit_code": exitCode,
+				"output":    string(outputData),
 			})
-			log.Fatalf("Command failed: %v", cmdErr)
+			log.Fatalf("Command failed: %v\noutput: %s", cmdErr, string(outputData))
 		}
 		fmt.Print(string(outputData))
 		logger.LogEvent("command_completed", map[string]interface{}{
