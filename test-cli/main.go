@@ -350,7 +350,7 @@ func main() {
 	})
 
 	// Create client
-	client := sprites.New(token, sprites.WithBaseURL(*baseURL))
+	client := sprites.New(token, sprites.WithBaseURL(*baseURL), sprites.WithDisableControl())
 	sprite := client.Sprite(*spriteName)
 
 	// Create context with optional timeout
