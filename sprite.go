@@ -29,6 +29,8 @@ type Sprite struct {
 	PrimaryRegion    string
 	URL              string
 	URLSettings      *URLSettings
+	LastRunningAt    *time.Time
+	LastWarmingAt    *time.Time
 
 	// useLegacyExecEndpoint is set to true if /exec/:id returned 404,
 	// indicating this sprite requires the legacy /exec?id= format.

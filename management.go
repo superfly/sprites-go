@@ -139,6 +139,8 @@ func (c *Client) GetSpriteWithOrg(ctx context.Context, name string, org *Organiz
 		PrimaryRegion:    info.PrimaryRegion,
 		URL:              info.URL,
 		URLSettings:      info.URLSettings,
+		LastRunningAt:    info.LastRunningAt,
+		LastWarmingAt:    info.LastWarmingAt,
 	}
 	return sprite, nil
 }
@@ -246,6 +248,8 @@ func (c *Client) ListAllSpritesWithOrg(ctx context.Context, prefix string, org *
 				PrimaryRegion:    info.PrimaryRegion,
 				URL:              info.URL,
 				URLSettings:      info.URLSettings,
+				LastRunningAt:    info.LastRunningAt,
+				LastWarmingAt:    info.LastWarmingAt,
 			}
 			allSprites = append(allSprites, sprite)
 		}

@@ -31,6 +31,8 @@ type SpriteInfo struct {
 	PrimaryRegion string            `json:"primary_region,omitempty"`
 	URL           string            `json:"url,omitempty"`
 	URLSettings   *URLSettings      `json:"url_settings,omitempty"`
+	LastRunningAt *time.Time        `json:"last_running_at,omitempty"`
+	LastWarmingAt *time.Time        `json:"last_warming_at,omitempty"`
 }
 
 // CreateSpriteRequest represents the request to create a sprite
