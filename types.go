@@ -52,6 +52,16 @@ type UpdateURLSettingsRequest struct {
 	URLSettings *URLSettings `json:"url_settings"`
 }
 
+// OrgInfo represents aggregate organization stats returned with sprite listings.
+type OrgInfo struct {
+	Name         string `json:"name"`
+	Running      int    `json:"running"`
+	Warm         int    `json:"warm"`
+	Cold         int    `json:"cold"`
+	RunningLimit int    `json:"running_limit"`
+	WarmLimit    int    `json:"warm_limit"`
+}
+
 // ListOptions represents options for listing sprites
 type ListOptions struct {
 	Prefix            string
@@ -62,6 +72,7 @@ type ListOptions struct {
 // SpriteList represents a paginated list of sprites
 type SpriteList struct {
 	Sprites               []SpriteInfo `json:"sprites"`
+	Org                   *OrgInfo     `json:"org,omitempty"`
 	HasMore               bool         `json:"has_more"`
 	NextContinuationToken string       `json:"next_continuation_token,omitempty"`
 }

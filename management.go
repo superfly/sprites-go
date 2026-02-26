@@ -214,9 +214,24 @@ func (c *Client) ListAllSprites(ctx context.Context, prefix string) ([]*Sprite, 
 	return c.ListAllSpritesWithOrg(ctx, prefix, nil)
 }
 
+// ListResult holds the result of listing all sprites, including aggregate org info.
+type ListResult struct {
+	Sprites []*Sprite
+	Org     *OrgInfo
+}
+
 // ListAllSpritesWithOrg retrieves all sprites with organization information, handling pagination automatically
 func (c *Client) ListAllSpritesWithOrg(ctx context.Context, prefix string, org *OrganizationInfo) ([]*Sprite, error) {
-	var allSprites []*Sprite
+	result, err := c.ListAllSpritesResult(ctx, prefix, org)
+	if err != nil {
+		return nil, err
+	}
+	return result.Sprites, nil
+}
+
+// ListAllSpritesResult retrieves all sprites with aggregate org stats, handling pagination automatically
+func (c *Client) ListAllSpritesResult(ctx context.Context, prefix string, org *OrganizationInfo) (*ListResult, error) {
+	result := &ListResult{}
 	continuationToken := ""
 
 	for {
@@ -229,6 +244,11 @@ func (c *Client) ListAllSpritesWithOrg(ctx context.Context, prefix string, org *
 		list, err := c.ListSprites(ctx, opts)
 		if err != nil {
 			return nil, err
+		}
+
+		// Capture org info from the first page
+		if result.Org == nil && list.Org != nil {
+			result.Org = list.Org
 		}
 
 		// Convert SpriteInfo to Sprite objects
@@ -251,7 +271,7 @@ func (c *Client) ListAllSpritesWithOrg(ctx context.Context, prefix string, org *
 				LastRunningAt:    info.LastRunningAt,
 				LastWarmingAt:    info.LastWarmingAt,
 			}
-			allSprites = append(allSprites, sprite)
+			result.Sprites = append(result.Sprites, sprite)
 		}
 
 		if !list.HasMore || list.NextContinuationToken == "" {
@@ -261,7 +281,7 @@ func (c *Client) ListAllSpritesWithOrg(ctx context.Context, prefix string, org *
 		continuationToken = list.NextContinuationToken
 	}
 
-	return allSprites, nil
+	return result, nil
 }
 
 // DeleteSprite deletes a sprite
