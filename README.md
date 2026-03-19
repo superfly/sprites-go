@@ -365,6 +365,19 @@ func main() {
 }
 ```
 
+## Examples
+
+The [`examples/`](examples/) directory contains runnable examples for each API endpoint. Each file is a standalone `main` package:
+
+```bash
+cd examples
+export SPRITE_TOKEN="your-token"
+export SPRITE_NAME="your-sprite"
+
+go run sprite_list.go
+go run service_create.go
+```
+
 ## API Reference
 
 ### Client Creation
