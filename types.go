@@ -31,6 +31,7 @@ type SpriteInfo struct {
 	PrimaryRegion string            `json:"primary_region,omitempty"`
 	URL           string            `json:"url,omitempty"`
 	URLSettings   *URLSettings      `json:"url_settings,omitempty"`
+	Labels        []string          `json:"labels,omitempty"`
 	LastRunningAt *time.Time        `json:"last_running_at,omitempty"`
 	LastWarmingAt *time.Time        `json:"last_warming_at,omitempty"`
 }
@@ -40,6 +41,14 @@ type CreateSpriteRequest struct {
 	Name        string            `json:"name"`
 	Config      *SpriteConfig     `json:"config,omitempty"`
 	Environment map[string]string `json:"environment,omitempty"`
+	Labels      []string          `json:"labels,omitempty"`
+}
+
+// UpdateSpriteRequest represents the request to update a sprite's settings
+type UpdateSpriteRequest struct {
+	URLSettings *URLSettings `json:"url_settings,omitempty"`
+	Labels      []string     `json:"labels,omitempty"`
+	ClearLabels bool         `json:"clear_labels,omitempty"`
 }
 
 // CreateSpriteResponse represents the response from sprite creation

@@ -29,6 +29,7 @@ type Sprite struct {
 	PrimaryRegion    string
 	URL              string
 	URLSettings      *URLSettings
+	Labels           []string
 	LastRunningAt    *time.Time
 	LastWarmingAt    *time.Time
 

@@ -13,14 +13,15 @@ import (
 
 // CreateSprite creates a new sprite with the given name and optional configuration
 func (c *Client) CreateSprite(ctx context.Context, name string, config *SpriteConfig) (*Sprite, error) {
-	return c.CreateSpriteWithOrg(ctx, name, config, nil)
+	return c.CreateSpriteWithOrg(ctx, name, config, nil, nil)
 }
 
-// CreateSpriteWithOrg creates a new sprite with the given name, optional configuration, and organization information
-func (c *Client) CreateSpriteWithOrg(ctx context.Context, name string, config *SpriteConfig, org *OrganizationInfo) (*Sprite, error) {
+// CreateSpriteWithOrg creates a new sprite with the given name, optional configuration, organization information, and labels
+func (c *Client) CreateSpriteWithOrg(ctx context.Context, name string, config *SpriteConfig, org *OrganizationInfo, labels []string) (*Sprite, error) {
 	req := CreateSpriteRequest{
 		Name:   name,
 		Config: config,
+		Labels: labels,
 	}
 
 	jsonData, err := json.Marshal(req)
@@ -139,6 +140,7 @@ func (c *Client) GetSpriteWithOrg(ctx context.Context, name string, org *Organiz
 		PrimaryRegion:    info.PrimaryRegion,
 		URL:              info.URL,
 		URLSettings:      info.URLSettings,
+		Labels:           info.Labels,
 		LastRunningAt:    info.LastRunningAt,
 		LastWarmingAt:    info.LastWarmingAt,
 	}
@@ -411,4 +413,38 @@ func (c *Client) UpdateURLSettings(ctx context.Context, spriteName string, setti
 // UpdateURLSettings updates the URL authentication settings for this sprite
 func (s *Sprite) UpdateURLSettings(ctx context.Context, settings *URLSettings) error {
 	return s.client.UpdateURLSettings(ctx, s.name, settings)
+}
+
+// UpdateSprite updates a sprite's settings (URL auth, labels, etc.)
+func (c *Client) UpdateSprite(ctx context.Context, spriteName string, req *UpdateSpriteRequest) error {
+	jsonData, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/v1/sprites/%s", c.baseURL, spriteName)
+
+	httpReq, err := http.NewRequestWithContext(ctx, "PUT", url, bytes.NewReader(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("failed to update sprite: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		if apiErr := parseAPIError(resp, body); apiErr != nil {
+			return apiErr
+		}
+		return fmt.Errorf("failed to update sprite (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	return nil
 }

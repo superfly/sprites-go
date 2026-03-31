@@ -17,12 +17,13 @@ func main() {
 
 	client := sprites.New(token)
 
-	err := client.UpdateURLSettings(context.Background(), spriteName, &sprites.URLSettings{
-		Auth: "public",
+	err := client.UpdateSprite(context.Background(), spriteName, &sprites.UpdateSpriteRequest{
+		URLSettings: &sprites.URLSettings{Auth: "public"},
+		Labels:      []string{"prod"},
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	fmt.Println("URL settings updated")
+	fmt.Println("Sprite updated")
 }
