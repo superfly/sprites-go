@@ -23,7 +23,7 @@ const (
 	// poolDrainTarget: drain down to this many conns when draining
 	poolDrainTarget = 10
 
-	dialTimeout     = 5 * time.Second
+	dialTimeout     = 30 * time.Second
 	keepAliveWindow = 30 * time.Second
 )
 
