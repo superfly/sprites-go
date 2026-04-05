@@ -468,7 +468,7 @@ func (ps *ProxySession) handleConnection(localConn net.Conn) {
 
 	var remoteConn net.Conn
 	var err error
-	addr := fmt.Sprintf("%s:%d", ps.RemoteHost, ps.RemotePort)
+	addr := net.JoinHostPort(ps.RemoteHost, strconv.Itoa(ps.RemotePort))
 
 	if sprite.supportsControl {
 		// Try to use control connection
