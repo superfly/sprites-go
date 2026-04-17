@@ -14,7 +14,8 @@ type SpriteConfig struct {
 
 // URLSettings represents URL authentication settings
 type URLSettings struct {
-	Auth string `json:"auth,omitempty"`
+	Auth          string `json:"auth,omitempty"`
+	PrivateAccess string `json:"private_access,omitempty"`
 }
 
 // SpriteInfo represents sprite information from the API
