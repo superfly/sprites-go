@@ -17,7 +17,7 @@ func main() {
 
 	client := sprites.New(token)
 
-	_, err := client.CreateSprite(context.Background(), spriteName, nil)
+	_, err := client.CreateSpriteWithOrg(context.Background(), spriteName, nil, nil, []string{"prod"})
 	if err != nil {
 		log.Fatal(err)
 	}

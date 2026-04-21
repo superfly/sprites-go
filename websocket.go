@@ -203,7 +203,7 @@ func (c *wsCmd) start() {
 	} else {
 		// Dial new connection (legacy direct WebSocket path)
 		dialer := websocket.DefaultDialer
-		dialer.HandshakeTimeout = 10 * time.Second
+		dialer.HandshakeTimeout = 30 * time.Second
 		dialer.ReadBufferSize = 1024 * 1024
 		dialer.WriteBufferSize = 1024 * 1024
 
@@ -295,12 +295,12 @@ func (c *wsCmd) start() {
 func (c *wsCmd) waitForSessionInfo() error {
 	dbg("sprites: waitForSessionInfo starting", "usingControl", c.usingControl)
 	// Set a timeout for receiving session_info
-	ctx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
 	defer cancel()
 
 	// For non-control connections, also set read deadline on the websocket
 	if !c.usingControl {
-		c.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		c.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		defer c.conn.SetReadDeadline(time.Time{})
 	}
 
