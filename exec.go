@@ -246,6 +246,7 @@ func (c *Cmd) Start() error {
 		args = c.Args[1:]
 	}
 	c.wsCmd = newWSCmdContext(c.ctx, req, c.Path, args...)
+	c.wsCmd.dialContext = c.sprite.client.netDialContext
 
 	// If using control connection, provide the existing WebSocket
 	if usingControl {
@@ -300,6 +301,7 @@ func (c *Cmd) Start() error {
 			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.sprite.client.token))
 
 			c.wsCmd = newWSCmdContext(c.ctx, req, c.Path, args...)
+			c.wsCmd.dialContext = c.sprite.client.netDialContext
 			c.setupIO()
 			c.wsCmd.Tty = c.tty
 			c.wsCmd.IsAttach = true
