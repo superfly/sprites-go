@@ -194,11 +194,11 @@ func wsProxyHandshake(
 	// Race with ctx.Done in a goroutine
 	go func() {
 		var err error
-		if err := wsConn.WriteJSON(initMsg); err != nil {
+		if err = wsConn.WriteJSON(initMsg); err != nil {
 			err = fmt.Errorf("failed to send init message: %w", err)
 		} else {
 			// Read response
-			if err := wsConn.ReadJSON(&response); err != nil {
+			if err = wsConn.ReadJSON(&response); err != nil {
 				err = fmt.Errorf("failed to read response: %w", err)
 			} else if response.Status != "connected" {
 				err = fmt.Errorf("unexpected status: %s", response.Status)
