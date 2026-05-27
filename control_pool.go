@@ -77,7 +77,8 @@ func (p *controlPool) checkout(ctx context.Context) (*controlConn, error) {
 	}
 
 	// Try to find an idle connection
-	for i, conn := range p.conns {
+	for i := 0; i < len(p.conns); i++ {
+		conn := p.conns[i]
 		conn.mu.Lock()
 		if !conn.busy {
 			// Check if connection is still alive
@@ -87,6 +88,7 @@ func (p *controlPool) checkout(ctx context.Context) (*controlConn, error) {
 				conn.mu.Unlock()
 				p.conns = append(p.conns[:i], p.conns[i+1:]...)
 				dbg("sprites: removed closed control conn", "sprite", p.spriteName, "pool", len(p.conns))
+				i--
 				continue
 			default:
 			}
