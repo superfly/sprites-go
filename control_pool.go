@@ -217,6 +217,9 @@ func (p *controlPool) dial(ctx context.Context) (*controlConn, error) {
 		WriteBufferSize:  1024 * 1024, // 1MB
 		HandshakeTimeout: dialTimeout,
 	}
+	if p.client.netDialContext != nil {
+		dialer.NetDialContext = p.client.netDialContext
+	}
 
 	// Add TLS config if needed
 	if wsURL.Scheme == "wss" {

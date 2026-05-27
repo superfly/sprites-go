@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -31,6 +32,10 @@ type Client struct {
 
 	// disableControl prevents automatic control connection usage
 	disableControl bool
+
+	// netDialContext, when set, is used for all outbound TCP connections:
+	// both the HTTP client transport and gorilla WebSocket dialers.
+	netDialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 // Option is a functional option for configuring the SDK client.
@@ -101,6 +106,17 @@ func WithControlInitTimeout(d time.Duration) Option {
 func WithDisableControl() Option {
 	return func(c *Client) {
 		c.disableControl = true
+	}
+}
+
+// WithNetDialContext sets a custom dial function used for all outbound TCP
+// connections.
+func WithNetDialContext(fn func(ctx context.Context, network, addr string) (net.Conn, error)) Option {
+	return func(c *Client) {
+		c.netDialContext = fn
+		c.httpClient.Transport = &http.Transport{
+			DialContext: fn,
+		}
 	}
 }
 

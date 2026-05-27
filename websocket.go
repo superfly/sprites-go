@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -81,6 +82,9 @@ type wsCmd struct {
 	usingControl bool
 	// controlConn is the control connection wrapper (for reading from readCh)
 	controlConn *controlConn
+
+	// dialContext, when set, is used as the gorilla dialer's NetDialContext.
+	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 // wsAdapter wraps a WebSocket connection for terminal communication
@@ -206,6 +210,9 @@ func (c *wsCmd) start() {
 		dialer.HandshakeTimeout = 30 * time.Second
 		dialer.ReadBufferSize = 1024 * 1024
 		dialer.WriteBufferSize = 1024 * 1024
+		if c.dialContext != nil {
+			dialer.NetDialContext = c.dialContext
+		}
 
 		if c.Request.URL.Scheme == "wss" {
 			dialer.TLSClientConfig = &tls.Config{}
@@ -480,46 +487,46 @@ func (c *wsCmd) runIO() {
 			switch messageType {
 			case websocket.BinaryMessage:
 				stdout.Write(data)
-		case websocket.TextMessage:
-			// Check for control messages on control connections
-			if len(data) >= len("control:") && string(data[:len("control:")]) == "control:" {
-				dbg("sprites: pty received control message", "data", string(data))
-				continue
-			}
-			// Parse message type
-			var msg struct {
-				Type      string `json:"type"`
-				SessionID string `json:"session_id,omitempty"`
-				ExitCode  int    `json:"exit_code,omitempty"`
-			}
-			if json.Unmarshal(data, &msg) == nil {
-				dbg("sprites: pty received text message", "type", msg.Type, "data", string(data))
-				switch msg.Type {
-				case "session_info":
-					if msg.SessionID != "" {
-						c.sessionID = msg.SessionID
-					}
-				case "exit":
-					dbg("sprites: pty exit", "code", msg.ExitCode)
-					// Call handler first so CLI can detect clean exit
-					if c.TextMessageHandler != nil {
-						c.TextMessageHandler(data)
-					}
-					c.receivedExit = true
-					select {
-					case c.exitChan <- msg.ExitCode:
-					default:
-					}
-					adapter.Close()
-					return
+			case websocket.TextMessage:
+				// Check for control messages on control connections
+				if len(data) >= len("control:") && string(data[:len("control:")]) == "control:" {
+					dbg("sprites: pty received control message", "data", string(data))
+					continue
 				}
-			} else {
-				dbg("sprites: pty received non-json text message", "data", string(data))
-			}
-			// Handle text messages (e.g., port notifications)
-			if c.TextMessageHandler != nil {
-				c.TextMessageHandler(data)
-			}
+				// Parse message type
+				var msg struct {
+					Type      string `json:"type"`
+					SessionID string `json:"session_id,omitempty"`
+					ExitCode  int    `json:"exit_code,omitempty"`
+				}
+				if json.Unmarshal(data, &msg) == nil {
+					dbg("sprites: pty received text message", "type", msg.Type, "data", string(data))
+					switch msg.Type {
+					case "session_info":
+						if msg.SessionID != "" {
+							c.sessionID = msg.SessionID
+						}
+					case "exit":
+						dbg("sprites: pty exit", "code", msg.ExitCode)
+						// Call handler first so CLI can detect clean exit
+						if c.TextMessageHandler != nil {
+							c.TextMessageHandler(data)
+						}
+						c.receivedExit = true
+						select {
+						case c.exitChan <- msg.ExitCode:
+						default:
+						}
+						adapter.Close()
+						return
+					}
+				} else {
+					dbg("sprites: pty received non-json text message", "data", string(data))
+				}
+				// Handle text messages (e.g., port notifications)
+				if c.TextMessageHandler != nil {
+					c.TextMessageHandler(data)
+				}
 			}
 		}
 	}
