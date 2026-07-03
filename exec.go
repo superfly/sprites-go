@@ -239,6 +239,7 @@ func (c *Cmd) Start() error {
 		return err
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.sprite.client.token))
+	applyClientSignalHeaders(req.Header, c.sprite.client.clientSignals)
 
 	// Create WebSocket command
 	var args []string
@@ -299,6 +300,7 @@ func (c *Cmd) Start() error {
 				return err
 			}
 			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.sprite.client.token))
+			applyClientSignalHeaders(req.Header, c.sprite.client.clientSignals)
 
 			c.wsCmd = newWSCmdContext(c.ctx, req, c.Path, args...)
 			c.wsCmd.dialContext = c.sprite.client.netDialContext
