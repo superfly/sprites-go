@@ -2,7 +2,6 @@ package sprites
 
 import (
 	"net/http"
-	"strconv"
 
 	clientsignals "github.com/superfly/client-signals"
 )
@@ -29,13 +28,5 @@ func applyClientSignalHeaders(header http.Header, sig *clientsignals.Signals) {
 	if sig == nil {
 		return
 	}
-	header.Set("Fly-Client-Interactive", strconv.FormatBool(sig.Interactive))
-	header.Set("Fly-Client-Parent", sig.Parent)
-	if sig.Agent != "" {
-		header.Set("Fly-Client-Agent", sig.Agent)
-		header.Set("Fly-Client-Agent-Source", sig.AgentSource)
-	}
-	if sig.CI {
-		header.Set("Fly-Client-CI", "true")
-	}
+	sig.ApplyHeaders(header)
 }
