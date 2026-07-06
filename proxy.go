@@ -300,6 +300,7 @@ func (c *Client) dialProxyWebSocket(ctx context.Context, spriteName string) (*we
 	header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
 	header.Set("User-Agent", "sprites-go-sdk/1.0")
 	header.Set("Sprite-Client-Features", "control")
+	applyClientSignalHeaders(header, c.clientSignals)
 
 	// Connect to WebSocket
 	wsConn, _, err := dialer.DialContext(ctx, wsURL.String(), header)

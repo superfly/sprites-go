@@ -234,6 +234,7 @@ func (p *controlPool) dial(ctx context.Context) (*controlConn, error) {
 	header := http.Header{}
 	header.Set("Authorization", fmt.Sprintf("Bearer %s", p.client.token))
 	header.Set("User-Agent", "sprites-go-sdk/1.0")
+	applyClientSignalHeaders(header, p.client.clientSignals)
 
 	// Connect to WebSocket
 	ws, resp, err := dialer.DialContext(ctx, wsURL.String(), header)

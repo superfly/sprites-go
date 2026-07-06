@@ -16,6 +16,7 @@ import (
 	"time"
 
 	cleanhttp "github.com/hashicorp/go-cleanhttp"
+	clientsignals "github.com/superfly/client-signals"
 )
 
 // Client is the main SDK client for interacting with the sprite API.
@@ -38,6 +39,10 @@ type Client struct {
 	// netDialContext, when set, is used for all outbound TCP connections:
 	// both the HTTP client transport and gorilla WebSocket dialers.
 	netDialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+
+	// clientSignals, when set via WithClientSignals, is attached to every
+	// outgoing HTTP request and WebSocket dial.
+	clientSignals *clientsignals.Signals
 }
 
 // Option is a functional option for configuring the SDK client.
@@ -72,6 +77,9 @@ func New(token string, opts ...Option) *Client {
 	transport := c.httpClient.Transport
 	if transport == nil {
 		transport = cleanhttp.DefaultPooledTransport()
+	}
+	if c.clientSignals != nil {
+		transport = c.clientSignals.WrapTransport(transport)
 	}
 	c.httpClient.Transport = &versionCapturingTransport{
 		wrapped:       transport,
