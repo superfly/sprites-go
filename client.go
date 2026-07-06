@@ -63,7 +63,6 @@ func New(token string, opts ...Option) *Client {
 	c := &Client{
 		baseURL:            "https://api.sprites.dev",
 		token:              token,
-		httpClient:         newDefaultHTTPClient(),
 		pools:              make(map[string]*controlPool),
 		controlInitTimeout: 2 * time.Second,
 	}
@@ -72,8 +71,9 @@ func New(token string, opts ...Option) *Client {
 		opt(c)
 	}
 
-	// An Option (e.g. WithHTTPClient(nil)) may have left httpClient nil;
-	// restore a default before using it below.
+	// httpClient starts nil above and is only ever constructed here, once:
+	// either no Option set it, or WithHTTPClient(nil) explicitly cleared
+	// it — either way, this is the single place a default gets built.
 	if c.httpClient == nil {
 		c.httpClient = newDefaultHTTPClient()
 	}
