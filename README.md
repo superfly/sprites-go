@@ -435,6 +435,18 @@ The SDK includes comprehensive tests that verify compatibility with `exec.Cmd` b
 go test -v ./sdk/...
 ```
 
+## Cutting a Release
+
+If you have write access to this repo, you can ship a release with:
+
+`scripts/bump_version.sh`
+
+Or a prerelease with:
+
+`scripts/bump_version.sh prerel`
+
+The release and notes will be created automatically via Github Actions. Follow along in: https://github.com/superfly/sprites-go/actions/workflows/release.yml
+
 ## License
 
 See the main project LICENSE file.
