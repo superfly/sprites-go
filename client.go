@@ -48,14 +48,22 @@ type Client struct {
 // Option is a functional option for configuring the SDK client.
 type Option func(*Client)
 
+// newDefaultHTTPClient returns a non-shared, pooled http.Client (never the
+// shared http.DefaultTransport/http.DefaultClient), used both as the
+// default at construction time and to restore a default whenever an Option
+// leaves httpClient nil.
+func newDefaultHTTPClient() *http.Client {
+	client := cleanhttp.DefaultPooledClient()
+	client.Timeout = 30 * time.Second
+	return client
+}
+
 // New creates a new SDK client with the given token and options.
 func New(token string, opts ...Option) *Client {
 	c := &Client{
-		baseURL: "https://api.sprites.dev",
-		token:   token,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		baseURL:            "https://api.sprites.dev",
+		token:              token,
+		httpClient:         newDefaultHTTPClient(),
 		pools:              make(map[string]*controlPool),
 		controlInitTimeout: 2 * time.Second,
 	}
@@ -67,14 +75,16 @@ func New(token string, opts ...Option) *Client {
 	// An Option (e.g. WithHTTPClient(nil)) may have left httpClient nil;
 	// restore a default before using it below.
 	if c.httpClient == nil {
-		c.httpClient = cleanhttp.DefaultPooledClient()
-		c.httpClient.Timeout = 30 * time.Second
+		c.httpClient = newDefaultHTTPClient()
 	}
 
 	// Wrap transport to capture Sprite-Version header from responses.
-	// Never fall back to the shared http.DefaultTransport: this is a
-	// long-lived client making repeated calls to the same host, so use
-	// cleanhttp's non-shared, pooled transport instead.
+	// c.httpClient.Transport is non-nil by construction above, unless an
+	// Option (e.g. WithHTTPClient) supplied a *http.Client with no
+	// Transport set — guard against that case too, and never fall back to
+	// the shared http.DefaultTransport: this is a long-lived client making
+	// repeated calls to the same host, so use cleanhttp's non-shared,
+	// pooled transport instead.
 	transport := c.httpClient.Transport
 	if transport == nil {
 		transport = cleanhttp.DefaultPooledTransport()
@@ -136,8 +146,7 @@ func WithNetDialContext(fn func(ctx context.Context, network, addr string) (net.
 		c.netDialContext = fn
 
 		if c.httpClient == nil {
-			c.httpClient = cleanhttp.DefaultPooledClient()
-			c.httpClient.Timeout = 30 * time.Second
+			c.httpClient = newDefaultHTTPClient()
 		}
 
 		// If an earlier option (e.g. WithHTTPClient) already configured a
