@@ -15,6 +15,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  precommit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: "go.mod"
+      - uses: j178/prek-action@v2.0.5
+        with:
+          extra-args: --all-files --stage=manual
+
   golangci:
     name: lint
     runs-on: ubuntu-latest
@@ -24,8 +35,9 @@ jobs:
         with:
           go-version-file: "go.mod"
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9.2.1
+        uses: golangci/golangci-lint-action@v9.3.0
         with:
+          # Keep golangci-lint version insync with .pre-commit-config.yaml
           version: v2.11.3
 
   test:

@@ -19,24 +19,24 @@ package main
 import (
     "fmt"
     "log"
-    
+
     sprites "github.com/superfly/sprites-go"
 )
 
 func main() {
     // Create a client with authentication
     client := sprites.New("your-auth-token")
-    
+
     // Get a sprite handle
     sprite := client.Sprite("my-sprite")
-    
+
     // Run a command - just like exec.Command!
     cmd := sprite.Command("echo", "hello", "world")
     output, err := cmd.Output()
     if err != nil {
         log.Fatal(err)
     }
-    
+
     fmt.Printf("Output: %s", output)
 }
 ```
@@ -50,7 +50,7 @@ func main() {
 client := sprites.New("your-auth-token")
 
 // Or with custom base URL
-client := sprites.New("your-auth-token", 
+client := sprites.New("your-auth-token",
     sprites.WithBaseURL("http://localhost:8080"))
 
 // Get a sprite handle
@@ -114,7 +114,7 @@ if err != nil {
     log.Fatal(err)
 }
 
-// Get stdout pipe  
+// Get stdout pipe
 stdout, err := cmd.StdoutPipe()
 if err != nil {
     log.Fatal(err)
@@ -260,9 +260,9 @@ cmd.TextMessageHandler = func(data []byte) {
 
     switch notification.Type {
     case "port_opened":
-        fmt.Printf("Port %d opened on %s (PID %d)\n", 
+        fmt.Printf("Port %d opened on %s (PID %d)\n",
             notification.Port, notification.Address, notification.PID)
-        
+
         // Create proxy session with the specific address
         session, err := sprite.ProxyPorts(ctx, []sprites.PortMapping{
             {
@@ -275,17 +275,17 @@ cmd.TextMessageHandler = func(data []byte) {
             log.Printf("Failed to create proxy for port %d: %v", notification.Port, err)
             return
         }
-        
+
         mu.Lock()
         proxies[notification.Port] = session[0]
         mu.Unlock()
-        
-        fmt.Printf("Forwarding localhost:%d -> %s:%d\n", 
+
+        fmt.Printf("Forwarding localhost:%d -> %s:%d\n",
             notification.Port, notification.Address, notification.Port)
 
     case "port_closed":
         fmt.Printf("Port %d closed (PID %d)\n", notification.Port, notification.PID)
-        
+
         mu.Lock()
         if session, ok := proxies[notification.Port]; ok {
             session.Close()
@@ -321,42 +321,42 @@ import (
     "log"
     "strings"
     "time"
-    
+
     sprites "github.com/superfly/sprites-go"
 )
 
 func main() {
     // Create client with authentication
-    client := sprites.New("your-auth-token", 
+    client := sprites.New("your-auth-token",
         sprites.WithBaseURL("https://api.sprite.example.com"))
-    
+
     // Get a sprite handle
     sprite := client.Sprite("my-sprite")
-    
+
     // Example 1: Simple command with output
     output, err := sprite.Command("date").Output()
     if err != nil {
         log.Fatal(err)
     }
     fmt.Printf("Current date: %s", output)
-    
+
     // Example 2: Command with pipes and timeout
     ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
     defer cancel()
-    
+
     cmd := sprite.CommandContext(ctx, "grep", "-i", "error")
     cmd.Stdin = strings.NewReader("Line 1\nError on line 2\nLine 3\nAnother ERROR\n")
-    
+
     output, err = cmd.Output()
     if err != nil {
         log.Fatal(err)
     }
     fmt.Printf("Grep results:\n%s", output)
-    
+
     // Example 3: Interactive command with environment
     cmd = sprite.Command("bash", "-c", "echo Hello $USER from $HOSTNAME")
     cmd.Env = []string{"USER=sprite", "HOSTNAME=remote"}
-    
+
     output, err = cmd.Output()
     if err != nil {
         log.Fatal(err)
@@ -409,7 +409,7 @@ sprites, err := client.List()
 The `sprite.Cmd` type is designed to be a drop-in replacement for `exec.Cmd`. It implements the same methods with the same behavior:
 
 - `Run()` - Start and wait for completion
-- `Start()` - Start the command asynchronously  
+- `Start()` - Start the command asynchronously
 - `Wait()` - Wait for a started command to complete
 - `Output()` - Run and return stdout
 - `CombinedOutput()` - Run and return combined stdout/stderr
