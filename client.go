@@ -89,6 +89,25 @@ func New(token string, opts ...Option) *Client {
 	if transport == nil {
 		transport = cleanhttp.DefaultPooledTransport()
 	}
+
+	// Apply a custom dial function, if WithNetDialContext was used. This is
+	// applied here (after all Options have run) rather than inside the
+	// Option itself, so it's independent of option order — e.g. it still
+	// takes effect even if WithNetDialContext was applied before
+	// WithHTTPClient, which would otherwise silently discard it.
+	if c.netDialContext != nil {
+		var httpTransport *http.Transport
+		if existing, ok := transport.(*http.Transport); ok && existing != nil {
+			// Clone rather than mutate in place, to preserve the existing
+			// transport's other settings (TLS config, proxy, etc.).
+			httpTransport = existing.Clone()
+		} else {
+			httpTransport = cleanhttp.DefaultPooledTransport()
+		}
+		httpTransport.DialContext = c.netDialContext
+		transport = httpTransport
+	}
+
 	if c.clientSignals != nil {
 		transport = c.clientSignals.WrapTransport(transport)
 	}
@@ -144,23 +163,6 @@ func WithDisableControl() Option {
 func WithNetDialContext(fn func(ctx context.Context, network, addr string) (net.Conn, error)) Option {
 	return func(c *Client) {
 		c.netDialContext = fn
-
-		if c.httpClient == nil {
-			c.httpClient = newDefaultHTTPClient()
-		}
-
-		// If an earlier option (e.g. WithHTTPClient) already configured a
-		// *http.Transport, clone it so we preserve its settings (TLS config,
-		// proxy, etc.) rather than discarding them; only fall back to a
-		// fresh cleanhttp transport if there's nothing to clone.
-		var transport *http.Transport
-		if existing, ok := c.httpClient.Transport.(*http.Transport); ok && existing != nil {
-			transport = existing.Clone()
-		} else {
-			transport = cleanhttp.DefaultPooledTransport()
-		}
-		transport.DialContext = fn
-		c.httpClient.Transport = transport
 	}
 }
 
