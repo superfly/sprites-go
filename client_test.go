@@ -112,3 +112,33 @@ func TestWithNetDialContext_PreservesExistingTransportSettings(t *testing.T) {
 		t.Fatal("expected WithNetDialContext to clone the existing transport, not mutate it in place")
 	}
 }
+
+func TestWithNetDialContext_OrderIndependentOfWithHTTPClient(t *testing.T) {
+	const distinguishingTimeout = 42 * time.Second
+
+	customTransport := &http.Transport{
+		TLSHandshakeTimeout: distinguishingTimeout,
+	}
+	fn := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return nil, nil
+	}
+
+	// WithNetDialContext is applied *before* WithHTTPClient here — the
+	// reverse of TestWithNetDialContext_PreservesExistingTransportSettings.
+	// Since netDialContext is only stored during the options loop and
+	// actually applied once afterward in New(), this must still take
+	// effect regardless of option order.
+	c := New("test-token",
+		WithNetDialContext(fn),
+		WithHTTPClient(&http.Client{Transport: customTransport}),
+	)
+
+	transport := unwrapTransport(t, c)
+
+	if transport.TLSHandshakeTimeout != distinguishingTimeout {
+		t.Fatalf("expected the final transport to preserve WithHTTPClient's TLSHandshakeTimeout, got %v", transport.TLSHandshakeTimeout)
+	}
+	if transport.DialContext == nil {
+		t.Fatal("expected DialContext to still be set even though WithNetDialContext ran before WithHTTPClient")
+	}
+}

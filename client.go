@@ -48,14 +48,21 @@ type Client struct {
 // Option is a functional option for configuring the SDK client.
 type Option func(*Client)
 
+// newDefaultHTTPClient returns a non-shared, pooled http.Client (never the
+// shared http.DefaultTransport/http.DefaultClient), used both as the
+// default at construction time and to restore a default whenever an Option
+// leaves httpClient nil.
+func newDefaultHTTPClient() *http.Client {
+	client := cleanhttp.DefaultPooledClient()
+	client.Timeout = 30 * time.Second
+	return client
+}
+
 // New creates a new SDK client with the given token and options.
 func New(token string, opts ...Option) *Client {
 	c := &Client{
-		baseURL: "https://api.sprites.dev",
-		token:   token,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		baseURL:            "https://api.sprites.dev",
+		token:              token,
 		pools:              make(map[string]*controlPool),
 		controlInitTimeout: 2 * time.Second,
 	}
@@ -64,20 +71,43 @@ func New(token string, opts ...Option) *Client {
 		opt(c)
 	}
 
-	// An Option (e.g. WithHTTPClient(nil)) may have left httpClient nil;
-	// restore a default before using it below.
+	// httpClient starts nil above and is only ever constructed here, once:
+	// either no Option set it, or WithHTTPClient(nil) explicitly cleared
+	// it — either way, this is the single place a default gets built.
 	if c.httpClient == nil {
-		c.httpClient = &http.Client{Timeout: 30 * time.Second}
+		c.httpClient = newDefaultHTTPClient()
 	}
 
 	// Wrap transport to capture Sprite-Version header from responses.
-	// Never fall back to the shared http.DefaultTransport: this is a
-	// long-lived client making repeated calls to the same host, so use
-	// cleanhttp's non-shared, pooled transport instead.
+	// c.httpClient.Transport is non-nil by construction above, unless an
+	// Option (e.g. WithHTTPClient) supplied a *http.Client with no
+	// Transport set — guard against that case too, and never fall back to
+	// the shared http.DefaultTransport: this is a long-lived client making
+	// repeated calls to the same host, so use cleanhttp's non-shared,
+	// pooled transport instead.
 	transport := c.httpClient.Transport
 	if transport == nil {
 		transport = cleanhttp.DefaultPooledTransport()
 	}
+
+	// Apply a custom dial function, if WithNetDialContext was used. This is
+	// applied here (after all Options have run) rather than inside the
+	// Option itself, so it's independent of option order — e.g. it still
+	// takes effect even if WithNetDialContext was applied before
+	// WithHTTPClient, which would otherwise silently discard it.
+	if c.netDialContext != nil {
+		var httpTransport *http.Transport
+		if existing, ok := transport.(*http.Transport); ok && existing != nil {
+			// Clone rather than mutate in place, to preserve the existing
+			// transport's other settings (TLS config, proxy, etc.).
+			httpTransport = existing.Clone()
+		} else {
+			httpTransport = cleanhttp.DefaultPooledTransport()
+		}
+		httpTransport.DialContext = c.netDialContext
+		transport = httpTransport
+	}
+
 	if c.clientSignals != nil {
 		transport = c.clientSignals.WrapTransport(transport)
 	}
@@ -133,23 +163,6 @@ func WithDisableControl() Option {
 func WithNetDialContext(fn func(ctx context.Context, network, addr string) (net.Conn, error)) Option {
 	return func(c *Client) {
 		c.netDialContext = fn
-
-		if c.httpClient == nil {
-			c.httpClient = &http.Client{Timeout: 30 * time.Second}
-		}
-
-		// If an earlier option (e.g. WithHTTPClient) already configured a
-		// *http.Transport, clone it so we preserve its settings (TLS config,
-		// proxy, etc.) rather than discarding them; only fall back to a
-		// fresh cleanhttp transport if there's nothing to clone.
-		var transport *http.Transport
-		if existing, ok := c.httpClient.Transport.(*http.Transport); ok && existing != nil {
-			transport = existing.Clone()
-		} else {
-			transport = cleanhttp.DefaultPooledTransport()
-		}
-		transport.DialContext = fn
-		c.httpClient.Transport = transport
 	}
 }
 
