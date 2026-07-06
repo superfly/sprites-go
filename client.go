@@ -59,6 +59,12 @@ func New(token string, opts ...Option) *Client {
 		opt(c)
 	}
 
+	// An Option (e.g. WithHTTPClient(nil)) may have left httpClient nil;
+	// restore a default before using it below.
+	if c.httpClient == nil {
+		c.httpClient = &http.Client{Timeout: 30 * time.Second}
+	}
+
 	// Wrap transport to capture Sprite-Version header from responses.
 	// Never fall back to the shared http.DefaultTransport: this is a
 	// long-lived client making repeated calls to the same host, so use
@@ -119,7 +125,21 @@ func WithDisableControl() Option {
 func WithNetDialContext(fn func(ctx context.Context, network, addr string) (net.Conn, error)) Option {
 	return func(c *Client) {
 		c.netDialContext = fn
-		transport := cleanhttp.DefaultPooledTransport()
+
+		if c.httpClient == nil {
+			c.httpClient = &http.Client{Timeout: 30 * time.Second}
+		}
+
+		// If an earlier option (e.g. WithHTTPClient) already configured a
+		// *http.Transport, clone it so we preserve its settings (TLS config,
+		// proxy, etc.) rather than discarding them; only fall back to a
+		// fresh cleanhttp transport if there's nothing to clone.
+		var transport *http.Transport
+		if existing, ok := c.httpClient.Transport.(*http.Transport); ok && existing != nil {
+			transport = existing.Clone()
+		} else {
+			transport = cleanhttp.DefaultPooledTransport()
+		}
 		transport.DialContext = fn
 		c.httpClient.Transport = transport
 	}
