@@ -255,7 +255,7 @@ func (s *Sprite) FsReadControl(ctx context.Context, filePath string, opts ...FsC
 func (s *Sprite) FsWriteControl(ctx context.Context, filePath string, data []byte, opts ...FsControlOption) (*FsWriteResult, error) {
 	o := &fsControlOpts{
 		workingDir:   "/home/sprite",
-		mode:         0644,
+		mode:         0o644,
 		mkdirParents: true,
 	}
 	for _, opt := range opts {
@@ -701,6 +701,7 @@ func (s *Sprite) checkoutControlConn(ctx context.Context) (*controlConn, error) 
 	}
 
 	pool := s.client.getOrCreatePool(s.name)
+
 	return pool.checkout(ctx)
 }
 
@@ -752,6 +753,7 @@ func (s *Sprite) waitControlComplete(conn *controlConn) error {
 			if json.Unmarshal(msg.Args, &errArgs) == nil {
 				return fmt.Errorf("operation failed: %s", errArgs.Error)
 			}
+
 			return fmt.Errorf("operation failed")
 		}
 	}

@@ -29,6 +29,7 @@ func (ss *ServiceStream) Next() (*ServiceLogEvent, error) {
 		if err := ss.scanner.Err(); err != nil {
 			return nil, err
 		}
+
 		return nil, io.EOF
 	}
 
@@ -51,6 +52,7 @@ func (ss *ServiceStream) Close() error {
 	if ss.reader != nil {
 		return ss.reader.Close()
 	}
+
 	return nil
 }
 

@@ -177,6 +177,7 @@ func (c *Client) Sprite(name string) *Sprite {
 	ctx, cancel := context.WithTimeout(context.Background(), c.controlInitTimeout)
 	defer cancel()
 	s.ensureControlSupport(ctx)
+
 	return s
 }
 
@@ -191,6 +192,7 @@ func (c *Client) SpriteWithOrg(name string, org *OrganizationInfo) *Sprite {
 	ctx, cancel := context.WithTimeout(context.Background(), c.controlInitTimeout)
 	defer cancel()
 	s.ensureControlSupport(ctx)
+
 	return s
 }
 
@@ -211,6 +213,7 @@ func (c *Client) SpriteVersion() string {
 	if v := c.spriteVersion.Load(); v != nil {
 		return v.(string)
 	}
+
 	return ""
 }
 
@@ -322,6 +325,7 @@ func CreateToken(ctx context.Context, flyMacaroon, orgSlug string, inviteCode st
 		if apiErr := parseAPIError(resp, body); apiErr != nil {
 			return "", apiErr
 		}
+
 		return "", fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -392,6 +396,7 @@ func (c *Client) getOrCreatePool(spriteName string) *controlPool {
 
 	pool = newControlPool(c, spriteName)
 	c.pools[spriteName] = pool
+
 	return pool
 }
 

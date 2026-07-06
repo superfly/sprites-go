@@ -125,6 +125,7 @@ func (s *Sprite) Command(name string, arg ...string) *Cmd {
 		ctx:    context.Background(),
 		sprite: s,
 	}
+
 	return cmd
 }
 
@@ -137,6 +138,7 @@ func (s *Sprite) CommandContext(ctx context.Context, name string, arg ...string)
 	}
 	cmd := s.Command(name, arg...)
 	cmd.ctx = ctx
+
 	return cmd
 }
 
@@ -146,6 +148,7 @@ func (c *Cmd) String() string {
 	if c == nil {
 		return "<nil>"
 	}
+
 	return fmt.Sprintf("%s %v", c.Path, c.Args[1:])
 }
 
@@ -161,6 +164,7 @@ func (c *Cmd) ConnectionMode() string {
 	if c.controlMode {
 		return "control"
 	}
+
 	return "direct"
 }
 
@@ -169,6 +173,7 @@ func (c *Cmd) Run() error {
 	if err := c.Start(); err != nil {
 		return err
 	}
+
 	return c.Wait()
 }
 
@@ -225,6 +230,7 @@ func (c *Cmd) Start() error {
 			pool.checkin(controlConn)
 		}
 		closeDescriptors(c.closers)
+
 		return err
 	}
 
@@ -236,6 +242,7 @@ func (c *Cmd) Start() error {
 			pool.checkin(controlConn)
 		}
 		closeDescriptors(c.closers)
+
 		return err
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.sprite.client.token))
@@ -316,6 +323,7 @@ func (c *Cmd) Start() error {
 				closeDescriptors(c.closers)
 				return fmt.Errorf("failed to start sprite command: %w", retryErr)
 			}
+
 			return nil
 		}
 
@@ -324,6 +332,7 @@ func (c *Cmd) Start() error {
 			pool.checkin(controlConn)
 		}
 		closeDescriptors(c.closers)
+
 		return fmt.Errorf("failed to start sprite command: %w", err)
 	}
 
@@ -417,6 +426,7 @@ func (c *Cmd) Output() ([]byte, error) {
 	c.Stdout = &outputBuffer{bytes: &stdout}
 
 	err := c.Run()
+
 	return stdout, err
 }
 
@@ -435,6 +445,7 @@ func (c *Cmd) CombinedOutput() ([]byte, error) {
 	c.Stderr = out
 
 	err := c.Run()
+
 	return b, err
 }
 
@@ -452,6 +463,7 @@ func (c *Cmd) StdinPipe() (io.WriteCloser, error) {
 	wp := &writePipe{WriteCloser: pw}
 	c.stdinPipe = wp
 	c.closers = append(c.closers, pr)
+
 	return wp, nil
 }
 
@@ -469,6 +481,7 @@ func (c *Cmd) StdoutPipe() (io.ReadCloser, error) {
 	rp := &readPipe{ReadCloser: pr}
 	c.stdoutPipe = rp
 	c.closers = append(c.closers, pw)
+
 	return rp, nil
 }
 
@@ -486,6 +499,7 @@ func (c *Cmd) StderrPipe() (io.ReadCloser, error) {
 	rp := &readPipe{ReadCloser: pr}
 	c.stderrPipe = rp
 	c.closers = append(c.closers, pw)
+
 	return rp, nil
 }
 
@@ -517,11 +531,13 @@ func (c *Cmd) SetTTYSize(rows, cols uint16) error {
 		if c.wsCmd == nil {
 			return errors.New("sprite: command not fully initialized")
 		}
+
 		return c.wsCmd.Resize(cols, rows)
 	}
 
 	// Otherwise set the initial size
 	c.ttySize = &ttySize{Rows: rows, Cols: cols}
+
 	return nil
 }
 
@@ -577,6 +593,7 @@ func (c *Cmd) Signal(signal string) error {
 	if sessID == "" {
 		return errors.New("sprite: no session ID for HTTP signal fallback")
 	}
+
 	return c.sprite.client.signalSession(c.ctx, c.sprite.name, sessID, signal)
 }
 
@@ -589,6 +606,7 @@ func (c *Cmd) ExitCode() int {
 	if !c.finished {
 		return -1
 	}
+
 	return c.exitCode
 }
 
@@ -667,6 +685,7 @@ func (c *Cmd) buildWebSocketURL() (*url.URL, error) {
 	}
 
 	u.RawQuery = q.Encode()
+
 	return u, nil
 }
 
@@ -722,6 +741,7 @@ func (p *writePipe) Close() error {
 		p.closed = true
 		return p.WriteCloser.Close()
 	}
+
 	return nil
 }
 
@@ -739,6 +759,7 @@ func (p *readPipe) Close() error {
 		p.closed = true
 		return p.ReadCloser.Close()
 	}
+
 	return nil
 }
 
@@ -752,5 +773,6 @@ func (b *outputBuffer) Write(p []byte) (n int, err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	*b.bytes = append(*b.bytes, p...)
+
 	return len(p), nil
 }

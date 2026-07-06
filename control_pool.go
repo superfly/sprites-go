@@ -89,6 +89,7 @@ func (p *controlPool) checkout(ctx context.Context) (*controlConn, error) {
 				p.conns = append(p.conns[:i], p.conns[i+1:]...)
 				dbg("sprites: removed closed control conn", "sprite", p.spriteName, "pool", len(p.conns))
 				i--
+
 				continue
 			default:
 			}
@@ -97,6 +98,7 @@ func (p *controlPool) checkout(ctx context.Context) (*controlConn, error) {
 			conn.mu.Unlock()
 			dbg("sprites: checkout control conn", "sprite", p.spriteName, "pool", len(p.conns))
 			p.mu.Unlock()
+
 			return conn, nil
 		}
 		conn.mu.Unlock()
@@ -134,6 +136,7 @@ func (p *controlPool) checkout(ctx context.Context) (*controlConn, error) {
 	p.conns = append(p.conns, conn)
 	dbg("sprites: dialed new control conn", "sprite", p.spriteName, "pool", len(p.conns))
 	p.mu.Unlock()
+
 	return conn, nil
 }
 
@@ -245,6 +248,7 @@ func (p *controlPool) dial(ctx context.Context) (*controlConn, error) {
 			_ = resp.Body.Close()
 			return nil, fmt.Errorf("failed to dial control connection: %v (HTTP %d: %s)", err, resp.StatusCode, string(body))
 		}
+
 		return nil, fmt.Errorf("failed to dial control connection: %v", err)
 	}
 
