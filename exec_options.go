@@ -18,5 +18,6 @@ func (c *Cmd) SetControlMode(enable bool) error {
 	}
 
 	c.controlMode = enable
+
 	return nil
 }

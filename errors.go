@@ -65,6 +65,7 @@ func (e *APIError) Error() string {
 	if e.ErrorCode != "" {
 		return e.ErrorCode
 	}
+
 	return fmt.Sprintf("API error (status %d)", e.StatusCode)
 }
 
@@ -89,6 +90,7 @@ func (e *APIError) GetRetryAfterSeconds() int {
 	if e.RetryAfterSeconds > 0 {
 		return e.RetryAfterSeconds
 	}
+
 	return e.RetryAfterHeader
 }
 
@@ -147,6 +149,7 @@ func IsAPIError(err error) *APIError {
 	if apiErr, ok := err.(*APIError); ok {
 		return apiErr
 	}
+
 	return nil
 }
 
@@ -156,6 +159,7 @@ func IsRateLimitErr(err error) *APIError {
 	if apiErr := IsAPIError(err); apiErr != nil && apiErr.IsRateLimitError() {
 		return apiErr
 	}
+
 	return nil
 }
 

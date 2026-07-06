@@ -87,19 +87,6 @@ type fsListResponse struct {
 	Count   int       `json:"count"`
 }
 
-// fsWriteResponse is the response from /fs/write
-type fsWriteResponse struct {
-	Path string `json:"path"`
-	Size int64  `json:"size"`
-	Mode string `json:"mode"`
-}
-
-// fsDeleteResponse is the response from /fs/delete
-type fsDeleteResponse struct {
-	Deleted []string `json:"deleted"`
-	Count   int      `json:"count"`
-}
-
 // fsRenameRequest is the request body for /fs/rename
 type fsRenameRequest struct {
 	Source     string `json:"source"`
@@ -188,6 +175,7 @@ func (f *spriteFS) statContext(ctx context.Context, name string) (fs.FileInfo, e
 		if json.NewDecoder(resp.Body).Decode(&fsErr) == nil && fsErr.Error != "" {
 			return nil, &fs.PathError{Op: "stat", Path: name, Err: fmt.Errorf("%s", fsErr.Error)}
 		}
+
 		return nil, &fs.PathError{Op: "stat", Path: name, Err: fmt.Errorf("HTTP %d", resp.StatusCode)}
 	}
 
@@ -201,6 +189,7 @@ func (f *spriteFS) statContext(ctx context.Context, name string) (fs.FileInfo, e
 	}
 
 	entry := listResp.Entries[0]
+
 	return &spriteFileInfo{
 		name:    path.Base(entry.Name),
 		size:    entry.Size,
@@ -243,6 +232,7 @@ func (f *spriteFS) ReadFileContext(ctx context.Context, name string) ([]byte, er
 		if json.NewDecoder(resp.Body).Decode(&fsErr) == nil && fsErr.Error != "" {
 			return nil, &fs.PathError{Op: "read", Path: name, Err: fmt.Errorf("%s", fsErr.Error)}
 		}
+
 		return nil, &fs.PathError{Op: "read", Path: name, Err: fmt.Errorf("HTTP %d", resp.StatusCode)}
 	}
 
@@ -281,6 +271,7 @@ func (f *spriteFS) readDirContext(ctx context.Context, name string) ([]fs.DirEnt
 		if json.NewDecoder(resp.Body).Decode(&fsErr) == nil && fsErr.Error != "" {
 			return nil, &fs.PathError{Op: "readdir", Path: name, Err: fmt.Errorf("%s", fsErr.Error)}
 		}
+
 		return nil, &fs.PathError{Op: "readdir", Path: name, Err: fmt.Errorf("HTTP %d", resp.StatusCode)}
 	}
 
@@ -304,6 +295,7 @@ func (f *spriteFS) readDirContext(ctx context.Context, name string) ([]fs.DirEnt
 			},
 		}
 	}
+
 	return entries, nil
 }
 
@@ -340,6 +332,7 @@ func (f *spriteFS) WriteFileContext(ctx context.Context, name string, data []byt
 		if json.NewDecoder(resp.Body).Decode(&fsErr) == nil && fsErr.Error != "" {
 			return &fs.PathError{Op: "write", Path: name, Err: fmt.Errorf("%s", fsErr.Error)}
 		}
+
 		return &fs.PathError{Op: "write", Path: name, Err: fmt.Errorf("HTTP %d", resp.StatusCode)}
 	}
 
@@ -408,6 +401,7 @@ func (f *spriteFS) removeInternal(ctx context.Context, name string, recursive bo
 		if json.NewDecoder(resp.Body).Decode(&fsErr) == nil && fsErr.Error != "" {
 			return &fs.PathError{Op: "remove", Path: name, Err: fmt.Errorf("%s", fsErr.Error)}
 		}
+
 		return &fs.PathError{Op: "remove", Path: name, Err: fmt.Errorf("HTTP %d", resp.StatusCode)}
 	}
 
@@ -452,6 +446,7 @@ func (f *spriteFS) renameContext(ctx context.Context, oldname, newname string) e
 		if json.NewDecoder(resp.Body).Decode(&fsErr) == nil && fsErr.Error != "" {
 			return &fs.PathError{Op: "rename", Path: oldname, Err: fmt.Errorf("%s", fsErr.Error)}
 		}
+
 		return &fs.PathError{Op: "rename", Path: oldname, Err: fmt.Errorf("HTTP %d", resp.StatusCode)}
 	}
 
@@ -498,6 +493,7 @@ func (f *spriteFS) CopyContext(ctx context.Context, src, dst string) error {
 		if json.NewDecoder(resp.Body).Decode(&fsErr) == nil && fsErr.Error != "" {
 			return &fs.PathError{Op: "copy", Path: src, Err: fmt.Errorf("%s", fsErr.Error)}
 		}
+
 		return &fs.PathError{Op: "copy", Path: src, Err: fmt.Errorf("HTTP %d", resp.StatusCode)}
 	}
 
@@ -516,7 +512,7 @@ func (f *spriteFS) ChmodContext(ctx context.Context, name string, mode fs.FileMo
 	body, err := json.Marshal(fsChmodRequest{
 		Path:       name,
 		WorkingDir: f.workingDir,
-		Mode:       fmt.Sprintf("%04o", mode&0777),
+		Mode:       fmt.Sprintf("%04o", mode&0o777),
 	})
 	if err != nil {
 		return &fs.PathError{Op: "chmod", Path: name, Err: err}
@@ -543,6 +539,7 @@ func (f *spriteFS) ChmodContext(ctx context.Context, name string, mode fs.FileMo
 		if json.NewDecoder(resp.Body).Decode(&fsErr) == nil && fsErr.Error != "" {
 			return &fs.PathError{Op: "chmod", Path: name, Err: fmt.Errorf("%s", fsErr.Error)}
 		}
+
 		return &fs.PathError{Op: "chmod", Path: name, Err: fmt.Errorf("HTTP %d", resp.StatusCode)}
 	}
 
@@ -566,14 +563,16 @@ func parseMode(mode string, isDir bool) fs.FileMode {
 	m, err := strconv.ParseUint(mode, 8, 32)
 	if err != nil {
 		if isDir {
-			return fs.ModeDir | 0755
+			return fs.ModeDir | 0o755
 		}
-		return 0644
+
+		return 0o644
 	}
 	fm := fs.FileMode(m)
 	if isDir {
 		fm |= fs.ModeDir
 	}
+
 	return fm
 }
 
@@ -627,8 +626,10 @@ type spriteDir struct {
 }
 
 func (d *spriteDir) Stat() (fs.FileInfo, error) { return d.info, nil }
-func (d *spriteDir) Read(b []byte) (int, error) { return 0, &fs.PathError{Op: "read", Path: d.name, Err: fs.ErrInvalid} }
-func (d *spriteDir) Close() error               { return nil }
+func (d *spriteDir) Read(b []byte) (int, error) {
+	return 0, &fs.PathError{Op: "read", Path: d.name, Err: fs.ErrInvalid}
+}
+func (d *spriteDir) Close() error { return nil }
 
 // ReadDir implements fs.ReadDirFile
 func (d *spriteDir) ReadDir(n int) ([]fs.DirEntry, error) {
@@ -656,5 +657,6 @@ func (d *spriteDir) ReadDir(n int) ([]fs.DirEntry, error) {
 	}
 	entries := d.entries[d.offset:end]
 	d.offset = end
+
 	return entries, nil
 }

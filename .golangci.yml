@@ -1,0 +1,61 @@
+version: "2"
+run:
+  issues-exit-code: 1
+  tests: true
+linters:
+  default: none
+  enable:
+    - gomodguard
+    - govet
+    - ineffassign
+    - staticcheck
+    - unconvert
+    - unused
+    - nlreturn
+    - bodyclose
+    - gocheckcompilerdirectives
+    - errname
+    - errchkjson
+  settings:
+    nlreturn:
+      block-size: 3
+    staticcheck:
+      checks:
+        - all
+        - -ST1003 # struct field ... should be ... (mostly acronyms such as Http -> HTTP)
+    gomodguard:
+      allowed:
+        modules:
+          - github.com/Masterminds/semver/v3
+          - github.com/gorilla/websocket
+          - github.com/hashicorp/go-cleanhttp
+          - github.com/superfly/client-signals
+        domains:
+          - golang.org
+      blocked:
+        modules:
+          - github.com/superfly/flyctl:
+              reason: "this SDK can not depend on flyctl project because it pulls tons of dependencies"
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gofumpt
+  settings:
+    gofumpt:
+      module-path: github.com/superfly/sprites-go
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

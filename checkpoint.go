@@ -30,12 +30,12 @@ func (c *Client) CreateCheckpointWithComment(ctx context.Context, spriteName str
 	// Build URL
 	url := fmt.Sprintf("%s/v1/sprites/%s/checkpoint", c.baseURL, spriteName)
 
-    // Create request body (backward compatible if comment is empty)
-    payload := map[string]interface{}{}
-    if comment != "" {
-        payload["comment"] = comment
-    }
-    jsonData, err := json.Marshal(payload)
+	// Create request body (backward compatible if comment is empty)
+	payload := map[string]interface{}{}
+	if comment != "" {
+		payload["comment"] = comment
+	}
+	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -74,17 +74,17 @@ func (c *Client) CreateCheckpointWithComment(ctx context.Context, spriteName str
 
 // CreateCheckpoint creates a new checkpoint for the sprite (no comment)
 func (c *Client) CreateCheckpoint(ctx context.Context, spriteName string) (*CheckpointStream, error) {
-    return c.CreateCheckpointWithComment(ctx, spriteName, "")
+	return c.CreateCheckpointWithComment(ctx, spriteName, "")
 }
 
 // CreateCheckpoint creates a new checkpoint for this sprite (no comment)
 func (s *Sprite) CreateCheckpoint(ctx context.Context) (*CheckpointStream, error) {
-    return s.client.CreateCheckpointWithComment(ctx, s.name, "")
+	return s.client.CreateCheckpointWithComment(ctx, s.name, "")
 }
 
 // CreateCheckpointWithComment creates a new checkpoint for this sprite with an optional comment
 func (s *Sprite) CreateCheckpointWithComment(ctx context.Context, comment string) (*CheckpointStream, error) {
-    return s.client.CreateCheckpointWithComment(ctx, s.name, comment)
+	return s.client.CreateCheckpointWithComment(ctx, s.name, comment)
 }
 
 // ListCheckpointsOptions contains options for listing checkpoints
@@ -254,6 +254,7 @@ func (cs *CheckpointStream) Next() (*StreamMessage, error) {
 		if err := cs.scanner.Err(); err != nil {
 			return nil, err
 		}
+
 		return nil, io.EOF
 	}
 
@@ -276,6 +277,7 @@ func (cs *CheckpointStream) Close() error {
 	if cs.reader != nil {
 		return cs.reader.Close()
 	}
+
 	return nil
 }
 
@@ -290,6 +292,7 @@ func (rs *RestoreStream) Next() (*StreamMessage, error) {
 		if err := rs.scanner.Err(); err != nil {
 			return nil, err
 		}
+
 		return nil, io.EOF
 	}
 
@@ -312,6 +315,7 @@ func (rs *RestoreStream) Close() error {
 	if rs.reader != nil {
 		return rs.reader.Close()
 	}
+
 	return nil
 }
 

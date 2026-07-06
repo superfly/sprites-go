@@ -60,6 +60,7 @@ func (conn *proxyConn) Read(p []byte) (n int, err error) {
 				conn.readReader = nil
 				continue
 			}
+
 			return n, err
 		}
 
@@ -68,6 +69,7 @@ func (conn *proxyConn) Read(p []byte) (n int, err error) {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 				return 0, io.EOF
 			}
+
 			return 0, err
 		}
 		// only handle binary messages
@@ -104,6 +106,7 @@ func (conn *proxyConn) Close() error {
 		)
 		closeErr = conn.conn.Close()
 	})
+
 	return closeErr
 }
 
@@ -111,6 +114,7 @@ func (conn *proxyConn) LocalAddr() net.Addr {
 	// there is no local address, return nil
 	return nil
 }
+
 func (conn *proxyConn) RemoteAddr() net.Addr {
 	return conn.remoteAddr
 }
@@ -119,11 +123,14 @@ func (conn *proxyConn) SetDeadline(t time.Time) error {
 	if err := conn.SetReadDeadline(t); err != nil {
 		return err
 	}
+
 	return conn.SetWriteDeadline(t)
 }
+
 func (conn *proxyConn) SetReadDeadline(t time.Time) error {
 	return conn.conn.SetReadDeadline(t)
 }
+
 func (conn *proxyConn) SetWriteDeadline(t time.Time) error {
 	return conn.conn.SetWriteDeadline(t)
 }
@@ -144,6 +151,7 @@ func (c *controlProxyConn) Close() error {
 		c.control.sendRelease()
 		c.pool.checkin(c.control)
 	})
+
 	return nil
 }
 
@@ -157,6 +165,7 @@ func (c *Client) ProxySocket(ctx context.Context, network, spriteName, addr stri
 		if err != nil {
 			return nil, err
 		}
+
 		return initSocketTCP(ctx, wsConn, addr)
 	default:
 		return nil, fmt.Errorf("unsupported network type %q", network)
@@ -194,15 +203,12 @@ func wsProxyHandshake(
 	// Race with ctx.Done in a goroutine
 	go func() {
 		var err error
-		if err := wsConn.WriteJSON(initMsg); err != nil {
-			err = fmt.Errorf("failed to send init message: %w", err)
-		} else {
-			// Read response
-			if err := wsConn.ReadJSON(&response); err != nil {
-				err = fmt.Errorf("failed to read response: %w", err)
-			} else if response.Status != "connected" {
-				err = fmt.Errorf("unexpected status: %s", response.Status)
-			}
+		if writeErr := wsConn.WriteJSON(initMsg); writeErr != nil {
+			err = fmt.Errorf("failed to send init message: %w", writeErr)
+		} else if readErr := wsConn.ReadJSON(&response); readErr != nil {
+			err = fmt.Errorf("failed to read response: %w", readErr)
+		} else if response.Status != "connected" {
+			err = fmt.Errorf("unexpected status: %s", response.Status)
 		}
 		errChan <- err
 	}()
@@ -235,8 +241,9 @@ func initSocketTCP(ctx context.Context, wsConn *websocket.Conn, addr string) (ne
 
 	initMsg := &ProxyInitMessage{
 		Host: host,
-		Port: int(port),
+		Port: port,
 	}
+
 	return wsProxyHandshake(ctx, wsConn, initMsg)
 }
 
@@ -303,7 +310,10 @@ func (c *Client) dialProxyWebSocket(ctx context.Context, spriteName string) (*we
 	applyClientSignalHeaders(header, c.clientSignals)
 
 	// Connect to WebSocket
-	wsConn, _, err := dialer.DialContext(ctx, wsURL.String(), header)
+	wsConn, resp, err := dialer.DialContext(ctx, wsURL.String(), header)
+	if resp != nil {
+		defer resp.Body.Close()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect: %w", err)
 	}
@@ -364,6 +374,7 @@ func (c *Client) ProxyPorts(ctx context.Context, spriteName string, mappings []P
 			for _, s := range sessions {
 				s.Close()
 			}
+
 			return nil, fmt.Errorf("failed to create proxy for port %d: %w", mapping.LocalPort, err)
 		}
 		sessions = append(sessions, session)
@@ -402,6 +413,7 @@ func (c *Client) createProxySession(ctx context.Context, spriteName string, mapp
 			if session.RemoteHost != "" {
 				return session.RemoteHost
 			}
+
 			return "localhost"
 		}(),
 		"remote_port", session.RemotePort,
@@ -486,6 +498,7 @@ func (ps *ProxySession) handleConnection(localConn net.Conn) {
 				)
 				controlConn.sendRelease()
 				pool.checkin(controlConn)
+
 				return
 			}
 		}
@@ -499,6 +512,7 @@ func (ps *ProxySession) handleConnection(localConn net.Conn) {
 				"sprite", ps.spriteName,
 				"error", dialErr,
 			)
+
 			return
 		}
 
@@ -509,6 +523,7 @@ func (ps *ProxySession) handleConnection(localConn net.Conn) {
 				"error", err,
 			)
 			wsConn.Close()
+
 			return
 		}
 	}
@@ -583,6 +598,7 @@ func (ps *ProxySession) LocalAddr() net.Addr {
 	if ps.listener != nil {
 		return ps.listener.Addr()
 	}
+
 	return nil
 }
 

@@ -164,5 +164,6 @@ func (s *Session) GetActivityAge() time.Duration {
 	if s.LastActivity == nil {
 		return time.Since(s.Created)
 	}
+
 	return time.Since(*s.LastActivity)
 }

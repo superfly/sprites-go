@@ -31,7 +31,7 @@ func NewLogger(logPath string) (*Logger, error) {
 		return &Logger{}, nil
 	}
 
-	file, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	file, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open log file: %w", err)
 	}
@@ -743,7 +743,7 @@ func handleFsWrite(token, baseURL, spriteName, workingDir, path, content string,
 		fsys = sprite.Filesystem()
 	}
 
-	err := fsys.WriteFile(path, []byte(content), 0644)
+	err := fsys.WriteFile(path, []byte(content), 0o644)
 	if err != nil {
 		logger.LogEvent("fs_write_failed", map[string]interface{}{
 			"error": err.Error(),
@@ -902,9 +902,9 @@ func handleFsMkdir(token, baseURL, spriteName, workingDir, path string, parents 
 
 	var err error
 	if parents {
-		err = fsys.MkdirAll(path, 0755)
+		err = fsys.MkdirAll(path, 0o755)
 	} else {
-		err = fsys.Mkdir(path, 0755)
+		err = fsys.Mkdir(path, 0o755)
 	}
 	if err != nil {
 		logger.LogEvent("fs_mkdir_failed", map[string]interface{}{

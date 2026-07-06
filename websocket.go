@@ -107,6 +107,7 @@ func newWSCmd(req *http.Request, name string, arg ...string) *wsCmd {
 	if req == nil {
 		panic("sprites: newWSCmd called with nil request")
 	}
+
 	return &wsCmd{
 		Path:      name,
 		Args:      append([]string{name}, arg...),
@@ -125,6 +126,7 @@ func newWSCmdContext(ctx context.Context, req *http.Request, name string, arg ..
 	}
 	c := newWSCmd(req, name, arg...)
 	c.ctx = ctx
+
 	return c
 }
 
@@ -133,6 +135,7 @@ func (c *wsCmd) Run() error {
 	if err := c.Start(); err != nil {
 		return err
 	}
+
 	return c.Wait()
 }
 
@@ -196,7 +199,11 @@ func (c *wsCmd) start() {
 				"op":   "exec",
 				"args": args,
 			}
-			b, _ := json.Marshal(env)
+			b, err := json.Marshal(env)
+			if err != nil {
+				c.startChan <- fmt.Errorf("failed to marshal operation start message: %w", err)
+				return
+			}
 			payload := append([]byte("control:"), b...)
 			dbg("sprites: sending control op.start", "args_len", len(b))
 			if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
@@ -237,6 +244,7 @@ func (c *wsCmd) start() {
 				errMsg = fmt.Sprintf("failed to connect: %v (HTTP %d)", err, resp.StatusCode)
 			}
 			c.startChan <- fmt.Errorf("%s", errMsg)
+
 			return
 		}
 	}
@@ -351,6 +359,7 @@ func (c *wsCmd) waitForSessionInfo() error {
 				if c.TextMessageHandler != nil {
 					c.TextMessageHandler(data)
 				}
+
 				return nil
 			}
 			// Pass other text messages to handler
@@ -467,6 +476,7 @@ func (c *wsCmd) runIO() {
 					case c.exitChan <- 1:
 					default:
 					}
+
 					return
 				}
 				if closeErr, ok := err.(*websocket.CloseError); ok && closeErr.Code == websocket.CloseNormalClosure {
@@ -480,6 +490,7 @@ func (c *wsCmd) runIO() {
 					default:
 					}
 				}
+
 				return
 			}
 			// Reset read deadline on any successful read
@@ -518,6 +529,7 @@ func (c *wsCmd) runIO() {
 						default:
 						}
 						adapter.Close()
+
 						return
 					}
 				} else {
@@ -548,7 +560,7 @@ func (c *wsCmd) runIO() {
 				adapter.WriteStream(StreamStdinEOF, []byte{})
 			}
 		}()
-	} else if !(c.usingControl && c.controlConn != nil) {
+	} else if !c.usingControl || c.controlConn == nil {
 		// For legacy direct connections, send EOF immediately if no stdin is provided
 		go func() {
 			adapter.WriteStream(StreamStdinEOF, []byte{})
@@ -595,6 +607,7 @@ func (c *wsCmd) runIO() {
 					default:
 					}
 					adapter.Close()
+
 					return
 				}
 			} else {
@@ -626,6 +639,7 @@ func (c *wsCmd) runIO() {
 					}
 				}
 				adapter.Close()
+
 				return
 			}
 		}
@@ -643,6 +657,7 @@ func (c *wsCmd) ExitCode() int {
 		case c.exitChan <- code:
 		default:
 		}
+
 		return code
 	default:
 		// receivedExit is true but exitChan is empty - exit code was 0
@@ -670,6 +685,7 @@ func (c *wsCmd) Close() error {
 			deadline)
 		c.conn.Close()
 	}
+
 	return nil
 }
 
@@ -679,6 +695,7 @@ func (c *wsCmd) Resize(width, height uint16) error {
 		return nil
 	}
 	msg := &ControlMessage{Type: "resize", Cols: width, Rows: height}
+
 	return c.adapter.WriteControl(msg)
 }
 
@@ -688,6 +705,7 @@ func (c *wsCmd) Signal(signal string) error {
 		return errors.New("websocket not connected")
 	}
 	msg := &ControlMessage{Type: "signal", Signal: signal}
+
 	return c.adapter.WriteControl(msg)
 }
 
@@ -696,6 +714,7 @@ func (c *wsCmd) HasCapability(cap string) bool {
 	if c.capabilities == nil {
 		return false
 	}
+
 	return c.capabilities[cap]
 }
 
@@ -713,6 +732,7 @@ func newWSAdapter(conn *websocket.Conn, isPTY bool) *wsAdapter {
 		done:      make(chan struct{}),
 	}
 	go a.writeLoop()
+
 	return a
 }
 
@@ -788,6 +808,7 @@ func (a *wsAdapter) WriteStream(stream StreamID, data []byte) error {
 	msg := make([]byte, len(data)+1)
 	msg[0] = byte(stream)
 	copy(msg[1:], data)
+
 	return a.WriteRaw(msg)
 }
 
@@ -800,6 +821,7 @@ func (a *wsAdapter) Write(p []byte) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+
 	return len(p), nil
 }
 
@@ -820,6 +842,7 @@ func (w *streamWriter) Write(p []byte) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+
 	return len(p), nil
 }
 
@@ -832,5 +855,6 @@ func (w *rawWriter) Write(p []byte) (int, error) {
 	if err := w.ws.WriteRaw(p); err != nil {
 		return 0, err
 	}
+
 	return len(p), nil
 }

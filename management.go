@@ -60,6 +60,7 @@ func (c *Client) CreateSpriteWithOrg(ctx context.Context, name string, config *S
 		if apiErr := parseAPIError(resp, body); apiErr != nil {
 			return nil, apiErr
 		}
+
 		return nil, fmt.Errorf("failed to create sprite (status %d): %s", resp.StatusCode, string(body))
 	}
 
@@ -115,6 +116,7 @@ func (c *Client) GetSpriteWithOrg(ctx context.Context, name string, org *Organiz
 		if apiErr := parseAPIError(resp, body); apiErr != nil {
 			return nil, apiErr
 		}
+
 		return nil, fmt.Errorf("failed to get sprite (status %d): %s", resp.StatusCode, string(body))
 	}
 
@@ -144,6 +146,7 @@ func (c *Client) GetSpriteWithOrg(ctx context.Context, name string, org *Organiz
 		LastRunningAt:    info.LastRunningAt,
 		LastWarmingAt:    info.LastWarmingAt,
 	}
+
 	return sprite, nil
 }
 
@@ -196,6 +199,7 @@ func (c *Client) ListSprites(ctx context.Context, opts *ListOptions) (*SpriteLis
 		if apiErr := parseAPIError(resp, body); apiErr != nil {
 			return nil, apiErr
 		}
+
 		return nil, fmt.Errorf("failed to list sprites (status %d): %s", resp.StatusCode, string(body))
 	}
 
@@ -228,6 +232,7 @@ func (c *Client) ListAllSpritesWithOrg(ctx context.Context, prefix string, org *
 	if err != nil {
 		return nil, err
 	}
+
 	return result.Sprites, nil
 }
 
@@ -313,6 +318,7 @@ func (c *Client) DeleteSprite(ctx context.Context, name string) error {
 		if apiErr := parseAPIError(resp, body); apiErr != nil {
 			return apiErr
 		}
+
 		return fmt.Errorf("failed to delete sprite (status %d): %s", resp.StatusCode, string(body))
 	}
 
@@ -356,6 +362,7 @@ func (c *Client) UpgradeSprite(ctx context.Context, name string) error {
 		if apiErr := parseAPIError(resp, body); apiErr != nil {
 			return apiErr
 		}
+
 		return fmt.Errorf("failed to upgrade sprite (status %d): %s", resp.StatusCode, string(body))
 	}
 
@@ -404,6 +411,7 @@ func (c *Client) UpdateURLSettings(ctx context.Context, spriteName string, setti
 		if apiErr := parseAPIError(resp, body); apiErr != nil {
 			return apiErr
 		}
+
 		return fmt.Errorf("failed to update URL settings (status %d): %s", resp.StatusCode, string(body))
 	}
 
@@ -443,6 +451,7 @@ func (c *Client) UpdateSprite(ctx context.Context, spriteName string, req *Updat
 		if apiErr := parseAPIError(resp, body); apiErr != nil {
 			return apiErr
 		}
+
 		return fmt.Errorf("failed to update sprite (status %d): %s", resp.StatusCode, string(body))
 	}
 

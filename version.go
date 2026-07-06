@@ -34,6 +34,7 @@ func extractChannel(version string) string {
 		if strings.HasPrefix(suffix, "rc") {
 			return "rc"
 		}
+
 		return suffix
 	}
 
@@ -72,7 +73,7 @@ func supportsPathAttach(version string) bool {
 
 // versionCapturingTransport wraps an http.RoundTripper to capture Sprite-Version headers.
 type versionCapturingTransport struct {
-	wrapped   http.RoundTripper
+	wrapped       http.RoundTripper
 	versionHolder *atomic.Value
 }
 
