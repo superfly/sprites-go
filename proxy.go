@@ -311,10 +311,16 @@ func (c *Client) dialProxyWebSocket(ctx context.Context, spriteName string) (*we
 
 	// Connect to WebSocket
 	wsConn, resp, err := dialer.DialContext(ctx, wsURL.String(), header)
-	if resp != nil {
-		defer resp.Body.Close()
-	}
 	if err != nil {
+		// On success, resp.Body must be left alone: gorilla/websocket hands
+		// back the *http.Response tied to the now-live connection, and
+		// closing its body here would close the WebSocket too. Only close
+		// it in the error path, where resp (if non-nil) is just a
+		// diagnostic response body, not the live connection.
+		if resp != nil {
+			resp.Body.Close()
+		}
+
 		return nil, fmt.Errorf("failed to connect: %w", err)
 	}
 
