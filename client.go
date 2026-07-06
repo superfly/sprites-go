@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	cleanhttp "github.com/hashicorp/go-cleanhttp"
 )
 
 // Client is the main SDK client for interacting with the sprite API.
@@ -57,10 +59,19 @@ func New(token string, opts ...Option) *Client {
 		opt(c)
 	}
 
-	// Wrap transport to capture Sprite-Version header from responses
+	// An Option (e.g. WithHTTPClient(nil)) may have left httpClient nil;
+	// restore a default before using it below.
+	if c.httpClient == nil {
+		c.httpClient = &http.Client{Timeout: 30 * time.Second}
+	}
+
+	// Wrap transport to capture Sprite-Version header from responses.
+	// Never fall back to the shared http.DefaultTransport: this is a
+	// long-lived client making repeated calls to the same host, so use
+	// cleanhttp's non-shared, pooled transport instead.
 	transport := c.httpClient.Transport
 	if transport == nil {
-		transport = http.DefaultTransport
+		transport = cleanhttp.DefaultPooledTransport()
 	}
 	c.httpClient.Transport = &versionCapturingTransport{
 		wrapped:       transport,
@@ -114,9 +125,23 @@ func WithDisableControl() Option {
 func WithNetDialContext(fn func(ctx context.Context, network, addr string) (net.Conn, error)) Option {
 	return func(c *Client) {
 		c.netDialContext = fn
-		c.httpClient.Transport = &http.Transport{
-			DialContext: fn,
+
+		if c.httpClient == nil {
+			c.httpClient = &http.Client{Timeout: 30 * time.Second}
 		}
+
+		// If an earlier option (e.g. WithHTTPClient) already configured a
+		// *http.Transport, clone it so we preserve its settings (TLS config,
+		// proxy, etc.) rather than discarding them; only fall back to a
+		// fresh cleanhttp transport if there's nothing to clone.
+		var transport *http.Transport
+		if existing, ok := c.httpClient.Transport.(*http.Transport); ok && existing != nil {
+			transport = existing.Clone()
+		} else {
+			transport = cleanhttp.DefaultPooledTransport()
+		}
+		transport.DialContext = fn
+		c.httpClient.Transport = transport
 	}
 }
 
@@ -248,12 +273,15 @@ func CreateToken(ctx context.Context, flyMacaroon, orgSlug string, inviteCode st
 	// Force HTTP/1.1 to avoid HTTP/2 header size limits in Fly.io's edge proxy
 	// The edge proxy rejects HTTP/2 requests with large headers (>16KB) even though
 	// the backend supports much larger headers (256KB)
-	// Setting TLSNextProto to a non-nil empty map disables HTTP/2 in the transport
+	// Setting TLSNextProto to a non-nil empty map disables HTTP/2 in the transport.
+	// Start from cleanhttp's non-shared transport (rather than a bare
+	// &http.Transport{}) so this one-off request still gets sane defaults
+	// like proxy support.
+	transport := cleanhttp.DefaultTransport()
+	transport.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
 	client := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
-		},
+		Timeout:   30 * time.Second,
+		Transport: transport,
 	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
