@@ -67,7 +67,7 @@ func New(token string, opts ...Option) *Client {
 	// An Option (e.g. WithHTTPClient(nil)) may have left httpClient nil;
 	// restore a default before using it below.
 	if c.httpClient == nil {
-		c.httpClient = &http.Client{Timeout: 30 * time.Second}
+		c.httpClient = cleanhttp.DefaultPooledClient()
 	}
 
 	// Wrap transport to capture Sprite-Version header from responses.
@@ -135,7 +135,7 @@ func WithNetDialContext(fn func(ctx context.Context, network, addr string) (net.
 		c.netDialContext = fn
 
 		if c.httpClient == nil {
-			c.httpClient = &http.Client{Timeout: 30 * time.Second}
+			c.httpClient = cleanhttp.DefaultPooledClient()
 		}
 
 		// If an earlier option (e.g. WithHTTPClient) already configured a
