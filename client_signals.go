@@ -3,7 +3,7 @@ package sprites
 import (
 	"net/http"
 
-	clientsignals "github.com/superfly/client-signals"
+	clientsignals "github.com/superfly/client-signals/go"
 )
 
 // WithClientSignals attaches coarse, privacy-safe client-signal headers
