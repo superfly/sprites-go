@@ -16,7 +16,7 @@ import (
 	"time"
 
 	cleanhttp "github.com/hashicorp/go-cleanhttp"
-	clientsignals "github.com/superfly/client-signals"
+	clientsignals "github.com/superfly/client-signals/go"
 )
 
 // Client is the main SDK client for interacting with the sprite API.

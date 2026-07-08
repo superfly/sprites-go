@@ -29,7 +29,7 @@ linters:
           - github.com/Masterminds/semver/v3
           - github.com/gorilla/websocket
           - github.com/hashicorp/go-cleanhttp
-          - github.com/superfly/client-signals
+          - github.com/superfly/client-signals/go
         domains:
           - golang.org
       blocked:

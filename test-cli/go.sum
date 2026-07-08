@@ -4,8 +4,8 @@ github.com/gorilla/websocket v1.5.0 h1:PPwGk2jz7EePpoHN/+ClbZu8SPxiqlu12wZP/3sWm
 github.com/gorilla/websocket v1.5.0/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
 github.com/hashicorp/go-cleanhttp v0.5.2 h1:035FKYIWjmULyFRBKPs8TBQoi0x6d9G4xc9neXJWAZQ=
 github.com/hashicorp/go-cleanhttp v0.5.2/go.mod h1:kO/YDlP8L1346E6Sodw+PrpBSV4/SoxCXGY6BqNFT48=
-github.com/superfly/client-signals v0.2.1 h1:4rYN455gl4uhfgeuGwXta0f6U+L7QjZvVNUcVZcW/t8=
-github.com/superfly/client-signals v0.2.1/go.mod h1:YeQnlJ3sh9ptDyq1QZMKYv+AUW9Xuh77lRS9ULj+m2I=
+github.com/superfly/client-signals/go v0.3.0 h1:UegKdBgPCYn5FqSGdxHUIeyLTAGWnd0kYxlioARw4LY=
+github.com/superfly/client-signals/go v0.3.0/go.mod h1:v/FQ2fZ4zOkOxKmue+bYh96awuh9Qh1ImcdxzRYcHFA=
 golang.org/x/sys v0.46.0 h1:noSf2Fq6F8DBgS+LysIkx7rIExoNHJsxOAtPp4rthXw=
 golang.org/x/sys v0.46.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
 golang.org/x/term v0.0.0-20220526004731-065cf7ba2467 h1:CBpWXWQpIRjzmkkA+M7q9Fqnwd2mZr3AFqexg8YTfoM=
