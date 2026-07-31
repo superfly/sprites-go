@@ -837,6 +837,7 @@ func copyNonTTYStdin(ws streamSocket, stdin io.Reader) (int64, error) {
 	if err := ws.WriteStream(StreamStdinEOF, nil); err != nil {
 		return n, err
 	}
+
 	return n, nil
 }
 

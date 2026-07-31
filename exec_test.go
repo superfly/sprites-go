@@ -25,6 +25,7 @@ func (w *recordingStreamSocket) WriteStream(stream StreamID, data []byte) error 
 		stream: stream,
 		data:   bytes.Clone(data),
 	})
+
 	return nil
 }
 
