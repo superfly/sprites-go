@@ -1,6 +1,7 @@
 package sprites
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -9,6 +10,44 @@ import (
 	"testing"
 	"time"
 )
+
+type recordedStreamFrame struct {
+	stream StreamID
+	data   []byte
+}
+
+type recordingStreamSocket struct {
+	frames []recordedStreamFrame
+}
+
+func (w *recordingStreamSocket) WriteStream(stream StreamID, data []byte) error {
+	w.frames = append(w.frames, recordedStreamFrame{
+		stream: stream,
+		data:   bytes.Clone(data),
+	})
+	return nil
+}
+
+func TestCopyNonTTYStdinUsesStreamFrames(t *testing.T) {
+	socket := &recordingStreamSocket{}
+
+	n, err := copyNonTTYStdin(socket, strings.NewReader("hello\n"))
+	if err != nil {
+		t.Fatalf("copyNonTTYStdin() error = %v", err)
+	}
+	if n != 6 {
+		t.Fatalf("copyNonTTYStdin() copied %d bytes, want 6", n)
+	}
+	if len(socket.frames) != 2 {
+		t.Fatalf("got %d frames, want stdin and EOF frames", len(socket.frames))
+	}
+	if socket.frames[0].stream != StreamStdin || string(socket.frames[0].data) != "hello\n" {
+		t.Errorf("stdin frame = %#v, want stream %d with payload %q", socket.frames[0], StreamStdin, "hello\n")
+	}
+	if socket.frames[1].stream != StreamStdinEOF || len(socket.frames[1].data) != 0 {
+		t.Errorf("EOF frame = %#v, want empty stream %d frame", socket.frames[1], StreamStdinEOF)
+	}
+}
 
 func TestCmdString(t *testing.T) {
 	client := New("test-token", WithBaseURL("http://localhost:8080"))

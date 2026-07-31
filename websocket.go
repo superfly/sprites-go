@@ -546,19 +546,12 @@ func (c *wsCmd) runIO() {
 	// Non-PTY mode - handle stream-based I/O
 	if c.Stdin != nil {
 		go func() {
-			if c.usingControl && c.controlConn != nil {
-				// For control connections, send raw bytes and then a single-byte EOF marker (0x04)
-				rw := &rawWriter{ws: adapter}
-				n, _ := io.Copy(rw, c.Stdin)
-				dbg("sprites: sent stdin bytes", "n", n)
-				adapter.WriteRaw([]byte{byte(StreamStdinEOF)})
-				dbg("sprites: sent stdin EOF")
-			} else {
-				stdinWriter := &streamWriter{ws: adapter, streamID: StreamStdin}
-				n, _ := io.Copy(stdinWriter, c.Stdin)
-				dbg("sprites: sent stdin bytes (legacy)", "n", n)
-				adapter.WriteStream(StreamStdinEOF, []byte{})
+			n, err := copyNonTTYStdin(adapter, c.Stdin)
+			if err != nil {
+				dbg("sprites: failed to send stdin", "n", n, "error", err)
+				return
 			}
+			dbg("sprites: sent stdin bytes", "n", n, "control", c.usingControl)
 		}()
 	} else if !c.usingControl || c.controlConn == nil {
 		// For legacy direct connections, send EOF immediately if no stdin is provided
@@ -831,28 +824,31 @@ func (a *wsAdapter) Close() error {
 	return a.conn.Close()
 }
 
+type streamSocket interface {
+	WriteStream(StreamID, []byte) error
+}
+
+func copyNonTTYStdin(ws streamSocket, stdin io.Reader) (int64, error) {
+	stdinWriter := &streamWriter{ws: ws, streamID: StreamStdin}
+	n, err := io.Copy(stdinWriter, stdin)
+	if err != nil {
+		return n, err
+	}
+	if err := ws.WriteStream(StreamStdinEOF, nil); err != nil {
+		return n, err
+	}
+	return n, nil
+}
+
 // streamWriter writes to a specific stream via the adapter
 type streamWriter struct {
-	ws       *wsAdapter
+	ws       streamSocket
 	streamID StreamID
 }
 
 func (w *streamWriter) Write(p []byte) (int, error) {
 	err := w.ws.WriteStream(w.streamID, p)
 	if err != nil {
-		return 0, err
-	}
-
-	return len(p), nil
-}
-
-// rawWriter writes raw bytes without any stream framing
-type rawWriter struct {
-	ws *wsAdapter
-}
-
-func (w *rawWriter) Write(p []byte) (int, error) {
-	if err := w.ws.WriteRaw(p); err != nil {
 		return 0, err
 	}
 
