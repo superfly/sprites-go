@@ -830,15 +830,14 @@ type streamSocket interface {
 
 func copyNonTTYStdin(ws streamSocket, stdin io.Reader) (int64, error) {
 	stdinWriter := &streamWriter{ws: ws, streamID: StreamStdin}
-	n, err := io.Copy(stdinWriter, stdin)
-	if err != nil {
-		return n, err
-	}
-	if err := ws.WriteStream(StreamStdinEOF, nil); err != nil {
-		return n, err
+	n, copyErr := io.Copy(stdinWriter, stdin)
+	// A read-side failure should not leave the remote process waiting for stdin.
+	eofErr := ws.WriteStream(StreamStdinEOF, nil)
+	if copyErr != nil {
+		return n, copyErr
 	}
 
-	return n, nil
+	return n, eofErr
 }
 
 // streamWriter writes to a specific stream via the adapter

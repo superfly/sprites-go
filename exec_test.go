@@ -3,11 +3,14 @@ package sprites
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"syscall"
 	"testing"
+	"testing/iotest"
 	"time"
 )
 
@@ -44,6 +47,29 @@ func TestCopyNonTTYStdinUsesStreamFrames(t *testing.T) {
 	}
 	if socket.frames[0].stream != StreamStdin || string(socket.frames[0].data) != "hello\n" {
 		t.Errorf("stdin frame = %#v, want stream %d with payload %q", socket.frames[0], StreamStdin, "hello\n")
+	}
+	if socket.frames[1].stream != StreamStdinEOF || len(socket.frames[1].data) != 0 {
+		t.Errorf("EOF frame = %#v, want empty stream %d frame", socket.frames[1], StreamStdinEOF)
+	}
+}
+
+func TestCopyNonTTYStdinSendsEOFAfterReadError(t *testing.T) {
+	socket := &recordingStreamSocket{}
+	copyErr := errors.New("read failed")
+	stdin := io.MultiReader(strings.NewReader("hello"), iotest.ErrReader(copyErr))
+
+	n, err := copyNonTTYStdin(socket, stdin)
+	if !errors.Is(err, copyErr) {
+		t.Fatalf("copyNonTTYStdin() error = %v, want %v", err, copyErr)
+	}
+	if n != 5 {
+		t.Fatalf("copyNonTTYStdin() copied %d bytes, want 5", n)
+	}
+	if len(socket.frames) != 2 {
+		t.Fatalf("got %d frames, want stdin and EOF frames", len(socket.frames))
+	}
+	if socket.frames[0].stream != StreamStdin || string(socket.frames[0].data) != "hello" {
+		t.Errorf("stdin frame = %#v, want stream %d with payload %q", socket.frames[0], StreamStdin, "hello")
 	}
 	if socket.frames[1].stream != StreamStdinEOF || len(socket.frames[1].data) != 0 {
 		t.Errorf("EOF frame = %#v, want empty stream %d frame", socket.frames[1], StreamStdinEOF)
