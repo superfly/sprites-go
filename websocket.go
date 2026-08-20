@@ -62,6 +62,7 @@ type wsCmd struct {
 	exitChan     chan int
 	doneChan     chan struct{}
 	receivedExit bool            // true if we received an exit code from server
+	readErr      error           // underlying WebSocket read error, if the connection was interrupted
 	capabilities map[string]bool // Server capabilities from X-Sprite-Capabilities header
 	sessionID    string          // Session ID from session_info message
 
@@ -378,7 +379,7 @@ func (c *wsCmd) waitForSessionInfo() error {
 func (c *wsCmd) Wait() error {
 	select {
 	case <-c.doneChan:
-		return nil
+		return c.readErr
 	case <-c.ctx.Done():
 		return c.ctx.Err()
 	}
@@ -469,6 +470,7 @@ func (c *wsCmd) runIO() {
 		for {
 			messageType, data, err := c.readMessage()
 			if err != nil {
+				c.readErr = err
 				slog.Default().Debug("ws read error", "error", err, "errorType", fmt.Sprintf("%T", err))
 				adapter.Close()
 				if c.ctx.Err() != nil {
@@ -563,6 +565,7 @@ func (c *wsCmd) runIO() {
 	for {
 		messageType, data, err := c.readMessage()
 		if err != nil {
+			c.readErr = err
 			adapter.Close()
 			return
 		}
