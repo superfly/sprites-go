@@ -6,12 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"syscall"
 	"testing"
 	"testing/iotest"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 type recordedStreamFrame struct {
@@ -73,6 +77,63 @@ func TestCopyNonTTYStdinSendsEOFAfterReadError(t *testing.T) {
 	}
 	if socket.frames[1].stream != StreamStdinEOF || len(socket.frames[1].data) != 0 {
 		t.Errorf("EOF frame = %#v, want empty stream %d frame", socket.frames[1], StreamStdinEOF)
+	}
+}
+
+func TestCmdWaitPreservesWebSocketReadError(t *testing.T) {
+	const closeReason = "transport interrupted"
+
+	serverErr := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+
+		serverErr <- conn.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseInternalServerErr, closeReason),
+			time.Now().Add(time.Second),
+		)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+
+	stdinReader, stdinWriter := io.Pipe()
+	defer stdinReader.Close()
+	defer stdinWriter.Close()
+
+	wsCmd := newWSCmdContext(ctx, req, "true")
+	wsCmd.Stdin = stdinReader
+	if err := wsCmd.Start(); err != nil {
+		t.Fatalf("wsCmd.Start() error = %v", err)
+	}
+
+	cmd := &Cmd{started: true, wsCmd: wsCmd}
+	err = cmd.Wait()
+	_ = stdinWriter.Close()
+
+	var closeErr *websocket.CloseError
+	if !errors.As(err, &closeErr) {
+		t.Fatalf("Cmd.Wait() error = %v (%T), want *websocket.CloseError", err, err)
+	}
+	if closeErr.Code != websocket.CloseInternalServerErr {
+		t.Errorf("close code = %d, want %d", closeErr.Code, websocket.CloseInternalServerErr)
+	}
+	if closeErr.Text != closeReason {
+		t.Errorf("close reason = %q, want %q", closeErr.Text, closeReason)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("server close error = %v", err)
 	}
 }
 
