@@ -363,6 +363,7 @@ func (c *wsCmd) waitForSessionInfo() error {
 					if info.Error == "" {
 						info.Error = "exec attach failed"
 					}
+
 					return errors.New(info.Error)
 				}
 				if info.Type == "session_info" {
