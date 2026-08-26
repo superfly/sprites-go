@@ -1,4 +1,6 @@
-// Package sprites provides an idiomatic Go API for working with sprites.
+// Package sprites provides a Go API for Fly.io Sprites: computers for agents.
+// It offers an exec.Cmd-style API for running commands on persistent,
+// hardware-isolated Linux machines.
 package sprites
 
 import (
