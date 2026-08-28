@@ -147,6 +147,12 @@ func (s *Sprite) AttachSessionContext(ctx context.Context, sessionID string) *Cm
 	return s.client.AttachSessionContext(ctx, s.name, sessionID)
 }
 
+// SignalSession sends a signal to an execution session without requiring an
+// active exec WebSocket.
+func (s *Sprite) SignalSession(ctx context.Context, sessionID, signal string) error {
+	return s.client.signalSession(ctx, s.name, sessionID, signal)
+}
+
 // IsSessionActive returns true if the session has recent activity
 func (s *Session) IsSessionActive() bool {
 	if !s.IsActive {

@@ -78,8 +78,9 @@ type Cmd struct {
 	ttySize *ttySize
 
 	// Session management
-	sessionID   string
-	controlMode bool
+	sessionID    string
+	controlMode  bool
+	outputOffset *int64
 
 	// Control connection for cleanup
 	controlConn *controlConn
@@ -270,6 +271,7 @@ func (c *Cmd) Start() error {
 	c.wsCmd.Tty = c.tty
 	c.wsCmd.IsAttach = c.sessionID != ""
 	c.wsCmd.AttachSessionID = c.sessionID
+	c.wsCmd.OutputOffset = c.outputOffset
 
 	// Set environment and directory
 	c.wsCmd.Env = c.Env
@@ -314,6 +316,8 @@ func (c *Cmd) Start() error {
 			c.setupIO()
 			c.wsCmd.Tty = c.tty
 			c.wsCmd.IsAttach = true
+			c.wsCmd.AttachSessionID = c.sessionID
+			c.wsCmd.OutputOffset = c.outputOffset
 			if c.TextMessageHandler != nil {
 				c.wsCmd.TextMessageHandler = c.TextMessageHandler
 			}
@@ -515,6 +519,21 @@ func (c *Cmd) SetTTY(enable bool) {
 	c.tty = enable
 }
 
+// SetOutputOffset sets the number of stdout and stderr payload bytes already
+// delivered by a non-TTY attachment.
+func (c *Cmd) SetOutputOffset(offset int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.started {
+		panic("sprite: SetOutputOffset after process started")
+	}
+	if offset < 0 {
+		panic("sprite: SetOutputOffset called with a negative offset")
+	}
+	c.outputOffset = &offset
+}
+
 // SetTTYSize sets the terminal size for TTY mode.
 // If called before Start(), it sets the initial size.
 // If called after Start(), it resizes the running terminal.
@@ -675,6 +694,9 @@ func (c *Cmd) buildWebSocketURL() (*url.URL, error) {
 	// Add control mode flag
 	if c.controlMode {
 		q.Set("cc", "true")
+	}
+	if c.outputOffset != nil {
+		q.Set("output_offset", fmt.Sprintf("%d", *c.outputOffset))
 	}
 
 	// Add stdin parameter so the server knows whether to expect input

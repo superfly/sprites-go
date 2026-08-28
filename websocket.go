@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -73,6 +74,9 @@ type wsCmd struct {
 
 	// AttachSessionID is the session ID to attach to (for control connections)
 	AttachSessionID string
+
+	// OutputOffset is the number of non-TTY output payload bytes already delivered.
+	OutputOffset *int64
 
 	// TextMessageHandler is called when text messages are received over the WebSocket
 	TextMessageHandler func([]byte)
@@ -193,6 +197,9 @@ func (c *wsCmd) start() {
 			// For attach operations, include the session ID
 			if c.AttachSessionID != "" {
 				args["id"] = c.AttachSessionID
+			}
+			if c.OutputOffset != nil {
+				args["output_offset"] = strconv.FormatInt(*c.OutputOffset, 10)
 			}
 			// Construct control envelope
 			env := map[string]interface{}{
@@ -349,19 +356,29 @@ func (c *wsCmd) waitForSessionInfo() error {
 				Type      string `json:"type"`
 				TTY       bool   `json:"tty"`
 				SessionID string `json:"session_id"`
+				Error     string `json:"error"`
 			}
-			if err := json.Unmarshal(data, &info); err == nil && info.Type == "session_info" {
-				dbg("sprites: waitForSessionInfo got session_info", "tty", info.TTY, "session_id", info.SessionID)
-				c.Tty = info.TTY
-				if info.SessionID != "" {
-					c.sessionID = info.SessionID
-				}
-				// Call text handler if set
-				if c.TextMessageHandler != nil {
-					c.TextMessageHandler(data)
-				}
+			if err := json.Unmarshal(data, &info); err == nil {
+				if info.Type == "error" {
+					if info.Error == "" {
+						info.Error = "exec attach failed"
+					}
 
-				return nil
+					return errors.New(info.Error)
+				}
+				if info.Type == "session_info" {
+					dbg("sprites: waitForSessionInfo got session_info", "tty", info.TTY, "session_id", info.SessionID)
+					c.Tty = info.TTY
+					if info.SessionID != "" {
+						c.sessionID = info.SessionID
+					}
+					// Call text handler if set
+					if c.TextMessageHandler != nil {
+						c.TextMessageHandler(data)
+					}
+
+					return nil
+				}
 			}
 			// Pass other text messages to handler
 			if c.TextMessageHandler != nil {
@@ -583,6 +600,7 @@ func (c *wsCmd) runIO() {
 				Type      string `json:"type"`
 				SessionID string `json:"session_id,omitempty"`
 				ExitCode  int    `json:"exit_code,omitempty"`
+				Error     string `json:"error,omitempty"`
 			}
 			if json.Unmarshal(data, &msg) == nil {
 				dbg("sprites: non-pty received text message", "type", msg.Type, "data", string(data))
@@ -602,6 +620,17 @@ func (c *wsCmd) runIO() {
 					case c.exitChan <- msg.ExitCode:
 					default:
 					}
+					adapter.Close()
+
+					return
+				case "error":
+					if c.TextMessageHandler != nil {
+						c.TextMessageHandler(data)
+					}
+					if msg.Error == "" {
+						msg.Error = "exec failed"
+					}
+					c.readErr = errors.New(msg.Error)
 					adapter.Close()
 
 					return

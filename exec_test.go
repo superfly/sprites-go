@@ -137,6 +137,40 @@ func TestCmdWaitPreservesWebSocketReadError(t *testing.T) {
 	}
 }
 
+func TestCmdWaitReturnsExecProtocolError(t *testing.T) {
+	const protocolError = "cannot resume output at byte 0: earliest retained byte is 1"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_ = conn.WriteJSON(map[string]string{
+			"type":  "error",
+			"error": protocolError,
+		})
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+
+	wsCmd := newWSCmdContext(ctx, req, "true")
+	if err := wsCmd.Start(); err != nil {
+		t.Fatalf("wsCmd.Start() error = %v", err)
+	}
+
+	cmd := &Cmd{started: true, wsCmd: wsCmd}
+	if err := cmd.Wait(); err == nil || err.Error() != protocolError {
+		t.Fatalf("Cmd.Wait() error = %v, want %q", err, protocolError)
+	}
+}
+
 func TestCmdString(t *testing.T) {
 	client := New("test-token", WithBaseURL("http://localhost:8080"))
 	sprite := client.Sprite("my-sprite")
@@ -150,6 +184,7 @@ func TestCmdString(t *testing.T) {
 }
 
 func TestCmdBuildWebSocketURL(t *testing.T) {
+	outputOffset := int64(42)
 	tests := []struct {
 		name              string
 		spriteName        string
@@ -255,11 +290,13 @@ func TestCmdBuildWebSocketURL(t *testing.T) {
 			spriteName:    "my-sprite",
 			serverVersion: "0.1.0", // Release version supports path attach
 			cmd: &Cmd{
-				sessionID: "abc123",
+				sessionID:    "abc123",
+				outputOffset: &outputOffset,
 			},
 			wantPath: "/v1/sprites/my-sprite/exec/abc123",
 			wantQuery: map[string][]string{
-				"stdin": {"false"},
+				"output_offset": {"42"},
+				"stdin":         {"false"},
 			},
 		},
 		{
