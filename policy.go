@@ -28,7 +28,7 @@ func (c *Client) GetNetworkPolicy(ctx context.Context, spriteName string) (*Netw
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+		return nil, StatusError(resp, body)
 	}
 
 	var policy NetworkPolicy
@@ -74,7 +74,7 @@ func (c *Client) UpdateNetworkPolicy(ctx context.Context, spriteName string, pol
 
 	if resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+		return StatusError(resp, body)
 	}
 
 	return nil
