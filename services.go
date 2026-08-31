@@ -96,7 +96,7 @@ func (c *Client) ListServices(ctx context.Context, spriteName string) ([]*Servic
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+		return nil, StatusError(resp, body)
 	}
 
 	var services []*ServiceWithState
@@ -136,7 +136,7 @@ func (c *Client) GetService(ctx context.Context, spriteName, serviceName string)
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+		return nil, StatusError(resp, body)
 	}
 
 	var service ServiceWithState
@@ -196,7 +196,7 @@ func (c *Client) CreateServiceWithDuration(ctx context.Context, spriteName, serv
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+		return nil, StatusError(resp, body)
 	}
 
 	return &ServiceStream{
@@ -244,7 +244,7 @@ func (c *Client) DeleteService(ctx context.Context, spriteName, serviceName stri
 
 	if resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+		return StatusError(resp, body)
 	}
 
 	return nil
@@ -293,7 +293,7 @@ func (c *Client) StartServiceWithDuration(ctx context.Context, spriteName, servi
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+		return nil, StatusError(resp, body)
 	}
 
 	return &ServiceStream{
@@ -356,7 +356,7 @@ func (c *Client) StopServiceWithTimeout(ctx context.Context, spriteName, service
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+		return nil, StatusError(resp, body)
 	}
 
 	return &ServiceStream{
@@ -423,7 +423,7 @@ func (c *Client) SignalService(ctx context.Context, spriteName, serviceName, sig
 
 	if resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+		return StatusError(resp, body)
 	}
 
 	return nil

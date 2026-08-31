@@ -2,6 +2,7 @@ package sprites
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -55,6 +56,11 @@ type APIError struct {
 
 	// RateLimitReset is the X-RateLimit-Reset header value (Unix timestamp)
 	RateLimitReset int64 `json:"-"`
+
+	// RequestID is the Fly-Request-Id header, which correlates this call
+	// with sprites-api and fly-proxy logs. Set from the response, never
+	// from the body.
+	RequestID string `json:"-"`
 }
 
 // Error implements the error interface
@@ -104,6 +110,10 @@ func parseAPIError(resp *http.Response, body []byte) *APIError {
 	apiErr := &APIError{
 		StatusCode: resp.StatusCode,
 	}
+
+	// Correlation first: it is the field that stays useful when everything
+	// else about the response is empty.
+	apiErr.RequestID = resp.Header.Get("Fly-Request-Id")
 
 	// Parse rate limit headers
 	if ra := resp.Header.Get("Retry-After"); ra != "" {
@@ -168,4 +178,35 @@ func IsRateLimitErr(err error) *APIError {
 // This is the exported version of parseAPIError for use by clients.
 func ParseAPIError(resp *http.Response, body []byte) *APIError {
 	return parseAPIError(resp, body)
+}
+
+// StatusError renders a non-2xx response in the form callers have always
+// seen, with the Fly request ID appended when the response carried one.
+//
+// Why the text is preserved rather than replaced by APIError.Error(): that
+// method returns only the message, so routing these call sites through it
+// would silently drop the "API returned status NNN" prefix that downstream
+// tooling matches on. The point here is to ADD correlation, not to change
+// what anything already parses.
+//
+// Why it matters: a non-2xx with an empty body renders as the whole of
+//
+//	API returned status 502:
+//
+// and there is nothing in that to find in a log. On one soak run a restore
+// failed exactly that way, and a later search turned up a burst of 21
+// fly-proxy PU02 502s it almost certainly belonged to -- "almost certainly"
+// being where it stopped, because the request ID was sitting in the response
+// this function's callers were discarding. See superfly/sprite-harness#92.
+//
+// Only Fly-Request-Id is added. Copying headers wholesale would eventually
+// echo the Authorization header these requests set, into text that callers
+// print and archive.
+func StatusError(resp *http.Response, body []byte) error {
+	msg := fmt.Sprintf("API returned status %d: %s", resp.StatusCode, string(body))
+	if id := resp.Header.Get("Fly-Request-Id"); id != "" {
+		msg += fmt.Sprintf("\nfly-request-id: %s", id)
+	}
+
+	return errors.New(msg)
 }

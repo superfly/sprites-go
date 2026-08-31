@@ -328,7 +328,7 @@ func CreateToken(ctx context.Context, flyMacaroon, orgSlug string, inviteCode st
 			return "", apiErr
 		}
 
-		return "", fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+		return "", StatusError(resp, body)
 	}
 
 	// Parse response

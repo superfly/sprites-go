@@ -37,7 +37,7 @@ func (c *Client) ListSessions(ctx context.Context, spriteName string) ([]*Sessio
 	// Check status
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+		return nil, StatusError(resp, body)
 	}
 
 	// Parse response

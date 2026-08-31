@@ -62,7 +62,7 @@ func (c *Client) CreateCheckpointWithComment(ctx context.Context, spriteName str
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+		return nil, StatusError(resp, body)
 	}
 
 	// Return streaming reader
@@ -131,7 +131,7 @@ func (c *Client) ListCheckpointsWithOptions(ctx context.Context, spriteName stri
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+		return nil, StatusError(resp, body)
 	}
 
 	// Check content type
@@ -185,7 +185,7 @@ func (c *Client) GetCheckpoint(ctx context.Context, spriteName string, checkpoin
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+		return nil, StatusError(resp, body)
 	}
 
 	// Parse response
@@ -228,7 +228,7 @@ func (c *Client) RestoreCheckpoint(ctx context.Context, spriteName string, check
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+		return nil, StatusError(resp, body)
 	}
 
 	// Return streaming reader
