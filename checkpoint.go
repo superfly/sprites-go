@@ -13,16 +13,18 @@ import (
 
 // CheckpointStream represents a streaming checkpoint operation
 type CheckpointStream struct {
-	reader  io.ReadCloser
-	scanner *bufio.Scanner
-	done    bool
+	reader    io.ReadCloser
+	scanner   *bufio.Scanner
+	done      bool
+	requestID string
 }
 
 // RestoreStream represents a streaming restore operation
 type RestoreStream struct {
-	reader  io.ReadCloser
-	scanner *bufio.Scanner
-	done    bool
+	reader    io.ReadCloser
+	scanner   *bufio.Scanner
+	done      bool
+	requestID string
 }
 
 // CreateCheckpointWithComment creates a new checkpoint for the sprite with an optional comment
@@ -67,8 +69,9 @@ func (c *Client) CreateCheckpointWithComment(ctx context.Context, spriteName str
 
 	// Return streaming reader
 	return &CheckpointStream{
-		reader:  resp.Body,
-		scanner: bufio.NewScanner(resp.Body),
+		reader:    resp.Body,
+		scanner:   bufio.NewScanner(resp.Body),
+		requestID: resp.Header.Get("Fly-Request-Id"),
 	}, nil
 }
 
@@ -233,8 +236,9 @@ func (c *Client) RestoreCheckpoint(ctx context.Context, spriteName string, check
 
 	// Return streaming reader
 	return &RestoreStream{
-		reader:  resp.Body,
-		scanner: bufio.NewScanner(resp.Body),
+		reader:    resp.Body,
+		scanner:   bufio.NewScanner(resp.Body),
+		requestID: resp.Header.Get("Fly-Request-Id"),
 	}, nil
 }
 
@@ -252,7 +256,7 @@ func (cs *CheckpointStream) Next() (*StreamMessage, error) {
 	if !cs.scanner.Scan() {
 		cs.done = true
 		if err := cs.scanner.Err(); err != nil {
-			return nil, err
+			return nil, withRequestID(err, cs.requestID)
 		}
 
 		return nil, io.EOF
@@ -266,7 +270,7 @@ func (cs *CheckpointStream) Next() (*StreamMessage, error) {
 
 	var msg StreamMessage
 	if err := json.Unmarshal([]byte(line), &msg); err != nil {
-		return nil, fmt.Errorf("failed to parse message: %w", err)
+		return nil, withRequestID(fmt.Errorf("failed to parse message: %w", err), cs.requestID)
 	}
 
 	return &msg, nil
@@ -290,7 +294,7 @@ func (rs *RestoreStream) Next() (*StreamMessage, error) {
 	if !rs.scanner.Scan() {
 		rs.done = true
 		if err := rs.scanner.Err(); err != nil {
-			return nil, err
+			return nil, withRequestID(err, rs.requestID)
 		}
 
 		return nil, io.EOF
@@ -304,7 +308,7 @@ func (rs *RestoreStream) Next() (*StreamMessage, error) {
 
 	var msg StreamMessage
 	if err := json.Unmarshal([]byte(line), &msg); err != nil {
-		return nil, fmt.Errorf("failed to parse message: %w", err)
+		return nil, withRequestID(fmt.Errorf("failed to parse message: %w", err), rs.requestID)
 	}
 
 	return &msg, nil

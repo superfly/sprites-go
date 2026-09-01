@@ -13,9 +13,10 @@ import (
 
 // ServiceStream represents a streaming service operation (start/stop/create)
 type ServiceStream struct {
-	reader  io.ReadCloser
-	scanner *bufio.Scanner
-	done    bool
+	reader    io.ReadCloser
+	scanner   *bufio.Scanner
+	done      bool
+	requestID string
 }
 
 // Next reads the next log event from the service stream
@@ -27,7 +28,7 @@ func (ss *ServiceStream) Next() (*ServiceLogEvent, error) {
 	if !ss.scanner.Scan() {
 		ss.done = true
 		if err := ss.scanner.Err(); err != nil {
-			return nil, err
+			return nil, withRequestID(err, ss.requestID)
 		}
 
 		return nil, io.EOF
@@ -41,7 +42,7 @@ func (ss *ServiceStream) Next() (*ServiceLogEvent, error) {
 
 	var event ServiceLogEvent
 	if err := json.Unmarshal([]byte(line), &event); err != nil {
-		return nil, fmt.Errorf("failed to parse service log event: %w", err)
+		return nil, withRequestID(fmt.Errorf("failed to parse service log event: %w", err), ss.requestID)
 	}
 
 	return &event, nil
@@ -200,8 +201,9 @@ func (c *Client) CreateServiceWithDuration(ctx context.Context, spriteName, serv
 	}
 
 	return &ServiceStream{
-		reader:  resp.Body,
-		scanner: bufio.NewScanner(resp.Body),
+		reader:    resp.Body,
+		scanner:   bufio.NewScanner(resp.Body),
+		requestID: resp.Header.Get("Fly-Request-Id"),
 	}, nil
 }
 
@@ -297,8 +299,9 @@ func (c *Client) StartServiceWithDuration(ctx context.Context, spriteName, servi
 	}
 
 	return &ServiceStream{
-		reader:  resp.Body,
-		scanner: bufio.NewScanner(resp.Body),
+		reader:    resp.Body,
+		scanner:   bufio.NewScanner(resp.Body),
+		requestID: resp.Header.Get("Fly-Request-Id"),
 	}, nil
 }
 
@@ -360,8 +363,9 @@ func (c *Client) StopServiceWithTimeout(ctx context.Context, spriteName, service
 	}
 
 	return &ServiceStream{
-		reader:  resp.Body,
-		scanner: bufio.NewScanner(resp.Body),
+		reader:    resp.Body,
+		scanner:   bufio.NewScanner(resp.Body),
+		requestID: resp.Header.Get("Fly-Request-Id"),
 	}, nil
 }
 
