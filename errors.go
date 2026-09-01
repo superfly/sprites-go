@@ -210,3 +210,14 @@ func StatusError(resp *http.Response, body []byte) error {
 
 	return errors.New(msg)
 }
+
+// withRequestID adds response correlation to an error while preserving the
+// original error for errors.Is/errors.As. Errors without a request ID retain
+// their original identity and text.
+func withRequestID(err error, requestID string) error {
+	if requestID == "" {
+		return err
+	}
+
+	return fmt.Errorf("%w\nfly-request-id: %s", err, requestID)
+}
