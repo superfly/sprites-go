@@ -4,7 +4,7 @@ go 1.25.8
 
 require (
 	github.com/Masterminds/semver/v3 v3.5.0
-	github.com/gorilla/websocket v1.5.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/hashicorp/go-cleanhttp v0.5.2
 	github.com/superfly/client-signals/go v0.4.4
 	golang.org/x/term v0.0.0-20220526004731-065cf7ba2467
