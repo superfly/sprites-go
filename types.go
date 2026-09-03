@@ -124,7 +124,16 @@ type StreamMessage struct {
 	Type  string `json:"type"` // "info", "stdout", "stderr", "error"
 	Data  string `json:"data,omitempty"`
 	Error string `json:"error,omitempty"`
+	Code  string `json:"code,omitempty"`
 }
+
+// Machine-readable codes returned on checkpoint and restore error events.
+const (
+	StreamErrorCodeDeadlineExceeded       = "deadline_exceeded"
+	StreamErrorCodeCanceled               = "canceled"
+	StreamErrorCodeOperationIndeterminate = "operation_indeterminate"
+	StreamErrorCodeOperationInProgress    = "operation_in_progress"
+)
 
 // ProxyInitMessage represents the initial message sent to establish a proxy
 type ProxyInitMessage struct {
