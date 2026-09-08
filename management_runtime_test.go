@@ -42,6 +42,7 @@ func TestCreateSpriteWithOptionsSendsRuntime(t *testing.T) {
 		_, err := c.CreateSpriteWithOptions(context.Background(), "test-sprite", CreateSpriteOptions{
 			Runtime: "some-runtime",
 		})
+
 		return err
 	})
 
