@@ -43,6 +43,11 @@ type CreateSpriteRequest struct {
 	Config      *SpriteConfig     `json:"config,omitempty"`
 	Environment map[string]string `json:"environment,omitempty"`
 	Labels      []string          `json:"labels,omitempty"`
+	// Runtime selects a server-side runtime variant for the sprite. Valid
+	// values are defined by the API rather than this SDK, so new ones become
+	// usable without an SDK release; an unknown value is rejected by the
+	// server with the set it accepts. Empty means the default runtime.
+	Runtime string `json:"runtime,omitempty"`
 }
 
 // UpdateSpriteRequest represents the request to update a sprite's settings

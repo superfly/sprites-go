@@ -11,6 +11,18 @@ import (
 	"strconv"
 )
 
+// CreateSpriteOptions carries the optional settings for creating a sprite.
+//
+// It exists so that new settings can be added without changing the signature
+// of an exported function; the zero value asks for a default sprite.
+type CreateSpriteOptions struct {
+	Config *SpriteConfig
+	Org    *OrganizationInfo
+	Labels []string
+	// Runtime selects a server-side runtime variant. See CreateSpriteRequest.
+	Runtime string
+}
+
 // CreateSprite creates a new sprite with the given name and optional configuration
 func (c *Client) CreateSprite(ctx context.Context, name string, config *SpriteConfig) (*Sprite, error) {
 	return c.CreateSpriteWithOrg(ctx, name, config, nil, nil)
@@ -18,10 +30,24 @@ func (c *Client) CreateSprite(ctx context.Context, name string, config *SpriteCo
 
 // CreateSpriteWithOrg creates a new sprite with the given name, optional configuration, organization information, and labels
 func (c *Client) CreateSpriteWithOrg(ctx context.Context, name string, config *SpriteConfig, org *OrganizationInfo, labels []string) (*Sprite, error) {
-	req := CreateSpriteRequest{
-		Name:   name,
+	return c.CreateSpriteWithOptions(ctx, name, CreateSpriteOptions{
 		Config: config,
+		Org:    org,
 		Labels: labels,
+	})
+}
+
+// CreateSpriteWithOptions creates a new sprite, taking its optional settings as
+// a struct. Prefer it over CreateSprite and CreateSpriteWithOrg, which remain
+// for compatibility and delegate here.
+func (c *Client) CreateSpriteWithOptions(ctx context.Context, name string, opts CreateSpriteOptions) (*Sprite, error) {
+	org := opts.Org
+
+	req := CreateSpriteRequest{
+		Name:    name,
+		Config:  opts.Config,
+		Labels:  opts.Labels,
+		Runtime: opts.Runtime,
 	}
 
 	jsonData, err := json.Marshal(req)
