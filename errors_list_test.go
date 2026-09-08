@@ -23,9 +23,9 @@ func TestAPIErrorReadsErrorList(t *testing.T) {
 	// Validation failures are reported as a list, and until this was parsed
 	// the reason was dropped and callers saw only the status.
 	apiErr := errorFromBody(t, http.StatusBadRequest,
-		`{"errors":["invalid runtime: nope, must be \"default\" or \"dev\""]}`)
+		`{"errors":["name must be lowercase alphanumeric"]}`)
 
-	if got, want := apiErr.Error(), `invalid runtime: nope, must be "default" or "dev"`; got != want {
+	if got, want := apiErr.Error(), "name must be lowercase alphanumeric"; got != want {
 		t.Errorf("Error() = %q, want %q", got, want)
 	}
 
