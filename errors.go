@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 // Error codes returned by the API for rate limiting
@@ -23,6 +24,11 @@ type APIError struct {
 
 	// Message is the human-readable error message
 	Message string `json:"message"`
+
+	// Errors holds the messages from endpoints that report validation
+	// failures as a list rather than as a single message — a create
+	// rejected for several reasons at once returns one entry per reason.
+	Errors []string `json:"errors"`
 
 	// Limit is the rate limit value (e.g., 10 sprites per minute)
 	Limit int `json:"limit,omitempty"`
@@ -70,6 +76,11 @@ func (e *APIError) Error() string {
 	}
 	if e.ErrorCode != "" {
 		return e.ErrorCode
+	}
+	// Validation failures arrive only as a list. Without this the reason the
+	// server gave is dropped and the caller is left with the bare status.
+	if joined := strings.Join(e.Errors, "; "); joined != "" {
+		return joined
 	}
 
 	return fmt.Sprintf("API error (status %d)", e.StatusCode)
@@ -146,7 +157,7 @@ func parseAPIError(resp *http.Response, body []byte) *APIError {
 	}
 
 	// Fallback message if nothing was parsed
-	if apiErr.Message == "" && apiErr.ErrorCode == "" {
+	if apiErr.Message == "" && apiErr.ErrorCode == "" && len(apiErr.Errors) == 0 {
 		apiErr.Message = fmt.Sprintf("API error (status %d)", resp.StatusCode)
 	}
 
