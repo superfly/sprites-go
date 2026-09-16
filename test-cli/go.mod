@@ -1,6 +1,6 @@
 module github.com/superfly/sprites-go/test-cli
 
-go 1.25.8
+go 1.26.0
 
 require github.com/superfly/sprites-go v0.0.0
 
@@ -16,8 +16,8 @@ require (
 	github.com/prometheus/common v0.55.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
 	github.com/superfly/client-signals/go v0.4.4 // indirect
-	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/term v0.45.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/term v0.46.0 // indirect
 	google.golang.org/protobuf v1.34.2 // indirect
 )
 
