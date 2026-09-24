@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -242,14 +241,7 @@ func (p *controlPool) dial(ctx context.Context) (*controlConn, error) {
 	// Connect to WebSocket
 	ws, resp, err := dialer.DialContext(ctx, wsURL.String(), header)
 	if err != nil {
-		// Enrich error with HTTP status/body when available
-		if resp != nil {
-			body, _ := io.ReadAll(resp.Body)
-			_ = resp.Body.Close()
-			return nil, fmt.Errorf("failed to dial control connection: %v (HTTP %d: %s)", err, resp.StatusCode, string(body))
-		}
-
-		return nil, fmt.Errorf("failed to dial control connection: %v", err)
+		return nil, commandConnectionError("failed to dial control connection", err, resp, header)
 	}
 
 	connCtx, cancel := context.WithCancel(context.Background())
