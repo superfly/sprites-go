@@ -19,8 +19,10 @@ type connectionError struct {
 func (e *connectionError) Error() string   { return e.message }
 func (e *connectionError) Unwrap() []error { return e.causes }
 
-var connectionCredentials = regexp.MustCompile(`(?i)(authorization|proxy-authorization|cookie|set-cookie|token|password|secret|api[_-]?key)\s*["']?\s*[:=]\s*[^\r\n,;]+|\b(bearer|basic)\s+[^\s"<>]+`)
-var connectionURL = regexp.MustCompile(`(?i)(https?|wss?)://[^\s"<>]+`)
+var (
+	connectionCredentials = regexp.MustCompile(`(?i)(authorization|proxy-authorization|cookie|set-cookie|token|password|secret|api[_-]?key)\s*["']?\s*[:=]\s*[^\r\n,;]+|\b(bearer|basic)\s+[^\s"<>]+`)
+	connectionURL         = regexp.MustCompile(`(?i)(https?|wss?)://[^\s"<>]+`)
+)
 
 func sanitizeConnectionDetail(s string, header http.Header) string {
 	// Remove the actual credentials even when a server echoes only their value.
@@ -49,12 +51,14 @@ func sanitizeConnectionDetail(s string, header http.Header) string {
 		if unicode.IsControl(r) {
 			return ' '
 		}
+
 		return r
 	}, s)
 	s = strings.Join(strings.Fields(s), " ")
 	if len(s) > 512 {
 		s = s[:512] + "..."
 	}
+
 	return s
 }
 
@@ -91,5 +95,6 @@ func commandConnectionError(operation string, cause error, resp *http.Response, 
 		}
 	}
 	e.message += ": " + sanitizeConnectionDetail(cause.Error(), header)
+
 	return e
 }

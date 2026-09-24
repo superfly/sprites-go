@@ -96,6 +96,7 @@ func (b *interruptedConnectionBody) Read(p []byte) (int, error) {
 		return 0, io.ErrUnexpectedEOF
 	}
 	b.read = true
+
 	return copy(p, "upstream unavailable"), io.ErrUnexpectedEOF
 }
 func (b *interruptedConnectionBody) Close() error { b.closed = true; return nil }
