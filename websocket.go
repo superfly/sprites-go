@@ -221,7 +221,7 @@ func (c *wsCmd) start() {
 		}
 	} else {
 		// Dial new connection (legacy direct WebSocket path)
-		dialer := websocket.DefaultDialer
+		dialer := *websocket.DefaultDialer
 		dialer.HandshakeTimeout = 30 * time.Second
 		dialer.ReadBufferSize = 1024 * 1024
 		dialer.WriteBufferSize = 1024 * 1024
@@ -234,24 +234,7 @@ func (c *wsCmd) start() {
 		}
 		conn, resp, err = dialer.DialContext(c.ctx, c.Request.URL.String(), c.Request.Header)
 		if err != nil {
-			// Check if we got an HTTP error response with a body we can parse
-			if resp != nil {
-				body, readErr := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				if readErr == nil && len(body) > 0 {
-					// Try to parse as a structured API error
-					if apiErr := parseAPIError(resp, body); apiErr != nil {
-						c.startChan <- apiErr
-						return
-					}
-				}
-			}
-			// Fall back to generic error with HTTP status if available
-			errMsg := fmt.Sprintf("failed to connect: %v", err)
-			if resp != nil {
-				errMsg = fmt.Sprintf("failed to connect: %v (HTTP %d)", err, resp.StatusCode)
-			}
-			c.startChan <- fmt.Errorf("%s", errMsg)
+			c.startChan <- commandConnectionError("failed to connect", err, resp, c.Request.Header)
 
 			return
 		}
