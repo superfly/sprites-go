@@ -147,8 +147,51 @@ func (f *spriteFS) Stat(name string) (fs.FileInfo, error) {
 	return f.statContext(context.Background(), name)
 }
 
+// statContext is built on /fs/list, as the server has no stat endpoint. Listing
+// a file returns one entry describing the file itself, but listing a directory
+// returns its children, which says nothing about the directory and is empty
+// for an empty one. So a directory is looked up as an entry in its parent.
 func (f *spriteFS) statContext(ctx context.Context, name string) (fs.FileInfo, error) {
-	// Use list with the specific path to get info
+	listing, err := f.listContext(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+
+	// A file lists itself, under the path the server resolved.
+	if len(listing.Entries) == 1 && listing.Entries[0].Path == listing.Path && !listing.Entries[0].IsDir {
+		return entryInfo(listing.Entries[0]), nil
+	}
+
+	// Otherwise it is a directory.
+	abs := path.Clean(listing.Path)
+	if abs == "/" {
+		return &spriteFileInfo{name: "/", mode: fs.ModeDir | 0o755, isDir: true}, nil
+	}
+	parent, err := f.listContext(ctx, path.Dir(abs))
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range parent.Entries {
+		if path.Clean(entry.Path) == abs {
+			return entryInfo(entry), nil
+		}
+	}
+
+	return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrNotExist}
+}
+
+func entryInfo(entry fsEntry) fs.FileInfo {
+	return &spriteFileInfo{
+		name:    path.Base(entry.Name),
+		size:    entry.Size,
+		mode:    parseMode(entry.Mode, entry.IsDir),
+		modTime: entry.ModTime,
+		isDir:   entry.IsDir,
+	}
+}
+
+// listContext fetches /fs/list for name, reporting errors as stat errors.
+func (f *spriteFS) listContext(ctx context.Context, name string) (*fsListResponse, error) {
 	u := f.buildURL("/fs/list")
 	q := u.Query()
 	q.Set("path", name)
@@ -184,19 +227,7 @@ func (f *spriteFS) statContext(ctx context.Context, name string) (fs.FileInfo, e
 		return nil, &fs.PathError{Op: "stat", Path: name, Err: err}
 	}
 
-	if len(listResp.Entries) == 0 {
-		return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrNotExist}
-	}
-
-	entry := listResp.Entries[0]
-
-	return &spriteFileInfo{
-		name:    path.Base(entry.Name),
-		size:    entry.Size,
-		mode:    parseMode(entry.Mode, entry.IsDir),
-		modTime: entry.ModTime,
-		isDir:   entry.IsDir,
-	}, nil
+	return &listResp, nil
 }
 
 // ReadFile reads and returns the content of the named file.
