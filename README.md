@@ -5,6 +5,8 @@ The Sprite SDK provides an idiomatic Go API for working with sprites. It mirrors
 
 ## Installation
 
+Requires Go 1.26.0 or newer.
+
 ```bash
 go get github.com/superfly/sprites-go
 ```
