@@ -314,14 +314,16 @@ func (c *Client) dialProxyWebSocket(ctx context.Context, spriteName string) (*we
 	if err != nil {
 		// On success, resp.Body must be left alone: gorilla/websocket hands
 		// back the *http.Response tied to the now-live connection, and
-		// closing its body here would close the WebSocket too. Only close
-		// it in the error path, where resp (if non-nil) is just a
-		// diagnostic response body, not the live connection.
-		if resp != nil {
-			resp.Body.Close()
-		}
-
-		return nil, fmt.Errorf("failed to connect: %w", err)
+		// closing its body here would close the WebSocket too. Only read it
+		// in the error path, where resp (if non-nil) is just a diagnostic
+		// response body, not the live connection.
+		//
+		// commandConnectionError consumes and closes that body. Without it
+		// the status was dropped and every rejected handshake — 401, 404,
+		// 502 alike — surfaced as the same bare "websocket: bad handshake",
+		// which says nothing about whether the caller, the control plane or
+		// the sprite is at fault.
+		return nil, commandConnectionError("failed to connect", err, resp, header)
 	}
 
 	return wsConn, nil
