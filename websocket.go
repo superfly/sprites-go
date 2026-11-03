@@ -267,10 +267,17 @@ func (c *wsCmd) start() {
 
 	// Send initial resize message for TTY mode
 	if c.Tty {
+		// Read os.Stdin here, before Start returns, so a caller that swaps
+		// it afterwards does not race with this goroutine.
+		stdin := os.Stdin
 		go func() {
-			time.Sleep(10 * time.Millisecond)
-			if term.IsTerminal(int(os.Stdin.Fd())) {
-				if width, height, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
+			select {
+			case <-time.After(10 * time.Millisecond):
+			case <-c.doneChan:
+				return
+			}
+			if term.IsTerminal(int(stdin.Fd())) {
+				if width, height, err := term.GetSize(int(stdin.Fd())); err == nil {
 					c.Resize(uint16(width), uint16(height))
 				}
 			}
@@ -686,8 +693,9 @@ func (c *wsCmd) IsDone() bool {
 // Close gracefully closes the WebSocket connection
 func (c *wsCmd) Close() error {
 	if c.conn != nil {
+		// WriteControl takes its own deadline and is safe to call while the
+		// adapter's write loop is writing; SetWriteDeadline is not.
 		deadline := time.Now().Add(time.Second)
-		c.conn.SetWriteDeadline(deadline)
 		c.conn.WriteControl(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 			deadline)
