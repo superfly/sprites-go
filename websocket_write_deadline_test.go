@@ -37,9 +37,12 @@ func TestWriteLoopBoundsWritesOnAStalledPeer(t *testing.T) {
 	defer server.Close()
 	defer close(accepted)
 
-	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	conn, resp, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
+	}
+	if resp != nil && resp.Body != nil {
+		resp.Body.Close()
 	}
 	adapter := newWSAdapter(conn, false)
 	defer adapter.Close()
