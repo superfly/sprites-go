@@ -34,8 +34,11 @@ const (
 const (
 	wsPingInterval = 15 * time.Second // How often to send pings
 	wsPongWait     = 45 * time.Second // Time allowed to read next pong (should be > ping interval)
-	wsWriteWait    = 10 * time.Second // Time allowed to write a message
 )
+
+// wsWriteWait is the time allowed to write a message. A variable rather than
+// a constant so tests can shorten it.
+var wsWriteWait = 10 * time.Second
 
 // ControlMessage represents control messages sent over the WebSocket
 type ControlMessage struct {
@@ -751,9 +754,25 @@ func (a *wsAdapter) writeLoop() {
 	for {
 		select {
 		case req := <-a.writeChan:
-			err := a.conn.WriteMessage(req.messageType, req.data)
+			// Bound the write. Without a deadline, a peer that has stopped
+			// reading wedges this goroutine forever — and because the ping
+			// ticker shares this loop, pings stop going out too, so neither
+			// end ever concludes the connection is dead. The read side has
+			// wsPongWait for exactly this; the write side had nothing.
+			err := a.conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+			if err == nil {
+				err = a.conn.WriteMessage(req.messageType, req.data)
+			}
 			if req.result != nil {
 				req.result <- err
+			}
+			if err != nil {
+				// A write that failed partway leaves an incomplete frame on
+				// the wire, so the connection cannot carry another message.
+				slog.Default().Debug("ws write failed, closing", "error", err)
+				a.conn.Close()
+
+				return
 			}
 		case <-ticker.C:
 			// Send ping to keep connection alive
