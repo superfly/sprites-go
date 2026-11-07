@@ -267,17 +267,17 @@ func (c *wsCmd) start() {
 
 	// Send initial resize message for TTY mode
 	if c.Tty {
-		// Read os.Stdin here, before Start returns, so a caller that swaps
-		// it afterwards does not race with this goroutine.
-		stdin := os.Stdin
+		// Read os.Stdin's descriptor here, before Start returns, so a caller
+		// that swaps or closes it afterwards does not race with this goroutine.
+		stdinFd := int(os.Stdin.Fd())
 		go func() {
 			select {
 			case <-time.After(10 * time.Millisecond):
 			case <-c.doneChan:
 				return
 			}
-			if term.IsTerminal(int(stdin.Fd())) {
-				if width, height, err := term.GetSize(int(stdin.Fd())); err == nil {
+			if term.IsTerminal(stdinFd) {
+				if width, height, err := term.GetSize(stdinFd); err == nil {
 					c.Resize(uint16(width), uint16(height))
 				}
 			}
