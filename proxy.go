@@ -96,9 +96,10 @@ func (conn *proxyConn) Write(p []byte) (n int, err error) {
 func (conn *proxyConn) Close() error {
 	var closeErr error
 	conn.closeOnce.Do(func() {
-		// send close message with deadline
+		// send close message with deadline. WriteControl takes its own
+		// deadline and is safe to call while Write is in progress;
+		// SetWriteDeadline is not.
 		deadline := time.Now().Add(proxyCloseDeadline)
-		conn.conn.SetWriteDeadline(deadline)
 		conn.conn.WriteControl(
 			websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
